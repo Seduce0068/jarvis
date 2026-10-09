@@ -1,0 +1,60 @@
+[Unit]
+Description=JARVIS Policy Engine
+Documentation=https://github.com/koppe/jarvis
+After=network.target postgresql.service qdrant.service
+Wants=postgresql.service qdrant.service
+
+[Service]
+Type=notify
+User=jarvis
+Group=jarvis
+WorkingDirectory=/opt/jarvis/rust
+ExecStart=/opt/jarvis/bin/jarvis-policy
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Environment
+Environment=RUST_LOG=info
+Environment=JARVIS_POLICY_GRPC_ADDR=127.0.0.1:50051
+Environment=JARVIS_POLICY_HTTP_ADDR=127.0.0.1:8081
+Environment=JARVIS_POLICY_CEDAR_POLICY_DIR=/etc/jarvis/policy
+Environment=JARVIS_POLICY_CASBIN_MODEL_PATH=/etc/jarvis/casbin_model.conf
+Environment=JARVIS_POLICY_CASBIN_POLICY_PATH=/etc/jarvis/casbin_policy.csv
+EnvironmentFile=-/etc/jarvis/policy.env
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=2G
+CPUQuota=200%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-policy
+
+[Install]
+WantedBy=multi-user.target

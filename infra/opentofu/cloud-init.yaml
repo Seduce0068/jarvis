@@ -1,0 +1,454 @@
+#cloud-config
+# JARVIS Host Cloud-Init Configuration
+# Target: Ubuntu 22.04 LTS on OCI Ampere A1 (Arm64)
+
+package_update: true
+package_upgrade: true
+packages:
+  - curl
+  - wget
+  - git
+  - vim
+  - htop
+  - jq
+  - unzip
+  - ca-certificates
+  - gnupg
+  - lsb-release
+  - software-properties-common
+  - apt-transport-https
+  - build-essential
+  - pkg-config
+  - libssl-dev
+  - protobuf-compiler
+  - postgresql-client
+  - postgresql-14
+  - qdrant
+  - firejail
+  - bwrap
+  - docker.io
+  - docker-compose-plugin
+  - tailscale
+  - ufw
+
+# Create jarvis user
+users:
+  - name: jarvis
+    groups: [sudo, docker]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
+    lock_passwd: true
+    ssh_authorized_keys:
+      - ${ssh_public_key}
+
+# Write systemd unit files
+write_files:
+  - path: /etc/systemd/system/jarvis-policy.service
+    content: |
+      [Unit]
+      Description=JARVIS Policy Engine
+      After=network.target postgresql.service qdrant.service
+      Wants=postgresql.service qdrant.service
+
+      [Service]
+      Type=notify
+      User=jarvis
+      Group=jarvis
+      WorkingDirectory=/opt/jarvis/rust
+      ExecStart=/opt/jarvis/bin/jarvis-policy
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=60
+      TimeoutStopSec=30
+      KillMode=mixed
+      KillSignal=SIGTERM
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis
+      Environment=RUST_LOG=info
+      EnvironmentFile=-/etc/jarvis/policy.env
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/jarvis-mcp-gw.service
+    content: |
+      [Unit]
+      Description=JARVIS MCP Gateway
+      After=network.target jarvis-policy.service
+      Wants=jarvis-policy.service
+
+      [Service]
+      Type=notify
+      User=jarvis
+      Group=jarvis
+      WorkingDirectory=/opt/jarvis/rust
+      ExecStart=/opt/jarvis/bin/jarvis-mcp-gw
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=60
+      TimeoutStopSec=30
+      KillMode=mixed
+      KillSignal=SIGTERM
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /tmp
+      Environment=RUST_LOG=info
+      EnvironmentFile=-/etc/jarvis/mcp_gateway.env
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/jarvis-event.service
+    content: |
+      [Unit]
+      Description=JARVIS Event Normalizer
+      After=network.target jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
+      Wants=jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
+
+      [Service]
+      Type=notify
+      User=jarvis
+      Group=jarvis
+      WorkingDirectory=/opt/jarvis/rust
+      ExecStart=/opt/jarvis/bin/jarvis-event
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=60
+      TimeoutStopSec=30
+      KillMode=mixed
+      KillSignal=SIGTERM
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis
+      Environment=RUST_LOG=info
+      EnvironmentFile=-/etc/jarvis/event.env
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/jarvis-context.service
+    content: |
+      [Unit]
+      Description=JARVIS Context Builder
+      After=network.target postgresql.service qdrant.service jarvis-policy.service
+      Wants=postgresql.service qdrant.service jarvis-policy.service
+
+      [Service]
+      Type=notify
+      User=jarvis
+      Group=jarvis
+      WorkingDirectory=/opt/jarvis/rust
+      ExecStart=/opt/jarvis/bin/jarvis-context
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=60
+      TimeoutStopSec=30
+      KillMode=mixed
+      KillSignal=SIGTERM
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis
+      Environment=RUST_LOG=info
+      EnvironmentFile=-/etc/jarvis/context.env
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/opencode.service
+    content: |
+      [Unit]
+      Description=OpenCode V2 Server (Agent Runtime)
+      After=network.target
+      Wants=network.target
+
+      [Service]
+      Type=simple
+      User=jarvis
+      Group=jarvis
+      WorkingDirectory=/home/jarvis/repos
+      ExecStart=/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 49374
+      Restart=on-failure
+      RestartSec=10
+      TimeoutStartSec=30
+      TimeoutStopSec=30
+      KillMode=mixed
+      KillSignal=SIGTERM
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/opencode /tmp
+      Environment=OPENCODE_CONFIG_DIR=/home/jarvis/.config/opencode
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/code-server.service
+    content: |
+      [Unit]
+      Description=code-server (Browser IDE)
+      After=network.target
+      Wants=network.target
+
+      [Service]
+      Type=simple
+      User=jarvis
+      Group=jarvis
+      WorkingDirectory=/home/jarvis/repos
+      ExecStart=/usr/bin/code-server --bind-addr 127.0.0.1:8080 --auth password
+      Restart=on-failure
+      RestartSec=10
+      TimeoutStartSec=30
+      TimeoutStopSec=30
+      KillMode=mixed
+      KillSignal=SIGTERM
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/code-server /home/jarvis/.local/share/code-server /tmp
+      Environment=PASSWORD_FILE=/etc/jarvis/code-server-password
+      Environment=SHELL=/bin/bash
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/otelcol.service
+    content: |
+      [Unit]
+      Description=OpenTelemetry Collector for JARVIS
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=jarvis
+      Group=jarvis
+      ExecStart=/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml
+      Restart=on-failure
+      RestartSec=5
+      TimeoutStartSec=30
+      TimeoutStopSec=10
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/etc/jarvis /var/log/jarvis
+
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /etc/systemd/system/jarvis-backup.service
+    content: |
+      [Unit]
+      Description=JARVIS Backup Job
+      After=network.target
+
+      [Service]
+      Type=oneshot
+      User=jarvis
+      Group=jarvis
+      ExecStart=/opt/jarvis/scripts/backup.sh
+      WorkingDirectory=/opt/jarvis/scripts
+      NoNewPrivileges=yes
+      PrivateTmp=yes
+      ProtectSystem=strict
+      ProtectHome=yes
+      ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /home/jarvis/repos
+
+  - path: /etc/systemd/system/jarvis-backup.timer
+    content: |
+      [Unit]
+      Description=Daily JARVIS Backup
+      Requires=jarvis-backup.service
+
+      [Timer]
+      OnCalendar=daily
+      RandomizedDelaySec=1h
+      Persistent=true
+
+      [Install]
+      WantedBy=timers.target
+
+# Directories
+runcmd:
+  # Create directories
+  - mkdir -p /opt/jarvis/{bin,data,logs,scripts,rust}
+  - mkdir -p /home/jarvis/repos
+  - mkdir -p /etc/jarvis
+  - mkdir -p /var/log/jarvis
+  - chown -R jarvis:jarvis /opt/jarvis /home/jarvis/repos /var/log/jarvis
+
+  # Install Rust (for building JARVIS services)
+  - sudo -u jarvis curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+  - source /home/jarvis/.cargo/env && rustup target add aarch64-unknown-linux-gnu
+
+  # Install OpenCode V2
+  - curl -fsSL https://opencode.ai/v2/install | bash
+  - ln -sf /home/jarvis/.local/bin/opencode /usr/local/bin/opencode
+
+  # Install code-server
+  - curl -fsSL https://code-server.dev/install.sh | sh
+  - ln -sf /usr/lib/code-server/bin/code-server /usr/bin/code-server
+
+  # Install OpenTelemetry Collector
+  - cd /tmp && wget https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v0.106.0/otelcol-contrib_0.106.0_linux_arm64.tar.gz
+  - tar -xzf otelcol-contrib_0.106.0_linux_arm64.tar.gz -C /usr/local/bin/
+
+  # Configure PostgreSQL
+  - sudo -u postgres psql -c "CREATE USER jarvis WITH PASSWORD 'jarvis';" || true
+  - sudo -u postgres psql -c "CREATE DATABASE jarvis OWNER jarvis;" || true
+  - sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE jarvis TO jarvis;" || true
+
+  # Configure Qdrant
+  - systemctl enable qdrant
+  - systemctl start qdrant
+
+  # Configure Tailscale (auth key from env)
+  - systemctl enable tailscaled
+  - systemctl start tailscaled
+  - if [ -n "${tailscale_auth_key}" ]; then tailscale up --authkey="${tailscale_auth_key}" --hostname=jarvis-host; fi
+
+  # Configure UFW (allow Tailscale, deny public except SSH)
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow from 100.64.0.0/10 to any port 8080  # code-server via Tailscale
+  - ufw allow from 100.64.0.0/10 to any port 49374 # OpenCode Web via Tailscale
+  - ufw allow from 100.64.0.0/10 to any port 22   # SSH via Tailscale
+  - ufw enable
+
+  # Generate code-server password
+  - openssl rand -base64 32 > /etc/jarvis/code-server-password
+  - chown jarvis:jarvis /etc/jarvis/code-server-password
+  - chmod 600 /etc/jarvis/code-server-password
+
+  # Enable systemd services
+  - systemctl daemon-reload
+  - systemctl enable jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol jarvis-backup.timer
+
+  # Create backup script
+  - cat > /opt/jarvis/scripts/backup.sh << 'BACKUP_EOF'
+#!/bin/bash
+set -euo pipefail
+
+BACKUP_DIR="/opt/jarvis/backups"
+DATE=$(date +%Y%m%d-%H%M%S)
+mkdir -p "$BACKUP_DIR"
+
+# Backup PostgreSQL
+pg_dump -h localhost -U jarvis jarvis | gzip > "$BACKUP_DIR/pg-$DATE.sql.gz"
+
+# Backup Qdrant (snapshot)
+curl -X POST "http://localhost:6334/collections/jarvis_memories/snapshots" || true
+sleep 2
+curl -s "http://localhost:6334/collections/jarvis_memories/snapshots" | jq -r '.result[0].name' | xargs -I {} curl -s "http://localhost:6334/collections/jarvis_memories/snapshots/{}" -o "$BACKUP_DIR/qdrant-$DATE.snapshot" || true
+
+# Backup configs
+tar -czf "$BACKUP_DIR/configs-$DATE.tar.gz" /etc/jarvis /home/jarvis/.config/opencode /home/jarvis/.config/code-server 2>/dev/null || true
+
+# Backup repos (git bundles)
+cd /home/jarvis/repos
+for repo in */; do
+  if [ -d "$repo/.git" ]; then
+    git -C "$repo" bundle create "$BACKUP_DIR/repo-${repo%/}-$DATE.bundle" --all 2>/dev/null || true
+  fi
+done
+
+# Upload to OCI Object Storage (requires rclone configured)
+if command -v rclone &> /dev/null; then
+  rclone copy "$BACKUP_DIR" oci:jarvis-backups/$(hostname)/ --progress || true
+fi
+
+# Cleanup old local backups (keep 7 days)
+find "$BACKUP_DIR" -type f -mtime +7 -delete
+
+echo "Backup completed: $DATE"
+BACKUP_EOF
+
+  - chmod +x /opt/jarvis/scripts/backup.sh
+  - chown -R jarvis:jarvis /opt/jarvis/scripts
+
+  # Install rclone for OCI Object Storage backup
+  - curl https://rclone.org/install.sh | bash
+
+  # Create OpenTelemetry Collector config
+  - cat > /etc/jarvis/otelcol-config.yaml << 'OTEL_EOF'
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'jarvis-services'
+          static_configs:
+            - targets: ['localhost:8081', 'localhost:8082', 'localhost:8083', 'localhost:8084']
+        - job_name: 'opencode'
+          static_configs:
+            - targets: ['localhost:49374']
+        - job_name: 'code-server'
+          static_configs:
+            - targets: ['localhost:8080']
+        - job_name: 'postgresql'
+          static_configs:
+            - targets: ['localhost:9187']
+        - job_name: 'qdrant'
+          static_configs:
+            - targets: ['localhost:6334']
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1000
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+exporters:
+  otlp:
+    endpoint: "https://otlp.${grafana_cloud_instance}.grafana.net:4317"
+    headers:
+      Authorization: "Bearer ${grafana_cloud_token}"
+  prometheusremotewrite:
+    endpoint: "https://prometheus-${grafana_cloud_instance}.grafana.net/api/prom/push"
+    headers:
+      Authorization: "Bearer ${grafana_cloud_token}"
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp]
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, batch]
+      exporters: [prometheusremotewrite]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp]
+OTEL_EOF
+
+  # Create placeholder config files (to be populated by 1Password/secrets)
+  - touch /etc/jarvis/policy.env /etc/jarvis/mcp_gateway.env /etc/jarvis/event.env /etc/jarvis/context.env
+  - chown jarvis:jarvis /etc/jarvis/*.env
+
+  # Final cleanup
+  - apt-get clean
+  - rm -rf /var/lib/apt/lists/* /tmp/*
+
+# Final message
+final_message: "JARVIS host provisioned. SSH via Tailscale. Run 'sudo journalctl -u jarvis-*' to check services."

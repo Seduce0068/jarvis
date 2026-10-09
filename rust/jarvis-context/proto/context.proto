@@ -1,0 +1,51 @@
+syntax = "proto3";
+
+package jarvis.context.v1;
+
+service ContextService {
+  rpc BuildContext(BuildContextRequest) returns (BuildContextResponse);
+  rpc StoreMemory(StoreMemoryRequest) returns (Empty);
+  rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
+}
+
+message BuildContextRequest {
+  string event_id = 1;
+  string event_type = 2;
+  string payload = 3;
+  string correlation_id = 4;
+}
+
+message BuildContextResponse {
+  string context = 1;
+}
+
+message StoreMemoryRequest {
+  string id = 1;
+  string content = 2;
+  repeated float embedding = 3;
+  string metadata = 4;
+  string source = 5;
+  int64 expires_at = 6;
+}
+
+message SearchMemoryRequest {
+  string query = 1;
+  int32 limit = 2;
+}
+
+message SearchMemoryResponse {
+  repeated MemoryEntry memories = 1;
+}
+
+message MemoryEntry {
+  string id = 1;
+  string content = 2;
+  repeated float embedding = 3;
+  string metadata = 4;
+  string source = 5;
+  int64 created_at = 6;
+  int64 updated_at = 7;
+  int64 expires_at = 8;
+}
+
+message Empty {}

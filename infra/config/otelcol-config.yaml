@@ -1,0 +1,193 @@
+# OpenTelemetry Collector Configuration for JARVIS
+# Sends traces, metrics, logs to Grafana Cloud Free Tier
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'jarvis-policy'
+          static_configs:
+            - targets: ['localhost:8081']
+          metrics_path: '/metrics'
+
+        - job_name: 'jarvis-mcp-gw'
+          static_configs:
+            - targets: ['localhost:8082']
+          metrics_path: '/metrics'
+
+        - job_name: 'jarvis-event'
+          static_configs:
+            - targets: ['localhost:8083']
+          metrics_path: '/metrics'
+
+        - job_name: 'jarvis-context'
+          static_configs:
+            - targets: ['localhost:8084']
+          metrics_path: '/metrics'
+
+        - job_name: 'opencode'
+          static_configs:
+            - targets: ['localhost:49374']
+          metrics_path: '/metrics'
+
+        - job_name: 'code-server'
+          static_configs:
+            - targets: ['localhost:8080']
+          metrics_path: '/metrics'
+
+        - job_name: 'postgresql'
+          static_configs:
+            - targets: ['localhost:9187']
+
+        - job_name: 'qdrant'
+          static_configs:
+            - targets: ['localhost:6334']
+
+        - job_name: 'node-exporter'
+          static_configs:
+            - targets: ['localhost:9100']
+
+  # File log receiver for systemd journals
+  filelog:
+    include:
+      - /var/log/jarvis/*.log
+    include_file_path: true
+    include_file_name: false
+
+processors:
+  # Batch processor for efficient export
+  batch:
+    timeout: 10s
+    send_batch_size: 1000
+    send_batch_max_size: 2000
+
+  # Memory limiter to prevent OOM
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+    ballast_size_mib: 64
+
+  # Resource processor to add common attributes
+  resource:
+    attributes:
+      - key: service.namespace
+        value: "jarvis"
+        action: insert
+      - key: deployment.environment
+        value: "prod"
+        action: insert
+      - key: host.name
+        value: "${HOSTNAME}"
+        action: insert
+
+  # Transform processor for common transformations
+  transform:
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["jarvis.correlation_id"], attributes["correlation_id"]) where attributes["correlation_id"] != nil
+          - set(attributes["jarvis.event_source"], attributes["event_source"]) where attributes["event_source"] != nil
+
+  # Filter processor to drop noisy spans
+  filter:
+    spans:
+      include:
+        match_type: regexp
+        span_names: ["jarvis.*", "opencode.*", "mcp.*", "policy.*"]
+      exclude:
+        match_type: strict
+        span_names: ["health.check", "metrics.scrape"]
+
+  # Tail sampling for traces (keep errors, sample successes)
+  tailsampling:
+    decision_wait: 30s
+    num_traces: 10000
+    expected_new_traces_per_sec: 100
+    policies:
+      - name: errors
+        type: string_attribute
+        string_attribute:
+          key: "status.code"
+          values: ["ERROR", "2"]  # gRPC error codes
+      - name: slow
+        type: latency
+        latency:
+          threshold_ms: 5000
+      - name: jarvis-critical
+        type: string_attribute
+        string_attribute:
+          key: "jarvis.severity"
+          values: ["critical", "high"]
+      - name: probabilistic
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+exporters:
+  # OTLP exporter for Grafana Cloud (traces & logs)
+  otlp:
+    endpoint: "https://otlp.${GRAFANA_CLOUD_INSTANCE}.grafana.net:4317"
+    headers:
+      Authorization: "Bearer ${GRAFANA_CLOUD_TOKEN}"
+    compression: gzip
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 120s
+
+  # Prometheus Remote Write for metrics
+  prometheusremotewrite:
+    endpoint: "https://prometheus-${GRAFANA_CLOUD_INSTANCE}.grafana.net/api/prom/push"
+    headers:
+      Authorization: "Bearer ${GRAFANA_CLOUD_TOKEN}"
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Debug exporter (for troubleshooting)
+  debug:
+    verbosity: detailed
+    sampling_initial: 10
+    sampling_thereafter: 100
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch, resource, transform, filter, tailsampling]
+      exporters: [otlp, debug]
+
+    metrics:
+      receivers: [otlp, prometheus]
+      processors: [memory_limiter, batch, resource]
+      exporters: [prometheusremotewrite, debug]
+
+    logs:
+      receivers: [otlp, filelog]
+      processors: [memory_limiter, batch, resource]
+      exporters: [otlp, debug]
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      level: detailed
+      address: 0.0.0.0:8888
+
+  # Health check endpoint
+  extensions:
+    health_check:
+      endpoint: 0.0.0.0:13133
+    pprof:
+      endpoint: 0.0.0.0:1777
+    zpages:
+      endpoint: 0.0.0.0:55679

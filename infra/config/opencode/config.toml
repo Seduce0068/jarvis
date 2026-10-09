@@ -1,0 +1,80 @@
+# OpenCode V2 Configuration for JARVIS
+# Location: /home/jarvis/.config/opencode/config.toml
+
+[model]
+# Default model - will be overridden by tier selection
+default = "openrouter/free"
+
+# Model aliases for tier-based routing
+aliases = {
+    "tier0" = "local:qwen2.5-coder:7b",  # Free local preprocessing
+    "tier1" = "openrouter/free",          # Free tier via OpenRouter
+    "tier2" = "openrouter/anthropic/claude-3.5-haiku",  # Low cost
+    "tier3" = "openrouter/anthropic/claude-3.5-sonnet", # High performance
+    "tier4" = "openai/gpt-4o",            # Native premium
+}
+
+# Model routing rules (evaluated in order)
+routing = [
+    # Simple tasks -> tier 0/1
+    { if = "task.type in ['format', 'lint', 'classify']", use = "tier1" },
+    # Implementation tasks -> tier 2
+    { if = "task.type in ['implement', 'refactor', 'test']", use = "tier2" },
+    # Complex tasks -> tier 3
+    { if = "task.type in ['design', 'debug', 'architect']", use = "tier3" },
+    # Fallback
+    { if = "true", use = "tier2" },
+]
+
+[agent]
+# Agent behavior
+max_turns = 50
+max_tool_calls_per_turn = 10
+idle_timeout_ms = 300000
+
+# System prompt additions for JARVIS context
+system_prompt_additions = """
+You are JARVIS, a personal AI assistant running on OCI Always Free infrastructure.
+You have access to tools via MCP Gateway with policy-based authorization.
+All destructive actions require approval via the Policy Engine.
+You operate in an event-driven architecture: observe → decide → act (with approval).
+"""
+
+[mcp]
+# MCP Servers configured via MCP Gateway
+servers = {
+    "jarvis-gateway" = {
+        command = "grpcurl"
+        args = ["-plaintext", "localhost:50052", "jarvis.mcp.gateway.v1.McpGatewayService/ExecuteTool"]
+        env = {}
+    }
+}
+
+# Tool filters (allowlist managed by MCP Gateway)
+tool_filters = [
+    # Allow all tools from jarvis-gateway (gateway enforces allowlist)
+    { server = "jarvis-gateway", tools = ["*"] },
+]
+
+[sandbox]
+# Sandbox configuration (delegated to MCP Gateway)
+enabled = true
+default = "firejail"
+
+[session]
+# Session persistence
+persist = true
+storage_path = "~/.local/share/opencode/sessions"
+max_sessions = 100
+
+[web]
+# OpenCode Web UI
+host = "127.0.0.1"
+port = 49374
+auth = "none"  # Secured via Tailscale
+
+[telemetry]
+# OpenTelemetry integration
+enabled = true
+endpoint = "http://localhost:4317"
+service_name = "opencode-jarvis"

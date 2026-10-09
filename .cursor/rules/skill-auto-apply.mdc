@@ -1,0 +1,59 @@
+---
+description: スキル・サブエージェント自動適用ルール
+alwaysApply: true
+---
+
+# スキル・サブエージェント自動適用ルール
+
+## スキル自動適用マトリクス
+
+| トリガー キーワード | 適用スキル | 条件 |
+|-------------------|-----------|------|
+| Azure, AKS, App Service, Functions, Bicep, Terraform | `azure-prepare`, `azure-deploy`, `azure-kubernetes` | インフラ構築・デプロイ |
+| コスト, 料金, 予算, 最適化 | `azure-cost` | コスト分析 |
+| 診断, デバッグ, 障害, エラー, 高CPU | `azure-diagnostics` | 本番トラブルシュート |
+| 信頼性, 可用性, ゾーン冗長, DR | `azure-reliability` | 信頼性評価 |
+| クォータ, 制限, vCPU, 容量 | `azure-quotas` | 容量確認 |
+| RBAC, 権限, ロール, 最小権限 | `azure-rbac` | 権限設計 |
+| ストレージ, Blob, File Share, 階層 | `azure-storage` | ストレージ設計 |
+| メッセージング, Event Hub, Service Bus | `azure-messaging` | メッセージング |
+| AI, OpenAI, Foundry, エージェント, ファインチューニング | `microsoft-foundry`, `deploy-model`, `finetuning` | AI ワークロード |
+| API Management, AI Gateway, セマンティックキャッシュ | `azure-aigateway` | AI ゲートウェイ |
+| 移行, Lambda, Heroku, Cloud Run, Fargate | `azure-cloud-migrate` | クロスクラウド移行 |
+| コンプライアンス, 監査, セキュリティ, azqr | `azure-compliance` | コンプライアンス監査 |
+| アップグレード, モダナイズ, SKU変更 | `azure-upgrade` | ワークロードアップグレード |
+| 検証, プレデプロイ, 事前チェック | `azure-validate` | デプロイ前検証 |
+| リソース一覧, インベントリ, タグ分析 | `azure-resource-lookup` | リソース確認 |
+| アーキテクチャ図, Mermaid, 可視化 | `azure-resource-visualizer` | アーキテクチャ可視化 |
+| App Insights, テレメトリ, 計装 | `appinsights-instrumentation` | 観測性実装 |
+| Entra, アプリ登録, OAuth, MSAL | `entra-app-registration` | ID管理 |
+| Entra Agent ID, Blueprint, FMI | `entra-agent-id` | エージェントID |
+| 技術選定, フレームワーク, ライブラリ比較 | `tech-selection` | 汎用技術選定 |
+| AI選定, モデル, 推論エンジン, ベクトルDB, RAG | `ai-selection` | AI技術選定 |
+| ドキュメント生成, ADR, RFC, Runbook | `doc-create` | 文書化 |
+| テスト仕様, TDD, BDD, Property-based | `test-spec` | テスト設計 |
+| コードレビュー, PR, セキュリティ, アーキテクチャ, 運用 | `review-security`, `arch-reviewer`, `ops-reviewer` | レビュー |
+| クロスレビュー, 多視点, 統合レポート | `cross-review` | 包括的レビュー |
+| レビュー管理, パイプライン, ゲート | `review-flow` | レュープロセス管理 |
+| ユーザースクリプト, Violentmonkey, メタデータ | `userscript-validator` | ユーザースクリプト検証 |
+
+## サブエージェント自動起動マトリクス
+
+| タスク種別 | 起動エージェント | 用途 |
+|-----------|----------------|------|
+| コード探索, パターン検索, 概要把握 | `explore` (quick/medium/very thorough) | コードベース理解 |
+| 複雑な調査, マルチステップ, 並列実行 | `general` | 汎用タスク実行 |
+| セキュリティレビュー | `security-reviewer` | 脆弱性・秘密管理チェック |
+| アーキテクチャレビュー | `arch-reviewer` | 責務分離・依存方向・拡張性評価 |
+| 運用レビュー | `ops-reviewer` | 観測性・エラー処理・ロールバック評価 |
+
+## 適用優先順位
+
+1. **明示的指定** > 自動適用ルール
+2. **複数マッチ時**: 最も具体的なスキルを優先
+3. **競合時**: `alwaysApply: true` のルールが最終決定権を持つ
+
+## 除外パターン
+
+- 雑談・質問応答のみの場合はスキル適用しない
+- 単純なファイル読み書き・検索のみの場合はスキル適用しない

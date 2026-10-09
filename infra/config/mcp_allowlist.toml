@@ -1,0 +1,131 @@
+# JARVIS MCP Allowlist Configuration
+# Tools allowed to be executed via MCP Gateway
+
+[[tools]]
+name = "filesystem.read"
+description = "Read files from workspace"
+allowed_principals = ["jarvis", "opencode", "user"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = false
+sandbox_type = "none"
+
+[[tools]]
+name = "filesystem.write"
+description = "Write files to workspace"
+allowed_principals = ["jarvis", "opencode", "user"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = true
+sandbox_type = "firejail"
+
+[[tools]]
+name = "filesystem.list"
+description = "List directory contents"
+allowed_principals = ["jarvis", "opencode", "user"]
+max_args_size = 1048576
+timeout_ms = 3000
+requires_approval = false
+sandbox_type = "none"
+
+[[tools]]
+name = "shell.execute"
+description = "Execute shell commands"
+allowed_principals = ["jarvis", "opencode"]
+max_args_size = 1048576
+timeout_ms = 30000
+requires_approval = true
+sandbox_type = "firejail"
+
+[[tools]]
+name = "git.status"
+description = "Get git repository status"
+allowed_principals = ["jarvis", "opencode", "user"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = false
+sandbox_type = "none"
+
+[[tools]]
+name = "git.diff"
+description = "Show git diff"
+allowed_principals = ["jarvis", "opencode", "user"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = false
+sandbox_type = "none"
+
+[[tools]]
+name = "git.commit"
+description = "Create git commit"
+allowed_principals = ["jarvis", "opencode", "user"]
+max_args_size = 1048576
+timeout_ms = 10000
+requires_approval = true
+sandbox_type = "none"
+
+[[tools]]
+name = "github.create_pr"
+description = "Create GitHub pull request"
+allowed_principals = ["jarvis", "opencode"]
+max_args_size = 1048576
+timeout_ms = 30000
+requires_approval = true
+sandbox_type = "none"
+
+[[tools]]
+name = "homeassistant.get_state"
+description = "Get Home Assistant entity state"
+allowed_principals = ["jarvis", "opencode"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = false
+sandbox_type = "none"
+
+[[tools]]
+name = "homeassistant.call_service"
+description = "Call Home Assistant service"
+allowed_principals = ["jarvis"]
+max_args_size = 1048576
+timeout_ms = 10000
+requires_approval = true
+sandbox_type = "none"
+
+[[tools]]
+name = "android.get_device_info"
+description = "Get Android device info via MCP"
+allowed_principals = ["jarvis"]
+max_args_size = 1048576
+timeout_ms = 10000
+requires_approval = false
+sandbox_type = "none"
+
+[[tools]]
+name = "android.send_notification"
+description = "Send notification to Android device"
+allowed_principals = ["jarvis"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = true
+sandbox_type = "none"
+
+[[tools]]
+name = "web.search"
+description = "Search the web"
+allowed_principals = ["jarvis", "opencode"]
+max_args_size = 1048576
+timeout_ms = 30000
+requires_approval = false
+sandbox_type = "none"
+
+[[tools]]
+name = "web.fetch"
+description = "Fetch web page content"
+allowed_principals = ["jarvis", "opencode"]
+max_args_size = 5242880
+timeout_ms = 30000
+requires_approval = false
+sandbox_type = "none"
+
+# Principals allowed to use MCP Gateway
+principals = ["jarvis", "opencode", "user"]

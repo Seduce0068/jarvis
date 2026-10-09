@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+package jarvis.policy.v1;
+
+service PolicyService {
+  rpc Check(CheckRequest) returns (CheckResponse);
+  rpc RequestApproval(ApprovalRequest) returns (ApprovalResponse);
+  rpc GetKillSwitchStatus(Empty) returns (KillSwitchStatusResponse);
+  rpc ActivateKillSwitch(ActivateKillSwitchRequest) returns (Empty);
+  rpc DeactivateKillSwitch(DeactivateKillSwitchRequest) returns (Empty);
+}
+
+message CheckRequest {
+  string principal = 1;
+  string action = 2;
+  string resource = 3;
+  string context = 4;
+}
+
+message CheckResponse {
+  bool allowed = 1;
+}
+
+message ApprovalRequest {
+  string id = 1;
+  string principal = 2;
+  string action = 3;
+  string resource = 4;
+  string context = 5;
+  int64 requested_at = 6;
+  int64 expires_at = 7;
+}
+
+message ApprovalResponse {
+  string decision = 1;
+}
+
+message KillSwitchStatusResponse {
+  bool activated = 1;
+  int64 activated_at = 2;
+  string reason = 3;
+  string activated_by = 4;
+}
+
+message ActivateKillSwitchRequest {
+  string reason = 1;
+}
+
+message DeactivateKillSwitchRequest {
+  string admin_token = 1;
+}
+
+message Empty {}

@@ -1,0 +1,51 @@
+# JARVIS Casbin Policy Rules
+# Format: p, subject, object, action
+# Format: g, user, role
+
+# Admin role
+p, admin, *, *
+g, jarvis_admin, admin
+
+# User role
+p, user, tool:filesystem.read, execute
+p, user, tool:filesystem.write, execute
+p, user, tool:filesystem.list, execute
+p, user, tool:git.status, execute
+p, user, tool:git.diff, execute
+p, user, tool:git.commit, execute
+p, user, tool:github.create_pr, execute
+p, user, service:homeassistant.get_state, execute
+p, user, service:homeassistant.call_service, execute
+p, user, service:android.get_device_info, execute
+p, user, service:android.send_notification, execute
+p, user, web.search, execute
+p, user, web.fetch, execute
+g, jarvis_user, user
+
+# Agent (JARVIS) role - limited, requires approval for most actions
+p, agent, tool:filesystem.read, execute
+p, agent, tool:filesystem.list, execute
+p, agent, tool:git.status, execute
+p, agent, tool:git.diff, execute
+p, agent, service:homeassistant.get_state, execute
+p, agent, service:android.get_device_info, execute
+p, agent, web.search, execute
+p, agent, web.fetch, execute
+g, jarvis, agent
+
+# Safe tools (auto-approved for agent)
+p, agent, tool:filesystem.read, execute
+p, agent, tool:filesystem.list, execute
+p, agent, tool:git.status, execute
+p, agent, tool:git.diff, execute
+p, agent, service:homeassistant.get_state, execute
+p, agent, web.search, execute
+p, agent, web.fetch, execute
+
+# System role (for internal operations)
+p, system, *, *
+g, jarvis_system, system
+
+# Kill switch role (denies all)
+p, killswitch, *, *
+g, jarvis_killswitch, killswitch

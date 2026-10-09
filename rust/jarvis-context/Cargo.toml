@@ -1,0 +1,76 @@
+[package]
+name = "jarvis-context"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "JARVIS Context Builder: Memory search, PII redaction, prompt assembly"
+
+[dependencies]
+# Workspace
+tokio = { workspace = true, features = ["full", "tracing"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+opentelemetry = { workspace = true }
+metrics = { workspace = true }
+config = { workspace = true }
+figment = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Database
+sqlx = { workspace = true }
+deadpool-postgres = { workspace = true }
+tokio-postgres = { workspace = true }
+
+# Vector DB
+qdrant-client = { workspace = true }
+
+# PII detection
+regex = "1.10"
+toml = "0.8"
+
+# Secrets
+secrecy = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+prost = { workspace = true }
+tonic-prost = { workspace = true }
+
+# Policy client
+jarvis-policy = { path = "../jarvis-policy" }
+
+# Core types
+jarvis-core = { path = "../jarvis-core" }
+
+# HTTP
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+# Metrics
+metrics-exporter-prometheus = { workspace = true }
+
+# Logging
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+mockall = { workspace = true }
+testcontainers = { workspace = true }
+
+[[bin]]
+name = "jarvis-context"
+path = "src/main.rs"
+
+[lib]
+name = "jarvis_context"
+path = "src/lib.rs"
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }

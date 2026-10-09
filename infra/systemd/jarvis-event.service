@@ -1,0 +1,63 @@
+[Unit]
+Description=JARVIS Event Normalizer
+Documentation=https://github.com/koppe/jarvis
+After=network.target jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
+Wants=jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
+
+[Service]
+Type=notify
+User=jarvis
+Group=jarvis
+WorkingDirectory=/opt/jarvis/rust
+ExecStart=/opt/jarvis/bin/jarvis-event
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+SendSIGKILL=yes
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Environment
+Environment=RUST_LOG=info
+Environment=JARVIS_EVENT_GRPC_ADDR=127.0.0.1:50053
+Environment=JARVIS_EVENT_HTTP_ADDR=127.0.0.1:8083
+Environment=JARVIS_EVENT_WEBHOOK_ADDR=0.0.0.0:8080
+Environment=JARVIS_EVENT_HA_URL=http://homeassistant.local:8123
+Environment=JARVIS_EVENT_ANDROID_MCP_URL=http://127.0.0.1:49374
+Environment=JARVIS_EVENT_POLICY_GRPC_ADDR=http://127.0.0.1:50051
+Environment=JARVIS_EVENT_MCP_GW_GRPC_ADDR=http://127.0.0.1:50052
+Environment=JARVIS_EVENT_CONTEXT_GRPC_ADDR=http://127.0.0.1:50054
+EnvironmentFile=-/etc/jarvis/event.env
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+MemoryMax=1G
+CPUQuota=100%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-event
+
+[Install]
+WantedBy=multi-user.target

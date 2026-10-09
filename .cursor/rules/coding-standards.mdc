@@ -1,0 +1,51 @@
+---
+description: jarvisプロジェクト共通コーディング規約
+alwaysApply: true
+---
+
+# jarvis コーディング規約
+
+## 共通原則
+
+- **型安全**: `any`・`@ts-ignore`・リフレクション回避
+- **合成優先**: 継承より委譲・ラッパーパターン
+- **最小依存**: 標準ライブラリ優先、新規ライブラリは要確認
+- **セキュリティファースト**: 秘密情報のログ/出力/コミット禁止
+- **完全性**: プレースホルダー禁止、コピペ即実行可能なコード提供
+
+## TypeScript/JavaScript
+
+```typescript
+// ✅ 推奨: 明示的型付け・エラーハンドリング
+async function fetchUser(id: string): Promise<User> {
+  try {
+    const response = await fetch(`/api/users/${id}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  } catch (e) {
+    logger.error('User fetch failed', { id, error: e });
+    throw new UserFetchError(id, { cause: e });
+  }
+}
+
+// ❌ 非推奨: any・catch空・暗黙的any
+async function fetchUser(id) {
+  try { return fetch(`/api/users/${id}`).then(r => r.json()); } catch {}
+}
+```
+
+## Rust
+
+- `/home/koppe/.gemini/references/languages/rust-advanced` および `reference` 準拠
+- `cargo fmt` / `cargo clippy` 通過必須
+- `unwrap()`/`expect()` 本番コードで禁止（`Result` 伝播または `?` 使用）
+
+## Git/コミット
+
+- アトミックコミット: 1コミット = 1論理変更
+- メッセージ: `type(scope): subject` 形式（Conventional Commits）
+
+## ドキュメント
+
+- 公開関数・複雑ロジックに JSDoc/docstrings 必須
+- ADR/RFC/Runbook は `doc-create` スキルテンプレート使用

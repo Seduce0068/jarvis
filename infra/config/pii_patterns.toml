@@ -1,0 +1,48 @@
+# JARVIS PII Detection Patterns
+# Used by jarvis-context PiiFilter
+
+# Email addresses
+email = "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
+
+# Japanese phone numbers
+phone_jp = "0\\d{1,4}-\\d{1,4}-\\d{4}"
+
+# Credit card numbers (basic pattern)
+credit_card = "\\b\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}[-\\s]?\\d{4}\\b"
+
+# API keys, secrets, tokens, passwords (key=value patterns)
+api_key = "(?i)(api[_-]?key|secret|token|password|access[_-]?key|client[_-]?secret)\\s*[:=]\\s*[\"']?([a-zA-Z0-9_\\-]{20,})[\"']?"
+
+# IPv4 addresses
+ipv4 = "\\b(?:\\d{1,3}\\.){3}\\d{1,3}\\b"
+
+# UUIDs
+uuid = "\\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\\b"
+
+# AWS keys
+aws_access_key = "AKIA[0-9A-Z]{16}"
+aws_secret_key = "[0-9a-zA-Z/+]{40}"
+
+# GitHub tokens
+github_token = "gh[ps]_[0-9a-zA-Z]{36}"
+
+# Slack tokens
+slack_token = "xox[baprs]-[0-9a-zA-Z]{10,48}"
+
+# Generic bearer tokens
+bearer_token = "(?i)bearer\\s+[a-zA-Z0-9_\\-]{20,}"
+
+# Private keys
+private_key = "-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----"
+
+# Database connection strings
+db_connection = "(?i)(postgres|mysql|mongodb)://[^\\s]+"
+
+# JWT tokens
+jwt = "eyJ[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+"
+
+# Redaction replacement
+redact_replacement = "[REDACTED]"
+
+# Enable PII filtering
+enabled = true

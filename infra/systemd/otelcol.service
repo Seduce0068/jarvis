@@ -1,0 +1,34 @@
+[Unit]
+Description=OpenTelemetry Collector for JARVIS
+Documentation=https://opentelemetry.io/docs/collector/
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=jarvis
+Group=jarvis
+ExecStart=/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=10
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/etc/jarvis /var/log/jarvis
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=otelcol
+
+[Install]
+WantedBy=multi-user.target

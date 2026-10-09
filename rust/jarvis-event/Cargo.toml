@@ -1,0 +1,57 @@
+[package]
+name = "jarvis-event"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "JARVIS Event Normalizer: HA, Android, external APIs → unified events"
+
+[dependencies]
+# Workspace
+tokio = { workspace = true, features = ["full", "tracing"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+opentelemetry = { workspace = true }
+metrics = { workspace = true }
+config = { workspace = true }
+figment = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# HTTP server for webhooks
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+# gRPC
+tonic = { workspace = true }
+prost = { workspace = true }
+tonic-prost = { workspace = true }
+
+# Core types
+jarvis-core = { path = "../jarvis-core" }
+
+# Policy client
+jarvis-policy = { path = "../jarvis-policy" }
+
+# MCP Gateway client
+jarvis-mcp-gw = { path = "../jarvis-mcp-gw" }
+
+[dev-dependencies]
+proptest = { workspace = true }
+mockall = { workspace = true }
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[[bin]]
+name = "jarvis-event"
+path = "src/main.rs"
+
+[lib]
+name = "jarvis_event"
+path = "src/lib.rs"

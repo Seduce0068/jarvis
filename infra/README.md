@@ -1,0 +1,184 @@
+# JARVIS Infrastructure
+
+This directory contains all infrastructure-as-code and deployment configuration for the JARVIS personal AI system.
+
+## Structure
+
+```
+infra/
+├── opentofu/                    # OpenTofu (Terraform) modules
+│   ├── environments/prod/       # Production environment
+│   └── modules/
+│       ├── compute/             # OCI Compute (A1 Flex)
+│       ├── network/             # VCN, Subnet, IGW, NAT
+│       ├── security/            # NSG, Security Rules
+│       ├── storage/             # Block Volume, Object Storage
+│       └── observability/       # Logging, Monitoring, Alarms
+├── systemd/                     # Systemd service units
+│   ├── jarvis-policy.service
+│   ├── jarvis-mcp-gw.service
+│   ├── jarvis-event.service
+│   ├── jarvis-context.service
+│   ├── opencode.service
+│   ├── code-server.service
+│   ├── otelcol.service
+│   ├── jarvis-backup.service
+│   └── jarvis-backup.timer
+├── scripts/                     # Operational scripts
+│   └── backup.sh               # Daily backup to OCI Object Storage
+├── config/                      # Configuration files
+│   ├── pii_patterns.toml       # PII detection patterns
+│   ├── mcp_allowlist.toml      # MCP tool allowlist
+│   ├── policy/                 # Cedar/Casbin policies
+│   │   ├── cedar_schema.cedarschema
+│   │   ├── casbin_model.conf
+│   │   └── casbin_policy.csv
+│   ├── opencode/               # OpenCode V2 config
+│   │   └── config.toml
+│   ├── otelcol-config.yaml     # OpenTelemetry Collector
+│   ├── policy.env              # Policy Engine env (1Password)
+│   ├── mcp_gateway.env         # MCP Gateway env (1Password)
+│   ├── event.env               # Event Normalizer env (1Password)
+│   ├── context.env             # Context Builder env (1Password)
+│   └── code_server.env         # code-server env (1Password)
+└── cloud-init.yaml             # OCI instance initialization
+```
+
+## Deployment
+
+### Prerequisites
+
+1. OCI Account with Always Free eligibility
+2. OpenTofu installed (`tofu version`)
+3. OCI CLI configured (`oci setup config`)
+4. 1Password CLI installed and authenticated (`op signin`)
+5. Tailscale account (for secure access)
+6. SSH key pair
+
+### Quick Start
+
+```bash
+# 1. Navigate to production environment
+cd infra/opentofu/environments/prod
+
+# 2. Create terraform.tfvars with your values
+cat > terraform.tfvars <<EOF
+compartment_id     = "ocid1.compartment.oc1..xxxxx"
+ssh_public_key     = "ssh-ed25519 AAAA..."
+tailscale_auth_key = "tskey-auth-xxxxx"
+# Optional overrides
+# availability_domain = "Uocm:AP-TOKYO-1-AD-1"
+# allowed_ssh_cidrs   = ["100.64.0.0/10"]  # Tailscale CIDR
+EOF
+
+# 3. Initialize and plan
+tofu init
+tofu plan
+
+# 4. Apply
+tofu apply
+```
+
+### Post-Deployment
+
+After the instance is provisioned, cloud-init will:
+
+1. Install all packages (Rust, OpenCode, code-server, PostgreSQL, Qdrant, Docker, Tailscale)
+2. Create `jarvis` user and directories
+3. Configure PostgreSQL and Qdrant
+4. Join Tailscale network
+5. Install systemd services
+6. Generate code-server password
+7. Enable all services
+
+Wait 5-10 minutes for cloud-init to complete, then:
+
+```bash
+# Check service status via Tailscale SSH
+tailscale ssh jarvis@jarvis-host
+
+# Verify services
+sudo systemctl status jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol
+
+# Check logs
+sudo journalctl -u jarvis-policy -f
+```
+
+### Access
+
+- **code-server (IDE)**: `http://jarvis-host.tailnet.ts.net:8080` (password in `/etc/jarvis/code-server-password`)
+- **OpenCode Web**: `http://jarvis-host.tailnet.ts.net:49374`
+- **Metrics**: `http://jarvis-host.tailnet.ts.net:8081/metrics` (Policy), `:8082` (MCP GW), `:8083` (Event), `:8084` (Context)
+
+### Secret Management
+
+All secrets are managed via **1Password CLI**. The `.env` files contain `op://` references that are resolved at runtime.
+
+Required 1Password vault items:
+- `JARVIS/Policy/admin_token`
+- `JARVIS/PostgreSQL/connection_string`
+- `JARVIS/Home Assistant/long_lived_token`
+- `JARVIS/Gmail/client_id`, `client_secret`
+- `JARVIS/Google Calendar/client_id`, `client_secret`
+- `GRAFANA_CLOUD_INSTANCE`, `GRAFANA_CLOUD_TOKEN`
+
+### Backup & DR
+
+Daily backups run via `jarvis-backup.timer`:
+- PostgreSQL dump → OCI Object Storage
+- Qdrant snapshot → OCI Object Storage
+- Config files → OCI Object Storage
+- Git bundles → OCI Object Storage
+
+Retention: 7 days local, 30 days remote.
+
+To test disaster recovery:
+```bash
+# On fresh instance after tofu apply
+cd /opt/jarvis/scripts
+./restore.sh  # (create this script to restore from OCI Object Storage)
+```
+
+### Updating Services
+
+```bash
+# Build Rust services
+cd /opt/jarvis/rust
+cargo build --release --workspace
+
+# Copy binaries
+sudo cp target/release/jarvis-* /opt/jarvis/bin/
+
+# Restart services
+sudo systemctl restart jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context
+```
+
+### Monitoring
+
+- **Grafana Cloud Free**: Traces, metrics, logs
+- **OCI Monitoring**: Instance health, CPU, memory alarms
+- **Tailscale**: Network connectivity
+
+### Troubleshooting
+
+```bash
+# View cloud-init logs
+sudo journalctl -u cloud-init -f
+
+# Check specific service
+sudo journalctl -u jarvis-policy -n 100
+
+# Verify network
+tailscale status
+sudo ufw status
+
+# Check disk space
+df -h /opt/jarvis
+
+# Manual backup
+sudo systemctl start jarvis-backup
+```
+
+## Architecture Reference
+
+See `../adr/0001-unified-architecture.md` for the unified architecture decision.

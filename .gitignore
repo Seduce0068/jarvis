@@ -1,0 +1,37 @@
+# JARVIS .gitignore
+
+# Runtime directories (created by bootstrap)
+bin/
+state/
+logs/
+repos/
+
+# Configuration with secrets
+config/*.env
+config/*.env.*
+!config/templates/
+!config/schemas/
+
+# Runtime policies (generated from templates)
+policies/*.json
+!policies/README.md
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+*.orig
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.tmp/
+
+/rust/target/

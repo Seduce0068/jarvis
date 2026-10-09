@@ -1,0 +1,143 @@
+---
+type: Architecture-Decision
+title: "ADR-0001: Unified JARVIS Architecture — OpenCode V2 as Agent Runtime"
+description: "統合アーキテクチャ決定: JARVIS Personal AI と OpenCode V2 OCI Code Server の境界・重複・依存を解消し、OpenCode V2 を JARVIS の公式 Agent Runtime および開発 IDE として位置づける。"
+tags:
+  - adr
+  - jarvis
+  - opencode
+  - oci
+  - architecture
+status: proposed
+deciders:
+  - "Sovereign AI Agent"
+date: "2026-10-09"
+---
+
+## Context
+
+現在、以下の2ドキュメントが独立して存在し、境界・責務・用語に重複・不整合がある。
+
+1. `jarvis_personal_ai_architecture.md` — JARVIS全体アーキテクチャ（スマホ・HA・サーバー・LLM・Memory・Policy）
+2. `opencode-v2-oci-code-server-architecture-report.md` — OCI上の code-server + OpenCode V2 開発環境
+
+**主な不整合:**
+- "Agent Runtime" が `OpenClaw` (JARVIS側) と `OpenCode V2` (OCI側) で二重定義
+- MCP導入順・管理が別個
+- 秘密情報管理・ネットワーク境界・ストレージ戦略が各々で異なる前提
+- 用語: "JARVIS Server" vs "OCI VM"、 "MCP Host" vs "OpenCode MCP"
+
+---
+
+## Decision
+
+### 1. OpenCode V2 を JARVIS の **公式 Agent Runtime** として採用
+
+| 要素 | 採用 | 備考 |
+|------|------|------|
+| Agent 実行基盤 | **OpenCode V2** (`opencode serve` + TUI/CLI) | `OpenClaw` 等の自前実装は中止 |
+| IDE | **code-server** (同一VM内、systemd管理) | ブラウザIDE担当 |
+| MCP Host | **OpenCode 内蔵 MCP Client** | JARVIS側の `MCPHost` は OpenCode に委譲 |
+| モデル切替/フォールバック | **OpenCode 内蔵 Model Router** | Tier 0-4 戦略を OpenCode 設定にマッピング |
+| セッション管理 | **OpenCode セッション** | 永続化は OpenCode 仕様に従う |
+| 非対話実行 | **OpenCode CLI (`opencode run`)** | CI/CD・バッチ処理で利用 |
+
+### 2. JARVIS 固有コンポーネントを **Rust 製サイドカーサービス** として分離
+
+OpenCode ではカバーできない **セキュリティ境界・ポリシー・文脈構築** のみ自前実装:
+
+| サービス | 責務 | 技術 |
+|----------|------|------|
+| `jarvis-policy` | Policy Engine (Cedar/Casbin)、承認ゲート、キルスイッチ | Rust + Cedar |
+| `jarvis-mcp-gw` | MCP Gateway (allowlist、サンドボックス、能力ベース認可) | Rust + rmcp |
+| `jarvis-event` | Event Normalizer (HA/Android/外部API→統一イベント) | Rust |
+| `jarvis-context` | Context Builder (Memory検索、PII除去、プロンプト組立) | Rust |
+
+**通信:** OpenCode ⇄ JARVIS Rust サービス は **ローカル gRPC / Unix Domain Socket** または **HTTP/JSON** (MCP プロトコル拡張)
+
+### 3. インフラ・運用の統一
+
+| 領域 | 統一方針 |
+|------|----------|
+| **IaC** | OpenTofu 単一リポジトリ (`infra/opentofu/`) |
+| **プロセス管理** | systemd 全サービス (`infra/systemd/`) |
+| **秘密情報** | **1Password CLI (`op`)** で注入、Git/state排除 |
+| **バックアップ/DR** | OCI Object Storage + rclone (cron/systemd timer) |
+| **監視** | OpenTelemetry Collector → Grafana Cloud Free |
+| **ネットワーク** | Tailscale のみ公開、code-server/OpenCode Web は 127.0.0.1 バインド |
+| **コンテナ** | 初期は **なし** (systemd ネイティブ)。将来 Podman/Docker Compose 移行パスのみ確保 |
+
+### 4. 用語の統一 (Ubiquitous Language)
+
+| 従来 (JARVIS側) | 従来 (OCI側) | 統一用語 |
+|----------------|--------------|----------|
+| JARVIS Server | OCI VM / Code Server Host | **JARVIS Host** |
+| OpenClaw / Agent Runtime | OpenCode V2 Server | **Agent Runtime (OpenCode)** |
+| MCP Host | OpenCode MCP | **MCP Gateway (jarvis-mcp-gw)** |
+| Policy Engine | (なし) | **Policy Engine (jarvis-policy)** |
+| Long-term Memory | (OpenCode Session) | **Memory Store (PostgreSQL + Qdrant)** |
+| Audit Log | (なし) | **Audit Log (構造化JSON → Object Storage)** |
+
+---
+
+## Consequences
+
+### Positive
+- 自前 Agent ランタイム実装コスト **削減** (OpenCode: セッション、MCP、モデル切替、UI、非対話実行を標準装備)
+- セキュリティクリティカルな境界のみ **Rust で堅牢に実装** (Policy、MCP GW、キルスイッチ)
+- 開発環境 (code-server) と Agent Runtime (OpenCode) が **同一ワークスペースを共有** → 開発ループ高速化
+- 単一 IaC・単一プロセス管理・単一秘密管理で **運用簡素化**
+
+### Negative / Risks
+- OpenCode V2 の仕様変更・破壊的変更への追従リスク → バージョン固定 + 変更監視
+- OpenCode の MCP 実装が JARVIS 要件 (allowlist/サンドボックス/能力認可) を満たすか要検証 → `jarvis-mcp-gw` でラップ吸収
+- 単一 VM (OCI A1) への集約 → Idle Compute 回収時の全停止リスク → **自動再プロビジョニング必須**
+
+### Neutral
+- OCI Always Free 枠内で完結 (2 OCPU / 12GB / 200GB Block + 10TB Object)
+- Arm64 互換性確認必須 (OpenCode, code-server, Rust toolchain, PostgreSQL, Qdrant すべて対応済み)
+
+---
+
+## Implementation Plan
+
+### Phase 0: 統合基盤 (Week 1)
+- [ ] この ADR 承認・マージ
+- [ ] OpenTofu で OCI A1 VM + Tailscale 疎通
+- [ ] 1Password CLI 設定・秘密情報注入確認
+
+### Phase 1: 開発環境 + Agent Runtime (Week 1-2)
+- [ ] code-server systemd 化
+- [ ] OpenCode V2 インストール・`opencode serve` systemd 化
+- [ ] 同一ワークスペース (`~/repos`) 共有確認
+
+### Phase 2: JARVIS Rust サービス雛形 (Week 2-3)
+- [ ] Cargo ワークスペース作成 (`rust/`)
+- [ ] `jarvis-policy` (Cedar ポリシー + gRPC)
+- [ ] `jarvis-mcp-gw` (rmcp + allowlist)
+- [ ] `jarvis-event` (HA/Android Webhook 受信 → 統一イベント)
+- [ ] `jarvis-context` (PostgreSQL/Qdrant クライアント + PIIフィルタ)
+
+### Phase 3: 統合・ポリシー適用 (Week 3-4)
+- [ ] OpenCode → `jarvis-policy` / `jarvis-mcp-gw` 連携 (MCP ツールとして登録)
+- [ ] キルスイッチ実装・テスト
+- [ ] イベント駆動フロー: HA → jarvis-event → jarvis-context → OpenCode → Policy → MCP GW → HA/Android
+
+### Phase 4: 観測性・DR・自動化 (Week 4-5)
+- [ ] OpenTelemetry Collector 導入
+- [ ] Grafana Cloud ダッシュボード/アラート
+- [ ] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル)
+- [ ] Idle Compute 対策: ヘルスチェック + `tofu apply` 自動再実行 (systemd timer)
+- [ ] review-flow CI ゲート統合
+
+---
+
+## References
+
+- [OpenCode V2 Docs](https://opencode.ai/v2/docs)
+- [OpenCode V2 MCP](https://opencode.ai/v2/docs/mcp-servers)
+- [Cedar Policy Language](https://www.cedarpolicy.com/)
+- [rmcp - Rust MCP SDK](https://github.com/rmcp-rs/rmcp)
+- [OpenTofu](https://opentofu.org/)
+- [OCI Always Free](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
+- [1Password CLI](https://developer.1password.com/docs/cli/get-started/)

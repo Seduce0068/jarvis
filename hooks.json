@@ -1,0 +1,87 @@
+{
+  "hooks": {
+    "pre-task": [
+      {
+        "matcher": "review|レビュー|コードレビュー|PRレビュー",
+        "command": "subagent review-security",
+        "description": "レビュー依頼時にセキュリティレビュー起動"
+      },
+      {
+        "matcher": "アーキテクチャ|設計|責務|依存方向|拡張性",
+        "command": "subagent arch-reviewer",
+        "description": "アーキテクチャ観点のレビュー起動"
+      },
+      {
+        "matcher": "運用|観測性|エラーハンドリング|ロールバック|マイグレーション",
+        "command": "subagent ops-reviewer",
+        "description": "運用観点のレビュー起動"
+      },
+      {
+        "matcher": "クロスレビュー|多視点|統合レポート",
+        "command": "skill cross-review",
+        "description": "クロスレビュースキル適用"
+      },
+      {
+        "matcher": "技術選定|フレームワーク選定|ライブラリ比較|ADR",
+        "command": "skill tech-selection",
+        "description": "技術選定スキル適用"
+      },
+      {
+        "matcher": "AI選定|モデル選定|ベクトルDB|RAG|推論エンジン",
+        "command": "skill ai-selection",
+        "description": "AI技術選定スキル適用"
+      },
+      {
+        "matcher": "ドキュメント生成|ADR|RFC|Runbook|仕様書|設計書",
+        "command": "skill doc-create",
+        "description": "ドキュメント生成スキル適用"
+      },
+      {
+        "matcher": "テスト仕様|TDD|BDD|Property-based|テスト設計",
+        "command": "skill test-spec",
+        "description": "テスト仕様スキル適用"
+      },
+      {
+        "matcher": "ユーザースクリプト|Violentmonkey|メタデータ検証|@match|@grant",
+        "command": "skill userscript-validator",
+        "description": "ユーザースクリプト検証スキル適用"
+      }
+    ],
+    "post-edit": [
+      {
+        "matcher": "**/*.ts",
+        "command": "skill test-spec",
+        "description": "TypeScript編集後にテスト仕様確認"
+      },
+      {
+        "matcher": "**/*.rs",
+        "command": "shell cargo fmt --check && cargo clippy -- -D warnings",
+        "description": "Rust編集後にフォーマット・リントチェック"
+      },
+      {
+        "matcher": "**/*.md",
+        "command": "shell npx markdownlint --fix",
+        "description": "Markdown編集後にlint自動修正"
+      }
+    ],
+    "post-write": [
+      {
+        "matcher": ".cursor/rules/*.mdc",
+        "command": "echo 'Rule created: {file}'",
+        "description": "ルール作成通知"
+      },
+      {
+        "matcher": ".cursor/skills/**/SKILL.md",
+        "command": "echo 'Skill created: {file}'",
+        "description": "スキル作成通知"
+      }
+    ],
+    "pre-commit": [
+      {
+        "matcher": "*",
+        "command": "shell git diff --cached --name-only | xargs -r npx markdownlint 2>/dev/null || true",
+        "description": "コミット前Markdownチェック"
+      }
+    ]
+  }
+}

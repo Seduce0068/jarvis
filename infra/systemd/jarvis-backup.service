@@ -1,0 +1,27 @@
+[Unit]
+Description=JARVIS Backup Job
+Documentation=https://github.com/koppe/jarvis
+After=network.target
+
+[Service]
+Type=oneshot
+User=jarvis
+Group=jarvis
+ExecStart=/opt/jarvis/scripts/backup.sh
+WorkingDirectory=/opt/jarvis/scripts
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /home/jarvis/repos
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=50%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-backup

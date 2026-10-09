@@ -1,0 +1,44 @@
+[Unit]
+Description=code-server (Browser IDE)
+Documentation=https://coder.com/docs/code-server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=jarvis
+Group=jarvis
+WorkingDirectory=/home/jarvis/repos
+ExecStart=/usr/bin/code-server --bind-addr 127.0.0.1:8080 --auth password
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=30
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/code-server /home/jarvis/.local/share/code-server /tmp
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+
+# Environment
+Environment=PASSWORD_FILE=/etc/jarvis/code-server-password
+Environment=SHELL=/bin/bash
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+CPUQuota=100%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=code-server
+
+[Install]
+WantedBy=multi-user.target

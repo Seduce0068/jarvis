@@ -1,0 +1,60 @@
+[package]
+name = "jarvis-mcp-gw"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "JARVIS MCP Gateway: allowlist, sandboxing, capability-based auth for MCP tools"
+
+[dependencies]
+# Workspace
+tokio = { workspace = true, features = ["full", "tracing"] }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
+config = { workspace = true }
+figment = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+secrecy = { workspace = true }
+
+# MCP
+rmcp = { workspace = true }
+
+# Policy client
+jarvis-policy = { path = "../jarvis-policy" }
+
+# gRPC
+tonic = { workspace = true }
+prost = { workspace = true }
+tonic-prost = { workspace = true }
+
+# HTTP
+axum = { workspace = true }
+tower-http = { workspace = true }
+
+# Config parsing
+toml = "0.8"
+
+[build-dependencies]
+tonic-prost-build = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+mockall = { workspace = true }
+
+[[bin]]
+name = "jarvis-mcp-gw"
+path = "src/main.rs"
+
+[lib]
+name = "jarvis_mcp_gw"
+path = "src/lib.rs"

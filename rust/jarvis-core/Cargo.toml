@@ -1,0 +1,21 @@
+[package]
+name = "jarvis-core"
+version = { workspace = true }
+edition = { workspace = true }
+license = { workspace = true }
+authors = { workspace = true }
+repository = { workspace = true }
+description = "JARVIS Core: Shared types and traits"
+
+[dependencies]
+# Workspace
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+[lib]
+name = "jarvis_core"
+path = "src/lib.rs"

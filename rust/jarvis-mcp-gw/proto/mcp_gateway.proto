@@ -1,0 +1,25 @@
+syntax = "proto3";
+
+package jarvis.mcp.gateway.v1;
+
+service McpGatewayService {
+  rpc ExecuteTool(ExecuteToolRequest) returns (ExecuteToolResponse);
+  rpc RegisterMcpServer(RegisterMcpRequest) returns (Empty);
+}
+
+message ExecuteToolRequest {
+  string tool = 1;
+  string args = 2;
+  string principal = 3;
+}
+
+message ExecuteToolResponse {
+  string result = 1;
+}
+
+message RegisterMcpRequest {
+  string name = 1;
+  repeated string command = 2;
+}
+
+message Empty {}

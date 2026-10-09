@@ -1,0 +1,44 @@
+[Unit]
+Description=OpenCode V2 Server (Agent Runtime)
+Documentation=https://opencode.ai/v2/docs
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=jarvis
+Group=jarvis
+WorkingDirectory=/home/jarvis/repos
+ExecStart=/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 49374
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=30
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGTERM
+
+# Security
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/opencode /tmp
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+
+# Environment
+Environment=OPENCODE_CONFIG_DIR=/home/jarvis/.config/opencode
+Environment=RUST_LOG=info
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=4G
+CPUQuota=100%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=opencode
+
+[Install]
+WantedBy=multi-user.target

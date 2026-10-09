@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package jarvis.event.v1;
+
+service EventService {
+  rpc EmitEvent(EmitEventRequest) returns (EmitEventResponse);
+}
+
+message EmitEventRequest {
+  string id = 1;
+  string source = 2;
+  string event_type = 3;
+  string payload = 4;
+  int64 timestamp = 5;
+  string correlation_id = 6;
+}
+
+message EmitEventResponse {
+  bool success = 1;
+}
