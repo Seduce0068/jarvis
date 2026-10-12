@@ -1,7 +1,10 @@
 //! Configuration for Policy Engine
 
 use anyhow::Result;
-use figment::{Figment, providers::{Toml, Env, Format}};
+use figment::{
+    Figment,
+    providers::{Env, Format, Toml},
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

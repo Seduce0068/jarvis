@@ -1,18 +1,18 @@
 //! JARVIS Context Builder - Main library
 
+pub mod builder;
 pub mod config;
 pub mod error;
-pub mod builder;
-pub mod pii;
 pub mod grpc;
 pub mod http;
+pub mod pii;
 
-use std::sync::Arc;
 use anyhow::Result;
-use tracing::info;
 use qdrant_client::Qdrant;
+use std::sync::Arc;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 pub struct ContextBuilder {
     config: config::ContextConfig,
     builder: Arc<builder::Builder>,
@@ -27,16 +27,19 @@ impl ContextBuilder {
         let pg_pool = Arc::new(builder::memory::create_pg_pool(&config).await?);
         let qdrant_client = Arc::new(builder::memory::create_qdrant_client(&config).await?);
         let pii_filter = Arc::new(pii::PiiFilter::new(&config).await?);
-        let policy_client = Arc::new(jarvis_policy::PolicyEngine::new(
-            jarvis_policy::config::PolicyConfig::load()?
-        ).await?);
-        let builder = Arc::new(builder::Builder::new(
-            config.clone(),
-            pg_pool.clone(),
-            qdrant_client.clone(),
-            pii_filter.clone(),
-            policy_client.clone(),
-        ).await?);
+        let policy_client = Arc::new(
+            jarvis_policy::PolicyEngine::new(jarvis_policy::config::PolicyConfig::load()?).await?,
+        );
+        let builder = Arc::new(
+            builder::Builder::new(
+                config.clone(),
+                pg_pool.clone(),
+                qdrant_client.clone(),
+                pii_filter.clone(),
+                policy_client.clone(),
+            )
+            .await?,
+        );
 
         Ok(Self {
             config,
@@ -48,7 +51,10 @@ impl ContextBuilder {
         })
     }
 
-    pub async fn build_context(&self, event: &jarvis_core::UnifiedEvent) -> Result<serde_json::Value> {
+    pub async fn build_context(
+        &self,
+        event: &jarvis_core::UnifiedEvent,
+    ) -> Result<serde_json::Value> {
         self.builder.build_context(event).await
     }
 
@@ -56,7 +62,11 @@ impl ContextBuilder {
         self.builder.store_memory(memory).await
     }
 
-    pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<jarvis_core::MemoryEntry>> {
+    pub async fn search_memory(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<jarvis_core::MemoryEntry>> {
         self.builder.search_memory(query, limit).await
     }
 
@@ -65,29 +75,6 @@ impl ContextBuilder {
     }
 
     pub async fn serve_http(&self, addr: std::net::SocketAddr) -> Result<()> {
-        http::serve(self.clone(), addr).await
+        http::serve(Arc::new(self.clone()), addr).await
     }
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
-
-    let config = config::ContextConfig::load()?;
-    let builder = ContextBuilder::new(config.clone()).await?;
-
-    info!("Starting JARVIS Context Builder");
-
-    let grpc_addr = config.grpc_addr.parse()?;
-    let http_addr = config.http_addr.parse()?;
-
-    tokio::try_join!(
-        builder.serve_grpc(grpc_addr),
-        builder.serve_http(http_addr),
-    )?;
-
-    Ok(())
 }

@@ -1,11 +1,11 @@
 //! Kill Switch - emergency stop for all automated actions
 
+use anyhow::Result;
+use hex;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
-use sha2::{Sha256, Digest};
-use hex;
 use tracing::warn;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +36,10 @@ impl KillSwitch {
     }
 
     pub fn activate(&self, reason: String) {
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         self.activated.store(true, Ordering::SeqCst);
         self.activated_at.store(now, Ordering::SeqCst);
         *self.reason.write().unwrap() = Some(reason.clone());
@@ -65,7 +68,9 @@ impl KillSwitch {
             activated: self.activated.load(Ordering::SeqCst),
             activated_at: if self.activated.load(Ordering::SeqCst) {
                 Some(self.activated_at.load(Ordering::SeqCst))
-            } else { None },
+            } else {
+                None
+            },
             reason: self.reason.read().unwrap().clone(),
             activated_by: self.activated_by.read().unwrap().clone(),
         }

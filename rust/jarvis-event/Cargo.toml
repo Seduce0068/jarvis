@@ -32,6 +32,12 @@ tonic = { workspace = true }
 prost = { workspace = true }
 tonic-prost = { workspace = true }
 
+# HTTP client
+reqwest = { workspace = true }
+
+# Logging
+tracing-subscriber = { workspace = true }
+
 # Core types
 jarvis-core = { path = "../jarvis-core" }
 
@@ -40,6 +46,18 @@ jarvis-policy = { path = "../jarvis-policy" }
 
 # MCP Gateway client
 jarvis-mcp-gw = { path = "../jarvis-mcp-gw" }
+
+# Context client
+jarvis-context = { path = "../jarvis-context" }
+
+# WebSocket for Android
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+
+# Secrets
+secrecy = { workspace = true }
+
+# Metrics
+metrics-exporter-prometheus = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

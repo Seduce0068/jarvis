@@ -3,8 +3,6 @@
 use anyhow::Result;
 use reqwest::Client;
 use serde_json::Value;
-use secrecy::ExposeSecret;
-use std::sync::Arc;
 
 pub struct HomeAssistantClient {
     client: Client,
@@ -21,12 +19,13 @@ impl HomeAssistantClient {
         Ok(Self {
             client,
             base_url: config.ha_url.trim_end_matches('/').into(),
-            token: config.ha_token.expose_secret().into(),
+            token: config.ha_token().into(),
         })
     }
 
     pub async fn get_state(&self, entity_id: &str) -> Result<Value> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/api/states/{}", self.base_url, entity_id))
             .bearer_auth(&self.token)
             .send()
@@ -37,8 +36,12 @@ impl HomeAssistantClient {
     }
 
     pub async fn call_service(&self, domain: &str, service: &str, data: Value) -> Result<Value> {
-        let resp = self.client
-            .post(format!("{}/api/services/{}/{}", self.base_url, domain, service))
+        let resp = self
+            .client
+            .post(format!(
+                "{}/api/services/{}/{}",
+                self.base_url, domain, service
+            ))
             .bearer_auth(&self.token)
             .json(&data)
             .send()
@@ -48,7 +51,13 @@ impl HomeAssistantClient {
         Ok(resp)
     }
 
-    pub async fn subscribe_events(&self) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+    pub async fn subscribe_events(
+        &self,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+    > {
         let url = format!("{}/api/websocket", self.base_url.replace("http", "ws"));
         let (ws, _) = tokio_tungstenite::connect_async(&url).await?;
         // Auth flow omitted for brevity
@@ -74,7 +83,8 @@ impl AndroidClient {
     }
 
     pub async fn execute_tool(&self, tool: &str, args: Value) -> Result<Value> {
-        let resp = self.client
+        let resp = self
+            .client
             .post(format!("{}/mcp/call", self.base_url))
             .json(&serde_json::json!({ "tool": tool, "args": args }))
             .send()
@@ -85,7 +95,8 @@ impl AndroidClient {
     }
 
     pub async fn get_device_info(&self) -> Result<Value> {
-        let resp = self.client
+        let resp = self
+            .client
             .get(format!("{}/device/info", self.base_url))
             .send()
             .await?

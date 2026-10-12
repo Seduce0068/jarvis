@@ -3,9 +3,8 @@
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
-use std::collections::HashMap;
-use tokio::sync::RwLock;
 
+#[allow(dead_code)]
 pub struct Gateway {
     config: crate::config::McpGatewayConfig,
     allowlist: Arc<crate::allowlist::AllowList>,
@@ -28,7 +27,9 @@ impl Gateway {
     }
 
     pub async fn execute(&self, tool: &str, args: Value) -> Result<Value> {
-        let tool_config = self.allowlist.get_config(tool)
+        let tool_config = self
+            .allowlist
+            .get_config(tool)
             .ok_or_else(|| anyhow::anyhow!("Tool config not found: {}", tool))?;
 
         // Execute in sandbox

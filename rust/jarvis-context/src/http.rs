@@ -1,11 +1,15 @@
 //! HTTP/REST for Context Builder
 
-use axum::{Router, routing::{get, post}, Json, extract::State};
-use std::sync::Arc;
 use crate::ContextBuilder;
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
+use jarvis_core::{MemoryEntry, UnifiedEvent};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::instrument;
-use jarvis_core::{UnifiedEvent, MemoryEntry};
 
 #[derive(Debug, Deserialize)]
 struct BuildContextRequest {
@@ -15,7 +19,7 @@ struct BuildContextRequest {
     correlation_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct BuildContextResponse {
     context: serde_json::Value,
 }
@@ -58,7 +62,7 @@ async fn metrics() -> String {
 #[instrument(skip(builder))]
 async fn build_context(
     State(builder): State<Arc<ContextBuilder>>,
-    Json(req): Json<BuildContextRequest>
+    Json(req): Json<BuildContextRequest>,
 ) -> Result<Json<BuildContextResponse>, axum::http::StatusCode> {
     let event = UnifiedEvent {
         id: uuid::Uuid::parse_str(&req.event_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
@@ -68,7 +72,9 @@ async fn build_context(
         timestamp: chrono::Utc::now(),
         correlation_id: req.correlation_id,
     };
-    let context = builder.build_context(&event).await
+    let context = builder
+        .build_context(&event)
+        .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(BuildContextResponse { context }))
 }
@@ -76,19 +82,26 @@ async fn build_context(
 #[instrument(skip(builder))]
 async fn store_memory(
     State(builder): State<Arc<ContextBuilder>>,
-    Json(req): Json<StoreMemoryRequest>
+    Json(req): Json<StoreMemoryRequest>,
 ) -> Result<&'static str, axum::http::StatusCode> {
     let memory = MemoryEntry {
-        id: req.id.and_then(|s| uuid::Uuid::parse_str(&s).ok()).unwrap_or_else(uuid::Uuid::new_v4),
+        id: req
+            .id
+            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
+            .unwrap_or_else(uuid::Uuid::new_v4),
         content: req.content,
         embedding: req.embedding,
         metadata: serde_json::from_str(&req.metadata).unwrap_or_default(),
         source: req.source,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
-        expires_at: req.expires_at.map(|t| chrono::DateTime::from_timestamp(t, 0).unwrap()),
+        expires_at: req
+            .expires_at
+            .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
     };
-    builder.store_memory(memory).await
+    builder
+        .store_memory(memory)
+        .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok("stored")
 }
@@ -96,9 +109,11 @@ async fn store_memory(
 #[instrument(skip(builder))]
 async fn search_memory(
     State(builder): State<Arc<ContextBuilder>>,
-    Json(req): Json<SearchMemoryRequest>
+    Json(req): Json<SearchMemoryRequest>,
 ) -> Result<Json<Vec<MemoryEntry>>, axum::http::StatusCode> {
-    let memories = builder.search_memory(&req.query, req.limit).await
+    let memories = builder
+        .search_memory(&req.query, req.limit)
+        .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(memories))
 }

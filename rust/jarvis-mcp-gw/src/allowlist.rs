@@ -1,8 +1,8 @@
 //! Allowlist management for MCP tools
 
-use std::collections::HashSet;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tokio::fs;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -29,7 +29,9 @@ pub struct AllowList {
 
 impl AllowList {
     pub async fn new(config: &crate::config::McpGatewayConfig) -> Result<Self> {
-        let content = fs::read_to_string(&config.allowlist_path).await.unwrap_or_default();
+        let content = fs::read_to_string(&config.allowlist_path)
+            .await
+            .unwrap_or_default();
         let allowlist_config: AllowListConfig = toml::from_str(&content).unwrap_or_default();
 
         let mut tools = HashSet::new();
@@ -63,7 +65,10 @@ impl AllowList {
 
     pub fn add_tool(&self, tool: AllowedTool) {
         self.tools.write().unwrap().insert(tool.name.clone());
-        self.tool_configs.write().unwrap().insert(tool.name.clone(), tool);
+        self.tool_configs
+            .write()
+            .unwrap()
+            .insert(tool.name.clone(), tool);
     }
 
     pub fn remove_tool(&self, tool: &str) {

@@ -1,13 +1,14 @@
 //! Event normalization core
 
 use anyhow::Result;
-use axum::{Router, routing::post, Json, extract::State};
+use axum::{Json, Router, extract::State, routing::post};
+use jarvis_core::{EventSource, UnifiedEvent};
 use serde_json::Value;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, instrument};
-use std::sync::Arc;
-use jarvis_core::{UnifiedEvent, EventSource};
 
+#[allow(dead_code)]
 pub struct Normalizer {
     config: crate::config::EventConfig,
     ha_client: Arc<crate::sources::HomeAssistantClient>,
@@ -33,21 +34,23 @@ impl Normalizer {
             config: config.clone(),
             ha_client,
             android_client,
-            policy_client,
-            mcp_gw_client,
-            context_client,
+            policy_client: policy_client.clone(),
+            mcp_gw_client: mcp_gw_client.clone(),
+            context_client: context_client.clone(),
             event_tx,
         };
 
-        // Spawn event processor
+        // Spawn event processor - clone Arcs for the spawned task
+        let policy_client = policy_client.clone();
+        let mcp_gw_client = mcp_gw_client.clone();
+        let context_client = context_client.clone();
+
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
-                if let Err(e) = Self::process_event(
-                    &policy_client,
-                    &mcp_gw_client,
-                    &context_client,
-                    event,
-                ).await {
+                if let Err(e) =
+                    Self::process_event(&policy_client, &mcp_gw_client, &context_client, event)
+                        .await
+                {
                     tracing::error!("Event processing failed: {}", e);
                 }
             }
@@ -62,17 +65,22 @@ impl Normalizer {
 
     async fn process_event(
         policy_client: &jarvis_policy::PolicyEngine,
-        mcp_gw_client: &jarvis_mcp_gw::McpGateway,
+        _mcp_gw_client: &jarvis_mcp_gw::McpGateway,
         context_client: &jarvis_context::ContextBuilder,
         event: UnifiedEvent,
     ) -> Result<()> {
-        info!("Processing event: {} from {:?}", event.event_type, event.source);
+        info!(
+            "Processing event: {} from {:?}",
+            event.event_type, event.source
+        );
 
         // Build context from memory
         let context = context_client.build_context(&event).await?;
 
         // Check policy for automated response
-        let should_act = policy_client.is_allowed("jarvis", "auto_respond", &event.event_type, &context)?;
+        let should_act = policy_client
+            .is_allowed("jarvis", "auto_respond", &event.event_type, &context)
+            .await?;
 
         if should_act {
             // Execute via MCP Gateway
@@ -82,16 +90,16 @@ impl Normalizer {
         Ok(())
     }
 
-    pub async fn start_webhook_server(&self) -> Result<()> {
+    pub async fn start_webhook_server(this: Arc<Self>) -> Result<()> {
         let app = Router::new()
             .route("/webhook/ha", post(ha_webhook))
             .route("/webhook/android", post(android_webhook))
             .route("/webhook/gmail", post(gmail_webhook))
             .route("/webhook/calendar", post(calendar_webhook))
-            .with_state(self.clone());
+            .with_state(this.clone());
 
-        let listener = tokio::net::TcpListener::bind(&self.config.webhook_addr).await?;
-        info!("Webhook server listening on {}", self.config.webhook_addr);
+        let listener = tokio::net::TcpListener::bind(&this.config.webhook_addr).await?;
+        info!("Webhook server listening on {}", this.config.webhook_addr);
         axum::serve(listener, app).await?;
         Ok(())
     }

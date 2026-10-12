@@ -1,9 +1,13 @@
 //! HTTP/REST for MCP Gateway
 
-use axum::{Router, routing::{get, post}, Json, extract::State};
-use std::sync::Arc;
 use crate::McpGateway;
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::instrument;
 
 #[derive(Debug, Deserialize)]
@@ -13,7 +17,7 @@ struct ExecuteToolRequest {
     principal: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ExecuteToolResponse {
     result: serde_json::Value,
 }
@@ -38,9 +42,11 @@ async fn metrics() -> String {
 #[instrument(skip(gateway))]
 async fn execute_tool(
     State(gateway): State<Arc<McpGateway>>,
-    Json(req): Json<ExecuteToolRequest>
+    Json(req): Json<ExecuteToolRequest>,
 ) -> Result<Json<ExecuteToolResponse>, axum::http::StatusCode> {
-    let result = gateway.execute_tool(&req.tool, req.args, &req.principal).await
+    let result = gateway
+        .execute_tool(&req.tool, req.args, &req.principal)
+        .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(ExecuteToolResponse { result }))
 }

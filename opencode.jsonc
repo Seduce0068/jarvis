@@ -1,0 +1,89 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "opencode/nemotron-3-ultra-free",
+  "mcp": {
+    "servers": {
+      "jarvis-gateway": {
+        "type": "local",
+        "command": [
+          "grpcurl",
+          "-plaintext",
+          "localhost:50052",
+          "jarvis.mcp.gateway.v1.McpGatewayService/ExecuteTool"
+        ],
+        "enabled": true
+      }
+    }
+  },
+  "permission": {
+    "read": {
+      "*/secrets/**": "deny",
+      "*/.env*": "deny",
+      "*.pem": "deny",
+      "*.key": "deny",
+      "id_rsa*": "deny",
+      "*.kdbx": "deny",
+      "secrets/**": "deny",
+      ".aws/credentials": "deny",
+      "*/.aws/*": "deny",
+      "*/.kube/*": "deny",
+      "*/.config/gcloud/*": "deny",
+      "*/.npmrc": "deny"
+    },
+    "edit": {
+      "*.pem": "deny",
+      "*.key": "deny",
+      "id_rsa*": "deny",
+      "*.kdbx": "deny",
+      "secrets/**": "deny",
+      ".aws/credentials": "deny",
+      "*/.aws/*": "deny",
+      "*/.kube/*": "deny",
+      "*/.config/gcloud/*": "deny",
+      "*/.npmrc": "deny"
+    },
+    "bash": "ask",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "patch": "allow",
+    "task": "allow"
+  },
+  "agents": {
+    "jarvis-dev": {
+      "mode": "subagent",
+      "model": "opencode/muse-spark-1.3-contributor-free",
+      "description": "jarvis専用実装エージェント",
+      "system": "You are a JARVIS implementation specialist. Implement Rust services for the JARVIS Personal AI system. Follow the architecture in adr/0001-unified-architecture.md. Write idiomatic Rust, run tests, and never deploy or access credentials directly.",
+      "permissions": {
+        "shell": "allow",
+        "edit": "allow",
+        "read": "allow",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "allow",
+        "task": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    },
+    "jarvis-policy-audit": {
+      "mode": "subagent",
+      "model": "opencode/nemotron-3-ultra-free",
+      "description": "Policy audit specialist for Cedar/Casbin policies",
+      "system": "You are a policy auditor. Review Cedar/Casbin policies for correctness, completeness, and security. Check for over-permissive rules, missing deny rules, and kill switch coverage. Do not modify policies - only audit and report findings with file:line references.",
+      "permissions": {
+        "read": "allow",
+        "grep": "allow",
+        "glob": "allow",
+        "list": "allow",
+        "edit": "deny",
+        "shell": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
+    }
+  }
+}

@@ -1,10 +1,14 @@
 //! HTTP/REST + Metrics endpoint for Policy Engine
 
-use axum::{Router, routing::{get, post}, Json, extract::State};
-use std::sync::Arc;
 use crate::PolicyEngine;
-use crate::policy::{ApprovalRequest, ApprovalDecision};
+use crate::policy::{ApprovalDecision, ApprovalRequest};
+use axum::{
+    Json, Router,
+    extract::State,
+    routing::{get, post},
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::instrument;
 
 #[derive(Deserialize, Debug)]
@@ -15,7 +19,7 @@ struct CheckRequest {
     context: serde_json::Value,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct CheckResponse {
     allowed: bool,
 }
@@ -31,7 +35,7 @@ struct ApprovalRequestHttp {
     expires_at: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 struct ApprovalResponseHttp {
     decision: String,
 }
@@ -59,13 +63,22 @@ async fn metrics() -> String {
 }
 
 #[instrument(skip(engine))]
-async fn check(State(engine): State<Arc<PolicyEngine>>, Json(req): Json<CheckRequest>) -> Json<CheckResponse> {
-    let allowed = engine.is_allowed(&req.principal, &req.action, &req.resource, &req.context).await.unwrap_or(false);
+async fn check(
+    State(engine): State<Arc<PolicyEngine>>,
+    Json(req): Json<CheckRequest>,
+) -> Json<CheckResponse> {
+    let allowed = engine
+        .is_allowed(&req.principal, &req.action, &req.resource, &req.context)
+        .await
+        .unwrap_or(false);
     Json(CheckResponse { allowed })
 }
 
 #[instrument(skip(engine))]
-async fn request_approval(State(engine): State<Arc<PolicyEngine>>, Json(req): Json<ApprovalRequestHttp>) -> Json<ApprovalResponseHttp> {
+async fn request_approval(
+    State(engine): State<Arc<PolicyEngine>>,
+    Json(req): Json<ApprovalRequestHttp>,
+) -> Json<ApprovalResponseHttp> {
     let approval_req = ApprovalRequest {
         id: uuid::Uuid::parse_str(&req.id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
         principal: req.principal,
@@ -75,31 +88,50 @@ async fn request_approval(State(engine): State<Arc<PolicyEngine>>, Json(req): Js
         requested_at: chrono::DateTime::from_timestamp(req.requested_at, 0).unwrap_or_default(),
         expires_at: chrono::DateTime::from_timestamp(req.expires_at, 0).unwrap_or_default(),
     };
-    let decision = engine.request_approval(approval_req).await.unwrap_or(ApprovalDecision::Denied { reason: "error".into() });
-    Json(ApprovalResponseHttp { decision: format!("{:?}", decision) })
+    let decision =
+        engine
+            .request_approval(approval_req)
+            .await
+            .unwrap_or(ApprovalDecision::Denied {
+                reason: "error".into(),
+            });
+    Json(ApprovalResponseHttp {
+        decision: format!("{:?}", decision),
+    })
 }
 
-async fn kill_switch_status(State(engine): State<Arc<PolicyEngine>>) -> Json<crate::kill_switch::KillSwitchStatus> {
+async fn kill_switch_status(
+    State(engine): State<Arc<PolicyEngine>>,
+) -> Json<crate::kill_switch::KillSwitchStatus> {
     Json(engine.kill_switch_status())
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct ActivateKillSwitchRequest {
     reason: String,
 }
 
-async fn activate_kill_switch(State(engine): State<Arc<PolicyEngine>>, Json(req): Json<ActivateKillSwitchRequest>) -> &'static str {
+async fn activate_kill_switch(
+    State(engine): State<Arc<PolicyEngine>>,
+    Json(req): Json<ActivateKillSwitchRequest>,
+) -> &'static str {
     engine.activate_kill_switch(req.reason);
     "activated"
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct DeactivateKillSwitchRequest {
     admin_token: String,
 }
 
-async fn deactivate_kill_switch(State(engine): State<Arc<PolicyEngine>>, Json(req): Json<DeactivateKillSwitchRequest>) -> Result<&'static str, axum::http::StatusCode> {
-    engine.deactivate_kill_switch(&req.admin_token).map(|_| "deactivated").map_err(|_| axum::http::StatusCode::UNAUTHORIZED)
+async fn deactivate_kill_switch(
+    State(engine): State<Arc<PolicyEngine>>,
+    Json(req): Json<DeactivateKillSwitchRequest>,
+) -> Result<&'static str, axum::http::StatusCode> {
+    engine
+        .deactivate_kill_switch(&req.admin_token)
+        .map(|_| "deactivated")
+        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)
 }
 
 pub async fn serve(engine: Arc<PolicyEngine>, addr: std::net::SocketAddr) -> anyhow::Result<()> {

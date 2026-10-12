@@ -11,7 +11,7 @@ pub enum McpGatewayError {
     Sandbox(String),
 
     #[error("MCP protocol error: {0}")]
-    Mcp(#[from] rmcp::Error),
+    Mcp(#[from] rmcp::ErrorData),
 
     #[error("Policy error: {0}")]
     Policy(#[from] jarvis_policy::error::PolicyError),

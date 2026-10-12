@@ -1,12 +1,12 @@
 //! Context building core
 
 use anyhow::Result;
-use serde_json::Value;
 use chrono::{DateTime, Utc};
-use tracing::instrument;
-use std::sync::Arc;
 use jarvis_core::{MemoryEntry, UnifiedEvent};
 use qdrant_client::Qdrant;
+use serde_json::Value;
+use std::sync::Arc;
+use tracing::instrument;
 use uuid::Uuid;
 
 pub struct Builder {
@@ -14,6 +14,7 @@ pub struct Builder {
     pg_pool: Arc<deadpool_postgres::Pool>,
     qdrant_client: Arc<Qdrant>,
     pii_filter: Arc<crate::pii::PiiFilter>,
+    #[allow(dead_code)]
     policy_client: Arc<jarvis_policy::PolicyEngine>,
 }
 
@@ -77,8 +78,15 @@ impl Builder {
             "INSERT INTO memories (id, content, metadata, source, created_at, updated_at, expires_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (id) DO UPDATE SET content = $2, metadata = $3, updated_at = $6",
-            &[&memory.id, &memory.content, &memory.metadata, &memory.source, 
-              &memory.created_at, &memory.updated_at, &memory.expires_at],
+            &[
+                &memory.id.to_string(),
+                &memory.content,
+                &memory.metadata.to_string(),
+                &memory.source,
+                &memory.created_at.timestamp(),
+                &memory.updated_at.timestamp(),
+                &memory.expires_at.map(|t| t.timestamp()),
+            ],
         ).await?;
 
         // Store embedding in Qdrant
@@ -87,57 +95,76 @@ impl Builder {
         Ok(())
     }
 
-    pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+    pub async fn search_memory(&self, _query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
         // Generate embedding for query (placeholder - would use actual embedding model)
         let embedding = vec![0.0; 384]; // all-MiniLM-L6-v2 dimension
 
         // Search Qdrant
-        let results = memory::search_vectors(&self.qdrant_client, &self.config.collection_name, &embedding, limit).await?;
+        let results = memory::search_vectors(
+            &self.qdrant_client,
+            &self.config.collection_name,
+            &embedding,
+            limit,
+        )
+        .await?;
 
         // Fetch full entries from PostgreSQL
-        let ids: Vec<Uuid> = results.iter().map(|r| r.id).collect();
+        let ids: Vec<String> = results.iter().map(|r| r.id.to_string()).collect();
         let client = self.pg_pool.get().await?;
         let rows = client.query(
             "SELECT id, content, metadata, source, created_at, updated_at, expires_at FROM memories WHERE id = ANY($1)",
             &[&ids],
         ).await?;
 
-        Ok(rows.into_iter().map(|row| MemoryEntry {
-            id: row.get(0),
-            content: row.get(1),
-            embedding: vec![],
-            metadata: row.get(2),
-            source: row.get(3),
-            created_at: row.get(4),
-            updated_at: row.get(5),
-            expires_at: row.get(6),
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|row| MemoryEntry {
+                id: Uuid::parse_str(&row.get::<_, String>(0)).unwrap(),
+                content: row.get(1),
+                embedding: vec![],
+                metadata: serde_json::from_str(&row.get::<_, String>(2)).unwrap_or_default(),
+                source: row.get(3),
+                created_at: DateTime::from_timestamp(row.get::<_, i64>(4), 0).unwrap_or_default(),
+                updated_at: DateTime::from_timestamp(row.get::<_, i64>(5), 0).unwrap_or_default(),
+                expires_at: row
+                    .get::<_, Option<i64>>(6)
+                    .and_then(|t| DateTime::from_timestamp(t, 0)),
+            })
+            .collect())
     }
 
     async fn get_recent_memories(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
         let client = self.pg_pool.get().await?;
-        let rows = client.query(
-            "SELECT id, content, metadata, source, created_at, updated_at, expires_at 
+        let rows = client
+            .query(
+                "SELECT id, content, metadata, source, created_at, updated_at, expires_at
              FROM memories ORDER BY created_at DESC LIMIT $1",
-            &[&(limit as i64)],
-        ).await?;
+                &[&(limit as i64)],
+            )
+            .await?;
 
-        Ok(rows.into_iter().map(|row| MemoryEntry {
-            id: row.get(0),
-            content: row.get(1),
-            embedding: vec![],
-            metadata: row.get(2),
-            source: row.get(3),
-            created_at: row.get(4),
-            updated_at: row.get(5),
-            expires_at: row.get(6),
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|row| MemoryEntry {
+                id: Uuid::parse_str(&row.get::<_, String>(0)).unwrap(),
+                content: row.get(1),
+                embedding: vec![],
+                metadata: serde_json::from_str(&row.get::<_, String>(2)).unwrap_or_default(),
+                source: row.get(3),
+                created_at: DateTime::from_timestamp(row.get::<_, i64>(4), 0).unwrap_or_default(),
+                updated_at: DateTime::from_timestamp(row.get::<_, i64>(5), 0).unwrap_or_default(),
+                expires_at: row
+                    .get::<_, Option<i64>>(6)
+                    .and_then(|t| DateTime::from_timestamp(t, 0)),
+            })
+            .collect())
     }
 
     fn truncate_context(&self, mut context: Value) -> Result<Value> {
         // Simple truncation - in production would count tokens properly
         let serialized = serde_json::to_string(&context)?;
-        if serialized.len() > self.config.max_context_tokens * 4 { // rough char/token ratio
+        if serialized.len() > self.config.max_context_tokens * 4 {
+            // rough char/token ratio
             context["memories"] = Value::Array(vec![]);
             context["recent"] = Value::Array(vec![]);
         }
@@ -147,55 +174,74 @@ impl Builder {
 
 pub mod memory {
     use super::*;
-    use qdrant_client::qdrant::{PointStruct, VectorParams, Distance, CreateCollection, UpsertPoints, SearchPoints};
-    use qdrant_client::Payload;
+    use qdrant_client::qdrant::{
+        CreateCollectionBuilder, Distance, PointStruct, SearchPointsBuilder, UpsertPointsBuilder,
+        VectorParamsBuilder,
+    };
+    use std::collections::HashMap;
 
-    pub async fn create_pg_pool(config: &crate::config::ContextConfig) -> Result<deadpool_postgres::Pool> {
-        let cfg = deadpool_postgres::Config::from_url(&config.pg_url.expose_secret());
-        let pool = cfg.create_pool(Some(deadpool_postgres::Runtime::Tokio1), tokio_postgres::NoTls)?;
-        
+    pub async fn create_pg_pool(
+        config: &crate::config::ContextConfig,
+    ) -> Result<deadpool_postgres::Pool> {
+        let mut cfg = deadpool_postgres::Config::new();
+        cfg.url = Some(config.pg_url().into());
+        let pool = cfg.create_pool(
+            Some(deadpool_postgres::Runtime::Tokio1),
+            tokio_postgres::NoTls,
+        )?;
+
         // Run migrations
         let client = pool.get().await?;
-        client.batch_execute(include_str!("../../migrations/001_initial.sql")).await?;
-        
+        client
+            .batch_execute(include_str!("../../migrations/001_initial.sql"))
+            .await?;
+
         Ok(pool)
     }
 
     pub async fn create_qdrant_client(config: &crate::config::ContextConfig) -> Result<Qdrant> {
         let mut client = Qdrant::from_url(&config.qdrant_url);
-        if let Some(key) = &config.qdrant_api_key {
-            client = client.api_key(key.expose_secret());
+        if let Some(key) = config.qdrant_api_key() {
+            client = client.api_key(key);
         }
-        Ok(client.build().map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?)
+        Ok(client
+            .build()
+            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?)
     }
 
     pub async fn ensure_collection(client: &Qdrant, name: &str) -> Result<()> {
-        let collections = client.list_collections().await.map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+        let collections = client
+            .list_collections()
+            .await
+            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
         if !collections.collections.iter().any(|c| c.name == name) {
-            client.create_collection(&CreateCollection {
-                collection_name: name.into(),
-                vectors_config: Some(VectorParams {
-                    size: 384,
-                    distance: Distance::Cosine.into(),
-                    ..Default::default()
-                }.into()),
-                ..Default::default()
-            }).await.map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+            client
+                .create_collection(
+                    CreateCollectionBuilder::new(name)
+                        .vectors_config(VectorParamsBuilder::new(384, Distance::Cosine)),
+                )
+                .await
+                .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
         }
         Ok(())
     }
 
-    pub async fn upsert_vector(client: &Qdrant, collection: &str, memory: &MemoryEntry) -> Result<()> {
-        let point = PointStruct::new(
-            memory.id.to_string(),
-            memory.embedding.clone(),
-            Payload::try_from(memory.metadata.clone())?,
-        );
-        client.upsert_points(&UpsertPoints {
-            collection_name: collection.into(),
-            points: vec![point],
-            ..Default::default()
-        }).await.map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+    pub async fn upsert_vector(
+        client: &Qdrant,
+        collection: &str,
+        memory: &MemoryEntry,
+    ) -> Result<()> {
+        let mut payload_map: HashMap<String, qdrant_client::qdrant::Value> = HashMap::new();
+        if let Value::Object(obj) = &memory.metadata {
+            for (k, v) in obj {
+                payload_map.insert(k.clone(), v.clone().into());
+            }
+        }
+        let point = PointStruct::new(memory.id.to_string(), memory.embedding.clone(), payload_map);
+        client
+            .upsert_points(UpsertPointsBuilder::new(collection, vec![point]))
+            .await
+            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
         Ok(())
     }
 
@@ -205,23 +251,39 @@ pub mod memory {
         embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<MemoryEntry>> {
-        let response = client.search_points(&SearchPoints {
-            collection_name: collection.into(),
-            vector: embedding.to_vec(),
-            limit: limit as u64,
-            with_payload: Some(true.into()),
-            ..Default::default()
-        }).await.map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+        let response = client
+            .search_points(
+                SearchPointsBuilder::new(collection, embedding.to_vec(), limit as u64)
+                    .with_payload(true),
+            )
+            .await
+            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
 
-        Ok(response.result.into_iter().map(|scored| MemoryEntry {
-            id: Uuid::parse_str(&scored.id.unwrap().uuid).unwrap(),
-            content: String::new(), // Will be fetched from PG
-            embedding: vec![],
-            metadata: scored.payload.into(),
-            source: String::new(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            expires_at: None,
-        }).collect())
+        Ok(response
+            .result
+            .into_iter()
+            .map(|scored| {
+                let id_str = match &scored.id {
+                    Some(id) => match &id.point_id_options {
+                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(u)) => u.clone(),
+                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) => {
+                            n.to_string()
+                        }
+                        None => Uuid::new_v4().to_string(),
+                    },
+                    None => Uuid::new_v4().to_string(),
+                };
+                MemoryEntry {
+                    id: Uuid::parse_str(&id_str).unwrap_or_default(),
+                    content: String::new(), // Will be fetched from PG
+                    embedding: vec![],
+                    metadata: serde_json::to_value(scored.payload).unwrap_or_default(),
+                    source: String::new(),
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    expires_at: None,
+                }
+            })
+            .collect())
     }
 }

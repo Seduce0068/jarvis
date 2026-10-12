@@ -1,14 +1,7 @@
 //! Main binary entry point
 
-mod config;
-mod error;
-mod normalizer;
-mod sources;
-mod grpc;
-mod http;
-
-use crate::EventNormalizer;
 use anyhow::Result;
+use jarvis_event::EventNormalizer;
 use tracing::info;
 
 #[tokio::main]
@@ -18,11 +11,13 @@ async fn main() -> Result<()> {
         .json()
         .init();
 
-    let config = config::EventConfig::load()?;
+    let config = jarvis_event::config::EventConfig::load()?;
     let normalizer = EventNormalizer::new(config.clone()).await?;
 
-    info!("Starting JARVIS Event Normalizer on gRPC {} HTTP {} Webhook {}", 
-        config.grpc_addr, config.http_addr, config.webhook_addr);
+    info!(
+        "Starting JARVIS Event Normalizer on gRPC {} HTTP {} Webhook {}",
+        config.grpc_addr, config.http_addr, config.webhook_addr
+    );
 
     let grpc_addr = config.grpc_addr.parse()?;
     let http_addr = config.http_addr.parse()?;

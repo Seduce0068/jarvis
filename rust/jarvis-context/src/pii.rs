@@ -1,9 +1,9 @@
 //! PII detection and redaction
 
 use anyhow::Result;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use regex::Regex;
 use std::collections::HashMap;
 use tracing::warn;
 
@@ -22,7 +22,9 @@ pub struct PiiFilter {
 
 impl PiiFilter {
     pub async fn new(config: &crate::config::ContextConfig) -> Result<Self> {
-        let content = tokio::fs::read_to_string(&config.pii_patterns_path).await.unwrap_or_default();
+        let content = tokio::fs::read_to_string(&config.pii_patterns_path)
+            .await
+            .unwrap_or_default();
         let pii_config: PiiConfig = toml::from_str(&content).unwrap_or_else(|_| PiiConfig {
             patterns: Self::default_patterns(),
             redact_replacement: "[REDACTED]".into(),
@@ -47,12 +49,25 @@ impl PiiFilter {
 
     fn default_patterns() -> HashMap<String, String> {
         let mut m = HashMap::new();
-        m.insert("email".into(), r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#.into());
+        m.insert(
+            "email".into(),
+            r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#.into(),
+        );
         m.insert("phone_jp".into(), r#"0\d{1,4}-\d{1,4}-\d{4}"#.into());
-        m.insert("credit_card".into(), r#"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"#.into());
-        m.insert("api_key".into(), r#"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*["']?([a-zA-Z0-9_\-]{20,})["']?"#.into());
+        m.insert(
+            "credit_card".into(),
+            r#"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b"#.into(),
+        );
+        m.insert(
+            "api_key".into(),
+            r#"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*["']?([a-zA-Z0-9_\-]{20,})["']?"#
+                .into(),
+        );
         m.insert("ipv4".into(), r#"\b(?:\d{1,3}\.){3}\d{1,3}\b"#.into());
-        m.insert("uuid".into(), r#"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"#.into());
+        m.insert(
+            "uuid".into(),
+            r#"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"#.into(),
+        );
         m
     }
 

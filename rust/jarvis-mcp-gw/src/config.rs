@@ -1,10 +1,11 @@
 //! Configuration for MCP Gateway
 
-use std::net::SocketAddr;
 use anyhow::Result;
-use figment::{Figment, providers::{Toml, Env}};
+use figment::{
+    Figment,
+    providers::{Env, Format, Toml},
+};
 use serde::{Deserialize, Serialize};
-use secrecy::SecretString;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpGatewayConfig {
