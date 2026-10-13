@@ -1,10 +1,10 @@
 # JARVIS Infrastructure
 
-This directory contains all infrastructure-as-code and deployment configuration for the JARVIS personal AI system.
+This directory contains all IaC and deployment config for JARVIS personal AI system.
 
 ## Structure
 
-```
+```text
 infra/
 ├── opentofu/                    # OpenTofu (Terraform) modules
 │   ├── environments/prod/       # Production environment
@@ -83,7 +83,7 @@ tofu apply
 
 After the instance is provisioned, cloud-init will:
 
-1. Install all packages (Rust, OpenCode, code-server, PostgreSQL, Qdrant, Docker, Tailscale)
+1. Install packages (Rust, OpenCode, code-server, PostgreSQL, Qdrant, Docker, Tailscale)
 2. Create `jarvis` user and directories
 3. Configure PostgreSQL and Qdrant
 4. Join Tailscale network
@@ -98,7 +98,7 @@ Wait 5-10 minutes for cloud-init to complete, then:
 tailscale ssh jarvis@jarvis-host
 
 # Verify services
-sudo systemctl status jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol
+sudo systemctl status jarvis-* opencode code-server otelcol
 
 # Check logs
 sudo journalctl -u jarvis-policy -f
@@ -106,15 +106,16 @@ sudo journalctl -u jarvis-policy -f
 
 ### Access
 
-- **code-server (IDE)**: `http://jarvis-host.tailnet.ts.net:8080` (password in `/etc/jarvis/code-server-password`)
+- **code-server (IDE)**: `http://jarvis-host.tailnet.ts.net:8080` (pw in `/etc/jarvis/code-server-password`)
 - **OpenCode Web**: `http://jarvis-host.tailnet.ts.net:49374`
-- **Metrics**: `http://jarvis-host.tailnet.ts.net:8081/metrics` (Policy), `:8082` (MCP GW), `:8083` (Event), `:8084` (Context)
+- **Metrics**: Policy `:8081`, MCP GW `:8082`, Event `:8083`, Context `:8084`
 
 ### Secret Management
 
-All secrets are managed via **1Password CLI**. The `.env` files contain `op://` references that are resolved at runtime.
+Secrets via **1Password CLI**. `.env` files have `op://` refs resolved at runtime.
 
 Required 1Password vault items:
+
 - `JARVIS/Policy/admin_token`
 - `JARVIS/PostgreSQL/connection_string`
 - `JARVIS/Home Assistant/long_lived_token`
@@ -125,6 +126,7 @@ Required 1Password vault items:
 ### Backup & DR
 
 Daily backups run via `jarvis-backup.timer`:
+
 - PostgreSQL dump → OCI Object Storage
 - Qdrant snapshot → OCI Object Storage
 - Config files → OCI Object Storage
@@ -133,6 +135,7 @@ Daily backups run via `jarvis-backup.timer`:
 Retention: 7 days local, 30 days remote.
 
 To test disaster recovery:
+
 ```bash
 # On fresh instance after tofu apply
 cd /opt/jarvis/scripts

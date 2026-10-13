@@ -42,7 +42,7 @@
       "*/.config/gcloud/*": "deny",
       "*/.npmrc": "deny"
     },
-    "bash": "ask",
+    "bash": "allow",
     "glob": "allow",
     "grep": "allow",
     "list": "allow",

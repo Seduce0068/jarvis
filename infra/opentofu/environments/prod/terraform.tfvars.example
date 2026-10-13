@@ -1,0 +1,32 @@
+# JARVIS OpenTofu Production Variables
+# Copy this file to terraform.tfvars and fill in the values
+
+# OCI Compartment OCID
+compartment_id = "ocid1.compartment.oc1..xxxxx"
+
+# SSH public key for instance access
+ssh_public_key = "ssh-ed25519 AAAAC3... user@host"
+
+# Tailscale auth key (get from https://login.tailscale.com/admin/settings/keys)
+tailscale_auth_key = "tskey-auth-xxxxx"
+
+# Optional: Override defaults
+# region = "ap-tokyo-1"
+# availability_domain = ""
+# vcn_cidr = "10.0.0.0/16"
+# subnet_cidr = "10.0.1.0/24"
+# instance_shape = "VM.Standard.A1.Flex"
+# instance_ocpus = 2
+# instance_memory_gbs = 12
+# boot_volume_size_gbs = 100
+# block_volume_size_gbs = 100
+# backup_policy_id = ""
+
+# SSH access CIDRs (default: Tailscale only 100.64.0.0/10)
+allowed_ssh_cidrs = ["100.64.0.0/10"]
+
+# Web access CIDRs (default: Tailscale only 100.64.0.0/10)
+allowed_web_cidrs = ["100.64.0.0/10"]
+
+# SSH private key path for output command
+ssh_private_key_path = "~/.ssh/id_ed25519"
