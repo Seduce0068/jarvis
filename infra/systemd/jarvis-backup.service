@@ -7,15 +7,18 @@ After=network.target
 Type=oneshot
 User=jarvis
 Group=jarvis
-ExecStart=/opt/jarvis/scripts/backup.sh
-WorkingDirectory=/opt/jarvis/scripts
+ExecStart=/opt/jarvis/bin/jarvis-backup
+WorkingDirectory=/opt/jarvis/bin
 
 # Security
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /home/jarvis/repos
+ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /home/jarvis/repos /run/rclone
+
+# Environment for 1Password
+Environment=OP_SESSION_FILE=/home/jarvis/.config/op/session
 
 # Resource limits
 MemoryMax=1G

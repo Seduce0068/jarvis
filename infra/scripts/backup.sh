@@ -82,15 +82,22 @@ backup_repos() {
 # Upload to OCI Object Storage
 upload_to_oci() {
     log "Uploading backups to OCI Object Storage..."
-    if command -v rclone &> /dev/null; then
-        if rclone copy "$BACKUP_DIR" "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" --progress --transfers 4; then
-            log "Upload to OCI completed"
+    if command -v rclone &> /dev/null && command -v op &> /dev/null; then
+        # Resolve 1Password references in rclone config
+        mkdir -p /run/rclone
+        if op inject -i /home/jarvis/.config/rclone/rclone.conf -o /run/rclone/rclone.conf; then
+            if rclone --config /run/rclone/rclone.conf copy "$BACKUP_DIR" "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" --progress --transfers 4; then
+                log "Upload to OCI completed"
+            else
+                log "ERROR: Upload to OCI failed"
+                return 1
+            fi
         else
-            log "ERROR: Upload to OCI failed"
+            log "ERROR: Failed to resolve 1Password references in rclone config"
             return 1
         fi
     else
-        log "WARNING: rclone not installed, skipping remote upload"
+        log "WARNING: rclone or op not installed, skipping remote upload"
     fi
 }
 
@@ -104,10 +111,13 @@ cleanup_local() {
 # Cleanup old remote backups (keep 30 days)
 cleanup_remote() {
     log "Cleaning up old remote backups (older than 30 days)..."
-    if command -v rclone &> /dev/null; then
-        rclone delete "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" --min-age 30d --dry-run 2>/dev/null | grep -c "Would delete" || true
-        # Uncomment to actually delete:
-        # rclone delete "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" --min-age 30d
+    if command -v rclone &> /dev/null && command -v op &> /dev/null; then
+        mkdir -p /run/rclone
+        if op inject -i /home/jarvis/.config/rclone/rclone.conf -o /run/rclone/rclone.conf; then
+            rclone --config /run/rclone/rclone.conf delete "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" --min-age 30d --dry-run 2>/dev/null | grep -c "Would delete" || true
+            # Uncomment to actually delete:
+            # rclone --config /run/rclone/rclone.conf delete "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" --min-age 30d
+        fi
     fi
 }
 

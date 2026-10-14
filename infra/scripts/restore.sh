@@ -14,10 +14,23 @@ log() {
     echo "[$(date -Iseconds)] $*"
 }
 
+# Resolve 1Password references in rclone config
+resolve_rclone_config() {
+    mkdir -p /run/rclone
+    if command -v op &> /dev/null; then
+        op inject -i /home/jarvis/.config/rclone/rclone.conf -o /run/rclone/rclone.conf
+        echo "--config /run/rclone/rclone.conf"
+    else
+        echo ""
+    fi
+}
+
+RCLONE_CONFIG_FLAG=$(resolve_rclone_config)
+
 # Find latest backup if not specified
 find_latest() {
     local pattern="$1"
-    rclone ls "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" | grep "$pattern" | sort -k2 | tail -1 | awk '{print $2}'
+    rclone $RCLONE_CONFIG_FLAG ls "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/" | grep "$pattern" | sort -k2 | tail -1 | awk '{print $2}'
 }
 
 # Download backup file
@@ -25,7 +38,7 @@ download_backup() {
     local remote_file="$1"
     local local_file="$2"
     log "Downloading $remote_file..."
-    rclone copy "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/$remote_file" "$BACKUP_DIR/"
+    rclone $RCLONE_CONFIG_FLAG copy "$RCLONE_REMOTE:$RCLONE_BUCKET/$HOSTNAME/$remote_file" "$BACKUP_DIR/"
     mv "$BACKUP_DIR/$remote_file" "$local_file"
 }
 

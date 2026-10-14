@@ -9,6 +9,7 @@ Type=notify
 User=jarvis
 Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
+ExecStartPre=/usr/local/bin/op inject -i /etc/jarvis/context.env -o /run/jarvis/context.env
 ExecStart=/opt/jarvis/bin/jarvis-context
 Restart=on-failure
 RestartSec=5
@@ -46,7 +47,7 @@ Environment=JARVIS_CONTEXT_COLLECTION_NAME=jarvis_memories
 Environment=JARVIS_CONTEXT_PII_PATTERNS_PATH=/etc/jarvis/pii_patterns.toml
 Environment=JARVIS_CONTEXT_MAX_CONTEXT_TOKENS=8000
 Environment=JARVIS_CONTEXT_POLICY_GRPC_ADDR=http://127.0.0.1:50051
-EnvironmentFile=-/etc/jarvis/context.env
+EnvironmentFile=-/run/jarvis/context.env
 
 # Resource limits
 LimitNOFILE=65536

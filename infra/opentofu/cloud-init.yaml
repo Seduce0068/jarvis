@@ -285,11 +285,18 @@ runcmd:
   - mkdir -p /home/jarvis/repos
   - mkdir -p /etc/jarvis
   - mkdir -p /var/log/jarvis
-  - chown -R jarvis:jarvis /opt/jarvis /home/jarvis/repos /var/log/jarvis
+  - mkdir -p /run/jarvis
+  - chown -R jarvis:jarvis /opt/jarvis /home/jarvis/repos /var/log/jarvis /run/jarvis
+  - chmod 750 /run/jarvis
 
   # Install Rust (for building JARVIS services)
   - sudo -u jarvis curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
   - source /home/jarvis/.cargo/env && rustup target add aarch64-unknown-linux-gnu
+
+  # Install 1Password CLI
+  - curl -fsSL https://downloads.1password.com/linux/keys/1password.asc | gpg --dearmor -o /usr/share/keyrings/1password-archive-keyring.gpg
+  - echo "deb [arch=arm64 signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/arm64 stable main" > /etc/apt/sources.list.d/1password.list
+  - apt-get update && apt-get install -y 1password-cli
 
   # Install OpenCode V2
   - curl -fsSL https://opencode.ai/v2/install | bash
@@ -334,47 +341,179 @@ runcmd:
   - systemctl daemon-reload
   - systemctl enable jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol jarvis-backup.timer
 
-  # Create backup script
-  - cat > /opt/jarvis/scripts/backup.sh << 'BACKUP_EOF'
-#!/bin/bash
-set -euo pipefail
+  # Install rust-script for running Rust scripts
+  - cargo install rust-script --locked
 
-BACKUP_DIR="/opt/jarvis/backups"
-DATE=$(date +%Y%m%d-%H%M%S)
-mkdir -p "$BACKUP_DIR"
+  # Create backup script (Rust version using rust-script)
+  - cat > /opt/jarvis/scripts/backup.rs << 'BACKUP_EOF'
+//! JARVIS Backup Script - Run with: rust-script backup.rs
 
-# Backup PostgreSQL
-pg_dump -h localhost -U jarvis jarvis | gzip > "$BACKUP_DIR/pg-$DATE.sql.gz"
+/// ```cargo
+/// [dependencies]
+/// anyhow = "1.0"
+/// chrono = { version = "0.4", features = ["serde"] }
+/// reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"] }
+/// serde = { version = "1.0", features = ["derive"] }
+/// serde_json = "1.0"
+/// tokio = { version = "1.40", features = ["full"] }
+/// tracing = "0.1"
+/// tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+/// ```
 
-# Backup Qdrant (snapshot)
-curl -X POST "http://localhost:6334/collections/jarvis_memories/snapshots" || true
-sleep 2
-curl -s "http://localhost:6334/collections/jarvis_memories/snapshots" | jq -r '.result[0].name' | xargs -I {} curl -s "http://localhost:6334/collections/jarvis_memories/snapshots/{}" -o "$BACKUP_DIR/qdrant-$DATE.snapshot" || true
+use anyhow::{Context, Result};
+use chrono::Local;
+use reqwest::blocking::Client;
+use std::fs;
+use std::path::Path;
+use std::process::{Command, Stdio};
+use tracing::{info, warn};
 
-# Backup configs
-tar -czf "$BACKUP_DIR/configs-$DATE.tar.gz" /etc/jarvis /home/jarvis/.config/opencode /home/jarvis/.config/code-server 2>/dev/null || true
+fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
 
-# Backup repos (git bundles)
-cd /home/jarvis/repos
-for repo in */; do
-  if [ -d "$repo/.git" ]; then
-    git -C "$repo" bundle create "$BACKUP_DIR/repo-${repo%/}-$DATE.bundle" --all 2>/dev/null || true
-  fi
-done
+    let hostname = hostname::get()?.to_string_lossy().to_string();
+    let date = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let backup_dir = Path::new("/opt/jarvis/backups");
 
-# Upload to OCI Object Storage (requires rclone configured)
-if command -v rclone &> /dev/null; then
-  rclone copy "$BACKUP_DIR" oci:jarvis-backups/$(hostname)/ --progress || true
-fi
+    fs::create_dir_all(backup_dir)?;
 
-# Cleanup old local backups (keep 7 days)
-find "$BACKUP_DIR" -type f -mtime +7 -delete
+    info!("Starting JARVIS backup: {} on {}", date, hostname);
 
-echo "Backup completed: $DATE"
+    // Resolve 1Password references in rclone config
+    let config_path = dirs::home_dir().context("No home directory")?.join(".config/rclone/rclone.conf");
+    let config_flag = if config_path.exists() {
+        let output_path = Path::new("/run/rclone/rclone.conf");
+        fs::create_dir_all(output_path.parent().unwrap())?;
+        let status = Command::new("op")
+            .args(["inject", "-i", config_path.to_str().unwrap(), "-o", output_path.to_str().unwrap()])
+            .status()
+            .context("Failed to run op inject")?;
+        if status.success() {
+            format!("--config {}", output_path.display())
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+
+    // Backup PostgreSQL
+    info!("Backing up PostgreSQL...");
+    let pg_output = backup_dir.join(format!("pg-{}.sql.gz", date));
+    let pg_status = Command::new("pg_dump")
+        .args(["-h", "localhost", "-U", "jarvis", "jarvis"])
+        .stdout(Stdio::piped())
+        .spawn()?
+        .stdout
+        .context("No stdout from pg_dump")?;
+    let mut gzip = Command::new("gzip")
+        .stdin(Stdio::from(pg_status))
+        .stdout(fs::File::create(&pg_output)?)
+        .spawn()?;
+    gzip.wait()?;
+    info!("PostgreSQL backup completed: {}", pg_output.display());
+
+    // Backup Qdrant
+    info!("Backing up Qdrant...");
+    let client = Client::new();
+    client.post("http://localhost:6334/collections/jarvis_memories/snapshots").send()?;
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    let response: serde_json::Value = client
+        .get("http://localhost:6334/collections/jarvis_memories/snapshots")
+        .send()?
+        .json()?;
+    if let Some(snapshot) = response["result"].as_array().and_then(|a| a.first()) {
+        let snapshot_name = snapshot["name"].as_str().unwrap_or("");
+        let qdrant_output = backup_dir.join(format!("qdrant-{}.snapshot", date));
+        let download = client
+            .get(&format!("http://localhost:6334/collections/jarvis_memories/snapshots/{}", snapshot_name))
+            .send()?
+            .bytes()?;
+        fs::write(&qdrant_output, download)?;
+        info!("Qdrant backup completed: {}", qdrant_output.display());
+    } else {
+        warn!("No Qdrant snapshot found");
+    }
+
+    // Backup configs
+    info!("Backing up configuration files...");
+    let config_output = backup_dir.join(format!("configs-{}.tar.gz", date));
+    let tar_status = Command::new("tar")
+        .args([
+            "-czf",
+            config_output.to_str().unwrap(),
+            "/etc/jarvis",
+            "/home/jarvis/.config/opencode",
+            "/home/jarvis/.config/code-server",
+            "/home/jarvis/.local/share/code-server",
+        ])
+        .status()?;
+    if tar_status.success() {
+        info!("Config backup completed: {}", config_output.display());
+    } else {
+        warn!("Config backup partially failed");
+    }
+
+    // Backup repos
+    info!("Backing up git repositories...");
+    let repos_dir = Path::new("/home/jarvis/repos");
+    if repos_dir.exists() {
+        for entry in fs::read_dir(repos_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.join(".git").exists() {
+                let repo_name = path.file_name().unwrap().to_string_lossy();
+                let repo_output = backup_dir.join(format!("repo-{}-{}.bundle", repo_name, date));
+                let git_status = Command::new("git")
+                    .args(["-C", path.to_str().unwrap(), "bundle", "create", repo_output.to_str().unwrap(), "--all"])
+                    .status()?;
+                if git_status.success() {
+                    info!("Repo backup completed: {}", repo_output.display());
+                } else {
+                    warn!("Failed to backup repo: {}", repo_name);
+                }
+            }
+        }
+    }
+
+    // Upload to OCI Object Storage
+    if !config_flag.is_empty() {
+        info!("Uploading backups to OCI Object Storage...");
+        let remote_path = format!("oci:jarvis-backups/{}/", hostname);
+        let rclone_status = Command::new("rclone")
+            .args(config_flag.split_whitespace())
+            .args(["copy", backup_dir.to_str().unwrap(), &remote_path, "--progress", "--transfers", "4"])
+            .status()?;
+        if rclone_status.success() {
+            info!("Upload to OCI completed");
+        }
+    }
+
+    // Cleanup old local backups (keep 7 days)
+    info!("Cleaning up old local backups (older than 7 days)...");
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(7 * 24 * 3600);
+    for entry in fs::read_dir(backup_dir)? {
+        let entry = entry?;
+        if let Ok(metadata) = entry.metadata() {
+            if metadata.is_file() && metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH) < cutoff {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    info!("Backup completed: {}", date);
+    Ok(())
+}
 BACKUP_EOF
 
-  - chmod +x /opt/jarvis/scripts/backup.sh
-  - chown -R jarvis:jarvis /opt/jarvis/scripts
+  # Compile and install backup script
+  - rust-script /opt/jarvis/scripts/backup.rs -- --help 2>&1 | head -1
+  - mkdir -p /opt/jarvis/bin
+  - rustc --edition 2021 /opt/jarvis/scripts/backup.rs -o /opt/jarvis/bin/jarvis-backup -C opt-level=3
+  - chown jarvis:jarvis /opt/jarvis/bin/jarvis-backup
+  - chmod +x /opt/jarvis/bin/jarvis-backup
 
   # Install rclone for OCI Object Storage backup
   - curl https://rclone.org/install.sh | bash
@@ -445,6 +584,21 @@ OTEL_EOF
   # Create placeholder config files (to be populated by 1Password/secrets)
   - touch /etc/jarvis/policy.env /etc/jarvis/mcp_gateway.env /etc/jarvis/event.env /etc/jarvis/context.env
   - chown jarvis:jarvis /etc/jarvis/*.env
+
+  # Configure rclone for OCI Object Storage (via 1Password)
+  - mkdir -p /home/jarvis/.config/rclone
+  - cat > /home/jarvis/.config/rclone/rclone.conf << 'RCLONE_EOF'
+[oci]
+type = s3
+provider = Other
+env_auth = false
+access_key_id = op://JARVIS/OCI/access_key_id
+secret_access_key = op://JARVIS/OCI/secret_access_key
+region = ap-tokyo-1
+endpoint = https://$(op://JARVIS/OCI/namespace).objectstorage.ap-tokyo-1.oraclecloud.com
+acl = private
+RCLONE_EOF
+  - chown -R jarvis:jarvis /home/jarvis/.config/rclone
 
   # Final cleanup
   - apt-get clean

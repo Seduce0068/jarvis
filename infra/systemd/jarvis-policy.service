@@ -9,6 +9,7 @@ Type=notify
 User=jarvis
 Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
+ExecStartPre=/usr/local/bin/op inject -i /etc/jarvis/policy.env -o /run/jarvis/policy.env
 ExecStart=/opt/jarvis/bin/jarvis-policy
 Restart=on-failure
 RestartSec=5
@@ -43,7 +44,7 @@ Environment=JARVIS_POLICY_HTTP_ADDR=127.0.0.1:8081
 Environment=JARVIS_POLICY_CEDAR_POLICY_DIR=/etc/jarvis/policy
 Environment=JARVIS_POLICY_CASBIN_MODEL_PATH=/etc/jarvis/casbin_model.conf
 Environment=JARVIS_POLICY_CASBIN_POLICY_PATH=/etc/jarvis/casbin_policy.csv
-EnvironmentFile=-/etc/jarvis/policy.env
+EnvironmentFile=-/run/jarvis/policy.env
 
 # Resource limits
 LimitNOFILE=65536
