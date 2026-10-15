@@ -396,4 +396,47 @@ mod tests {
         fs::remove_dir_all(model.parent().expect("temp dir"))?;
         Ok(())
     }
+
+    fn shipped_casbin_files(label: &str) -> (PathBuf, PathBuf) {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
+        let dir = temp_dir(label);
+        let model = dir.join("casbin_model.conf");
+        let policy = dir.join("casbin_policy.csv");
+        fs::copy(source.join("casbin_model.conf"), &model).expect("copy casbin model");
+        fs::copy(source.join("casbin_policy.csv"), &policy).expect("copy casbin policy");
+        (model, policy)
+    }
+
+    #[tokio::test]
+    async fn shipped_casbin_policy_loads_and_enforces() -> Result<()> {
+        let (model, policy) = shipped_casbin_files("casbin-shipped");
+        let enforcer = CasbinEnforcer::new(path_string(&model), path_string(&policy)).await?;
+
+        // Role assignments resolve through g(): jarvis -> agent -> exact tools.
+        assert!(
+            enforcer
+                .enforce("jarvis", "execute", "tool:filesystem.read")
+                .await?
+        );
+        assert!(enforcer.enforce("jarvis", "execute", "web.search").await?);
+        assert!(
+            enforcer
+                .enforce("jarvis_user", "execute", "tool:filesystem.write")
+                .await?
+        );
+        // The agent role must not inherit the user role's write access.
+        assert!(
+            !enforcer
+                .enforce("jarvis", "execute", "tool:filesystem.write")
+                .await?
+        );
+        assert!(
+            !enforcer
+                .enforce("unknown", "execute", "tool:filesystem.read")
+                .await?
+        );
+
+        fs::remove_dir_all(model.parent().expect("temp dir"))?;
+        Ok(())
+    }
 }
