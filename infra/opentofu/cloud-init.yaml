@@ -81,6 +81,11 @@ write_files:
     permissions: "0600"
     content: |
       ${indent(6, file("${backup_script}"))}
+  - path: /home/jarvis/.config/opencode/config.toml
+    owner: "jarvis:jarvis"
+    permissions: "0644"
+    content: |
+      ${indent(6, file("${config_dir}/opencode/config.toml"))}
 
 # Directories
 runcmd:
@@ -88,10 +93,14 @@ runcmd:
   - mkdir -p /opt/jarvis/{backups,bin,data,logs,scripts,rust}
   - mkdir -p /opt/jarvis/data/qdrant
   - mkdir -p /home/jarvis/repos
+  # XDG dirs required by systemd ReadWritePaths (services start fails if missing)
+  - mkdir -p /home/jarvis/.config/opencode /home/jarvis/.config/code-server /home/jarvis/.config/rclone
+  - mkdir -p /home/jarvis/.local/share/code-server /home/jarvis/.local/share/opencode /home/jarvis/.local/state/opencode
+  - mkdir -p /home/jarvis/.cache/opencode
   - mkdir -p /etc/jarvis
   - mkdir -p /var/log/jarvis
   - mkdir -p /run/jarvis /run/rclone /home/jarvis/.cache/rust-script
-  - chown -R jarvis:jarvis /opt/jarvis /home/jarvis/repos /var/log/jarvis /run/jarvis /run/rclone /home/jarvis/.cache
+  - chown -R jarvis:jarvis /opt/jarvis /home/jarvis/repos /home/jarvis/.config /home/jarvis/.local /home/jarvis/.cache /var/log/jarvis /run/jarvis /run/rclone
   - chmod 750 /run/jarvis
 
   # Install Rust (for building JARVIS services)

@@ -22,7 +22,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/opencode /tmp
+ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/opencode /home/jarvis/.local/share/opencode /home/jarvis/.local/state/opencode /home/jarvis/.cache/opencode /tmp
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 

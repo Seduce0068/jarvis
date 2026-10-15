@@ -224,6 +224,36 @@ impl Runner {
         }
         Ok(())
     }
+
+    /// Stream a single local file to a remote path (`cat` over ssh).
+    fn stream_file(&self, target: &str, local: &Path, remote_path: &str) -> Result<()> {
+        let remote_dir = Path::new(remote_path)
+            .parent()
+            .map(|dir| dir.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        let remote_command = format!("mkdir -p {remote_dir} && cat > {remote_path}");
+        if self.dry_run {
+            info!(
+                "[dry-run] cat {} | ssh {target} ({remote_command})",
+                local.display()
+            );
+            return Ok(());
+        }
+        let file = std::fs::File::open(local)
+            .with_context(|| format!("failed to open {}", local.display()))?;
+        let status = Command::new("ssh")
+            .args([target, &remote_command])
+            .stdin(Stdio::from(file))
+            .status()
+            .context("failed to stream file over ssh")?;
+        if !status.success() {
+            bail!(
+                "failed to copy {} to {target}:{remote_path}",
+                local.display()
+            );
+        }
+        Ok(())
+    }
 }
 
 fn build(runner: &Runner, rust_dir: &str) -> Result<()> {
@@ -296,6 +326,18 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
         &remote_base,
         &format!("sudo chown jarvis:jarvis {env_chown} && sudo chmod 600 {env_chown}"),
     )?;
+
+    // OpenCode reads its config dir from OPENCODE_CONFIG_DIR (= ~/.config/opencode
+    // in the unit), so install the managed config into the user's home as well.
+    let opencode_config = config_dir.join("opencode/config.toml");
+    if opencode_config.exists() || runner.dry_run {
+        info!("Deploying OpenCode config...");
+        runner.stream_file(
+            &remote_base,
+            &opencode_config,
+            "/home/jarvis/.config/opencode/config.toml",
+        )?;
+    }
 
     // Deploy systemd units (single source: infra/systemd/)
     info!("Deploying systemd units...");

@@ -17,6 +17,10 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/jarvis/.cache/rust-script /opt/jarvis/backups /opt/jarvis/data /opt/jarvis/logs /etc/jarvis /run/rclone
 
+# /run/rclone holds the op-inject resolved rclone config
+RuntimeDirectory=rclone
+RuntimeDirectoryMode=0750
+
 # Environment for 1Password (OP_SERVICE_ACCOUNT_TOKEN lives in op.env)
 EnvironmentFile=-/etc/jarvis/op.env
 Environment=HOME=/home/jarvis
