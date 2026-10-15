@@ -6,7 +6,7 @@ use jarvis_core::{MemoryEntry, UnifiedEvent};
 use qdrant_client::Qdrant;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{instrument, warn};
 use uuid::Uuid;
 
 pub struct Builder {
@@ -14,6 +14,7 @@ pub struct Builder {
     pg_pool: Arc<deadpool_postgres::Pool>,
     qdrant_client: Arc<Qdrant>,
     pii_filter: Arc<crate::pii::PiiFilter>,
+    embedding: crate::embedding::EmbeddingClient,
     #[allow(dead_code)]
     policy_client: Arc<jarvis_policy::PolicyEngine>,
 }
@@ -29,11 +30,20 @@ impl Builder {
         // Ensure collection exists
         memory::ensure_collection(&qdrant_client, &config.collection_name).await?;
 
+        let embedding = crate::embedding::EmbeddingClient::from_config(&config)?;
+        if !embedding.is_enabled() {
+            warn!(
+                "Embedding endpoint not configured; memory vector search is disabled \
+                 (set JARVIS_CONTEXT_EMBEDDING_URL)"
+            );
+        }
+
         Ok(Self {
             config,
             pg_pool,
             qdrant_client,
             pii_filter,
+            embedding,
             policy_client,
         })
     }
@@ -95,9 +105,16 @@ impl Builder {
         Ok(())
     }
 
-    pub async fn search_memory(&self, _query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
-        // Generate embedding for query (placeholder - would use actual embedding model)
-        let embedding = vec![0.0; 384]; // all-MiniLM-L6-v2 dimension
+    pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
+        // Generate an embedding for the query; without a configured embedding
+        // endpoint the vector search is skipped (recent memories still work).
+        let embedding = match self.embedding.embed(query).await {
+            Ok(embedding) => embedding,
+            Err(error) => {
+                warn!("memory vector search skipped: {error:#}");
+                return Ok(Vec::new());
+            }
+        };
 
         // Search Qdrant
         let results = memory::search_vectors(

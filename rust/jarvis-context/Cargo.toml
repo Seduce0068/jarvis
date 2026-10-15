@@ -31,6 +31,9 @@ tokio-postgres = { workspace = true }
 # Vector DB
 qdrant-client = { workspace = true }
 
+# HTTP client (embedding endpoint)
+reqwest = { workspace = true }
+
 # PII detection
 regex = "1.10"
 toml = "0.8"
