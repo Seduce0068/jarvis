@@ -13,7 +13,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Sovereign AI Agent"]
-repository = "https://github.com/koppe/jarvis"
+repository = "https://github.com/onoderakeita/jarvis"
 
 [workspace.dependencies]
 # Async runtime
