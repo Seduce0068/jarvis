@@ -1,12 +1,12 @@
 //! Policy evaluation: Cedar (ABAC) + Casbin (RBAC)
 
 use anyhow::{Context as AnyhowContext, Result};
-use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter};
+use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter, MgmtApi};
 use cedar_policy::{Authorizer, Context, Decision, Entities, PolicySet, Request as CedarRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::instrument;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -154,43 +154,80 @@ fn load_from_file(path: &Path) -> Result<(PolicySet, Entities)> {
 }
 
 pub struct CasbinEnforcer {
-    enforcer: Arc<Enforcer>,
+    enforcer: RwLock<Enforcer>,
 }
 
 impl CasbinEnforcer {
     pub async fn new(model_path: String, policy_path: String) -> Result<Self> {
+        // FileAdapter fails to load a missing policy file; start from an empty
+        // (deny-by-default) policy file instead.
+        if !Path::new(&policy_path).exists() {
+            std::fs::write(&policy_path, "")
+                .with_context(|| format!("creating Casbin policy file {policy_path}"))?;
+            tracing::info!("Created empty Casbin policy file {}", policy_path);
+        }
+
         let model = DefaultModel::from_file(&model_path).await?;
-        let adapter = FileAdapter::new(policy_path.clone());
+        let adapter = FileAdapter::new(policy_path);
         let enforcer = Enforcer::new(model, adapter).await?;
         Ok(Self {
-            enforcer: Arc::new(enforcer),
+            enforcer: RwLock::new(enforcer),
         })
     }
 
-    pub fn enforce(&self, principal: &str, action: &str, resource: &str) -> Result<bool> {
+    pub async fn enforce(&self, principal: &str, action: &str, resource: &str) -> Result<bool> {
         // Casbin 2.x uses (subject, resource, action) order
-        Ok(self.enforcer.enforce((principal, resource, action))?)
+        Ok(self
+            .enforcer
+            .read()
+            .await
+            .enforce((principal, resource, action))?)
     }
 
-    pub async fn add_policy(
-        &self,
-        _principal: &str,
-        _action: &str,
-        _resource: &str,
-    ) -> Result<bool> {
-        // Use the enforcer's underlying model/adapter directly for policy management
-        // For simplicity, return Ok for now - full policy management requires MgmtApi
+    /// Add a policy rule and persist it to the policy file.
+    ///
+    /// Returns `false` when the rule already exists.
+    pub async fn add_policy(&self, principal: &str, action: &str, resource: &str) -> Result<bool> {
+        let mut enforcer = self.enforcer.write().await;
+        if !enforcer
+            .add_policy(casbin_rule(principal, action, resource))
+            .await?
+        {
+            return Ok(false);
+        }
+        enforcer.save_policy().await?;
         Ok(true)
     }
 
+    /// Remove a policy rule and persist the policy file.
+    ///
+    /// Returns `false` when the rule did not exist.
     pub async fn remove_policy(
         &self,
-        _principal: &str,
-        _action: &str,
-        _resource: &str,
+        principal: &str,
+        action: &str,
+        resource: &str,
     ) -> Result<bool> {
+        let mut enforcer = self.enforcer.write().await;
+        if !enforcer
+            .remove_policy(casbin_rule(principal, action, resource))
+            .await?
+        {
+            return Ok(false);
+        }
+        enforcer.save_policy().await?;
         Ok(true)
     }
+}
+
+/// Map the public `(principal, action, resource)` order to Casbin's
+/// `(subject, object, action)` request order.
+fn casbin_rule(principal: &str, action: &str, resource: &str) -> Vec<String> {
+    vec![
+        principal.to_string(),
+        resource.to_string(),
+        action.to_string(),
+    ]
 }
 
 #[cfg(test)]
@@ -295,5 +332,68 @@ mod tests {
             "shipped policies.cedar must parse: {:?}",
             parsed.err().map(|err| err.to_string())
         );
+    }
+
+    fn casbin_files(label: &str) -> (PathBuf, PathBuf) {
+        let dir = temp_dir(label);
+        let model = dir.join("casbin_model.conf");
+        fs::write(
+            &model,
+            include_str!("../../../infra/config/policy/casbin_model.conf"),
+        )
+        .expect("write casbin model");
+        (model, dir.join("casbin_policy.csv"))
+    }
+
+    fn path_string(path: &Path) -> String {
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn casbin_add_and_remove_policy_round_trip() -> Result<()> {
+        let (model, policy) = casbin_files("casbin-roundtrip");
+        let enforcer = CasbinEnforcer::new(path_string(&model), path_string(&policy)).await?;
+
+        assert!(!enforcer.enforce("alice", "execute", "tool:demo").await?);
+        assert!(enforcer.add_policy("alice", "execute", "tool:demo").await?);
+        assert!(enforcer.enforce("alice", "execute", "tool:demo").await?);
+        // Adding the same rule twice must not report success.
+        assert!(!enforcer.add_policy("alice", "execute", "tool:demo").await?);
+
+        // A fresh enforcer reading the same files proves persistence.
+        let reloaded = CasbinEnforcer::new(path_string(&model), path_string(&policy)).await?;
+        assert!(reloaded.enforce("alice", "execute", "tool:demo").await?);
+
+        assert!(
+            reloaded
+                .remove_policy("alice", "execute", "tool:demo")
+                .await?
+        );
+        assert!(!reloaded.enforce("alice", "execute", "tool:demo").await?);
+        // Removing a missing rule must not report success.
+        assert!(
+            !reloaded
+                .remove_policy("alice", "execute", "tool:demo")
+                .await?
+        );
+
+        let third = CasbinEnforcer::new(path_string(&model), path_string(&policy)).await?;
+        assert!(!third.enforce("alice", "execute", "tool:demo").await?);
+
+        fs::remove_dir_all(model.parent().expect("temp dir"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn casbin_creates_missing_policy_file() -> Result<()> {
+        let (model, policy) = casbin_files("casbin-create");
+        assert!(!policy.exists());
+
+        let enforcer = CasbinEnforcer::new(path_string(&model), path_string(&policy)).await?;
+        assert!(policy.exists());
+        assert!(!enforcer.enforce("alice", "execute", "tool:demo").await?);
+
+        fs::remove_dir_all(model.parent().expect("temp dir"))?;
+        Ok(())
     }
 }

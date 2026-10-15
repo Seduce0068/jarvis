@@ -68,7 +68,11 @@ impl PolicyEngine {
         }
 
         // Fast path: Casbin for simple RBAC
-        if self.casbin_enforcer.enforce(principal, action, resource)? {
+        if self
+            .casbin_enforcer
+            .enforce(principal, action, resource)
+            .await?
+        {
             return Ok(true);
         }
 
