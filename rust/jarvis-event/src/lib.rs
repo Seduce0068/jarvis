@@ -55,6 +55,20 @@ impl EventNormalizer {
             .await?,
         );
 
+        // Subscribe to Home Assistant state changes when a token is configured;
+        // webhook ingestion keeps working regardless.
+        if config.ha_token().is_empty() {
+            tracing::info!("Home Assistant token not configured; WebSocket listener disabled");
+        } else {
+            let ha_client = ha_client.clone();
+            let event_tx = normalizer.event_sender();
+            tokio::spawn(async move {
+                if let Err(error) = ha_client.listen_events(event_tx).await {
+                    tracing::error!("Home Assistant WebSocket listener stopped: {error:#}");
+                }
+            });
+        }
+
         Ok(Self {
             config,
             normalizer,

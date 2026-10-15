@@ -50,8 +50,9 @@ jarvis-mcp-gw = { path = "../jarvis-mcp-gw" }
 # Context client
 jarvis-context = { path = "../jarvis-context" }
 
-# WebSocket for Android
+# WebSocket (Home Assistant / Android)
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = { workspace = true }
 
 # Secrets
 secrecy = { workspace = true }

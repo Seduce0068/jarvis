@@ -2233,6 +2233,7 @@ dependencies = [
  "chrono",
  "config",
  "figment",
+ "futures-util",
  "jarvis-context",
  "jarvis-core",
  "jarvis-mcp-gw",

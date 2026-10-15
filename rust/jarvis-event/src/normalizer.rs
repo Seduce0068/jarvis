@@ -63,6 +63,11 @@ impl Normalizer {
         let _ = self.event_tx.send(event);
     }
 
+    /// Clone of the channel sender used to submit events for processing.
+    pub fn event_sender(&self) -> mpsc::UnboundedSender<UnifiedEvent> {
+        self.event_tx.clone()
+    }
+
     async fn process_event(
         policy_client: &jarvis_policy::PolicyEngine,
         _mcp_gw_client: &jarvis_mcp_gw::McpGateway,
