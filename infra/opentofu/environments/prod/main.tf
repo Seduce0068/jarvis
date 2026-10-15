@@ -8,14 +8,6 @@ terraform {
       source  = "oracle/oci"
       version = "~> 5.0"
     }
-    tls = {
-      source  = "hashicorp/tls"
-      version = "~> 4.0"
-    }
-    random = {
-      source  = "hashicorp/random"
-      version = "~> 3.6"
-    }
   }
 
   backend "local" {
@@ -28,14 +20,14 @@ provider "oci" {
   # Authentication via ~/.oci/config or environment variables
 }
 
-# Random suffix for unique resource names
-resource "random_id" "suffix" {
-  byte_length = 4
+# Object Storage namespace (used for backup/log buckets)
+data "oci_objectstorage_namespace" "this" {
+  compartment_id = var.compartment_id
 }
 
 # Network module
 module "network" {
-  source = "./modules/network"
+  source = "../../modules/network"
 
   compartment_id      = var.compartment_id
   vcn_cidr            = var.vcn_cidr
@@ -47,11 +39,11 @@ module "network" {
 
 # Security module
 module "security" {
-  source = "./modules/security"
+  source = "../../modules/security"
 
   compartment_id = var.compartment_id
   vcn_id         = module.network.vcn_id
-  subnet_id      = module.network.subnet_id
+  subnet_cidr    = var.subnet_cidr
 
   allowed_ssh_cidrs = var.allowed_ssh_cidrs
   allowed_web_cidrs = var.allowed_web_cidrs
@@ -61,7 +53,7 @@ module "security" {
 
 # Compute module
 module "compute" {
-  source = "./modules/compute"
+  source = "../../modules/compute"
 
   compartment_id      = var.compartment_id
   availability_domain = var.availability_domain
@@ -73,30 +65,40 @@ module "compute" {
   memory_in_gbs        = var.instance_memory_gbs
   boot_volume_size_gbs = var.boot_volume_size_gbs
 
-  ssh_public_key  = var.ssh_public_key
-  cloud_init_path = "${path.module}/cloud-init.yaml"
+  ssh_public_key     = var.ssh_public_key
+  cloud_init_path    = "${path.module}/cloud-init.yaml"
+  tailscale_auth_key = var.tailscale_auth_key
 
   tags = var.common_tags
 }
 
-# Storage module
+# Storage module (data volume + Object Storage buckets)
 module "storage" {
-  source = "./modules/storage"
+  source = "../../modules/storage"
 
   compartment_id      = var.compartment_id
   availability_domain = var.availability_domain
 
   block_volume_size_gbs = var.block_volume_size_gbs
   backup_policy_id      = var.backup_policy_id
+  namespace             = data.oci_objectstorage_namespace.this.namespace
 
   tags = var.common_tags
 }
 
+# Attach the data volume to the instance
+resource "oci_core_volume_attachment" "data" {
+  instance_id     = module.compute.instance_id
+  volume_id       = module.storage.data_volume_id
+  attachment_type = "paravirtualized"
+}
+
 # Observability module
 module "observability" {
-  source = "./modules/observability"
+  source = "../../modules/observability"
 
   compartment_id = var.compartment_id
+  instance_id    = module.compute.instance_id
 
   tags = var.common_tags
 }
@@ -112,10 +114,14 @@ output "instance_private_ip" {
   description = "Private IP of the JARVIS instance"
 }
 
-output "tailscale_auth_key" {
-  value       = var.tailscale_auth_key
-  description = "Tailscale auth key (sensitive)"
-  sensitive   = true
+output "backups_bucket" {
+  value       = module.storage.backups_bucket
+  description = "Object Storage bucket for backups"
+}
+
+output "logs_bucket" {
+  value       = module.storage.logs_bucket
+  description = "Object Storage bucket for logs"
 }
 
 output "ssh_command" {

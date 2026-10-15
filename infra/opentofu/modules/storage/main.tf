@@ -1,3 +1,12 @@
+terraform {
+  required_providers {
+    oci = {
+      source  = "oracle/oci"
+      version = "~> 5.0"
+    }
+  }
+}
+
 # Storage Module
 
 # Block volume for persistent data (PostgreSQL, Qdrant, backups)
@@ -11,10 +20,18 @@ resource "oci_core_volume" "data" {
   freeform_tags = var.tags
 }
 
-# Object Storage bucket for backups
+# Optional backup policy assignment
+resource "oci_core_volume_backup_policy_assignment" "data" {
+  count = var.backup_policy_id == "" ? 0 : 1
+
+  asset_id  = oci_core_volume.data.id
+  policy_id = var.backup_policy_id
+}
+
+# Object Storage bucket for backups (stable name: referenced by backup.rs)
 resource "oci_objectstorage_bucket" "backups" {
   compartment_id = var.compartment_id
-  name           = "jarvis-backups-${random_id.suffix.hex}"
+  name           = "jarvis-backups"
   namespace      = var.namespace
   storage_tier   = "Standard"
   versioning     = "Enabled"
@@ -25,16 +42,12 @@ resource "oci_objectstorage_bucket" "backups" {
 # Object Storage bucket for logs
 resource "oci_objectstorage_bucket" "logs" {
   compartment_id = var.compartment_id
-  name           = "jarvis-logs-${random_id.suffix.hex}"
+  name           = "jarvis-logs"
   namespace      = var.namespace
   storage_tier   = "Standard"
   versioning     = "Enabled"
 
   freeform_tags = var.tags
-}
-
-resource "random_id" "suffix" {
-  byte_length = 4
 }
 
 output "data_volume_id" {

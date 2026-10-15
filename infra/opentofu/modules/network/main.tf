@@ -1,3 +1,12 @@
+terraform {
+  required_providers {
+    oci = {
+      source  = "oracle/oci"
+      version = "~> 5.0"
+    }
+  }
+}
+
 # Network Module
 
 resource "oci_core_virtual_network" "vcn" {
@@ -10,12 +19,12 @@ resource "oci_core_virtual_network" "vcn" {
 }
 
 resource "oci_core_subnet" "subnet" {
-  compartment_id        = var.compartment_id
-  vcn_id                = oci_core_virtual_network.vcn.id
-  cidr_block            = var.subnet_cidr
-  dns_label             = "jarvissubnet"
-  display_name          = "jarvis-subnet"
-  availability_domain   = var.availability_domain
+  compartment_id             = var.compartment_id
+  vcn_id                     = oci_core_virtual_network.vcn.id
+  cidr_block                 = var.subnet_cidr
+  dns_label                  = "jarvissubnet"
+  display_name               = "jarvis-subnet"
+  availability_domain        = var.availability_domain
   prohibit_public_ip_on_vnic = false
 
   freeform_tags = var.tags
@@ -25,7 +34,7 @@ resource "oci_core_internet_gateway" "igw" {
   compartment_id = var.compartment_id
   vcn_id         = oci_core_virtual_network.vcn.id
   display_name   = "jarvis-igw"
-  is_enabled     = true
+  enabled        = true
 
   freeform_tags = var.tags
 }

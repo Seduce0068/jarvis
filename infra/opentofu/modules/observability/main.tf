@@ -1,4 +1,21 @@
+terraform {
+  required_providers {
+    oci = {
+      source  = "oracle/oci"
+      version = "~> 5.0"
+    }
+  }
+}
+
 # Observability Module
+
+# Notification topic for alarm deliveries
+resource "oci_ons_notification_topic" "jarvis" {
+  compartment_id = var.compartment_id
+  name           = "jarvis-alerts"
+
+  freeform_tags = var.tags
+}
 
 # OCI Logging
 resource "oci_logging_log_group" "jarvis" {
@@ -10,14 +27,19 @@ resource "oci_logging_log_group" "jarvis" {
 }
 
 resource "oci_logging_log" "jarvis_services" {
-  compartment_id = var.compartment_id
-  log_group_id   = oci_logging_log_group.jarvis.id
-  display_name   = "jarvis-services"
-  log_type       = "SERVICE"
+  log_group_id = oci_logging_log_group.jarvis.id
+  display_name = "jarvis-services"
+  log_type     = "SERVICE"
 
   configuration {
-    source = "OCI_SERVICE"
-    service = "ALL"
+    compartment_id = var.compartment_id
+
+    source {
+      category    = "all"
+      resource    = var.instance_id
+      service     = "compute"
+      source_type = "OCISERVICE"
+    }
   }
 
   freeform_tags = var.tags
@@ -31,12 +53,11 @@ resource "oci_monitoring_alarm" "instance_health" {
   severity       = "CRITICAL"
 
   metric_compartment_id = var.compartment_id
-  namespace            = "oci_computeagent"
-  query                = "CpuUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > 90"
+  namespace             = "oci_computeagent"
+  query                 = "CpuUtilization[1m]{resourceId=\"${var.instance_id}\"}.mean() > 90"
 
-  destinations = [var.notification_topic_id]
+  destinations                 = [oci_ons_notification_topic.jarvis.id]
   repeat_notification_duration = "PT1H"
-  suppression_duration = "PT5M"
 
   freeform_tags = var.tags
 }
@@ -49,24 +70,11 @@ resource "oci_monitoring_alarm" "idle_compute" {
   severity       = "WARNING"
 
   metric_compartment_id = var.compartment_id
-  namespace            = "oci_computeagent"
-  query                = "CpuUtilization[1d]{resourceId=\"${var.instance_id}\"}.mean() < 5"
+  namespace             = "oci_computeagent"
+  query                 = "CpuUtilization[1d]{resourceId=\"${var.instance_id}\"}.mean() < 5"
 
-  destinations = [var.notification_topic_id]
+  destinations                 = [oci_ons_notification_topic.jarvis.id]
   repeat_notification_duration = "P1D"
-  suppression_duration = "PT1H"
 
   freeform_tags = var.tags
-}
-
-variable "instance_id" {
-  type = string
-}
-
-variable "notification_topic_id" {
-  type = string
-}
-
-variable "namespace" {
-  type = string
 }
