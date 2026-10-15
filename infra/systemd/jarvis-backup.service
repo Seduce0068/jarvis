@@ -7,18 +7,19 @@ After=network.target
 Type=oneshot
 User=jarvis
 Group=jarvis
-ExecStart=/opt/jarvis/bin/jarvis-backup
-WorkingDirectory=/opt/jarvis/bin
+ExecStart=/usr/local/bin/rust-script /opt/jarvis/scripts/backup.rs
+WorkingDirectory=/opt/jarvis/scripts
 
 # Security
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
-ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /home/jarvis/repos /run/rclone
+ProtectHome=read-only
+ReadWritePaths=/home/jarvis/.cache/rust-script /opt/jarvis/backups /opt/jarvis/data /opt/jarvis/logs /etc/jarvis /run/rclone
 
 # Environment for 1Password
 Environment=OP_SESSION_FILE=/home/jarvis/.config/op/session
+Environment=HOME=/home/jarvis
 
 # Resource limits
 MemoryMax=1G

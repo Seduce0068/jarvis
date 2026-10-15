@@ -25,7 +25,9 @@ infra/
 │   ├── jarvis-backup.service
 │   └── jarvis-backup.timer
 ├── scripts/                     # Operational scripts
-│   └── backup.sh               # Daily backup to OCI Object Storage
+│   ├── backup.sh               # Compatibility launcher to Rust script
+│   ├── deploy.sh               # Compatibility launcher to Rust script
+│   └── restore.sh              # Compatibility launcher to Rust script
 ├── config/                      # Configuration files
 │   ├── pii_patterns.toml       # PII detection patterns
 │   ├── mcp_allowlist.toml      # MCP tool allowlist
@@ -138,8 +140,9 @@ To test disaster recovery:
 
 ```bash
 # On fresh instance after tofu apply
-cd /opt/jarvis/scripts
-./restore.sh  # (create this script to restore from OCI Object Storage)
+rust-script /opt/jarvis/scripts/restore.rs latest --dry-run
+# After checking the selected backup, execute the destructive restore:
+rust-script /opt/jarvis/scripts/restore.rs latest --confirm
 ```
 
 ### Updating Services

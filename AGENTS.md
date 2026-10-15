@@ -36,7 +36,7 @@ jarvis/
 │   │   ├── environments/prod/    # Production env
 │   │   └── modules/              # compute, network, security, storage, observability
 │   ├── systemd/                  # Systemd service units
-│   ├── scripts/                  # Operational scripts (backup.sh, deploy.sh, restore.sh)
+│   ├── scripts/                  # Compatibility launchers for rust-script tools
 │   ├── config/                   # Config templates (pii_patterns, mcp_allowlist, policies)
 │   └── cloud-init.yaml           # OCI instance initialization
 ├── ci/                           # CI/CD pipelines
@@ -112,7 +112,7 @@ opencode run "/review-flow metrics --days 30 --json"
 
 ```bash
 # Deploy Rust services to host
-infra/scripts/deploy.sh jarvis-host
+rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy
 
 # Manual backup
 ssh jarvis@jarvis-host "sudo systemctl start jarvis-backup"
@@ -120,8 +120,8 @@ ssh jarvis@jarvis-host "sudo systemctl start jarvis-backup"
 # View logs
 ssh jarvis@jarvis-host "sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-context -f"
 
-# Disaster recovery
-infra/scripts/restore.sh latest  # or specific date: 20261009-120000
+# Review a restore plan (pass --confirm only after verifying the backup)
+rust-script rust/scripts/restore.rs latest --dry-run
 ```
 
 ## Key Commands
@@ -134,7 +134,7 @@ infra/scripts/restore.sh latest  # or specific date: 20261009-120000
 | Format check | `cd rust && cargo fmt --all --check` |
 | OpenTofu plan | `cd infra/opentofu/environments/prod && tofu plan` |
 | OpenTofu apply | `cd infra/opentofu/environments/prod && tofu apply` |
-| Deploy services | `infra/scripts/deploy.sh jarvis-host` |
+| Deploy services | `rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy` |
 | Run gate-check | `opencode run "/review-flow gate-check <pr>"` |
 | Run cross-review | `opencode run "/cross-review"` |
 | SSH to host | `tailscale ssh jarvis@jarvis-host` |

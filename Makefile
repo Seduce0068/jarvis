@@ -4,42 +4,46 @@
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
-SHELL := /bin/bash
+# Portable bash lookup: Termux has no /bin/bash, Ubuntu has /bin/bash or /usr/bin/bash.
+SHELL := $(shell command -v bash 2>/dev/null || echo /bin/sh)
 
 help: ## ヘルプ表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 bootstrap-server: ## サーバー(Linux/OCI/VPS)をブートストラップ
-	@chmod +x scripts/bootstrap/server.sh
-	@scripts/bootstrap/server.sh --root $(JARVIS_ROOT)
+	@rust-script scripts/bootstrap/bootstrap.rs --target server --source-root . --root $(JARVIS_ROOT)
 
 bootstrap-server-dry: ## サーバーブートストラップ (ドライラン)
-	@chmod +x scripts/bootstrap/server.sh
-	@scripts/bootstrap/server.sh --dry-run --root $(JARVIS_ROOT)
+	@rust-script scripts/bootstrap/bootstrap.rs --target server --source-root . --dry-run --root $(JARVIS_ROOT)
 
 bootstrap-termux: ## Termux(Android)をブートストラップ
-	@chmod +x scripts/bootstrap/termux.sh
-	@scripts/bootstrap/termux.sh --root $(JARVIS_ROOT)
+	@rust-script scripts/bootstrap/bootstrap.rs --target termux --source-root . --root $(JARVIS_ROOT)
 
 bootstrap-termux-boot: ## Termuxブートストラップ + setup_boot.sh実行
-	@chmod +x scripts/bootstrap/termux.sh
-	@scripts/bootstrap/termux.sh --setup-boot --root $(JARVIS_ROOT)
+	@rust-script scripts/bootstrap/bootstrap.rs --target termux --source-root . --setup-boot --root $(JARVIS_ROOT)
 
 doctor: ## 環境診断実行 (サーバー)
-	@chmod +x scripts/doctor/jarvis-doctor.sh
-	@JARVIS_ROOT=$(JARVIS_ROOT) scripts/doctor/jarvis-doctor.sh
+	@JARVIS_ROOT=$(JARVIS_ROOT) rust-script scripts/doctor/jarvis-doctor.rs
 
 phone-status: ## 端末ステータス取得 (Termux)
-	@chmod +x scripts/utils/phone-status-json.sh
-	@scripts/utils/phone-status-json.sh
+	@rust-script scripts/utils/phone-status-json.rs
 
-lint: ## シェルスクリプトの構文チェック
-	@command -v shellcheck >/dev/null 2>&1 || (echo "shellcheck not installed"; exit 1)
-	@shellcheck scripts/**/*.sh
+lint: ## Rust script の整形・起動確認
+	@rustfmt --check rust/scripts/*.rs scripts/doctor/*.rs scripts/utils/*.rs scripts/bootstrap/*.rs config/*.rs docs/architecture/verify.rs docs/architecture/calc.rs
+	@rust-script scripts/bootstrap/bootstrap.rs --help >/dev/null
+	@rust-script config/git-utf8.rs --help >/dev/null
+	@rust-script docs/architecture/verify.rs --help >/dev/null
+	@rust-script rust/scripts/deploy.rs --help >/dev/null
+	@rust-script rust/scripts/backup.rs --help >/dev/null
+	@rust-script rust/scripts/restore.rs --help >/dev/null
+	@rust-script scripts/doctor/jarvis-doctor.rs --help >/dev/null
+	@rust-script scripts/utils/phone-status-json.rs --help >/dev/null
+	@rust-script config/shell-locale.rs >/dev/null
 
-test: ## テスト実行 (プレースホルダ)
-	@echo "No tests configured yet"
-	@exit 0
+test: ## Rust workspace と rust-script のテスト
+	@cd rust && cargo test --workspace
+	@rust-script --test rust/scripts/restore.rs
+	@TERMUX_VERSION=test rust-script scripts/bootstrap/bootstrap.rs --target termux --dry-run --skip-android-mcp --source-root . --root "$(JARVIS_ROOT)"
 
 clean: ## 生成物削除 (注意: 設定ファイルも消える)
 	@echo "This will remove: bin/ state/ logs/ repos/ config/*.env policies/*.json"

@@ -16,14 +16,14 @@
 /// JARVIS Backup Script - Rust version
 /// Run with: `rust-script backup.rs` or compile with `cargo build --release --bin backup`
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local};
+use chrono::Local;
 use clap::Parser;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -50,25 +50,6 @@ struct Args {
     /// Skip remote operations
     #[arg(long)]
     local_only: bool,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct RcloneConfig {
-    #[serde(flatten)]
-    remotes: std::collections::HashMap<String, RemoteConfig>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-struct RemoteConfig {
-    #[serde(rename = "type")]
-    remote_type: String,
-    provider: Option<String>,
-    env_auth: Option<bool>,
-    access_key_id: Option<String>,
-    secret_access_key: Option<String>,
-    region: Option<String>,
-    endpoint: Option<String>,
-    acl: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -143,7 +124,7 @@ fn resolve_rclone_config() -> Result<String> {
         .context("Failed to run op inject")?;
 
     if !status.success() {
-        return Ok(String::new());
+        anyhow::bail!("op inject returned a non-zero exit status");
     }
 
     Ok(format!("--config {}", output_path.display()))
@@ -154,11 +135,15 @@ fn run_rclone(args: &[&str], config_flag: &str) -> Result<()> {
     if !config_flag.is_empty() {
         cmd.args(config_flag.split_whitespace());
     }
-    cmd.args(args)
+    let status = cmd
+        .args(args)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status()
         .context("Failed to run rclone")?;
+    if !status.success() {
+        anyhow::bail!("rclone exited with status {status}");
+    }
     Ok(())
 }
 
@@ -178,8 +163,14 @@ fn backup_postgres(backup_dir: &Path, date: &str) -> Result<()> {
         .spawn()
         .context("Failed to start gzip")?;
 
-    pg_dump.wait().context("pg_dump failed")?;
-    gzip.wait().context("gzip failed")?;
+    let pg_dump_status = pg_dump.wait().context("Failed waiting for pg_dump")?;
+    let gzip_status = gzip.wait().context("Failed waiting for gzip")?;
+    if !pg_dump_status.success() {
+        anyhow::bail!("pg_dump failed with status {pg_dump_status}");
+    }
+    if !gzip_status.success() {
+        anyhow::bail!("gzip failed with status {gzip_status}");
+    }
 
     info!("PostgreSQL backup completed: {}", output_file.display());
     Ok(())
@@ -192,7 +183,8 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
     // Create snapshot
     client
         .post("http://localhost:6334/collections/jarvis_memories/snapshots")
-        .send()?;
+        .send()?
+        .error_for_status()?;
 
     std::thread::sleep(std::time::Duration::from_secs(3));
 
@@ -200,6 +192,7 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
     let response: QdrantSnapshotResponse = client
         .get("http://localhost:6334/collections/jarvis_memories/snapshots")
         .send()?
+        .error_for_status()?
         .json()?;
 
     if let Some(snapshot) = response.result.first() {
@@ -212,6 +205,7 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
                 snapshot_name
             ))
             .send()?
+            .error_for_status()?
             .bytes()?;
 
         fs::write(&output_file, download)?;

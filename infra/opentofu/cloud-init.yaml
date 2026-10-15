@@ -256,13 +256,14 @@ write_files:
       Type=oneshot
       User=jarvis
       Group=jarvis
-      ExecStart=/opt/jarvis/scripts/backup.sh
+      ExecStart=/usr/local/bin/rust-script /opt/jarvis/scripts/backup.rs
       WorkingDirectory=/opt/jarvis/scripts
       NoNewPrivileges=yes
       PrivateTmp=yes
       ProtectSystem=strict
-      ProtectHome=yes
-      ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /home/jarvis/repos
+      ProtectHome=read-only
+      ReadWritePaths=/home/jarvis/.cache/rust-script /opt/jarvis/backups /opt/jarvis/data /opt/jarvis/logs /etc/jarvis /run/rclone
+      Environment=HOME=/home/jarvis
 
   - path: /etc/systemd/system/jarvis-backup.timer
     content: |
@@ -281,12 +282,12 @@ write_files:
 # Directories
 runcmd:
   # Create directories
-  - mkdir -p /opt/jarvis/{bin,data,logs,scripts,rust}
+  - mkdir -p /opt/jarvis/{backups,bin,data,logs,scripts,rust}
   - mkdir -p /home/jarvis/repos
   - mkdir -p /etc/jarvis
   - mkdir -p /var/log/jarvis
-  - mkdir -p /run/jarvis
-  - chown -R jarvis:jarvis /opt/jarvis /home/jarvis/repos /var/log/jarvis /run/jarvis
+  - mkdir -p /run/jarvis /run/rclone /home/jarvis/.cache/rust-script
+  - chown -R jarvis:jarvis /opt/jarvis /home/jarvis/repos /var/log/jarvis /run/jarvis /run/rclone /home/jarvis/.cache
   - chmod 750 /run/jarvis
 
   # Install Rust (for building JARVIS services)
@@ -342,12 +343,11 @@ runcmd:
   - systemctl enable jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol jarvis-backup.timer
 
   # Install rust-script for running Rust scripts
-  - cargo install rust-script --locked
+  - sudo -u jarvis /home/jarvis/.cargo/bin/cargo install rust-script --locked
+  - install -m 0755 /home/jarvis/.cargo/bin/rust-script /usr/local/bin/rust-script
 
   # Create backup script (Rust version using rust-script)
   - cat > /opt/jarvis/scripts/backup.rs << 'BACKUP_EOF'
-//! JARVIS Backup Script - Run with: rust-script backup.rs
-
 /// ```cargo
 /// [dependencies]
 /// anyhow = "1.0"
@@ -358,7 +358,11 @@ runcmd:
 /// tokio = { version = "1.40", features = ["full"] }
 /// tracing = "0.1"
 /// tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+/// hostname = "0.3"
+/// dirs = "5.0"
 /// ```
+
+// JARVIS Backup Script - Run with: rust-script backup.rs
 
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -509,11 +513,12 @@ fn main() -> Result<()> {
 BACKUP_EOF
 
   # Compile and install backup script
-  - rust-script /opt/jarvis/scripts/backup.rs -- --help 2>&1 | head -1
-  - mkdir -p /opt/jarvis/bin
-  - rustc --edition 2021 /opt/jarvis/scripts/backup.rs -o /opt/jarvis/bin/jarvis-backup -C opt-level=3
-  - chown jarvis:jarvis /opt/jarvis/bin/jarvis-backup
-  - chmod +x /opt/jarvis/bin/jarvis-backup
+  - chown jarvis:jarvis /opt/jarvis/scripts/backup.rs
+  - chmod 600 /opt/jarvis/scripts/backup.rs
+  - mkdir -p /home/jarvis/.cache/jarvis-backup-check
+  - chown jarvis:jarvis /home/jarvis/.cache/jarvis-backup-check
+  - sudo -u jarvis /usr/local/bin/rust-script --package --pkg-path /home/jarvis/.cache/jarvis-backup-check /opt/jarvis/scripts/backup.rs
+  - sudo -u jarvis /home/jarvis/.cargo/bin/cargo check --manifest-path /home/jarvis/.cache/jarvis-backup-check/Cargo.toml
 
   # Install rclone for OCI Object Storage backup
   - curl https://rclone.org/install.sh | bash

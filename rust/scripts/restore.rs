@@ -18,11 +18,10 @@ use anyhow::{Context, Result};
 use chrono::Local;
 use clap::Parser;
 use reqwest::blocking::Client;
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use tracing::{error, info, warn};
+use tracing::info;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -50,15 +49,13 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
 
+    /// Confirm destructive restoration of databases, configs, and repositories
+    #[arg(long)]
+    confirm: bool,
+
     /// Skip remote operations
     #[arg(long)]
     local_only: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct RcloneLsOutput {
-    size: String,
-    path: String,
 }
 
 fn main() -> Result<()> {
@@ -67,10 +64,12 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    if !args.dry_run && !args.confirm {
+        anyhow::bail!("restore is destructive; pass --confirm, or use --dry-run first");
+    }
+
     let hostname = hostname::get()?.to_string_lossy().to_string();
     let backup_dir = Path::new(&args.backup_dir);
-
-    fs::create_dir_all(backup_dir)?;
 
     info!(
         "Starting JARVIS restore for {} (backup: {})",
@@ -87,13 +86,29 @@ fn main() -> Result<()> {
     let date = if args.date == "latest" {
         find_latest_backup(&args, &hostname, &rclone_config_flag)?
     } else {
+        if !valid_backup_date(&args.date) {
+            anyhow::bail!("invalid backup date; expected YYYYMMDD-HHMMSS or latest");
+        }
         args.date.clone()
     };
+    if !valid_backup_date(&date) {
+        anyhow::bail!("selected backup has an invalid date: {date}");
+    }
+
+    if args.dry_run {
+        info!(
+            "DRY RUN: would restore backup set {} for {}",
+            date, hostname
+        );
+        return Ok(());
+    }
+
+    fs::create_dir_all(backup_dir)?;
 
     restore_configs(&args, &hostname, &date, &rclone_config_flag)?;
     restore_postgres(&args, &hostname, &date, &rclone_config_flag)?;
     restore_qdrant(&args, &hostname, &date, &rclone_config_flag)?;
-    restore_repos(&args, &hostname, &rclone_config_flag)?;
+    restore_repos(&args, &hostname, &date, &rclone_config_flag)?;
 
     if !args.dry_run {
         restart_services()?;
@@ -101,6 +116,32 @@ fn main() -> Result<()> {
 
     info!("Restore completed. Verify services with: sudo systemctl status jarvis-*");
     Ok(())
+}
+
+fn valid_backup_date(date: &str) -> bool {
+    date.len() == 15
+        && date.as_bytes()[8] == b'-'
+        && date
+            .bytes()
+            .enumerate()
+            .all(|(index, byte)| index == 8 || byte.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_backup_date;
+
+    #[test]
+    fn accepts_timestamp_format() {
+        assert!(valid_backup_date("20261009-120000"));
+    }
+
+    #[test]
+    fn rejects_invalid_length_and_characters() {
+        assert!(!valid_backup_date("latest"));
+        assert!(!valid_backup_date("20261009_120000"));
+        assert!(!valid_backup_date("2026100x-120000"));
+    }
 }
 
 fn resolve_rclone_config() -> Result<String> {
@@ -127,7 +168,7 @@ fn resolve_rclone_config() -> Result<String> {
         .context("Failed to run op inject")?;
 
     if !status.success() {
-        return Ok(String::new());
+        anyhow::bail!("op inject returned a non-zero exit status");
     }
 
     Ok(format!("--config {}", output_path.display()))
@@ -138,12 +179,16 @@ fn run_rclone(args: &[&str], config_flag: &str) -> Result<String> {
     if !config_flag.is_empty() {
         cmd.args(config_flag.split_whitespace());
     }
-    cmd.args(args)
+    let output = cmd
+        .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
         .output()
-        .context("Failed to run rclone")
-        .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+        .context("Failed to run rclone")?;
+    if !output.status.success() {
+        anyhow::bail!("rclone exited with status {}", output.status);
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 fn find_latest_backup(args: &Args, hostname: &str, config_flag: &str) -> Result<String> {
@@ -179,7 +224,7 @@ fn download_backup(
     info!("Downloading {}...", remote_file);
     run_rclone(
         &[
-            "copy",
+            "copyto",
             &format!("{}{}", remote_path, remote_file),
             local_file.to_str().unwrap(),
         ],
@@ -315,7 +360,7 @@ fn restore_configs(args: &Args, hostname: &str, date: &str, config_flag: &str) -
     Ok(())
 }
 
-fn restore_repos(args: &Args, hostname: &str, config_flag: &str) -> Result<()> {
+fn restore_repos(args: &Args, hostname: &str, date: &str, config_flag: &str) -> Result<()> {
     info!("Restoring git repositories...");
 
     if args.dry_run {
@@ -331,11 +376,11 @@ fn restore_repos(args: &Args, hostname: &str, config_flag: &str) -> Result<()> {
 
     for line in output.lines() {
         if let Some(bundle) = line.split_whitespace().nth(1) {
-            if bundle.starts_with("repo-") && bundle.ends_with(".bundle") {
+            if bundle.starts_with("repo-") && bundle.ends_with(&format!("-{date}.bundle")) {
                 let repo_name = bundle
                     .strip_prefix("repo-")
-                    .and_then(|s| s.strip_suffix(&format!("-{}.bundle", args.date)))
-                    .unwrap_or("unknown");
+                    .and_then(|s| s.strip_suffix(&format!("-{date}.bundle")))
+                    .context("Invalid repository bundle name")?;
 
                 info!("Restoring repo: {}", repo_name);
                 let local_bundle = Path::new(&args.backup_dir).join(bundle);

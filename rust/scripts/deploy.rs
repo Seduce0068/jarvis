@@ -2,7 +2,6 @@
 /// [dependencies]
 /// anyhow = "1.0"
 /// clap = { version = "4.5", features = ["derive"] }
-/// chrono = { version = "0.4", features = ["serde"] }
 /// tracing = "0.1"
 /// tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 /// ```
@@ -11,11 +10,10 @@
 /// Run with: `rust-script deploy.rs <host> [build|deploy|restart|logs|status]`
 /// Or compile with: `cargo build --release --bin deploy`
 use anyhow::{Context, Result};
-use chrono::Local;
 use clap::{Parser, Subcommand};
 use std::path::Path;
-use std::process::{Command, Stdio};
-use tracing::{error, info, warn};
+use std::process::Command;
+use tracing::{info, warn};
 
 #[derive(Parser, Debug)]
 #[command(name = "jarvis-deploy", about = "JARVIS deploy Rust services to host")]
@@ -149,6 +147,22 @@ fn deploy(args: &Args, rust_dir: &str) -> Result<()> {
     info!("Deploying config files...");
     let config_dir = Path::new(rust_dir).parent().unwrap().join("infra/config");
     run_scp(&config_dir, &remote_base, "/etc/jarvis/")?;
+
+    // Deploy persistent Rust scripts used by backup and restore operations.
+    let scripts_dir = Path::new(rust_dir).join("scripts");
+    run_ssh(
+        &remote_base,
+        &format!("mkdir -p {}/scripts", args.remote_path),
+    )?;
+    for script in ["backup.rs", "restore.rs"] {
+        let script_path = scripts_dir.join(script);
+        info!("Deploying {}...", script_path.display());
+        run_scp(
+            &script_path,
+            &remote_base,
+            &format!("{}/scripts/", args.remote_path),
+        )?;
+    }
 
     // Restart services
     info!("Restarting services...");
