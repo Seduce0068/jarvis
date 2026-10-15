@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use figment::{
-    Figment,
     providers::{Env, Format, Toml},
+    Figment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -35,8 +35,8 @@ impl Default for PolicyConfig {
             grpc_addr: "127.0.0.1:50051".into(),
             http_addr: "127.0.0.1:8081".into(),
             cedar_policy_dir: "/etc/jarvis/policy".into(),
-            casbin_model_path: "/etc/jarvis/casbin_model.conf".into(),
-            casbin_policy_path: "/etc/jarvis/casbin_policy.csv".into(),
+            casbin_model_path: "/etc/jarvis/policy/casbin_model.conf".into(),
+            casbin_policy_path: "/etc/jarvis/policy/casbin_policy.csv".into(),
             kill_switch_admin_token: "changeme".into(),
             approval_timeout_secs: 300,
             default_deny: true,

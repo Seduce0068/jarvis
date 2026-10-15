@@ -324,7 +324,7 @@ fn restore_qdrant(args: &Args, hostname: &str, date: &str, config_flag: &str) ->
     let form = reqwest::blocking::multipart::Form::new().file("snapshot", &local_file)?;
 
     client
-        .post("http://localhost:6334/collections/jarvis_memories/snapshots/upload")
+        .post("http://localhost:6333/collections/jarvis_memories/snapshots/upload")
         .multipart(form)
         .send()?;
 

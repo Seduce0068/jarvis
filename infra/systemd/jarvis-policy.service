@@ -1,16 +1,18 @@
 [Unit]
 Description=JARVIS Policy Engine
-Documentation=https://github.com/koppe/jarvis
+Documentation=https://github.com/onoderakeita/jarvis
 After=network.target postgresql.service qdrant.service
 Wants=postgresql.service qdrant.service
 
 [Service]
-Type=notify
+Type=exec
 User=jarvis
 Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
-ExecStartPre=/usr/local/bin/op inject -i /etc/jarvis/policy.env -o /run/jarvis/policy.env
-ExecStart=/opt/jarvis/bin/jarvis-policy
+EnvironmentFile=-/etc/jarvis/op.env
+
+# 1Password references in policy.env are resolved at service start
+ExecStart=/usr/bin/op run --env-file=/etc/jarvis/policy.env -- /opt/jarvis/bin/jarvis-policy
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
@@ -42,9 +44,8 @@ Environment=RUST_LOG=info
 Environment=JARVIS_POLICY_GRPC_ADDR=127.0.0.1:50051
 Environment=JARVIS_POLICY_HTTP_ADDR=127.0.0.1:8081
 Environment=JARVIS_POLICY_CEDAR_POLICY_DIR=/etc/jarvis/policy
-Environment=JARVIS_POLICY_CASBIN_MODEL_PATH=/etc/jarvis/casbin_model.conf
-Environment=JARVIS_POLICY_CASBIN_POLICY_PATH=/etc/jarvis/casbin_policy.csv
-EnvironmentFile=-/run/jarvis/policy.env
+Environment=JARVIS_POLICY_CASBIN_MODEL_PATH=/etc/jarvis/policy/casbin_model.conf
+Environment=JARVIS_POLICY_CASBIN_POLICY_PATH=/etc/jarvis/policy/casbin_policy.csv
 
 # Resource limits
 LimitNOFILE=65536

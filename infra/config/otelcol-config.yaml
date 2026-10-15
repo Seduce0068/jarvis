@@ -48,7 +48,7 @@ receivers:
 
         - job_name: 'qdrant'
           static_configs:
-            - targets: ['localhost:6334']
+            - targets: ['localhost:6333']
 
         - job_name: 'node-exporter'
           static_configs:
@@ -85,7 +85,7 @@ processors:
         value: "prod"
         action: insert
       - key: host.name
-        value: "${HOSTNAME}"
+        value: "${env:HOSTNAME:-jarvis-host}"
         action: insert
 
   # Transform processor for common transformations
@@ -134,9 +134,9 @@ processors:
 exporters:
   # OTLP exporter for Grafana Cloud (traces & logs)
   otlp:
-    endpoint: "https://otlp.${GRAFANA_CLOUD_INSTANCE}.grafana.net:4317"
+    endpoint: "https://otlp.${env:GRAFANA_CLOUD_INSTANCE}.grafana.net:4317"
     headers:
-      Authorization: "Bearer ${GRAFANA_CLOUD_TOKEN}"
+      Authorization: "Bearer ${env:GRAFANA_CLOUD_TOKEN}"
     compression: gzip
     retry_on_failure:
       enabled: true
@@ -146,9 +146,9 @@ exporters:
 
   # Prometheus Remote Write for metrics
   prometheusremotewrite:
-    endpoint: "https://prometheus-${GRAFANA_CLOUD_INSTANCE}.grafana.net/api/prom/push"
+    endpoint: "https://prometheus-${env:GRAFANA_CLOUD_INSTANCE}.grafana.net/api/prom/push"
     headers:
-      Authorization: "Bearer ${GRAFANA_CLOUD_TOKEN}"
+      Authorization: "Bearer ${env:GRAFANA_CLOUD_TOKEN}"
     resource_to_telemetry_conversion:
       enabled: true
 

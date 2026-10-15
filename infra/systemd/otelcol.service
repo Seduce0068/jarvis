@@ -8,7 +8,10 @@ Wants=network.target
 Type=simple
 User=jarvis
 Group=jarvis
-ExecStart=/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml
+EnvironmentFile=-/etc/jarvis/op.env
+
+# Grafana Cloud credentials in otel.env are resolved at service start
+ExecStart=/usr/bin/op run --env-file=/etc/jarvis/otel.env -- /usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=30

@@ -1,6 +1,6 @@
 [Unit]
 Description=JARVIS Backup Job
-Documentation=https://github.com/koppe/jarvis
+Documentation=https://github.com/onoderakeita/jarvis
 After=network.target
 
 [Service]
@@ -17,8 +17,8 @@ ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/jarvis/.cache/rust-script /opt/jarvis/backups /opt/jarvis/data /opt/jarvis/logs /etc/jarvis /run/rclone
 
-# Environment for 1Password
-Environment=OP_SESSION_FILE=/home/jarvis/.config/op/session
+# Environment for 1Password (OP_SERVICE_ACCOUNT_TOKEN lives in op.env)
+EnvironmentFile=-/etc/jarvis/op.env
 Environment=HOME=/home/jarvis
 
 # Resource limits

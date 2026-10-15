@@ -1,16 +1,18 @@
 [Unit]
 Description=JARVIS MCP Gateway
-Documentation=https://github.com/koppe/jarvis
+Documentation=https://github.com/onoderakeita/jarvis
 After=network.target jarvis-policy.service
 Wants=jarvis-policy.service
 
 [Service]
-Type=notify
+Type=exec
 User=jarvis
 Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
-ExecStartPre=/usr/local/bin/op inject -i /etc/jarvis/mcp_gateway.env -o /run/jarvis/mcp_gateway.env
-ExecStart=/opt/jarvis/bin/jarvis-mcp-gw
+EnvironmentFile=-/etc/jarvis/op.env
+
+# 1Password references in mcp_gateway.env are resolved at service start
+ExecStart=/usr/bin/op run --env-file=/etc/jarvis/mcp_gateway.env -- /opt/jarvis/bin/jarvis-mcp-gw
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
@@ -44,7 +46,6 @@ Environment=JARVIS_MCP_GW_HTTP_ADDR=127.0.0.1:8082
 Environment=JARVIS_MCP_GW_ALLOWLIST_PATH=/etc/jarvis/mcp_allowlist.toml
 Environment=JARVIS_MCP_GW_SANDBOX_TYPE=firejail
 Environment=JARVIS_MCP_GW_POLICY_GRPC_ADDR=http://127.0.0.1:50051
-EnvironmentFile=-/run/jarvis/mcp_gateway.env
 
 # Resource limits
 LimitNOFILE=65536

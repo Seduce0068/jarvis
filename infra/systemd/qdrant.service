@@ -1,0 +1,43 @@
+[Unit]
+Description=Qdrant Vector Database
+Documentation=https://qdrant.tech/documentation/
+After=network.target
+
+[Service]
+Type=exec
+User=jarvis
+Group=jarvis
+WorkingDirectory=/opt/jarvis/data/qdrant
+ExecStart=/usr/local/bin/qdrant
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=60
+TimeoutStopSec=30
+
+# Configuration (loopback only; the context service talks gRPC on 6334)
+Environment=QDRANT__SERVICE__HOST=127.0.0.1
+Environment=QDRANT__STORAGE__STORAGE_PATH=/opt/jarvis/data/qdrant
+Environment=QDRANT__TELEMETRY_DISABLED=true
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/jarvis/data
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=3G
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=qdrant
+
+[Install]
+WantedBy=multi-user.target

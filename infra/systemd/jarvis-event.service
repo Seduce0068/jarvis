@@ -1,16 +1,18 @@
 [Unit]
 Description=JARVIS Event Normalizer
-Documentation=https://github.com/koppe/jarvis
+Documentation=https://github.com/onoderakeita/jarvis
 After=network.target jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
 Wants=jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
 
 [Service]
-Type=notify
+Type=exec
 User=jarvis
 Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
-ExecStartPre=/usr/local/bin/op inject -i /etc/jarvis/event.env -o /run/jarvis/event.env
-ExecStart=/opt/jarvis/bin/jarvis-event
+EnvironmentFile=-/etc/jarvis/op.env
+
+# 1Password references in event.env are resolved at service start
+ExecStart=/usr/bin/op run --env-file=/etc/jarvis/event.env -- /opt/jarvis/bin/jarvis-event
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
@@ -47,7 +49,6 @@ Environment=JARVIS_EVENT_ANDROID_MCP_URL=http://127.0.0.1:49374
 Environment=JARVIS_EVENT_POLICY_GRPC_ADDR=http://127.0.0.1:50051
 Environment=JARVIS_EVENT_MCP_GW_GRPC_ADDR=http://127.0.0.1:50052
 Environment=JARVIS_EVENT_CONTEXT_GRPC_ADDR=http://127.0.0.1:50054
-EnvironmentFile=-/run/jarvis/event.env
 
 # Resource limits
 LimitNOFILE=65536

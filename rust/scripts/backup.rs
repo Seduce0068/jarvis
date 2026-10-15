@@ -182,7 +182,7 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
 
     // Create snapshot
     client
-        .post("http://localhost:6334/collections/jarvis_memories/snapshots")
+        .post("http://localhost:6333/collections/jarvis_memories/snapshots")
         .send()?
         .error_for_status()?;
 
@@ -190,7 +190,7 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
 
     // List snapshots
     let response: QdrantSnapshotResponse = client
-        .get("http://localhost:6334/collections/jarvis_memories/snapshots")
+        .get("http://localhost:6333/collections/jarvis_memories/snapshots")
         .send()?
         .error_for_status()?
         .json()?;
@@ -201,7 +201,7 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
 
         let download = client
             .get(&format!(
-                "http://localhost:6334/collections/jarvis_memories/snapshots/{}",
+                "http://localhost:6333/collections/jarvis_memories/snapshots/{}",
                 snapshot_name
             ))
             .send()?
