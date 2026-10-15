@@ -6,14 +6,16 @@
 
 ## 1. 概要
 
-本ドキュメントは、JARVIS Personal AI システムを **OCI Always Free (Ampere A1 Flex: 2 OCPU, 12 GB RAM)** 上で運用する際のリソース要件を、Rust で計算・検証した結果を示す。
+本ドキュメントは、JARVIS Personal AI システムを **OCI Always Free (Ampere A1 Flex:
+2 OCPU, 12 GB RAM)** 上で運用する際のリソース要件を、Rust で計算・検証した結果を示す。
 
 - **文書原本**: この `report.md` (Markdown + LaTeX数式記法)
 - **計算ロジック**: `calc.rs` (Rust、単体実行可能)
 - **表示・実行**: Markdown Preview Enhanced (MPE) Code Chunk
 - **共有成果物**: `dist/report.md` (計算済み), `dist/report.html`
 
-> **注意**: MPE の `@import` 構文と Code Chunk 実行結果は、MPE プレビューでのみ反映される。GitHub 等の一般的な Markdown ビューアでは計算結果は表示されないため、共有時は `dist/` 以下の生成物を使用すること。
+> **注意**: MPE の `@import` 構文と Code Chunk 実行結果は、MPE プレビューでのみ反映される。
+> GitHub 等の一般的な Markdown ビューアでは計算結果は表示されないため、共有時は `dist/` 以下の生成物を使用すること。
 
 ---
 
@@ -22,7 +24,7 @@
 JARVIS は以下のサービスを単一 VM 上で systemd 管理する：
 
 | サービス | 役割 | 技術 |
-|----------|------|------|
+| --- | --- | --- |
 | `jarvis-policy` | Policy Engine (Cedar/Casbin), Kill Switch | Rust |
 | `jarvis-mcp-gw` | MCP Gateway (Allowlist, Sandbox) | Rust |
 | `jarvis-event` | Event Normalizer (HA, Android, Webhooks) | Rust |
@@ -64,7 +66,8 @@ $$
 無料枠超過時のコスト試算 (東京リージョン従量課金)：
 
 $$
-C = \max(0, OCPU_{used} - 2.0) \times 720 \times \$0.0085 + \max(0, Mem_{used} - 12.0) \times 720 \times \$0.0012
+C = \max(0, OCPU_{used} - 2.0) \times 720 \times \$0.0085
+    + \max(0, Mem_{used} - 12.0) \times 720 \times \$0.0012
 $$
 
 ---
@@ -79,45 +82,54 @@ $$
 
 ## 5. 解釈と判断
 
+> **Verdict**: ⚠️ 無料枠超過（保守合算ベース。数値根拠は §4 の計算出力を参照）
+
 ### 5.1 リソース適合性
 
-計算結果の通り、**全サービスの総需要は Always Free 枠内に収まる** (OCPU 87.5%, Memory 95.8%, Disk 12.5%)。
+§4 の通り、**サービス割当の保守的な同時合算では OCPU 需要が Always Free 上限を上回る**。
+これは全サービスが同時に割当を使い切る最悪ケースの和であり、
+`cpu_weight`（時間平均ビジー率の想定）による加重平均負荷は上限に対して十分小さい。
+実運用上の拘束条件は **メモリ** である。
 
-特にメモリ余裕が **0.5 GB (4.2%)** と僅少であるため、以下の運用制約を守る：
+メモリは余裕が僅少なため、以下の運用制約を守る：
 
 1. **同時ビルド・重いコンパイルは避ける** (Rust リリースビルドは一時的に 2-3 GB 追加消費)
 2. **PostgreSQL shared_buffers は 512 MB 以下に制限**
 3. **Qdrant キャッシュサイズは 1 GB 以下に制限**
 4. **code-server 拡張は最小限に留める**
 
+CPU の保守合算超過分は、systemd `CPUQuota` による上限強制と実行時間帯の平準化で吸収する。
+
 ### 5.2 スケーリング余地
 
-- **OCPU 余裕: 0.25 OCPU** — 軽量バッチ処理や将来的なサービス追加に対応可能
-- **Disk 余裕: 175 GB** — ログ・バックアップ・DB 成長に十分
-- **Object Storage: 10 TB** — 長期バックアップ・監査ログに過不足なし
+- **Disk**: 余裕は計算出力の Headroom 列を参照。ログ・バックアップ・DB 成長に十分
+- **Object Storage (10 TB)**: 長期バックアップ・監査ログに過不足なし
+- **CPU**: 保守合算では余裕がない。恒常的な超過が観測された場合は、サービス割当の見直し
+  （例: `opencode` / `code-server` の縮小）で合算を上限以下に調整する
 
 ### 5.3 コストリスク
 
-無料枠内に収まるため **月額コストは $0.00**。Idle Compute 回収リスクのみが実質的リスク。
+- 無料枠を恒常的に超過する場合、計算出力の Cost Projection に示す従量課金相当のコストが参考値として生じ得る
+- 実効負荷（加重平均ベース）が上限内であれば追加コストは $0.00
+- 最大の実質リスクは Idle Compute 回収（ADR-0001 の対策: 自動再プロビジョニング）
 
 ---
 
 ## 6. 感度分析
 
+シナリオ別の数値は §4 計算出力の Sensitivity Analysis を参照。解釈は以下の通り。
+
 ### 6.1 メモリ 10% 増加シナリオ
 
-PostgreSQL または Qdrant のワークロード増大でメモリ需要が 10% 増えた場合：
+PostgreSQL / Qdrant のワークロード増大でメモリ需要が 10% 増えた場合、
+総需要は上限を超過する（計算出力参照）。対策としてスワップファイル 2 GB の確保、または
+`code-server` メモリ上限の引き下げを行う。
 
-- 新総メモリ: $11.45 \times 1.1 = 12.6$ GB → **上限超過 (105%)**
-- 対策: スワップファイル 2 GB 確保、または `code-server` メモリ制限を 1 GB に削減
+### 6.2 CPU 負荷 20% 増加シナリオ
 
-### 6.2 OCPU 20% 増加シナリオ
-
-同時ビルド等で CPU 負荷が増えた場合：
-
-- 加重 CPU 需要: $0.99 \times 1.2 = 1.19$ OCPU-equivalent
-- 実 OCPU 使用率: 87.5% → 実測値で 100% 接近、レスポンス低下リスク
-- 対策: `cargo build` 等は `nice -n 10` または専用時間帯に実行
+ビルド・バッチ実行等で負荷が増えた場合でも、加重平均ベースでは余裕がある（計算出力参照）。
+ただし保守合算ベースでは既に上限を超過しているため、`nice -n 10` / `CPUQuota` / 時間帯分散で
+ピークを制御する。
 
 ---
 
@@ -153,8 +165,9 @@ MPE プレビューで以下を実行：
 ## 8. 変更履歴とトレーサビリティ
 
 | 日付 | 変更内容 | 検証者 |
-|------|----------|--------|
+| --- | --- | --- |
 | 2026-10-09 | 初版作成 (ADR-0001 準拠) | Sovereign AI Agent |
+| 2026-10-15 | 数値整合、Verdict マーカー、感度分析移管 | Sovereign AI Agent |
 
 ---
 

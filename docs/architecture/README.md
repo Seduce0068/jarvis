@@ -9,7 +9,7 @@ docs/architecture/
 ├── AGENTS.md           # Agent instructions for this directory
 ├── report.md           # Main architecture report (Markdown + LaTeX + MPE imports)
 ├── calc.rs             # All calculations in Rust (run with rust-script)
-├── verify.sh           # Verification script (run before committing)
+├── verify.rs           # Rust verification script (run before committing)
 ├── dist/               # Generated artifacts (gitignored)
 │   ├── report.md       # Calculated Markdown for sharing
 │   └── report.html     # HTML export for sharing
@@ -40,7 +40,7 @@ docs/architecture/
 2. **Verify locally**: `rust-script calc.rs`
 3. **Edit document**: Modify `report.md` (formulas in LaTeX, import via `@import`)
 4. **Preview**: Open `report.md` in MPE, run Code Chunk (`Shift+Enter`)
-5. **Verify**: `./verify.sh`
+5. **Verify**: `rust-script verify.rs .`
 6. **Share**: MPE → Save as Markdown → `dist/report.md`, or Export HTML → `dist/report.html`
 
 ### MPE Settings (workspace-only)
@@ -71,9 +71,11 @@ The `report.md` analyzes **OCI Always Free (A1 Flex: 2 OCPU, 12 GB)** resource u
 | qdrant | 0.15 | 1.0 | 5.0 |
 | otelcol | 0.05 | 0.3 | 0.1 |
 | system/os | 0.10 | 1.0 | 5.0 |
-| **Total** | **1.75** | **11.8** | **25.5** |
+| **Total** | **2.20** | **11.8** | **25.4** |
 
-**Result**: ✅ All within Always Free limits (OCPU 87.5%, Memory 98.3%, Disk 12.8%)
+**Result**: ⚠️ The conservative sum exceeds the OCPU limit (calculated:
+OCPU 110.0%, Memory 98.3%, Disk 12.7%). See `report.md` §5 for the verdict,
+interpretation, and mitigations.
 
 ## Security
 
