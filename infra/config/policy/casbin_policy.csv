@@ -2,7 +2,7 @@
 # Format: p, subject, object, action
 # Format: g, user, role
 
-# Admin role
+# Admin role: unrestricted (mirrors the Cedar jarvis_admin permit)
 p, admin, *, *
 g, jarvis_admin, admin
 
@@ -33,19 +33,9 @@ p, agent, web.search, execute
 p, agent, web.fetch, execute
 g, jarvis, agent
 
-# Safe tools (auto-approved for agent)
-p, agent, tool:filesystem.read, execute
-p, agent, tool:filesystem.list, execute
-p, agent, tool:git.status, execute
-p, agent, tool:git.diff, execute
-p, agent, service:homeassistant.get_state, execute
-p, agent, web.search, execute
-p, agent, web.fetch, execute
-
-# System role (for internal operations)
+# System role: internal operations (mirrors the Cedar jarvis_system permit)
 p, system, *, *
 g, jarvis_system, system
 
-# Kill switch role (denies all)
-p, killswitch, *, *
-g, jarvis_killswitch, killswitch
+# The kill switch is enforced out-of-band by the policy engine (KillSwitch);
+# an allow-only Casbin model cannot express "deny all".

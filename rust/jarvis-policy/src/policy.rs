@@ -436,6 +436,25 @@ mod tests {
                 .await?
         );
 
+        // Wildcards are effective through keyMatch: admin and system cover all.
+        assert!(
+            enforcer
+                .enforce("jarvis_admin", "execute", "shell.execute")
+                .await?
+        );
+        assert!(
+            enforcer
+                .enforce("jarvis_system", "execute", "anything:at.all")
+                .await?
+        );
+        // The killswitch principal stays deny-by-default; the kill switch is
+        // enforced out-of-band by the policy engine.
+        assert!(
+            !enforcer
+                .enforce("jarvis_killswitch", "execute", "tool:filesystem.read")
+                .await?
+        );
+
         fs::remove_dir_all(model.parent().expect("temp dir"))?;
         Ok(())
     }
