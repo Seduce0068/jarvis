@@ -23,7 +23,9 @@ impl PolicyConfig {
     pub fn load() -> Result<Self> {
         let config: PolicyConfig = Figment::new()
             .merge(Toml::file("config/policy.toml"))
-            .merge(Env::prefixed("JARVIS_POLICY_").split("_"))
+            // Flat snake_case fields: do NOT use figment's Env split, which
+            // would turn JARVIS_POLICY_GRPC_ADDR into the nested key `grpc.addr`.
+            .merge(Env::prefixed("JARVIS_POLICY_"))
             .extract()?;
         Ok(config)
     }

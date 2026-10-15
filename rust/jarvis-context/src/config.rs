@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use figment::{
-    Figment,
     providers::{Env, Format, Toml},
+    Figment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -26,7 +26,9 @@ impl ContextConfig {
     pub fn load() -> Result<Self> {
         let config: ContextConfig = Figment::new()
             .merge(Toml::file("config/context.toml"))
-            .merge(Env::prefixed("JARVIS_CONTEXT_").split("_"))
+            // Flat snake_case fields: do NOT use figment's Env split, which
+            // would turn JARVIS_CONTEXT_GRPC_ADDR into the nested key `grpc.addr`.
+            .merge(Env::prefixed("JARVIS_CONTEXT_"))
             .extract()?;
         Ok(config)
     }
@@ -36,7 +38,12 @@ impl ContextConfig {
     }
 
     pub fn qdrant_api_key(&self) -> Option<&str> {
-        self.qdrant_api_key.as_deref()
+        // An empty JARVIS_CONTEXT_QDRANT_API_KEY means "no key" (the shipped
+        // .env template sets the variable to an empty value).
+        self.qdrant_api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
     }
 }
 

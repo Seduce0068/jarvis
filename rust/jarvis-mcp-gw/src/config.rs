@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use figment::{
-    Figment,
     providers::{Env, Format, Toml},
+    Figment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +21,9 @@ impl McpGatewayConfig {
     pub fn load() -> Result<Self> {
         let config: McpGatewayConfig = Figment::new()
             .merge(Toml::file("config/mcp_gateway.toml"))
-            .merge(Env::prefixed("JARVIS_MCP_GW_").split("_"))
+            // Flat snake_case fields: do NOT use figment's Env split, which
+            // would turn JARVIS_MCP_GW_GRPC_ADDR into the nested key `grpc.addr`.
+            .merge(Env::prefixed("JARVIS_MCP_GW_"))
             .extract()?;
         Ok(config)
     }
