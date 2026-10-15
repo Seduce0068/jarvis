@@ -39,7 +39,7 @@ impl Default for EventConfig {
         Self {
             grpc_addr: "127.0.0.1:50053".into(),
             http_addr: "127.0.0.1:8083".into(),
-            webhook_addr: "0.0.0.0:8080".into(),
+            webhook_addr: "127.0.0.1:8085".into(),
             ha_url: "http://homeassistant.local:8123".into(),
             ha_token: "".into(),
             android_mcp_url: "http://127.0.0.1:49374".into(),

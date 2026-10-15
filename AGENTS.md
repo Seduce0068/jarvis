@@ -145,7 +145,7 @@ rust-script rust/scripts/restore.rs latest --dry-run
 |---------|------|-----------------|
 | jarvis-policy | 50051 (gRPC), 8081 (HTTP) | http://localhost:8081/health |
 | jarvis-mcp-gw | 50052 (gRPC), 8082 (HTTP) | http://localhost:8082/health |
-| jarvis-event | 50053 (gRPC), 8083 (HTTP) | http://localhost:8083/health |
+| jarvis-event | 50053 (gRPC), 8083 (HTTP), 8085 (webhooks) | http://localhost:8083/health |
 | jarvis-context | 50054 (gRPC), 8084 (HTTP) | http://localhost:8084/health |
 | OpenCode V2 | 49374 (Web) | http://localhost:49374 |
 | code-server | 8080 | http://localhost:8080 |
