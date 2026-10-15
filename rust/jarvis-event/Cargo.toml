@@ -44,9 +44,6 @@ jarvis-core = { path = "../jarvis-core" }
 # Policy client
 jarvis-policy = { path = "../jarvis-policy" }
 
-# MCP Gateway client
-jarvis-mcp-gw = { path = "../jarvis-mcp-gw" }
-
 # Context client
 jarvis-context = { path = "../jarvis-context" }
 

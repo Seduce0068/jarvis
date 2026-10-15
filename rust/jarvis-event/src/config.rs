@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use figment::{
-    Figment,
     providers::{Env, Format, Toml},
+    Figment,
 };
 use serde::{Deserialize, Serialize};
 
@@ -15,16 +15,21 @@ pub struct EventConfig {
     pub ha_url: String,
     pub ha_token: String,
     pub android_mcp_url: String,
+    /// OpenCode server URL that receives policy-approved events.
+    pub opencode_url: String,
+    /// OpenCode location (working directory) used for agent sessions.
+    pub opencode_location: String,
     pub policy_grpc_addr: String,
-    pub mcp_gw_grpc_addr: String,
     pub context_grpc_addr: String,
 }
 
 impl EventConfig {
     pub fn load() -> Result<Self> {
+        // Flat snake_case fields: do NOT use figment's Env split, which would
+        // turn JARVIS_EVENT_GRPC_ADDR into the nested key `grpc.addr`.
         let config: EventConfig = Figment::new()
             .merge(Toml::file("config/event.toml"))
-            .merge(Env::prefixed("JARVIS_EVENT_").split("_"))
+            .merge(Env::prefixed("JARVIS_EVENT_"))
             .extract()?;
         Ok(config)
     }
@@ -43,8 +48,9 @@ impl Default for EventConfig {
             ha_url: "http://homeassistant.local:8123".into(),
             ha_token: "".into(),
             android_mcp_url: "http://127.0.0.1:49374".into(),
+            opencode_url: "http://127.0.0.1:49374".into(),
+            opencode_location: "/home/jarvis/repos".into(),
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
-            mcp_gw_grpc_addr: "http://127.0.0.1:50052".into(),
             context_grpc_addr: "http://127.0.0.1:50054".into(),
         }
     }

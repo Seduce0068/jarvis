@@ -2236,7 +2236,6 @@ dependencies = [
  "futures-util",
  "jarvis-context",
  "jarvis-core",
- "jarvis-mcp-gw",
  "jarvis-policy",
  "metrics 0.21.1",
  "metrics-exporter-prometheus",

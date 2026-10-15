@@ -14,7 +14,7 @@ pub struct Normalizer {
     ha_client: Arc<crate::sources::HomeAssistantClient>,
     android_client: Arc<crate::sources::AndroidClient>,
     policy_client: Arc<jarvis_policy::PolicyEngine>,
-    mcp_gw_client: Arc<jarvis_mcp_gw::McpGateway>,
+    opencode: Arc<crate::opencode::OpenCodeClient>,
     context_client: Arc<jarvis_context::ContextBuilder>,
     event_tx: mpsc::UnboundedSender<UnifiedEvent>,
 }
@@ -25,7 +25,7 @@ impl Normalizer {
         ha_client: Arc<crate::sources::HomeAssistantClient>,
         android_client: Arc<crate::sources::AndroidClient>,
         policy_client: Arc<jarvis_policy::PolicyEngine>,
-        mcp_gw_client: Arc<jarvis_mcp_gw::McpGateway>,
+        opencode: Arc<crate::opencode::OpenCodeClient>,
         context_client: Arc<jarvis_context::ContextBuilder>,
     ) -> Result<Self> {
         let (event_tx, mut event_rx) = mpsc::unbounded_channel();
@@ -35,21 +35,19 @@ impl Normalizer {
             ha_client,
             android_client,
             policy_client: policy_client.clone(),
-            mcp_gw_client: mcp_gw_client.clone(),
+            opencode: opencode.clone(),
             context_client: context_client.clone(),
             event_tx,
         };
 
         // Spawn event processor - clone Arcs for the spawned task
         let policy_client = policy_client.clone();
-        let mcp_gw_client = mcp_gw_client.clone();
         let context_client = context_client.clone();
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 if let Err(e) =
-                    Self::process_event(&policy_client, &mcp_gw_client, &context_client, event)
-                        .await
+                    Self::process_event(&policy_client, &context_client, &opencode, event).await
                 {
                     tracing::error!("Event processing failed: {}", e);
                 }
@@ -68,10 +66,22 @@ impl Normalizer {
         self.event_tx.clone()
     }
 
+    /// Policy-gated hand-off of a normalized event to the OpenCode agent.
+    ///
+    /// The gate is `auto_respond` on resource `event:<type>` for the `jarvis`
+    /// principal (role `agent` in the shipped Casbin policy, which grants
+    /// nothing by default). Grant an event type with:
+    ///
+    /// ```text
+    /// p, agent, event:<type>, auto_respond
+    /// ```
+    ///
+    /// Forwarded events run through OpenCode; every tool call the agent makes
+    /// is re-authorized by the MCP gateway before it executes.
     async fn process_event(
         policy_client: &jarvis_policy::PolicyEngine,
-        _mcp_gw_client: &jarvis_mcp_gw::McpGateway,
         context_client: &jarvis_context::ContextBuilder,
+        opencode: &crate::opencode::OpenCodeClient,
         event: UnifiedEvent,
     ) -> Result<()> {
         info!(
@@ -79,19 +89,26 @@ impl Normalizer {
             event.event_type, event.source
         );
 
-        // Build context from memory
+        // Build context from memory (PII-filtered by jarvis-context)
         let context = context_client.build_context(&event).await?;
 
         // Check policy for automated response
+        let resource = format!("event:{}", event.event_type);
         let should_act = policy_client
-            .is_allowed("jarvis", "auto_respond", &event.event_type, &context)
+            .is_allowed("jarvis", "auto_respond", &resource, &context)
             .await?;
 
-        if should_act {
-            // Execute via MCP Gateway
-            // mcp_gw_client.execute_tool(...).await?;
+        if !should_act {
+            tracing::debug!(
+                event_type = %event.event_type,
+                "auto_respond not granted; event not forwarded to the agent"
+            );
+            return Ok(());
         }
 
+        // Hand the event to the agent runtime; tool execution stays behind
+        // the MCP gateway and its policy enforcement.
+        opencode.dispatch(&event, &context).await?;
         Ok(())
     }
 

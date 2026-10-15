@@ -5,6 +5,7 @@ pub mod error;
 pub mod grpc;
 pub mod http;
 pub mod normalizer;
+pub mod opencode;
 pub mod sources;
 
 use anyhow::Result;
@@ -18,7 +19,7 @@ pub struct EventNormalizer {
     ha_client: Arc<sources::HomeAssistantClient>,
     android_client: Arc<sources::AndroidClient>,
     policy_client: Arc<jarvis_policy::PolicyEngine>,
-    mcp_gw_client: Arc<jarvis_mcp_gw::McpGateway>,
+    opencode: Arc<opencode::OpenCodeClient>,
     context_client: Arc<jarvis_context::ContextBuilder>,
 }
 
@@ -28,18 +29,12 @@ impl EventNormalizer {
             jarvis_policy::PolicyEngine::new(jarvis_policy::config::PolicyConfig::load()?).await?,
         );
 
-        let mcp_gw_client = Arc::new(
-            jarvis_mcp_gw::McpGateway::new(
-                jarvis_mcp_gw::config::McpGatewayConfig::load()?,
-                policy_client.clone(),
-            )
-            .await?,
-        );
-
         let context_client = Arc::new(
             jarvis_context::ContextBuilder::new(jarvis_context::config::ContextConfig::load()?)
                 .await?,
         );
+
+        let opencode = Arc::new(opencode::OpenCodeClient::new(&config)?);
 
         let ha_client = Arc::new(sources::HomeAssistantClient::new(&config).await?);
         let android_client = Arc::new(sources::AndroidClient::new(&config).await?);
@@ -49,7 +44,7 @@ impl EventNormalizer {
                 ha_client.clone(),
                 android_client.clone(),
                 policy_client.clone(),
-                mcp_gw_client.clone(),
+                opencode.clone(),
                 context_client.clone(),
             )
             .await?,
@@ -75,7 +70,7 @@ impl EventNormalizer {
             ha_client,
             android_client,
             policy_client,
-            mcp_gw_client,
+            opencode,
             context_client,
         })
     }

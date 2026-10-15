@@ -13,9 +13,6 @@ pub enum EventError {
     #[error("Policy error: {0}")]
     Policy(#[from] jarvis_policy::error::PolicyError),
 
-    #[error("MCP Gateway error: {0}")]
-    McpGateway(#[from] jarvis_mcp_gw::error::McpGatewayError),
-
     #[error("Context error: {0}")]
     Context(#[from] jarvis_context::error::ContextError),
 
