@@ -1,5 +1,12 @@
-// JARVIS Cedar Policy Schema
-// Defines entity types, actions, and attributes
+// JARVIS Cedar schema (informational).
+//
+// Documents the intended entity model for future policy validation.
+// This file is NOT parsed at runtime yet; enforcement comes from
+// policies.cedar (+ optional entities.json) in this directory.
+//
+// TODO: align the schema with the request context actually passed by the
+// services (actions need `context` declarations, and the approval workflow
+// needs a concrete ApprovalRequest entity) before enabling schema validation.
 
 namespace jarvis;
 
@@ -13,14 +20,14 @@ entity Resource {
     uid: String,
     type: String,  // "tool", "service", "data", "device"
     owner: String,
-    sensitivity: String  // "public", "private", "confidential", "restricted"
+    sensitivity: String,  // "public", "private", "confidential", "restricted"
     tags: Set<String>
 }
 
 entity Action {
     uid: String,
     name: String,  // "read", "write", "execute", "delete", "approve"
-    risk_level: String  // "low", "medium", "high", "critical"
+    risk_level: String,  // "low", "medium", "high", "critical"
     requires_approval: Boolean
 }
 
@@ -38,108 +45,3 @@ action "write" appliesTo (Principal, Resource);
 action "execute" appliesTo (Principal, Resource);
 action "delete" appliesTo (Principal, Resource);
 action "approve" appliesTo (Principal, Resource);
-
-// Policies
-
-// Admin has full access
-permit (
-    principal in Principal::"admin",
-    action in Action,
-    resource in Resource
-) when { true };
-
-// Agent (JARVIS) can read public resources
-permit (
-    principal in Principal::"agent",
-    action == Action::"read",
-    resource in Resource
-) when { resource.sensitivity == "public" };
-
-// Agent can execute approved tools
-permit (
-    principal in Principal::"agent",
-    action == Action::"execute",
-    resource in Resource
-) when {
-    resource.type == "tool" &&
-    resource.tags.contains("approved") &&
-    context.auto_respond == true
-};
-
-// Agent requires approval for high-risk actions
-forbid (
-    principal in Principal::"agent",
-    action in Action,
-    resource in Resource
-) when {
-    action.risk_level in ["high", "critical"] &&
-    context.auto_respond == true
-} unless {
-    context.correlation_id in ApprovalRequest::"approved"
-};
-
-// User can approve agent actions
-permit (
-    principal in Principal::"user",
-    action == Action::"approve",
-    resource in Resource
-) when { true };
-
-// Kill switch overrides all
-forbid (
-    principal,
-    action,
-    resource
-) when {
-    context.kill_switch_active == true
-};
-
-// Data access based on sensitivity
-permit (
-    principal,
-    action == Action::"read",
-    resource
-) when {
-    resource.sensitivity == "public" ||
-    (resource.sensitivity == "private" && principal.uid == resource.owner) ||
-    (resource.sensitivity == "confidential" && principal.role == "admin")
-};
-
-forbid (
-    principal,
-    action in [Action::"write", Action::"delete"],
-    resource
-) when {
-    resource.sensitivity == "restricted"
-};
-
-// MCP Tool specific policies
-permit (
-    principal,
-    action == Action::"execute",
-    resource
-) when {
-    resource.type == "tool" &&
-    resource.tags.contains("safe") &&
-    principal.capabilities.contains("tool_execute")
-};
-
-permit (
-    principal,
-    action == Action::"execute",
-    resource
-) when {
-    resource.type == "tool" &&
-    resource.tags.contains("requires_approval") &&
-    context.approval_granted == true
-};
-
-forbid (
-    principal,
-    action == Action::"execute",
-    resource
-) when {
-    resource.type == "tool" &&
-    !resource.tags.contains("safe") &&
-    !resource.tags.contains("requires_approval")
-};

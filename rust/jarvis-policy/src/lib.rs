@@ -1,6 +1,7 @@
 //! JARVIS Policy Engine
 //! Cedar/Casbin-based authorization with approval gates and kill switch.
 
+pub mod approval;
 pub mod config;
 pub mod error;
 pub mod grpc;
@@ -18,6 +19,7 @@ pub struct PolicyEngine {
     cedar_engine: Arc<policy::CedarEngine>,
     casbin_enforcer: Arc<policy::CasbinEnforcer>,
     kill_switch: Arc<kill_switch::KillSwitch>,
+    approvals: approval::ApprovalStore,
 }
 
 impl PolicyEngine {
@@ -33,12 +35,22 @@ impl PolicyEngine {
         let kill_switch = Arc::new(kill_switch::KillSwitch::new(
             &config.kill_switch_admin_token,
         ));
+        if config.kill_switch_admin_token() == "changeme" {
+            tracing::warn!(
+                "Kill switch admin token is still the default 'changeme'; \
+                 set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN"
+            );
+        }
+        let approvals = approval::ApprovalStore::new(std::time::Duration::from_secs(
+            config.approval_timeout_secs,
+        ));
 
         Ok(Self {
             config,
             cedar_engine,
             casbin_enforcer,
             kill_switch,
+            approvals,
         })
     }
 
@@ -75,7 +87,47 @@ impl PolicyEngine {
                 reason: "Kill switch activated".into(),
             });
         }
-        self.cedar_engine.request_approval(request).await
+        Ok(self.approvals.request(request).await)
+    }
+
+    /// Approve a pending request (human-in-the-loop decision).
+    pub async fn approve(
+        &self,
+        id: uuid::Uuid,
+        approved_by: &str,
+    ) -> std::result::Result<policy::ApprovalDecision, approval::ApprovalError> {
+        let decision = policy::ApprovalDecision::Approved {
+            approved_by: approved_by.into(),
+            approved_at: chrono::Utc::now(),
+        };
+        self.approvals.decide(id, decision.clone()).await?;
+        Ok(decision)
+    }
+
+    /// Deny a pending request.
+    pub async fn deny(
+        &self,
+        id: uuid::Uuid,
+        reason: &str,
+    ) -> std::result::Result<policy::ApprovalDecision, approval::ApprovalError> {
+        let decision = policy::ApprovalDecision::Denied {
+            reason: reason.into(),
+        };
+        self.approvals.decide(id, decision.clone()).await?;
+        Ok(decision)
+    }
+
+    /// Current status of an approval request (`Pending` while undecided).
+    pub async fn approval_status(
+        &self,
+        id: uuid::Uuid,
+    ) -> std::result::Result<policy::ApprovalDecision, approval::ApprovalError> {
+        self.approvals.status(id).await
+    }
+
+    /// All requests still awaiting a decision.
+    pub async fn pending_approvals(&self) -> Vec<policy::ApprovalRequest> {
+        self.approvals.list_pending().await
     }
 
     /// Activate kill switch - denies all subsequent actions
