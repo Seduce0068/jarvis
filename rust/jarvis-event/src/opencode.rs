@@ -52,10 +52,7 @@ impl OpenCodeClient {
 
         let response = self
             .http
-            .post(format!(
-                "{}/api/session/{session_id}/prompt",
-                self.base_url
-            ))
+            .post(format!("{}/api/session/{session_id}/prompt", self.base_url))
             .json(&json!({ "text": prompt, "delivery": "queue" }))
             .send()
             .await
@@ -90,10 +87,7 @@ impl OpenCodeClient {
     async fn send_prompt(&self, session_id: &str, prompt: &str) -> Result<()> {
         let response = self
             .http
-            .post(format!(
-                "{}/api/session/{session_id}/prompt",
-                self.base_url
-            ))
+            .post(format!("{}/api/session/{session_id}/prompt", self.base_url))
             .json(&json!({ "text": prompt, "delivery": "queue" }))
             .send()
             .await
