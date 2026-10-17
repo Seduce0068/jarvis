@@ -24,4 +24,5 @@ jobs:
     with:
       apt_packages: |
         libssl-dev
+        protobuf-compiler
       working_directory: rust
