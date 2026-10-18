@@ -110,6 +110,29 @@ sudo systemctl status jarvis-* opencode code-server otelcol
 sudo journalctl -u jarvis-policy -f
 ```
 
+### Idle Compute Recovery
+
+Automatic `tofu apply` recovery is intentionally not enabled. The current
+production configuration uses a local `terraform.tfstate` backend, and that
+state is not stored in this repository. A timer on the OCI host cannot recover
+the host after OCI reclaims it; an external runner without the authoritative
+state could instead plan duplicate resources or incur charges.
+
+Before enabling unattended recovery, provide all of the following:
+
+- An external runner that remains available when the OCI host is absent.
+- A durable, access-controlled, backed-up state backend with locking, plus a
+  verified migration from the current state.
+- A least-privilege OCI identity available only to that runner.
+- A health check that distinguishes instance loss from transient network,
+  DNS, or OCI API failures.
+- Bounded retries, alerting, and a plan guard that permits only reviewed
+  recovery actions; ambiguous plans must stop for operator review.
+
+Until those prerequisites are satisfied, recover manually from the workstation:
+inspect `tofu plan` and the selected backup before applying or restoring. Do
+not automate `tofu apply` from a host-local timer or an ephemeral CI runner.
+
 ### Access
 
 - **code-server (IDE)**: `http://jarvis-host.tailnet.ts.net:8080` (pw in `/etc/jarvis/code-server-password`)
