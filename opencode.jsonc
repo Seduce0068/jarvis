@@ -1,5 +1,5 @@
 {
-  "model": "opencode/nemotron-3-ultra-free",
+  "model": "opencode/longcat-2.5-preview-free",
   "mcp": {
     "servers": {
       "jarvis-gateway": {
