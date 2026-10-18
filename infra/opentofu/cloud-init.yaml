@@ -81,11 +81,11 @@ write_files:
     permissions: "0600"
     content: |
       ${indent(6, file("${backup_script}"))}
-  - path: /home/jarvis/.config/opencode/config.toml
+  - path: /home/jarvis/.config/opencode/opencode.jsonc
     owner: "jarvis:jarvis"
     permissions: "0644"
     content: |
-      ${indent(6, file("${config_dir}/opencode/config.toml"))}
+      ${indent(6, file("${config_dir}/opencode/opencode.jsonc"))}
 
 # Directories
 runcmd:

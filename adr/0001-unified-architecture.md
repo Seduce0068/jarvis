@@ -130,7 +130,7 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 ### Phase 3: 統合・ポリシー適用 (Week 3-4)
 
-- [ ] OpenCode → `jarvis-policy` / `jarvis-mcp-gw` 連携 (MCP ツールとして登録)
+- [x] OpenCode → `jarvis-policy` / `jarvis-mcp-gw` 連携 (MCP ツールとして登録)
 - [x] キルスイッチ実装・テスト
 - [x] イベント駆動フロー: HA → jarvis-event → jarvis-context → OpenCode → Policy → MCP GW
 

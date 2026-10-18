@@ -125,6 +125,14 @@ policy-checked and must have an entry in `/etc/jarvis/mcp_allowlist.toml`
 - **Execute**: HTTP `POST /v1/execute` on `:8082` with
   `{"tool": "...", "args": {...}, "principal": "..."}`, or gRPC
   `jarvis.mcp.gateway.v1.McpGatewayService/ExecuteTool` on `:50052`.
+- **MCP server endpoint** (Streamable HTTP): `POST /mcp` on `:8082`,
+  served by the same process. OpenCode connects as a `remote` MCP server
+  (`oauth: false`): `tools/list` exposes the allowlist entries granted to
+  `JARVIS_MCP_GW_MCP_PRINCIPAL` (default `opencode`) and every
+  `tools/call` passes the same policy + allowlist checks as
+  `/v1/execute`. The principal is fixed server-side; clients cannot
+  choose it. The managed OpenCode config in
+  `infra/config/opencode/opencode.jsonc` wires the host up.
 - **Register an upstream MCP server** (gRPC only): the gateway spawns the
   command over stdio, discovers its tools via `tools/list`, and routes
   matching calls to it ahead of the sandbox fallback. Discovered tools are

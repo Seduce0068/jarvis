@@ -329,13 +329,19 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
 
     // OpenCode reads its config dir from OPENCODE_CONFIG_DIR (= ~/.config/opencode
     // in the unit), so install the managed config into the user's home as well.
-    let opencode_config = config_dir.join("opencode/config.toml");
+    let opencode_config = config_dir.join("opencode/opencode.jsonc");
     if opencode_config.exists() || runner.dry_run {
         info!("Deploying OpenCode config...");
         runner.stream_file(
             &remote_base,
             &opencode_config,
-            "/home/jarvis/.config/opencode/config.toml",
+            "/home/jarvis/.config/opencode/opencode.jsonc",
+        )?;
+        // Remove the legacy TOML config some hosts may still have from an
+        // earlier deploy; OpenCode only reads opencode.jsonc.
+        runner.ssh(
+            &remote_base,
+            "sudo rm -f /home/jarvis/.config/opencode/config.toml",
         )?;
     }
 
