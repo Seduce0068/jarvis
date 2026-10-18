@@ -61,7 +61,14 @@ cedar-policy = "4.13"
 casbin = "2.0"
 
 # MCP - use older stable version that works
-rmcp = { version = "0.3", features = ["server", "client", "transport-io", "transport-sse-client", "reqwest"] }
+rmcp = { version = "0.3", features = [
+    "server",
+    "client",
+    "transport-io",
+    "transport-child-process",
+    "transport-sse-client",
+    "reqwest",
+] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "migrate"] }
