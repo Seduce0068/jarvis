@@ -67,6 +67,29 @@ impl AllowList {
         self.allowed_principals.read().unwrap().contains(principal)
     }
 
+    /// Tools `principal` may call: the principal must be admitted, and each
+    /// returned tool entry must grant the principal. Sorted by name so tool
+    /// listings are deterministic.
+    pub fn tools_for_principal(&self, principal: &str) -> Vec<AllowedTool> {
+        if !self.is_principal_allowed(principal) {
+            return Vec::new();
+        }
+        let mut tools: Vec<AllowedTool> = self
+            .tool_configs
+            .read()
+            .unwrap()
+            .values()
+            .filter(|tool| {
+                tool.allowed_principals
+                    .iter()
+                    .any(|allowed| allowed == principal)
+            })
+            .cloned()
+            .collect();
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        tools
+    }
+
     pub fn add_tool(&self, tool: AllowedTool) {
         self.tools.write().unwrap().insert(tool.name.clone());
         self.tool_configs
@@ -105,5 +128,63 @@ mod tests {
             config.principals.contains("jarvis"),
             "expected the top-level principals list to deserialize"
         );
+    }
+
+    #[test]
+    fn tools_for_principal_filters_and_sorts() {
+        let config: AllowListConfig = toml::from_str(
+            r#"
+principals = ["alice", "bob"]
+
+[[tools]]
+name = "b.tool"
+description = "b"
+allowed_principals = ["alice", "bob"]
+max_args_size = 1
+timeout_ms = 1
+requires_approval = false
+
+[[tools]]
+name = "a.tool"
+description = "a"
+allowed_principals = ["alice"]
+max_args_size = 1
+timeout_ms = 1
+requires_approval = false
+
+[[tools]]
+name = "c.tool"
+description = "c"
+allowed_principals = ["carol"]
+max_args_size = 1
+timeout_ms = 1
+requires_approval = false
+"#,
+        )
+        .expect("test allowlist parses");
+
+        let mut tool_configs = std::collections::HashMap::new();
+        for tool in config.tools {
+            tool_configs.insert(tool.name.clone(), tool);
+        }
+        let allowlist = AllowList {
+            tools: std::sync::RwLock::new(HashSet::new()),
+            tool_configs: std::sync::RwLock::new(tool_configs),
+            allowed_principals: std::sync::RwLock::new(config.principals),
+        };
+
+        let names = |principal: &str| -> Vec<String> {
+            allowlist
+                .tools_for_principal(principal)
+                .into_iter()
+                .map(|tool| tool.name)
+                .collect()
+        };
+
+        assert_eq!(names("alice"), vec!["a.tool", "b.tool"]);
+        assert_eq!(names("bob"), vec!["b.tool"]);
+        // `carol` is granted tools but is not an admitted principal.
+        assert!(names("carol").is_empty());
+        assert!(names("nobody").is_empty());
     }
 }

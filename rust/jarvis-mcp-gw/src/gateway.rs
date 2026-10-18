@@ -118,7 +118,7 @@ impl Gateway {
     /// Split out of [`Self::register_mcp_server`] so tests can drive the
     /// same protocol path with an in-memory duplex instead of a child
     /// process.
-    async fn register_transport<T, E, A>(&self, name: &str, transport: T) -> Result<()>
+    pub(crate) async fn register_transport<T, E, A>(&self, name: &str, transport: T) -> Result<()>
     where
         T: IntoTransport<RoleClient, E, A>,
         E: std::error::Error + Send + Sync + 'static,
@@ -201,65 +201,8 @@ async fn call_registered_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testing::run_mock_mcp_server;
     use serde_json::json;
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-    /// Minimal MCP server speaking newline-delimited JSON-RPC over the
-    /// given stream. Advertises a single `echo` tool. `fail_calls` makes
-    /// `tools/call` answer with an MCP error result.
-    async fn run_mock_mcp_server(stream: tokio::io::DuplexStream, fail_calls: bool) {
-        let (read_half, mut write_half) = tokio::io::split(stream);
-        let mut lines = BufReader::new(read_half).lines();
-
-        while let Ok(Some(line)) = lines.next_line().await {
-            let message: Value = serde_json::from_str(&line).expect("valid JSON-RPC line");
-            let method = message["method"].as_str().unwrap_or_default();
-            let id = message.get("id").cloned();
-
-            let response = match method {
-                "initialize" => Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "protocolVersion": "2025-03-26",
-                        "capabilities": {},
-                        "serverInfo": { "name": "mock-server", "version": "0.1.0" }
-                    }
-                })),
-                "notifications/initialized" => None,
-                "tools/list" => Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "tools": [{
-                            "name": "echo",
-                            "description": "Echo back the arguments",
-                            "inputSchema": { "type": "object" }
-                        }]
-                    }
-                })),
-                "tools/call" => Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": id,
-                    "result": {
-                        "content": [{ "type": "text", "text": "pong" }],
-                        "isError": fail_calls
-                    }
-                })),
-                _ => None,
-            };
-
-            if let Some(response) = response {
-                let mut line = serde_json::to_string(&response).expect("serializable response");
-                line.push('\n');
-                write_half
-                    .write_all(line.as_bytes())
-                    .await
-                    .expect("write response");
-                write_half.flush().await.expect("flush response");
-            }
-        }
-    }
 
     const ECHO_ALLOWLIST: &str = r#"
 principals = ["test"]
@@ -296,7 +239,7 @@ requires_approval = false
         let gateway = test_gateway("routes").await;
 
         let (client_side, server_side) = tokio::io::duplex(8192);
-        tokio::spawn(run_mock_mcp_server(server_side, false));
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
 
         gateway
             .register_transport("mock", client_side)
@@ -322,14 +265,14 @@ requires_approval = false
         let gateway = test_gateway("replace").await;
 
         let (client_side, server_side) = tokio::io::duplex(8192);
-        tokio::spawn(run_mock_mcp_server(server_side, false));
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
         gateway
             .register_transport("mock", client_side)
             .await
             .unwrap();
 
         let (client_side, server_side) = tokio::io::duplex(8192);
-        tokio::spawn(run_mock_mcp_server(server_side, false));
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
         gateway
             .register_transport("mock", client_side)
             .await
@@ -358,7 +301,7 @@ requires_approval = false
         let gateway = test_gateway("errors").await;
 
         let (client_side, server_side) = tokio::io::duplex(8192);
-        tokio::spawn(run_mock_mcp_server(server_side, true));
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", true));
         gateway
             .register_transport("mock", client_side)
             .await

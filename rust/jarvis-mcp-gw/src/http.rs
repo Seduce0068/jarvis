@@ -6,6 +6,8 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
+use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
+use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::instrument;
@@ -23,10 +25,24 @@ struct ExecuteToolResponse {
 }
 
 pub fn router(gateway: Arc<McpGateway>) -> Router {
+    // OpenCode connects to this endpoint as a remote MCP server
+    // (`oauth: false`); the principal is fixed server-side.
+    let mcp_server = crate::mcp_server::JarvisMcpServer::new(
+        gateway.clone(),
+        gateway.mcp_principal().to_string(),
+    );
+    let mcp_service: StreamableHttpService<crate::mcp_server::JarvisMcpServer> =
+        StreamableHttpService::new(
+            move || Ok(mcp_server.clone()),
+            Arc::new(LocalSessionManager::default()),
+            StreamableHttpServerConfig::default(),
+        );
+
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/v1/execute", post(execute_tool))
+        .nest_service("/mcp", mcp_service)
         .with_state(gateway)
 }
 

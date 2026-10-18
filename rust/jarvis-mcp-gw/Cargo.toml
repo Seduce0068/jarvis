@@ -51,6 +51,7 @@ tonic-prost-build = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 mockall = { workspace = true }
+reqwest = { workspace = true }
 
 [[bin]]
 name = "jarvis-mcp-gw"

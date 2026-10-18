@@ -2277,6 +2277,7 @@ dependencies = [
  "proptest",
  "prost",
  "prost-types",
+ "reqwest 0.12.28",
  "rmcp",
  "secrecy",
  "serde",
@@ -4112,12 +4113,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f0d0d5493be0d181a62db489eab7838669b81885972ca00ceca893cf6ac2883"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "futures",
  "http",
+ "http-body",
+ "http-body-util",
  "paste",
  "pin-project-lite",
  "process-wrap",
+ "rand 0.9.5",
  "reqwest 0.12.28",
  "rmcp-macros",
  "schemars 1.2.2",
@@ -4128,7 +4133,9 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-service",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

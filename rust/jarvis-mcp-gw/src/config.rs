@@ -15,6 +15,10 @@ pub struct McpGatewayConfig {
     pub sandbox_type: SandboxType,
     pub sandbox_config: serde_json::Value,
     pub policy_grpc_addr: String,
+    /// Principal identity used for tool calls that arrive over the MCP
+    /// server endpoint (`/mcp`). Calls still pass policy and allowlist
+    /// checks; the client never chooses the principal.
+    pub mcp_principal: String,
 }
 
 impl McpGatewayConfig {
@@ -38,6 +42,7 @@ impl Default for McpGatewayConfig {
             sandbox_type: SandboxType::None,
             sandbox_config: serde_json::json!({}),
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
+            mcp_principal: "opencode".into(),
         }
     }
 }
