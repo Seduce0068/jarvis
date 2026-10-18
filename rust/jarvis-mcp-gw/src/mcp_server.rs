@@ -135,6 +135,14 @@ allowed_principals = ["jarvis"]
 max_args_size = 1048576
 timeout_ms = 5000
 requires_approval = true
+
+[[tools]]
+name = "shell.execute"
+description = "Execute a shell command"
+allowed_principals = ["opencode"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = true
 "#;
 
     /// Gateway over a throwaway allowlist with the shipped policy files.
@@ -214,7 +222,7 @@ requires_approval = true
         assert_eq!(
             names,
             vec!["filesystem.read"],
-            "only tools granted to the endpoint principal are listed"
+            "only non-approval tools granted to the endpoint principal are listed"
         );
 
         let result = client
@@ -268,5 +276,22 @@ requires_approval = true
         assert_eq!(result.is_error, Some(true));
         let text = first_text(&result);
         assert!(text.contains("Policy denied"), "unexpected: {text}");
+
+        // The allowlist grants this tool to OpenCode, but marks it as
+        // approval-required. No approval flow is connected to execution.
+        let result = client
+            .peer()
+            .call_tool(CallToolRequestParam {
+                name: "shell.execute".into(),
+                arguments: Some(serde_json::Map::new()),
+            })
+            .await
+            .expect("approval requirement is reported as a tool result");
+        assert_eq!(result.is_error, Some(true));
+        let text = first_text(&result);
+        assert!(
+            text.contains("requires human approval"),
+            "unexpected: {text}"
+        );
     }
 }

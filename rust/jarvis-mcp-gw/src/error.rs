@@ -10,6 +10,11 @@ pub enum McpGatewayError {
     #[error("Principal '{principal}' is not allowed to execute tool '{tool}'")]
     PrincipalNotAllowed { principal: String, tool: String },
 
+    #[error(
+        "Tool '{tool}' requires human approval, but approval is not wired to this execution path"
+    )]
+    ApprovalRequired { tool: String },
+
     #[error("Sandbox error: {0}")]
     Sandbox(String),
 

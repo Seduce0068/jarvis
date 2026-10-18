@@ -80,9 +80,11 @@ impl AllowList {
             .unwrap()
             .values()
             .filter(|tool| {
-                tool.allowed_principals
-                    .iter()
-                    .any(|allowed| allowed == principal)
+                !tool.requires_approval
+                    && tool
+                        .allowed_principals
+                        .iter()
+                        .any(|allowed| allowed == principal)
             })
             .cloned()
             .collect();

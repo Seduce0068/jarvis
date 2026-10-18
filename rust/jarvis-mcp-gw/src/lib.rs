@@ -90,6 +90,12 @@ impl McpGateway {
             }
             .into());
         }
+        if tool_config.requires_approval {
+            return Err(error::McpGatewayError::ApprovalRequired {
+                tool: tool.to_owned(),
+            }
+            .into());
+        }
 
         // Route to a registered MCP server or the sandbox fallback.
         self.gateway.execute(tool, args).await
