@@ -116,6 +116,29 @@ sudo journalctl -u jarvis-policy -f
 - **OpenCode Web**: `http://jarvis-host.tailnet.ts.net:49374`
 - **Metrics**: Policy `:8081`, MCP GW `:8082`, Event `:8083`, Context `:8084`
 
+### MCP Gateway
+
+`jarvis-mcp-gw` is the execution path for MCP tools: every call is
+policy-checked and must have an entry in `/etc/jarvis/mcp_allowlist.toml`
+(a missing or malformed allowlist aborts startup).
+
+- **Execute**: HTTP `POST /v1/execute` on `:8082` with
+  `{"tool": "...", "args": {...}, "principal": "..."}`, or gRPC
+  `jarvis.mcp.gateway.v1.McpGatewayService/ExecuteTool` on `:50052`.
+- **Register an upstream MCP server** (gRPC only): the gateway spawns the
+  command over stdio, discovers its tools via `tools/list`, and routes
+  matching calls to it ahead of the sandbox fallback. Discovered tools are
+  not allowlisted automatically; registrations live in memory only, so
+  re-register after a gateway restart.
+
+```bash
+# grpcurl is not provisioned by cloud-init yet; install it on the host first.
+grpcurl -plaintext \
+  -d '{"name": "filesystem",
+       "command": ["/usr/local/bin/mcp-server-filesystem"]}' \
+  localhost:50052 jarvis.mcp.gateway.v1.McpGatewayService/RegisterMcpServer
+```
+
 ### Secret Management
 
 Secrets use **1Password CLI** references (`op://`):
