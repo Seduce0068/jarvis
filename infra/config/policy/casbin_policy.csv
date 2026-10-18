@@ -1,6 +1,9 @@
 # JARVIS Casbin Policy Rules
 # Format: p, subject, object, action
 # Format: g, user, role
+#
+# Gateway capabilities use the canonical resource form `tool:<name>`,
+# matching the tool names in infra/config/mcp_allowlist.toml.
 
 # Admin role: unrestricted (mirrors the Cedar jarvis_admin permit)
 p, admin, *, *
@@ -14,12 +17,12 @@ p, user, tool:git.status, execute
 p, user, tool:git.diff, execute
 p, user, tool:git.commit, execute
 p, user, tool:github.create_pr, execute
-p, user, service:homeassistant.get_state, execute
-p, user, service:homeassistant.call_service, execute
-p, user, service:android.get_device_info, execute
-p, user, service:android.send_notification, execute
-p, user, web.search, execute
-p, user, web.fetch, execute
+p, user, tool:homeassistant.get_state, execute
+p, user, tool:homeassistant.call_service, execute
+p, user, tool:android.get_device_info, execute
+p, user, tool:android.send_notification, execute
+p, user, tool:web.search, execute
+p, user, tool:web.fetch, execute
 g, jarvis_user, user
 
 # Agent (JARVIS) role - limited, requires approval for most actions
@@ -27,11 +30,26 @@ p, agent, tool:filesystem.read, execute
 p, agent, tool:filesystem.list, execute
 p, agent, tool:git.status, execute
 p, agent, tool:git.diff, execute
-p, agent, service:homeassistant.get_state, execute
-p, agent, service:android.get_device_info, execute
-p, agent, web.search, execute
-p, agent, web.fetch, execute
+p, agent, tool:homeassistant.get_state, execute
+p, agent, tool:android.get_device_info, execute
+p, agent, tool:web.search, execute
+p, agent, tool:web.fetch, execute
 g, jarvis, agent
+
+# OpenCode agent role - mirrors the `opencode` grants in mcp_allowlist.toml
+# (the allowlist still has to grant each tool to the opencode principal)
+p, opencode-agent, tool:filesystem.read, execute
+p, opencode-agent, tool:filesystem.write, execute
+p, opencode-agent, tool:filesystem.list, execute
+p, opencode-agent, tool:shell.execute, execute
+p, opencode-agent, tool:git.status, execute
+p, opencode-agent, tool:git.diff, execute
+p, opencode-agent, tool:git.commit, execute
+p, opencode-agent, tool:github.create_pr, execute
+p, opencode-agent, tool:homeassistant.get_state, execute
+p, opencode-agent, tool:web.search, execute
+p, opencode-agent, tool:web.fetch, execute
+g, opencode, opencode-agent
 
 # System role: internal operations (mirrors the Cedar jarvis_system permit)
 p, system, *, *

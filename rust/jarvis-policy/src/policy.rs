@@ -418,7 +418,11 @@ mod tests {
                 .enforce("jarvis", "execute", "tool:filesystem.read")
                 .await?
         );
-        assert!(enforcer.enforce("jarvis", "execute", "web.search").await?);
+        assert!(
+            enforcer
+                .enforce("jarvis", "execute", "tool:web.search")
+                .await?
+        );
         assert!(
             enforcer
                 .enforce("jarvis_user", "execute", "tool:filesystem.write")
@@ -433,6 +437,30 @@ mod tests {
         assert!(
             !enforcer
                 .enforce("unknown", "execute", "tool:filesystem.read")
+                .await?
+        );
+
+        // The opencode principal carries a dedicated role mirroring the
+        // `opencode` grants in mcp_allowlist.toml; the gateway exposes the
+        // role to OpenCode over MCP.
+        assert!(
+            enforcer
+                .enforce("opencode", "execute", "tool:filesystem.write")
+                .await?
+        );
+        assert!(
+            enforcer
+                .enforce("opencode", "execute", "tool:shell.execute")
+                .await?
+        );
+        assert!(
+            !enforcer
+                .enforce("opencode", "execute", "tool:homeassistant.call_service")
+                .await?
+        );
+        assert!(
+            !enforcer
+                .enforce("opencode", "execute", "tool:android.send_notification")
                 .await?
         );
 
