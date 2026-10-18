@@ -1,5 +1,12 @@
 # JARVIS MCP Allowlist Configuration
 # Tools allowed to be executed via MCP Gateway
+#
+# NOTE: top-level keys must come before the first [[tools]] header - in TOML
+# any key placed after a table header belongs to that table, which would make
+# the configuration fail to parse.
+
+# Principals allowed to use MCP Gateway
+principals = ["jarvis", "opencode", "user"]
 
 [[tools]]
 name = "filesystem.read"
@@ -126,6 +133,3 @@ max_args_size = 5242880
 timeout_ms = 30000
 requires_approval = false
 sandbox_type = "none"
-
-# Principals allowed to use MCP Gateway
-principals = ["jarvis", "opencode", "user"]

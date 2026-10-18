@@ -1,6 +1,6 @@
 //! Allowlist management for MCP tools
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tokio::fs;
@@ -29,10 +29,14 @@ pub struct AllowList {
 
 impl AllowList {
     pub async fn new(config: &crate::config::McpGatewayConfig) -> Result<Self> {
+        // Fail loudly on a missing or malformed allowlist: silently
+        // defaulting to an empty allowlist would leave the gateway running
+        // while denying every tool, and would hide configuration typos.
         let content = fs::read_to_string(&config.allowlist_path)
             .await
-            .unwrap_or_default();
-        let allowlist_config: AllowListConfig = toml::from_str(&content).unwrap_or_default();
+            .with_context(|| format!("failed to read allowlist: {}", config.allowlist_path))?;
+        let allowlist_config: AllowListConfig = toml::from_str(&content)
+            .with_context(|| format!("failed to parse allowlist: {}", config.allowlist_path))?;
 
         let mut tools = HashSet::new();
         let mut tool_configs = std::collections::HashMap::new();
@@ -74,5 +78,32 @@ impl AllowList {
     pub fn remove_tool(&self, tool: &str) {
         self.tools.write().unwrap().remove(tool);
         self.tool_configs.write().unwrap().remove(tool);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shipped allowlist must parse. A malformed file now aborts
+    /// startup instead of silently yielding an empty allowlist, and TOML
+    /// attaches any key after a table header to that table (which is how
+    /// `principals` ended up inside the last `[[tools]]` entry before).
+    #[test]
+    fn shipped_allowlist_configuration_parses() {
+        let shipped = include_str!("../../../infra/config/mcp_allowlist.toml");
+        let config: AllowListConfig = toml::from_str(shipped).expect("shipped allowlist parses");
+
+        assert!(
+            config
+                .tools
+                .iter()
+                .any(|tool| tool.name == "filesystem.read"),
+            "expected the shipped tool entries to deserialize"
+        );
+        assert!(
+            config.principals.contains("jarvis"),
+            "expected the top-level principals list to deserialize"
+        );
     }
 }
