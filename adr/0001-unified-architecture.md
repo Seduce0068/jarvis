@@ -105,6 +105,9 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 ## Implementation Plan
 
+> 進捗メモ (2026-10-18): `[x]` はリポジトリ成果物としての実装完了を示す。
+> 実機 (OCI) での稼働・疎通確認はデプロイ時に別途行う。
+
 ### Phase 0: 統合基盤 (Week 1)
 
 - [ ] この ADR 承認・マージ
@@ -113,29 +116,29 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 ### Phase 1: 開発環境 + Agent Runtime (Week 1-2)
 
-- [ ] code-server systemd 化
-- [ ] OpenCode V2 インストール・`opencode serve` systemd 化
+- [x] code-server systemd 化
+- [x] OpenCode V2 インストール・`opencode serve` systemd 化
 - [ ] 同一ワークスペース (`~/repos`) 共有確認
 
 ### Phase 2: JARVIS Rust サービス雛形 (Week 2-3)
 
-- [ ] Cargo ワークスペース作成 (`rust/`)
-- [ ] `jarvis-policy` (Cedar ポリシー + gRPC)
-- [ ] `jarvis-mcp-gw` (rmcp + allowlist)
-- [ ] `jarvis-event` (HA/Android Webhook 受信 → 統一イベント)
-- [ ] `jarvis-context` (PostgreSQL/Qdrant クライアント + PIIフィルタ)
+- [x] Cargo ワークスペース作成 (`rust/`)
+- [x] `jarvis-policy` (Cedar ポリシー + gRPC)
+- [x] `jarvis-mcp-gw` (rmcp + allowlist)
+- [x] `jarvis-event` (HA/Android Webhook 受信 → 統一イベント)
+- [x] `jarvis-context` (PostgreSQL/Qdrant クライアント + PIIフィルタ)
 
 ### Phase 3: 統合・ポリシー適用 (Week 3-4)
 
 - [ ] OpenCode → `jarvis-policy` / `jarvis-mcp-gw` 連携 (MCP ツールとして登録)
-- [ ] キルスイッチ実装・テスト
-- [ ] イベント駆動フロー: HA → jarvis-event → jarvis-context → OpenCode → Policy → MCP GW
+- [x] キルスイッチ実装・テスト
+- [x] イベント駆動フロー: HA → jarvis-event → jarvis-context → OpenCode → Policy → MCP GW
 
 ### Phase 4: 観測性・DR・自動化 (Week 4-5)
 
-- [ ] OpenTelemetry Collector 導入
+- [x] OpenTelemetry Collector 導入
 - [ ] Grafana Cloud ダッシュボード/アラート
-- [ ] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル)
+- [x] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル)
 - [ ] Idle Compute 対策: ヘルスチェック + `tofu apply` 自動再実行 (systemd timer)
 - [ ] review-flow CI ゲート統合
 
