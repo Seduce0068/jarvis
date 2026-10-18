@@ -37,7 +37,7 @@ infra/
 │   │   ├── casbin_model.conf
 │   │   └── casbin_policy.csv
 │   ├── opencode/               # OpenCode V2 config
-│   │   └── config.toml
+│   │   └── opencode.jsonc
 │   ├── otelcol-config.yaml     # OpenTelemetry Collector
 │   ├── policy.env              # Policy Engine env (1Password)
 │   ├── mcp_gateway.env         # MCP Gateway env (1Password)
