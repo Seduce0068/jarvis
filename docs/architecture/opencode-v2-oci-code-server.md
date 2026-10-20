@@ -19,6 +19,10 @@ status: "draft"
 stale_after: "2026-11-04T13:23:00+09:00"
 ---
 
+> **Status: incorporated.** This report is an input to ADR-0001 and is kept
+> for context. The unified architecture is defined in
+> [ADR-0001](../../adr/0001-unified-architecture.md).
+
 ## エグゼクティブサマリー
 
 現時点の推奨構成は、**OCI Always Free上に `code-server` と

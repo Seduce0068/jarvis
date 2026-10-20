@@ -18,6 +18,11 @@ generated:
 status: draft
 ---
 
+> **Status: superseded.** This document predates ADR-0001 and is kept for
+> historical context. The current architecture is defined in
+> [ADR-0001](../../adr/0001-unified-architecture.md). References to OpenClaw
+> describe the earlier design; OpenCode V2 is the current agent runtime.
+
 ## 目的
 
 私生活を常時ポーリングするのではなく、スマホ・メール・予定・
