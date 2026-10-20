@@ -52,7 +52,7 @@ struct Args {
     #[arg(long)]
     dry_run: bool,
     #[arg(long)]
-    skip_openclaw: bool,
+    skip_opencode: bool,
     #[arg(long)]
     skip_android_mcp: bool,
     #[arg(long)]
@@ -91,11 +91,11 @@ fn bootstrap_server(args: &Args, root: &Path, source_root: &Path) -> Result<()> 
     }
     install_linux_packages(args)?;
     create_layout(args, root, source_root, true)?;
-    install_openclaw(args)?;
+    install_opencode(args)?;
+    println!("Server bootstrap complete. Run `opencode auth login` to connect providers.");
     println!(
-        "Server bootstrap complete. Run `openclaw onboard --install-daemon` and `openclaw doctor`."
+        "Start the agent runtime with `opencode serve` and keep it loopback-only behind Tailscale."
     );
-    println!("Keep the OpenClaw Gateway private; use Tailscale, WireGuard, or an SSH tunnel.");
     Ok(())
 }
 
@@ -239,15 +239,15 @@ fn copy_tool(source_root: &Path, source: &str, destination: &Path) -> Result<()>
     Ok(())
 }
 
-fn install_openclaw(args: &Args) -> Result<()> {
-    if args.skip_openclaw || executable_on_path("openclaw") {
+fn install_opencode(args: &Args) -> Result<()> {
+    if args.skip_opencode || executable_on_path("opencode") {
         return Ok(());
     }
     if args.dry_run {
-        println!("DRY RUN: download official OpenClaw installer and run with --no-onboard");
+        println!("DRY RUN: download official OpenCode installer and run it");
         return Ok(());
     }
-    let installer = env::temp_dir().join(format!("jarvis-openclaw-install-{}", std::process::id()));
+    let installer = env::temp_dir().join(format!("jarvis-opencode-install-{}", std::process::id()));
     let status = Command::new("curl")
         .args([
             "--fail",
@@ -256,20 +256,21 @@ fn install_openclaw(args: &Args) -> Result<()> {
             "--proto",
             "=https",
             "--tlsv1.2",
-            "https://openclaw.ai/install.sh",
+            "https://opencode.ai/v2/install",
             "--output",
         ])
         .arg(&installer)
         .status()
-        .context("download OpenClaw installer")?;
+        .context("download OpenCode installer")?;
     ensure_success(status, "curl installer")?;
     let status = Command::new("bash")
         .arg(&installer)
-        .arg("--no-onboard")
         .status()
-        .context("execute OpenClaw installer")?;
+        .context("execute OpenCode installer")?;
     let _ = fs::remove_file(&installer);
-    ensure_success(status, "OpenClaw installer")
+    ensure_success(status, "OpenCode installer")?;
+    println!("OpenCode installed under ~/.local/bin; ensure that directory is on PATH.");
+    Ok(())
 }
 
 fn bootstrap_termux(args: &Args, root: &Path, source_root: &Path) -> Result<()> {

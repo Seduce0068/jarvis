@@ -17,7 +17,7 @@ fn main() {
     println!("{:<24} status", "component");
     println!("{:-<24} {:-<16}", "", "");
 
-    report_command_version("OpenClaw", "openclaw", &["--version"], "installed");
+    report_command_version("OpenCode", "opencode", &["--version"], "installed");
     for command in ["curl", "git", "jq", "python3"] {
         report_command(command, command, "OK");
     }
