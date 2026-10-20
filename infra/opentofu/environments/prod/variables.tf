@@ -11,7 +11,7 @@ variable "compartment_id" {
 
 variable "availability_domain" {
   type        = string
-  description = "Availability Domain"
+  description = "Availability Domain (empty = auto-select the first AD; compartment_id must be a tenancy OCID for discovery)"
   default     = ""
 }
 

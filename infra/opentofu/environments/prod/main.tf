@@ -20,6 +20,18 @@ provider "oci" {
   # Authentication via ~/.oci/config or environment variables
 }
 
+# Availability Domain discovery (when not explicitly provided).
+# The identity data source expects a tenancy OCID; if compartment_id is a
+# child compartment, set availability_domain explicitly in terraform.tfvars.
+data "oci_identity_availability_domains" "this" {
+  count          = var.availability_domain == "" ? 1 : 0
+  compartment_id = var.compartment_id
+}
+
+locals {
+  availability_domain = var.availability_domain != "" ? var.availability_domain : data.oci_identity_availability_domains.this[0].availability_domains[0].name
+}
+
 # Object Storage namespace (used for backup/log buckets)
 data "oci_objectstorage_namespace" "this" {
   compartment_id = var.compartment_id
@@ -32,7 +44,7 @@ module "network" {
   compartment_id      = var.compartment_id
   vcn_cidr            = var.vcn_cidr
   subnet_cidr         = var.subnet_cidr
-  availability_domain = var.availability_domain
+  availability_domain = local.availability_domain
 
   tags = var.common_tags
 }
@@ -56,7 +68,7 @@ module "compute" {
   source = "../../modules/compute"
 
   compartment_id      = var.compartment_id
-  availability_domain = var.availability_domain
+  availability_domain = local.availability_domain
   subnet_id           = module.network.subnet_id
   nsg_ids             = [module.security.nsg_id]
 
@@ -66,7 +78,7 @@ module "compute" {
   boot_volume_size_gbs = var.boot_volume_size_gbs
 
   ssh_public_key     = var.ssh_public_key
-  cloud_init_path    = "${path.module}/cloud-init.yaml"
+  cloud_init_path    = "${path.module}/../../cloud-init.yaml"
   tailscale_auth_key = var.tailscale_auth_key
 
   tags = var.common_tags
@@ -77,7 +89,7 @@ module "storage" {
   source = "../../modules/storage"
 
   compartment_id      = var.compartment_id
-  availability_domain = var.availability_domain
+  availability_domain = local.availability_domain
 
   block_volume_size_gbs = var.block_volume_size_gbs
   backup_policy_id      = var.backup_policy_id
