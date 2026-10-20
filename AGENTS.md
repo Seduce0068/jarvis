@@ -39,8 +39,8 @@ jarvis/
 │   ├── scripts/                  # Compatibility launchers for rust-script tools
 │   ├── config/                   # Config templates (pii_patterns, mcp_allowlist, policies)
 │   └── cloud-init.yaml           # OCI instance initialization
-├── ci/                           # CI/CD pipelines
-│   └── review-gate.yml           # GitHub Actions with review-flow
+├── ci/                           # Review-flow pipeline definitions
+│   └── review-gate.yml           # review-flow pipeline (not wired to Actions yet)
 ├── jarvis_personal_ai_architecture.md
 └── opencode-v2-oci-code-server-architecture-report.md
 ```
@@ -89,9 +89,16 @@ tofu apply -var-file=terraform.tfvars
 ../../scripts/deploy.sh jarvis-host
 ```
 
-### CI/CD (GitHub Actions + review-flow)
+### CI/CD
 
-The `ci/review-gate.yml` implements a 3-stage pipeline:
+Pushes to `master` and pull requests run `.github/workflows/ci.yml`, which
+delegates to the shared `onoderakeita/workflows` `rust-gates.yml@v1` workflow
+(fmt, check, test, clippy) with `working_directory: rust`.
+
+`ci/review-gate.yml` defines a 3-stage review pipeline (automated gates, cross
+review, merge gate), but it is not wired into `.github/workflows/` yet because
+it requires OpenCode credentials and a runner with the JARVIS toolchain. Run it
+manually:
 
 1. **Stage 1 - Automated Gates** (lint, typecheck, test, build, vuln scan, secret scan)
 2. **Stage 2 - Cross Review** (security, arch, ops subagents in parallel)
