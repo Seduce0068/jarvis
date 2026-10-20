@@ -34,5 +34,14 @@ Thumbs.db
 *.temp
 .tmp/
 
+# OpenTofu / Terraform state and secrets
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.tfvars
+*.tfvars.json
+crash.log
+
 /rust/target/
 .env
