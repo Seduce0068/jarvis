@@ -23,10 +23,6 @@ fn main() {
     }
     report_command("Tailscale", "tailscale", "installed");
     report_path("jarvis.env", &format!("{root}/config/jarvis.env"));
-    report_path(
-        "tool-policy.json",
-        &format!("{root}/policies/tool-policy.json"),
-    );
 }
 
 fn report_command(label: &str, command: &str, success: &str) {

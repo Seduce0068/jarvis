@@ -56,5 +56,4 @@ init-config: ## テンプレートから設定ファイルを初期生成
 	@mkdir -p $(JARVIS_ROOT)/config $(JARVIS_ROOT)/policies
 	@[ -f $(JARVIS_ROOT)/config/jarvis.env ] || cp config/templates/jarvis.env.example $(JARVIS_ROOT)/config/jarvis.env && chmod 600 $(JARVIS_ROOT)/config/jarvis.env
 	@[ -f $(JARVIS_ROOT)/config/mobile.env ] || cp config/templates/mobile.env.example $(JARVIS_ROOT)/config/mobile.env && chmod 600 $(JARVIS_ROOT)/config/mobile.env
-	@[ -f $(JARVIS_ROOT)/policies/tool-policy.json ] || cp config/templates/tool-policy.json $(JARVIS_ROOT)/policies/tool-policy.json
 	@echo "Config initialized at $(JARVIS_ROOT)"

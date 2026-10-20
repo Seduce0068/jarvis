@@ -24,18 +24,6 @@ const SERVER_ENV: &str = r#"# Do not commit this file.
 # OPENROUTER_API_KEY=
 "#;
 
-const TOOL_POLICY: &str = r#"{
-  "default": "deny",
-  "classes": {
-    "read_only": {"decision": "allow"},
-    "notify": {"decision": "allow"},
-    "write_low_risk": {"decision": "approval_required"},
-    "external_side_effect": {"decision": "approval_required"},
-    "financial": {"decision": "deny_without_explicit_session_approval"}
-  }
-}
-"#;
-
 const MOBILE_ENV: &str = r#"# Generated placeholder; keep Android MCP private.
 ANDROID_MCP_BIND=127.0.0.1
 ANDROID_MCP_PORT=8765
@@ -193,7 +181,6 @@ fn create_layout(args: &Args, root: &Path, source_root: &Path, server: bool) -> 
 
     if server {
         write_private(&root.join("config/jarvis.env"), SERVER_ENV)?;
-        fs::write(root.join("policies/tool-policy.json"), TOOL_POLICY)?;
         copy_tool(
             source_root,
             "scripts/doctor/jarvis-doctor.rs",
