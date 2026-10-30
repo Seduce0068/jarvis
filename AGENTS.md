@@ -13,6 +13,16 @@ generated:
   at: "2026-10-09T00:00:00+09:00"
 ---
 
+## Global Settings
+
+- Common rules are inherited from the global `~/.config/opencode/AGENTS.md`.
+- This file records only project-specific deltas. Do not duplicate global
+  rules; override them only where this project differs.
+- The global TODO list is `~/.config/opencode/todo.md`. Keep cross-project
+  tasks there and track project-specific tasks in this repository.
+- If this file conflicts with the global rules, the project-specific
+  statement here takes precedence.
+
 ## Overview
 
 - **Repository:** `jarvis` — JARVIS Personal AI System
