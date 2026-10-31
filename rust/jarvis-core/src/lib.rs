@@ -129,3 +129,80 @@ impl std::str::FromStr for EventSource {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn all_sources() -> [EventSource; 7] {
+        [
+            EventSource::HomeAssistant,
+            EventSource::Android,
+            EventSource::Gmail,
+            EventSource::Calendar,
+            EventSource::Web,
+            EventSource::Finance,
+            EventSource::Manual,
+        ]
+    }
+
+    #[test]
+    fn event_source_round_trips_through_display_and_from_str() {
+        for source in all_sources() {
+            let rendered = source.to_string();
+            let parsed = rendered
+                .parse::<EventSource>()
+                .unwrap_or_else(|error| panic!("{rendered} does not parse: {error}"));
+            assert_eq!(parsed, source);
+        }
+    }
+
+    #[test]
+    fn from_str_is_case_insensitive() {
+        assert_eq!(
+            "HOME_ASSISTANT".parse::<EventSource>().expect("uppercase"),
+            EventSource::HomeAssistant
+        );
+    }
+
+    #[test]
+    fn unknown_event_source_is_rejected() {
+        assert!("mqtt".parse::<EventSource>().is_err());
+    }
+
+    #[test]
+    fn unified_event_serializes_the_source_as_snake_case() {
+        let event = UnifiedEvent {
+            id: Uuid::nil(),
+            source: EventSource::HomeAssistant,
+            event_type: "state_changed".into(),
+            payload: serde_json::json!({ "entity_id": "light.kitchen" }),
+            timestamp: DateTime::from_timestamp(0, 0).expect("valid timestamp"),
+            correlation_id: "corr-1".into(),
+        };
+
+        let json = serde_json::to_value(&event).expect("event serializes");
+        assert_eq!(json["source"], "home_assistant");
+        assert_eq!(json["event_type"], "state_changed");
+    }
+
+    #[test]
+    fn memory_entry_round_trips() {
+        let memory = MemoryEntry {
+            id: Uuid::nil(),
+            content: "remember this".into(),
+            embedding: vec![0.25, 0.5],
+            metadata: serde_json::json!({ "kind": "note" }),
+            source: "test".into(),
+            created_at: DateTime::from_timestamp(0, 0).expect("valid timestamp"),
+            updated_at: DateTime::from_timestamp(0, 0).expect("valid timestamp"),
+            expires_at: None,
+        };
+
+        let encoded = serde_json::to_string(&memory).expect("memory serializes");
+        let decoded: MemoryEntry = serde_json::from_str(&encoded).expect("memory parses");
+        assert_eq!(decoded.content, memory.content);
+        assert_eq!(decoded.embedding, memory.embedding);
+        assert_eq!(decoded.metadata, memory.metadata);
+    }
+}
