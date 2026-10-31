@@ -21,9 +21,6 @@ pub enum McpGatewayError {
     #[error("MCP protocol error: {0}")]
     Mcp(#[from] rmcp::ErrorData),
 
-    #[error("Policy error: {0}")]
-    Policy(#[from] jarvis_policy::error::PolicyError),
-
     #[error("Configuration error: {0}")]
     Config(#[from] anyhow::Error),
 

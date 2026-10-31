@@ -19,7 +19,6 @@ pub struct ContextConfig {
     pub embedding_url: Option<String>,
     pub pii_patterns_path: String,
     pub max_context_tokens: usize,
-    pub policy_grpc_addr: String,
 }
 
 impl ContextConfig {
@@ -60,7 +59,6 @@ impl Default for ContextConfig {
             embedding_url: None,
             pii_patterns_path: "/etc/jarvis/pii_patterns.toml".into(),
             max_context_tokens: 8000,
-            policy_grpc_addr: "http://127.0.0.1:50051".into(),
         }
     }
 }

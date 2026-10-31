@@ -92,6 +92,9 @@ runcmd:
   # Create directories
   - mkdir -p /opt/jarvis/{backups,bin,data,logs,scripts,rust}
   - mkdir -p /opt/jarvis/data/qdrant
+  # Kill-switch state must survive policy restarts.
+  - mkdir -p /var/lib/jarvis
+  - chown jarvis:jarvis /var/lib/jarvis
   - mkdir -p /home/jarvis/repos
   # XDG dirs required by systemd ReadWritePaths (services start fails if missing)
   - mkdir -p /home/jarvis/.config/opencode /home/jarvis/.config/code-server /home/jarvis/.config/rclone

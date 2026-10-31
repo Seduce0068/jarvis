@@ -2,12 +2,15 @@
 //! Cedar/Casbin-based authorization with approval gates and kill switch.
 
 pub mod approval;
+pub mod client;
 pub mod config;
 pub mod error;
 pub mod grpc;
 pub mod http;
 pub mod kill_switch;
 pub mod policy;
+
+pub use client::PolicyClient;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -34,6 +37,10 @@ impl PolicyEngine {
         );
         let kill_switch = Arc::new(kill_switch::KillSwitch::new(
             &config.kill_switch_admin_token,
+            config
+                .kill_switch_state_path
+                .as_ref()
+                .map(std::path::PathBuf::from),
         ));
         if config.kill_switch_admin_token() == "changeme" {
             tracing::warn!(

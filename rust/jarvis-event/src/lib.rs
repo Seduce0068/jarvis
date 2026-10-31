@@ -18,16 +18,14 @@ pub struct EventNormalizer {
     normalizer: Arc<normalizer::Normalizer>,
     ha_client: Arc<sources::HomeAssistantClient>,
     android_client: Arc<sources::AndroidClient>,
-    policy_client: Arc<jarvis_policy::PolicyEngine>,
+    policy_client: Arc<jarvis_policy::PolicyClient>,
     opencode: Arc<opencode::OpenCodeClient>,
     context_client: Arc<jarvis_context::ContextBuilder>,
 }
 
 impl EventNormalizer {
     pub async fn new(config: config::EventConfig) -> Result<Self> {
-        let policy_client = Arc::new(
-            jarvis_policy::PolicyEngine::new(jarvis_policy::config::PolicyConfig::load()?).await?,
-        );
+        let policy_client = Arc::new(jarvis_policy::PolicyClient::new(&config.policy_grpc_addr)?);
 
         let context_client = Arc::new(
             jarvis_context::ContextBuilder::new(jarvis_context::config::ContextConfig::load()?)

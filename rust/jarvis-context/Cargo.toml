@@ -46,9 +46,6 @@ tonic = { workspace = true }
 prost = { workspace = true }
 tonic-prost = { workspace = true }
 
-# Policy client
-jarvis-policy = { path = "../jarvis-policy" }
-
 # Core types
 jarvis-core = { path = "../jarvis-core" }
 

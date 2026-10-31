@@ -110,3 +110,26 @@ pub async fn serve(engine: Arc<PolicyEngine>, addr: std::net::SocketAddr) -> any
         .await?;
     Ok(())
 }
+
+/// Serve on an already-bound listener.
+///
+/// Tests use this to bind an ephemeral port and learn its address before the
+/// server starts.
+pub async fn serve_with_listener(
+    engine: Arc<PolicyEngine>,
+    listener: tokio::net::TcpListener,
+) -> anyhow::Result<()> {
+    let incoming = futures_util::stream::unfold(listener, |listener| async move {
+        match listener.accept().await {
+            Ok((stream, _)) => Some((Ok::<_, std::io::Error>(stream), listener)),
+            Err(error) => Some((Err(error), listener)),
+        }
+    });
+
+    let service = GrpcPolicyService { engine };
+    tonic::transport::Server::builder()
+        .add_service(PolicyServiceServer::new(service))
+        .serve_with_incoming(incoming)
+        .await?;
+    Ok(())
+}

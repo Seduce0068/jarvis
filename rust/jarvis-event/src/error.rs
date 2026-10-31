@@ -10,9 +10,6 @@ pub enum EventError {
     #[error("Android MCP error: {0}")]
     AndroidMcp(String),
 
-    #[error("Policy error: {0}")]
-    Policy(#[from] jarvis_policy::error::PolicyError),
-
     #[error("Context error: {0}")]
     Context(#[from] jarvis_context::error::ContextError),
 

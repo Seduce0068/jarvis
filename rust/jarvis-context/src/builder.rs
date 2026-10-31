@@ -15,8 +15,6 @@ pub struct Builder {
     qdrant_client: Arc<Qdrant>,
     pii_filter: Arc<crate::pii::PiiFilter>,
     embedding: crate::embedding::EmbeddingClient,
-    #[allow(dead_code)]
-    policy_client: Arc<jarvis_policy::PolicyEngine>,
 }
 
 impl Builder {
@@ -25,7 +23,6 @@ impl Builder {
         pg_pool: Arc<deadpool_postgres::Pool>,
         qdrant_client: Arc<Qdrant>,
         pii_filter: Arc<crate::pii::PiiFilter>,
-        policy_client: Arc<jarvis_policy::PolicyEngine>,
     ) -> Result<Self> {
         // Ensure collection exists
         memory::ensure_collection(&qdrant_client, &config.collection_name).await?;
@@ -44,7 +41,6 @@ impl Builder {
             qdrant_client,
             pii_filter,
             embedding,
-            policy_client,
         })
     }
 

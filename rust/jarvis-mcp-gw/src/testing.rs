@@ -3,10 +3,11 @@
 //! Compiled only for tests; keeps the MCP protocol mock and policy wiring
 //! in one place instead of per-module copies.
 
-use jarvis_policy::PolicyEngine;
 use jarvis_policy::config::PolicyConfig;
+use jarvis_policy::{PolicyClient, PolicyEngine};
 use serde_json::{Value, json};
 use std::path::Path;
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 /// Minimal MCP server speaking newline-delimited JSON-RPC over the given
@@ -70,9 +71,27 @@ pub(crate) async fn run_mock_mcp_server(
     }
 }
 
+/// Policy client backed by a real gRPC server over the shipped policy files.
+///
+/// The gateway is policy-agnostic at compile time now; tests exercise the
+/// same wire path as production instead of an in-process engine.
+pub(crate) async fn shipped_policy_client(label: &str) -> PolicyClient {
+    let engine = Arc::new(shipped_policy_engine(label).await);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind policy test server");
+    let addr = listener.local_addr().expect("policy test server address");
+    tokio::spawn(async move {
+        jarvis_policy::grpc::serve_with_listener(engine, listener)
+            .await
+            .expect("policy test server runs");
+    });
+    PolicyClient::new(format!("http://{addr}")).expect("policy client")
+}
+
 /// Policy engine over the shipped policy files, with throwaway copies of
 /// the Casbin files (the engine persists policy edits to its own copy).
-pub(crate) async fn shipped_policy_engine(label: &str) -> PolicyEngine {
+async fn shipped_policy_engine(label: &str) -> PolicyEngine {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
     let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-policy-{label}"));
     tokio::fs::create_dir_all(&dir)

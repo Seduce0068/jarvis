@@ -20,7 +20,6 @@ pub struct ContextBuilder {
     pg_pool: Arc<deadpool_postgres::Pool>,
     qdrant_client: Arc<Qdrant>,
     pii_filter: Arc<pii::PiiFilter>,
-    policy_client: Arc<jarvis_policy::PolicyEngine>,
 }
 
 impl ContextBuilder {
@@ -28,16 +27,12 @@ impl ContextBuilder {
         let pg_pool = Arc::new(builder::memory::create_pg_pool(&config).await?);
         let qdrant_client = Arc::new(builder::memory::create_qdrant_client(&config).await?);
         let pii_filter = Arc::new(pii::PiiFilter::new(&config).await?);
-        let policy_client = Arc::new(
-            jarvis_policy::PolicyEngine::new(jarvis_policy::config::PolicyConfig::load()?).await?,
-        );
         let builder = Arc::new(
             builder::Builder::new(
                 config.clone(),
                 pg_pool.clone(),
                 qdrant_client.clone(),
                 pii_filter.clone(),
-                policy_client.clone(),
             )
             .await?,
         );
@@ -48,7 +43,6 @@ impl ContextBuilder {
             pg_pool,
             qdrant_client,
             pii_filter,
-            policy_client,
         })
     }
 

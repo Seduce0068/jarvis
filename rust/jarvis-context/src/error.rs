@@ -13,9 +13,6 @@ pub enum ContextError {
     #[error("PII detection error: {0}")]
     Pii(String),
 
-    #[error("Policy error: {0}")]
-    Policy(#[from] jarvis_policy::error::PolicyError),
-
     #[error("Configuration error: {0}")]
     Config(#[from] anyhow::Error),
 

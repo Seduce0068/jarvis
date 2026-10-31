@@ -37,6 +37,7 @@ casbin = { workspace = true }
 # gRPC
 tonic = { workspace = true }
 prost = { workspace = true }
+futures-util = { workspace = true }
 prost-types = { workspace = true }
 tonic-prost = { workspace = true }
 

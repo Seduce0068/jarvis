@@ -2,8 +2,7 @@
 
 use anyhow::Result;
 use jarvis_mcp_gw::McpGateway;
-use jarvis_policy::PolicyEngine;
-use jarvis_policy::config::PolicyConfig;
+use jarvis_policy::PolicyClient;
 use std::sync::Arc;
 use tracing::info;
 
@@ -15,7 +14,7 @@ async fn main() -> Result<()> {
         .init();
 
     let config = jarvis_mcp_gw::config::McpGatewayConfig::load()?;
-    let policy_client = Arc::new(PolicyEngine::new(PolicyConfig::load()?).await?);
+    let policy_client = Arc::new(PolicyClient::new(&config.policy_grpc_addr)?);
 
     let gateway = McpGateway::new(config.clone(), policy_client).await?;
 

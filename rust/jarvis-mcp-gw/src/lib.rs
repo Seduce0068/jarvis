@@ -22,13 +22,13 @@ pub struct McpGateway {
     gateway: Arc<gateway::Gateway>,
     allowlist: Arc<allowlist::AllowList>,
     sandbox: Arc<sandbox::Sandbox>,
-    policy_client: Arc<jarvis_policy::PolicyEngine>,
+    policy_client: Arc<jarvis_policy::PolicyClient>,
 }
 
 impl McpGateway {
     pub async fn new(
         config: config::McpGatewayConfig,
-        policy_client: Arc<jarvis_policy::PolicyEngine>,
+        policy_client: Arc<jarvis_policy::PolicyClient>,
     ) -> Result<Self> {
         let allowlist = Arc::new(allowlist::AllowList::new(&config).await?);
         let sandbox = Arc::new(sandbox::Sandbox::new(&config).await?);
@@ -62,10 +62,11 @@ impl McpGateway {
         // Policy first. Gateway capabilities use the canonical resource
         // form `tool:<name>` (see infra/config/policy/casbin_policy.csv).
         let resource = format!("tool:{tool}");
+        // `is_allowed` fails closed (false on transport errors).
         let allowed = self
             .policy_client
             .is_allowed(principal, "execute", &resource, &args)
-            .await?;
+            .await;
         if !allowed {
             return Err(anyhow::anyhow!("Policy denied: {}", tool));
         }

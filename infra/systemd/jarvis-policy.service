@@ -26,7 +26,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=yes
-ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis
+ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /var/lib/jarvis
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 ProtectControlGroups=yes
@@ -46,6 +46,7 @@ Environment=JARVIS_POLICY_HTTP_ADDR=127.0.0.1:8081
 Environment=JARVIS_POLICY_CEDAR_POLICY_DIR=/etc/jarvis/policy
 Environment=JARVIS_POLICY_CASBIN_MODEL_PATH=/etc/jarvis/policy/casbin_model.conf
 Environment=JARVIS_POLICY_CASBIN_POLICY_PATH=/etc/jarvis/policy/casbin_policy.csv
+Environment=JARVIS_POLICY_KILL_SWITCH_STATE_PATH=/var/lib/jarvis/kill-switch.json
 
 # Resource limits
 LimitNOFILE=65536

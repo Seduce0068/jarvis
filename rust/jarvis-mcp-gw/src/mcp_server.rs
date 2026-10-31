@@ -158,7 +158,7 @@ requires_approval = true
             allowlist_path: allowlist_path.to_string_lossy().into_owned(),
             ..Default::default()
         };
-        let policy = Arc::new(testing::shipped_policy_engine(name).await);
+        let policy = Arc::new(testing::shipped_policy_client(name).await);
         Arc::new(
             McpGateway::new(config, policy)
                 .await

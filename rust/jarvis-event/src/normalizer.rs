@@ -13,7 +13,7 @@ pub struct Normalizer {
     config: crate::config::EventConfig,
     ha_client: Arc<crate::sources::HomeAssistantClient>,
     android_client: Arc<crate::sources::AndroidClient>,
-    policy_client: Arc<jarvis_policy::PolicyEngine>,
+    policy_client: Arc<jarvis_policy::PolicyClient>,
     opencode: Arc<crate::opencode::OpenCodeClient>,
     context_client: Arc<jarvis_context::ContextBuilder>,
     event_tx: mpsc::UnboundedSender<UnifiedEvent>,
@@ -24,7 +24,7 @@ impl Normalizer {
         config: crate::config::EventConfig,
         ha_client: Arc<crate::sources::HomeAssistantClient>,
         android_client: Arc<crate::sources::AndroidClient>,
-        policy_client: Arc<jarvis_policy::PolicyEngine>,
+        policy_client: Arc<jarvis_policy::PolicyClient>,
         opencode: Arc<crate::opencode::OpenCodeClient>,
         context_client: Arc<jarvis_context::ContextBuilder>,
     ) -> Result<Self> {
@@ -79,7 +79,7 @@ impl Normalizer {
     /// Forwarded events run through OpenCode; every tool call the agent makes
     /// is re-authorized by the MCP gateway before it executes.
     async fn process_event(
-        policy_client: &jarvis_policy::PolicyEngine,
+        policy_client: &jarvis_policy::PolicyClient,
         context_client: &jarvis_context::ContextBuilder,
         opencode: &crate::opencode::OpenCodeClient,
         event: UnifiedEvent,
@@ -94,9 +94,12 @@ impl Normalizer {
 
         // Check policy for automated response
         let resource = format!("event:{}", event.event_type);
+        // `is_allowed` fails closed (returns false on transport errors), so
+        // there is no `?` here: an unreachable policy service must not
+        // forward the event.
         let should_act = policy_client
             .is_allowed("jarvis", "auto_respond", &resource, &context)
-            .await?;
+            .await;
 
         if !should_act {
             tracing::debug!(

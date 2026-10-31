@@ -171,6 +171,20 @@ grpcurl -plaintext \
   localhost:50052 jarvis.mcp.gateway.v1.McpGatewayService/RegisterMcpServer
 ```
 
+### Kill Switch
+
+`jarvis-policy` owns the kill switch and persists it to
+`/var/lib/jarvis/kill-switch.json`
+(`JARVIS_POLICY_KILL_SWITCH_STATE_PATH`). Sidecars authorize through the
+policy gRPC endpoint (`Check`), so activation reaches every service on the
+next call without a restart.
+
+- A missing state file means "not activated" (first start).
+- An unreadable or corrupt state file is treated as activated; the service
+  fails closed instead of silently disarming the switch.
+- The state directory is created by cloud-init and writable by the service
+  through `ReadWritePaths=/var/lib/jarvis`.
+
 ### Secret Management
 
 Secrets use **1Password CLI** references (`op://`):

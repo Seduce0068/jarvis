@@ -15,6 +15,9 @@ pub struct PolicyConfig {
     pub casbin_model_path: String,
     pub casbin_policy_path: String,
     pub kill_switch_admin_token: String,
+    /// Optional JSON file used to persist kill-switch state across restarts.
+    /// Unset keeps the switch in memory (tests, ephemeral runs).
+    pub kill_switch_state_path: Option<String>,
     pub approval_timeout_secs: u64,
     pub default_deny: bool,
 }
@@ -40,6 +43,7 @@ impl Default for PolicyConfig {
             casbin_model_path: "/etc/jarvis/policy/casbin_model.conf".into(),
             casbin_policy_path: "/etc/jarvis/policy/casbin_policy.csv".into(),
             kill_switch_admin_token: "changeme".into(),
+            kill_switch_state_path: None,
             approval_timeout_secs: 300,
             default_deny: true,
         }
