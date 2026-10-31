@@ -32,6 +32,16 @@ jobs:
       # Docker-backed testcontainers integration test.
       extra_gates: |
         sudo dpkg --add-architecture arm64
+        # Keep amd64 on the Azure mirror; arm64 packages live on Ubuntu Ports.
+        sudo sed -i 's/^Types: deb$/Types: deb\nArchitectures: amd64/' /etc/apt/sources.list.d/ubuntu.sources
+        sudo tee /etc/apt/sources.list.d/ubuntu-ports.sources >/dev/null <<'EOF'
+        Types: deb
+        URIs: http://ports.ubuntu.com/ubuntu-ports/
+        Suites: noble noble-updates noble-backports noble-security
+        Components: main restricted universe multiverse
+        Architectures: arm64
+        Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+        EOF
         sudo apt-get update
         sudo apt-get install -y libssl-dev:arm64
         rustup target add aarch64-unknown-linux-gnu
