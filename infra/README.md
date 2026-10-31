@@ -182,6 +182,9 @@ next call without a restart.
 - A missing state file means "not activated" (first start).
 - An unreadable or corrupt state file is treated as activated; the service
   fails closed instead of silently disarming the switch.
+- Activation and deactivation both require the admin token
+  (`JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN`); a local process cannot stop the
+  system unilaterally.
 - The state directory is created by cloud-init and writable by the service
   through `ReadWritePaths=/var/lib/jarvis`.
 

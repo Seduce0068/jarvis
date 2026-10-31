@@ -185,7 +185,9 @@ mod tests {
                 .expect("baseline check runs")
         );
 
-        engine.activate_kill_switch("test activation".into());
+        engine
+            .activate_kill_switch("test activation".into(), "test-admin-token")
+            .expect("admin token activates the switch");
 
         assert!(
             !client

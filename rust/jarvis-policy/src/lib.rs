@@ -141,9 +141,12 @@ impl PolicyEngine {
         self.approvals.list_pending().await
     }
 
-    /// Activate kill switch - denies all subsequent actions
-    pub fn activate_kill_switch(&self, reason: String) {
-        self.kill_switch.activate(reason);
+    /// Activate the kill switch - denies all subsequent actions.
+    ///
+    /// Requires the admin token; an unauthenticated caller cannot stop the
+    /// system.
+    pub fn activate_kill_switch(&self, reason: String, admin_token: &str) -> Result<()> {
+        self.kill_switch.activate_with_token(reason, admin_token)
     }
 
     /// Deactivate kill switch (requires admin)
@@ -232,7 +235,17 @@ mod tests {
                 .expect("baseline check runs")
         );
 
-        engine.activate_kill_switch("test activation".into());
+        // Unauthenticated activation must be rejected.
+        assert!(
+            engine
+                .activate_kill_switch("test activation".into(), "wrong-token")
+                .is_err()
+        );
+        assert!(!engine.kill_switch_status().activated);
+
+        engine
+            .activate_kill_switch("test activation".into(), "test-admin-token")
+            .expect("admin token activates the switch");
         assert!(engine.kill_switch_status().activated);
 
         assert!(

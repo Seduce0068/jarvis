@@ -51,7 +51,9 @@ impl PolicyService for GrpcPolicyService {
         request: Request<ActivateKillSwitchRequest>,
     ) -> Result<Response<Empty>, Status> {
         let req = request.into_inner();
-        self.engine.activate_kill_switch(req.reason);
+        self.engine
+            .activate_kill_switch(req.reason, &req.admin_token)
+            .map_err(|e| Status::unauthenticated(e.to_string()))?;
         Ok(Response::new(Empty {}))
     }
 

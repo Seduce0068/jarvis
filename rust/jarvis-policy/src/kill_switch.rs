@@ -57,6 +57,19 @@ impl KillSwitch {
         warn!("KILL SWITCH ACTIVATED: {}", reason);
     }
 
+    /// Activate after verifying the admin token.
+    ///
+    /// The unauthenticated [`Self::activate`] remains for internal callers
+    /// (restore, tests); every external surface must use this method so a
+    /// local process cannot stop the system unilaterally.
+    pub fn activate_with_token(&self, reason: String, admin_token: &str) -> Result<()> {
+        if Self::hash_token(admin_token) != self.admin_token_hash {
+            return Err(anyhow::anyhow!("Invalid admin token"));
+        }
+        self.activate(reason);
+        Ok(())
+    }
+
     /// Set the in-memory state without persisting. Used by [`Self::restore`]
     /// so a corrupt state file is not overwritten during recovery.
     fn arm(&self, reason: String) {

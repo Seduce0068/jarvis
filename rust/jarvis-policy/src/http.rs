@@ -209,14 +209,17 @@ async fn kill_switch_status(
 #[derive(Deserialize, Debug)]
 struct ActivateKillSwitchRequest {
     reason: String,
+    admin_token: String,
 }
 
 async fn activate_kill_switch(
     State(engine): State<Arc<PolicyEngine>>,
     Json(req): Json<ActivateKillSwitchRequest>,
-) -> &'static str {
-    engine.activate_kill_switch(req.reason);
-    "activated"
+) -> Result<&'static str, axum::http::StatusCode> {
+    engine
+        .activate_kill_switch(req.reason, &req.admin_token)
+        .map(|_| "activated")
+        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)
 }
 
 #[derive(Deserialize, Debug)]
