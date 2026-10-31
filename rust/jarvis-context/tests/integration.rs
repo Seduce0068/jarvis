@@ -103,10 +103,11 @@ async fn postgres_and_qdrant_round_trip() {
     let recent = context["recent"]
         .as_array()
         .expect("context carries the recent memory section");
+    // The PII filter redacts UUIDs, so compare on the preserved content.
     assert!(
         recent
             .iter()
-            .any(|entry| entry["id"] == memory.id.to_string()),
+            .any(|entry| entry["content"] == memory.content),
         "stored memory is returned by the PostgreSQL path: {context}"
     );
 }
