@@ -139,6 +139,8 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 ### Phase 4: 観測性・DR・自動化 (Week 4-5)
 
 - [x] OpenTelemetry Collector 導入
+- [x] サービスからの OTLP トレースエクスポート (`OTEL_EXPORTER_OTLP_ENDPOINT`)
+- [x] Prometheus メトリクス公開 (`/metrics`)
 - [ ] Grafana Cloud ダッシュボード/アラート
 - [x] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル)
 - [ ] Idle Compute 対策: ヘルスチェック + `tofu apply` 自動再実行 (systemd timer)

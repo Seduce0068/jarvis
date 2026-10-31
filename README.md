@@ -38,6 +38,9 @@ cargo fmt --all --check
 cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+
+# Deployment target (matches rust/scripts/deploy.rs)
+cargo build --release --workspace --target aarch64-unknown-linux-gnu
 ```
 
 ## Deployment
