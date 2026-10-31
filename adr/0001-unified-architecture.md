@@ -141,7 +141,8 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 - [x] OpenTelemetry Collector 導入
 - [x] サービスからの OTLP トレースエクスポート (`OTEL_EXPORTER_OTLP_ENDPOINT`)
 - [x] Prometheus メトリクス公開 (`/metrics`)
-- [ ] Grafana Cloud ダッシュボード/アラート
+- [x] Grafana Cloud ダッシュボード (`infra/grafana/dashboards/jarvis-overview.json`)
+- [ ] Grafana Cloud アラート
 - [x] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル)
 - [ ] Idle Compute 対策: ヘルスチェック + `tofu apply` 自動再実行 (systemd timer)
 - [ ] review-flow CI ゲート統合

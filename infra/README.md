@@ -45,6 +45,9 @@ infra/
 │   ├── context.env             # Context Builder env (1Password)
 │   ├── otel.env                # OTel Collector env (1Password)
 │   └── code_server.env         # code-server env (1Password)
+├── grafana/                     # Importable Grafana dashboards
+│   ├── README.md
+│   └── dashboards/jarvis-overview.json
 └── cloud-init.yaml             # OCI instance initialization
 ```
 
