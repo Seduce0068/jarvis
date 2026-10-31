@@ -8,7 +8,7 @@ tags:
   - opencode
   - oci
   - architecture
-status: proposed
+status: accepted
 deciders:
   - "Sovereign AI Agent"
 date: "2026-10-09"
@@ -105,12 +105,12 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 ## Implementation Plan
 
-> 進捗メモ (2026-10-18): `[x]` はリポジトリ成果物としての実装完了を示す。
+> 進捗メモ (2026-10-31): `[x]` はリポジトリ成果物としての実装完了を示す。
 > 実機 (OCI) での稼働・疎通確認はデプロイ時に別途行う。
 
 ### Phase 0: 統合基盤 (Week 1)
 
-- [ ] この ADR 承認・マージ
+- [x] この ADR 承認・マージ
 - [ ] OpenTofu で OCI A1 VM + Tailscale 疎通
 - [ ] 1Password CLI 設定・秘密情報注入確認
 
@@ -132,6 +132,8 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 - [x] OpenCode → `jarvis-policy` / `jarvis-mcp-gw` 連携 (MCP ツールとして登録)
 - [x] キルスイッチ実装・テスト
+- [x] キルスイッチ状態の永続化 (`/var/lib/jarvis/kill-switch.json`)
+- [x] サイドカーの認可を policy gRPC に集約 (fail-closed)
 - [x] イベント駆動フロー: HA → jarvis-event → jarvis-context → OpenCode → Policy → MCP GW
 
 ### Phase 4: 観測性・DR・自動化 (Week 4-5)
