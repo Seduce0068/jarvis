@@ -249,6 +249,10 @@ rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy --dry-run
 ### Monitoring
 
 - **Grafana Cloud Free**: Traces, metrics, logs
+- **Prometheus scraping**: `otelcol` scrapes `/metrics` on policy `:8081`,
+  MCP GW `:8082`, event `:8083`, and context `:8084`. Each service installs
+  a Prometheus recorder at startup and exposes `jarvis_http_requests_total`
+  alongside exporter-provided metrics.
 - **OCI Monitoring**: Instance health, CPU, memory alarms
 - **Tailscale**: Network connectivity
 

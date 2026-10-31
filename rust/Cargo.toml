@@ -36,7 +36,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"]
 opentelemetry = { version = "0.27", features = ["trace", "metrics"] }
 opentelemetry-otlp = { version = "0.20", features = ["tonic"] }
 opentelemetry-sdk = "0.27"
-metrics = "0.21"
+metrics = "0.22"
 metrics-exporter-prometheus = "0.14"
 
 # Error handling

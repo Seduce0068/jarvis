@@ -10,6 +10,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .json()
         .init();
+    jarvis_context::http::install_metrics()?;
 
     let config = jarvis_context::config::ContextConfig::load()?;
     let builder = ContextBuilder::new(config.clone()).await?;

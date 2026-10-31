@@ -12,6 +12,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .json()
         .init();
+    jarvis_mcp_gw::http::install_metrics()?;
 
     let config = jarvis_mcp_gw::config::McpGatewayConfig::load()?;
     let policy_client = Arc::new(PolicyClient::new(&config.policy_grpc_addr)?);

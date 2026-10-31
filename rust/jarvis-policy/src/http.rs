@@ -8,8 +8,23 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::instrument;
+
+/// Handle for the process-wide Prometheus recorder.
+static METRICS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+
+/// Install the Prometheus recorder exactly once per process.
+///
+/// Called from `main`; tests never install the global recorder so they can
+/// run in parallel with other tests in the same binary.
+pub fn install_metrics() -> anyhow::Result<()> {
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
+    if METRICS_HANDLE.set(handle).is_err() {
+        tracing::warn!("metrics recorder already installed; keeping the first handle");
+    }
+    Ok(())
+}
 
 #[derive(Deserialize, Debug)]
 struct CheckRequest {
@@ -69,6 +84,20 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
         .route("/v1/kill-switch/activate", post(activate_kill_switch))
         .route("/v1/kill-switch/deactivate", post(deactivate_kill_switch))
         .with_state(engine)
+        .layer(axum::middleware::from_fn(track_metrics))
+}
+
+/// Count every HTTP request so `/metrics` exposes more than an empty page
+/// even when the `process` feature of the exporter is disabled.
+async fn track_metrics(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let response = next.run(request).await;
+    // metrics 0.21's label parser rejects `"key" => expr` here, so record the
+    // request total without dimensions.
+    metrics::counter!("jarvis_http_requests_total").increment(1);
+    response
 }
 
 async fn health() -> &'static str {
@@ -76,9 +105,10 @@ async fn health() -> &'static str {
 }
 
 async fn metrics() -> String {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
-    let handle = recorder.handle();
-    handle.render()
+    match METRICS_HANDLE.get() {
+        Some(handle) => handle.render(),
+        None => "# metrics recorder not installed\n".to_string(),
+    }
 }
 
 #[instrument(skip(engine))]

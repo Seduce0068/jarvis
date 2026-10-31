@@ -8,8 +8,20 @@ use axum::{
 };
 use jarvis_core::{EventSource, UnifiedEvent};
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tracing::instrument;
+
+/// Handle for the process-wide Prometheus recorder.
+static METRICS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+
+/// Install the Prometheus recorder exactly once per process.
+pub fn install_metrics() -> anyhow::Result<()> {
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
+    if METRICS_HANDLE.set(handle).is_err() {
+        tracing::warn!("metrics recorder already installed; keeping the first handle");
+    }
+    Ok(())
+}
 
 #[derive(Deserialize, Debug)]
 struct EmitEventRequest {
@@ -31,6 +43,19 @@ pub fn router(normalizer: Arc<Normalizer>) -> Router {
         .route("/metrics", get(metrics))
         .route("/v1/events", post(emit_event))
         .with_state(normalizer)
+        .layer(axum::middleware::from_fn(track_metrics))
+}
+
+/// Count every HTTP request so `/metrics` exposes more than an empty page.
+async fn track_metrics(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let response = next.run(request).await;
+    // metrics 0.21's label parser rejects `"key" => expr` here, so record the
+    // request total without dimensions.
+    metrics::counter!("jarvis_http_requests_total").increment(1);
+    response
 }
 
 async fn health() -> &'static str {
@@ -38,8 +63,10 @@ async fn health() -> &'static str {
 }
 
 async fn metrics() -> String {
-    // Simplified metrics endpoint - in production would use proper Prometheus exporter
-    "# JARVIS Event Normalizer metrics placeholder\n".to_string()
+    match METRICS_HANDLE.get() {
+        Some(handle) => handle.render(),
+        None => "# metrics recorder not installed\n".to_string(),
+    }
 }
 
 #[instrument(skip(normalizer))]

@@ -11,6 +11,7 @@ async fn main() -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .json()
         .init();
+    jarvis_policy::http::install_metrics()?;
 
     let config = config::PolicyConfig::load()?;
     let engine = Arc::new(PolicyEngine::new(config.clone()).await?);
