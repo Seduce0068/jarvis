@@ -41,6 +41,7 @@ SystemCallErrorNumber=EPERM
 
 # Environment
 Environment=RUST_LOG=info
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 Environment=JARVIS_CONTEXT_GRPC_ADDR=127.0.0.1:50054
 Environment=JARVIS_CONTEXT_HTTP_ADDR=127.0.0.1:8084
 Environment=JARVIS_CONTEXT_PG_URL=postgres://jarvis:jarvis@localhost:5432/jarvis

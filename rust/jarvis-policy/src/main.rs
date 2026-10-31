@@ -5,12 +5,44 @@ use jarvis_policy::{PolicyEngine, config};
 use std::sync::Arc;
 use tracing::info;
 
+/// Initialise JSON logging with OTLP trace export.
+///
+/// The collector endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT` and
+/// defaults to the local collector. Export failures do not stop the service.
+fn init_tracing(service: &'static str) -> Result<()> {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://127.0.0.1:4317".to_string());
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&endpoint)
+        .build()?;
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build();
+
+    let tracer = provider.tracer(service);
+    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    tracing_subscriber::registry()
+        .with(telemetry)
+        .with(tracing_subscriber::fmt::layer().json())
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .json()
-        .init();
+    init_tracing("jarvis-policy")?;
     jarvis_policy::http::install_metrics()?;
 
     let config = config::PolicyConfig::load()?;

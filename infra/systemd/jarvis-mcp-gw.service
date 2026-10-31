@@ -41,6 +41,7 @@ SystemCallErrorNumber=EPERM
 
 # Environment
 Environment=RUST_LOG=info
+Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 Environment=JARVIS_MCP_GW_GRPC_ADDR=127.0.0.1:50052
 Environment=JARVIS_MCP_GW_HTTP_ADDR=127.0.0.1:8082
 Environment=JARVIS_MCP_GW_ALLOWLIST_PATH=/etc/jarvis/mcp_allowlist.toml

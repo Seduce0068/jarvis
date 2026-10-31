@@ -253,6 +253,9 @@ rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy --dry-run
   MCP GW `:8082`, event `:8083`, and context `:8084`. Each service installs
   a Prometheus recorder at startup and exposes `jarvis_http_requests_total`
   alongside exporter-provided metrics.
+- **OTLP traces**: every service exports spans to `otelcol` at
+  `http://127.0.0.1:4317` (`OTEL_EXPORTER_OTLP_ENDPOINT`); the collector
+  forwards them to Grafana Cloud.
 - **OCI Monitoring**: Instance health, CPU, memory alarms
 - **Tailscale**: Network connectivity
 

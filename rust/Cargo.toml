@@ -33,9 +33,10 @@ zeroize = "1.8"
 # Logging & Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "fmt"] }
-opentelemetry = { version = "0.27", features = ["trace", "metrics"] }
-opentelemetry-otlp = { version = "0.20", features = ["tonic"] }
-opentelemetry-sdk = "0.27"
+opentelemetry = { version = "0.33", features = ["trace", "metrics"] }
+opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"] }
+opentelemetry_sdk = "0.33"
+tracing-opentelemetry = "0.34"
 metrics = "0.22"
 metrics-exporter-prometheus = "0.14"
 
