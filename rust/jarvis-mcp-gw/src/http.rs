@@ -100,3 +100,134 @@ pub async fn serve(gateway: Arc<McpGateway>, addr: std::net::SocketAddr) -> anyh
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::McpGatewayConfig;
+    use crate::testing;
+    use serde_json::{Value, json};
+
+    const EXECUTE_ALLOWLIST: &str = r#"
+principals = ["opencode", "jarvis"]
+
+[[tools]]
+name = "filesystem.read"
+description = "Read a file"
+allowed_principals = ["opencode"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = false
+
+[[tools]]
+name = "shell.execute"
+description = "Execute a shell command"
+allowed_principals = ["opencode"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = true
+"#;
+
+    async fn test_gateway(label: &str) -> Arc<McpGateway> {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-http-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist_path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist_path, EXECUTE_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+
+        let config = McpGatewayConfig {
+            allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let policy = Arc::new(testing::shipped_policy_client(label).await);
+        Arc::new(
+            McpGateway::new(config, policy)
+                .await
+                .expect("gateway starts"),
+        )
+    }
+
+    async fn start_server(gateway: Arc<McpGateway>) -> String {
+        let app = router(gateway);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server runs");
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn execute_endpoint_routes_to_a_registered_server() {
+        let gateway = test_gateway("routes").await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(testing::run_mock_mcp_server(
+            server_side,
+            "filesystem.read",
+            false,
+        ));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock server registers");
+
+        let base = start_server(gateway).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/execute"))
+            .json(&json!({
+                "tool": "filesystem.read",
+                "args": { "path": "/tmp/example" },
+                "principal": "opencode",
+            }))
+            .send()
+            .await
+            .expect("execute request runs");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let body: Value = response.json().await.expect("execute response is JSON");
+        assert_eq!(body["result"]["content"][0]["text"], "pong");
+        assert_eq!(body["result"]["isError"], false);
+    }
+
+    #[tokio::test]
+    async fn execute_endpoint_reports_policy_and_approval_denials() {
+        let gateway = test_gateway("denials").await;
+        let base = start_server(gateway).await;
+        let client = reqwest::Client::new();
+
+        // Unknown tools fail the policy check before the allowlist.
+        let unknown = client
+            .post(format!("{base}/v1/execute"))
+            .json(&json!({
+                "tool": "unknown.tool",
+                "args": {},
+                "principal": "opencode",
+            }))
+            .send()
+            .await
+            .expect("unknown request runs");
+        assert_eq!(unknown.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Approval-required tools are rejected until an approval flow exists.
+        let approval = client
+            .post(format!("{base}/v1/execute"))
+            .json(&json!({
+                "tool": "shell.execute",
+                "args": {},
+                "principal": "opencode",
+            }))
+            .send()
+            .await
+            .expect("approval request runs");
+        assert_eq!(
+            approval.status(),
+            reqwest::StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+}
