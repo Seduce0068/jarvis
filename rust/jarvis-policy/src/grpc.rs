@@ -1,7 +1,6 @@
 //! gRPC service for Policy Engine
 
 use crate::PolicyEngine;
-use crate::policy::{ApprovalDecision, ApprovalRequest};
 use tonic::{Request, Response, Status};
 
 pub mod proto {
@@ -10,8 +9,8 @@ pub mod proto {
 
 use proto::policy_service_server::{PolicyService, PolicyServiceServer};
 use proto::{
-    ActivateKillSwitchRequest, ApprovalRequest as ProtoApprovalRequest, ApprovalResponse,
-    CheckRequest, CheckResponse, DeactivateKillSwitchRequest, Empty, KillSwitchStatusResponse,
+    ActivateKillSwitchRequest, CheckRequest, CheckResponse, DeactivateKillSwitchRequest, Empty,
+    KillSwitchStatusResponse,
 };
 
 pub struct GrpcPolicyService {
@@ -32,38 +31,6 @@ impl PolicyService for GrpcPolicyService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(CheckResponse { allowed }))
-    }
-
-    async fn request_approval(
-        &self,
-        request: Request<ProtoApprovalRequest>,
-    ) -> Result<Response<ApprovalResponse>, Status> {
-        let req = request.into_inner();
-        let context: serde_json::Value = serde_json::from_str(&req.context).unwrap_or_default();
-        let approval_req = ApprovalRequest {
-            id: uuid::Uuid::parse_str(&req.id)
-                .map_err(|e| Status::invalid_argument(e.to_string()))?,
-            principal: req.principal,
-            action: req.action,
-            resource: req.resource,
-            context,
-            requested_at: chrono::DateTime::from_timestamp(req.requested_at, 0).unwrap_or_default(),
-            expires_at: chrono::DateTime::from_timestamp(req.expires_at, 0).unwrap_or_default(),
-        };
-        let decision = self
-            .engine
-            .request_approval(approval_req)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        let decision_str = match decision {
-            ApprovalDecision::Approved { .. } => "approved".to_string(),
-            ApprovalDecision::Denied { reason } => format!("denied: {}", reason),
-            ApprovalDecision::Pending => "pending".to_string(),
-            ApprovalDecision::Expired => "expired".to_string(),
-        };
-        Ok(Response::new(ApprovalResponse {
-            decision: decision_str,
-        }))
     }
 
     async fn get_kill_switch_status(

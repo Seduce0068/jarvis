@@ -4,7 +4,6 @@ package jarvis.policy.v1;
 
 service PolicyService {
   rpc Check(CheckRequest) returns (CheckResponse);
-  rpc RequestApproval(ApprovalRequest) returns (ApprovalResponse);
   rpc GetKillSwitchStatus(Empty) returns (KillSwitchStatusResponse);
   rpc ActivateKillSwitch(ActivateKillSwitchRequest) returns (Empty);
   rpc DeactivateKillSwitch(DeactivateKillSwitchRequest) returns (Empty);
@@ -19,20 +18,6 @@ message CheckRequest {
 
 message CheckResponse {
   bool allowed = 1;
-}
-
-message ApprovalRequest {
-  string id = 1;
-  string principal = 2;
-  string action = 3;
-  string resource = 4;
-  string context = 5;
-  int64 requested_at = 6;
-  int64 expires_at = 7;
-}
-
-message ApprovalResponse {
-  string decision = 1;
 }
 
 message KillSwitchStatusResponse {

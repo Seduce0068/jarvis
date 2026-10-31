@@ -4,6 +4,10 @@
 //! (via the HTTP approve/deny endpoints) or the configured timeout elapses.
 //! Decisions are held in memory; PostgreSQL-backed audit persistence and
 //! user notification (HA/phone) will be layered on top later.
+//!
+//! Approval is intentionally HTTP-only: the gRPC surface is limited to
+//! authorization and kill-switch operations so a long-running human decision
+//! never occupies a gRPC stream.
 
 use std::collections::HashMap;
 use std::sync::Arc;
