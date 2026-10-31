@@ -13,5 +13,79 @@
         "oauth": false
       }
     }
+  },
+  // Keep credential material out of agent context even when a task asks
+  // for it. The gateway handles execution; these rules constrain what the
+  // agent runtime itself can read or edit.
+  "permission": {
+    "read": {
+      "*/secrets/**": "deny",
+      "*/.env*": "deny",
+      "*.pem": "deny",
+      "*.key": "deny",
+      "id_rsa*": "deny",
+      "*.kdbx": "deny",
+      "secrets/**": "deny",
+      ".aws/credentials": "deny",
+      "*/.aws/*": "deny",
+      "*/.kube/*": "deny",
+      "*/.config/gcloud/*": "deny",
+      "*/.npmrc": "deny"
+    },
+    "edit": {
+      "*.pem": "deny",
+      "*.key": "deny",
+      "id_rsa*": "deny",
+      "*.kdbx": "deny",
+      "secrets/**": "deny",
+      ".aws/credentials": "deny",
+      "*/.aws/*": "deny",
+      "*/.kube/*": "deny",
+      "*/.config/gcloud/*": "deny",
+      "*/.npmrc": "deny"
+    },
+    "bash": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "webfetch": "allow",
+    "websearch": "allow",
+    "patch": "allow",
+    "task": "allow"
+  },
+  // Subagents inherit the host model: no model id is pinned here so the
+  // host's authenticated provider stays authoritative.
+  "agents": {
+    "jarvis-dev": {
+      "mode": "subagent",
+      "description": "jarvis専用実装エージェント",
+      "system": "You are a JARVIS implementation specialist. Implement Rust services for the JARVIS Personal AI system. Follow the architecture in adr/0001-unified-architecture.md. Write idiomatic Rust, run tests, and never deploy or access credentials directly.",
+      "permissions": [
+        { "action": "shell", "resource": "*", "effect": "allow" },
+        { "action": "edit", "resource": "*", "effect": "allow" },
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "list", "resource": "*", "effect": "allow" },
+        { "action": "subagent", "resource": "*", "effect": "deny" },
+        { "action": "webfetch", "resource": "*", "effect": "deny" },
+        { "action": "websearch", "resource": "*", "effect": "deny" }
+      ]
+    },
+    "jarvis-policy-audit": {
+      "mode": "subagent",
+      "description": "Policy audit specialist for Cedar/Casbin policies",
+      "system": "You are a policy auditor. Review Cedar/Casbin policies for correctness, completeness, and security. Check for over-permissive rules, missing deny rules, and kill switch coverage. Do not modify policies - only audit and report findings with file:line references.",
+      "permissions": [
+        { "action": "read", "resource": "*", "effect": "allow" },
+        { "action": "grep", "resource": "*", "effect": "allow" },
+        { "action": "glob", "resource": "*", "effect": "allow" },
+        { "action": "list", "resource": "*", "effect": "allow" },
+        { "action": "edit", "resource": "*", "effect": "deny" },
+        { "action": "shell", "resource": "*", "effect": "deny" },
+        { "action": "webfetch", "resource": "*", "effect": "deny" },
+        { "action": "websearch", "resource": "*", "effect": "deny" }
+      ]
+    }
   }
 }
