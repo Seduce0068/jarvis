@@ -81,14 +81,14 @@ async fn postgres_and_qdrant_round_trip() {
         .await
         .expect("memory is stored in PostgreSQL and Qdrant");
 
-    // Without an embedding endpoint, search falls back to PostgreSQL.
-    let recent = builder
+    // Without an embedding endpoint, vector search is skipped.
+    let empty = builder
         .search_memory("integration", 5)
         .await
         .expect("memory search runs");
     assert!(
-        recent.iter().any(|entry| entry.id == memory.id),
-        "stored memory is returned by the PostgreSQL path: {recent:?}"
+        empty.is_empty(),
+        "vector search is disabled without an embedding endpoint: {empty:?}"
     );
 
     let event = UnifiedEvent {
@@ -100,8 +100,13 @@ async fn postgres_and_qdrant_round_trip() {
         correlation_id: "integration-test".into(),
     };
     let context = builder.build_context(&event).await.expect("context builds");
+    let recent = context["recent"]
+        .as_array()
+        .expect("context carries the recent memory section");
     assert!(
-        context.get("memories").is_some(),
-        "context carries the memory section: {context}"
+        recent
+            .iter()
+            .any(|entry| entry["id"] == memory.id.to_string()),
+        "stored memory is returned by the PostgreSQL path: {context}"
     );
 }

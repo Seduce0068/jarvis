@@ -1,7 +1,7 @@
 //! Context building core
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use jarvis_core::{MemoryEntry, UnifiedEvent};
 use qdrant_client::Qdrant;
 use serde_json::Value;
@@ -122,7 +122,7 @@ impl Builder {
         .await?;
 
         // Fetch full entries from PostgreSQL
-        let ids: Vec<String> = results.iter().map(|r| r.id.to_string()).collect();
+        let ids: Vec<Uuid> = results.iter().map(|r| r.id).collect();
         let client = self.pg_pool.get().await?;
         let rows = client.query(
             "SELECT id, content, metadata, source, created_at, updated_at, expires_at FROM memories WHERE id = ANY($1)",
@@ -132,16 +132,14 @@ impl Builder {
         Ok(rows
             .into_iter()
             .map(|row| MemoryEntry {
-                id: Uuid::parse_str(&row.get::<_, String>(0)).unwrap(),
+                id: row.get(0),
                 content: row.get(1),
                 embedding: vec![],
-                metadata: serde_json::from_str(&row.get::<_, String>(2)).unwrap_or_default(),
+                metadata: row.get(2),
                 source: row.get(3),
-                created_at: DateTime::from_timestamp(row.get::<_, i64>(4), 0).unwrap_or_default(),
-                updated_at: DateTime::from_timestamp(row.get::<_, i64>(5), 0).unwrap_or_default(),
-                expires_at: row
-                    .get::<_, Option<i64>>(6)
-                    .and_then(|t| DateTime::from_timestamp(t, 0)),
+                created_at: row.get(4),
+                updated_at: row.get(5),
+                expires_at: row.get(6),
             })
             .collect())
     }
@@ -159,16 +157,14 @@ impl Builder {
         Ok(rows
             .into_iter()
             .map(|row| MemoryEntry {
-                id: Uuid::parse_str(&row.get::<_, String>(0)).unwrap(),
+                id: row.get(0),
                 content: row.get(1),
                 embedding: vec![],
-                metadata: serde_json::from_str(&row.get::<_, String>(2)).unwrap_or_default(),
+                metadata: row.get(2),
                 source: row.get(3),
-                created_at: DateTime::from_timestamp(row.get::<_, i64>(4), 0).unwrap_or_default(),
-                updated_at: DateTime::from_timestamp(row.get::<_, i64>(5), 0).unwrap_or_default(),
-                expires_at: row
-                    .get::<_, Option<i64>>(6)
-                    .and_then(|t| DateTime::from_timestamp(t, 0)),
+                created_at: row.get(4),
+                updated_at: row.get(5),
+                expires_at: row.get(6),
             })
             .collect())
     }
@@ -217,7 +213,9 @@ pub mod memory {
     }
 
     pub async fn create_qdrant_client(config: &crate::config::ContextConfig) -> Result<Qdrant> {
-        let mut client = Qdrant::from_url(&config.qdrant_url);
+        // The gRPC API is backward compatible, and the released server may be
+        // older than the client; skip the strict minor-version gate.
+        let mut client = Qdrant::from_url(&config.qdrant_url).skip_compatibility_check();
         if let Some(key) = config.qdrant_api_key() {
             client = client.api_key(key);
         }
