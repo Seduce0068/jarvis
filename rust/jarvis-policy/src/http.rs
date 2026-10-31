@@ -382,6 +382,96 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn check_endpoint_allows_and_denies() {
+        let (engine, dir) = test_engine("check").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let allowed: Value = client
+            .post(format!("{base}/v1/check"))
+            .json(&json!({
+                "principal": "jarvis",
+                "action": "execute",
+                "resource": "tool:filesystem.read",
+                "context": {},
+            }))
+            .send()
+            .await
+            .expect("check request runs")
+            .json()
+            .await
+            .expect("check response is JSON");
+        assert_eq!(allowed["allowed"], true);
+
+        let denied: Value = client
+            .post(format!("{base}/v1/check"))
+            .json(&json!({
+                "principal": "jarvis",
+                "action": "execute",
+                "resource": "tool:git.commit",
+                "context": {},
+            }))
+            .send()
+            .await
+            .expect("check request runs")
+            .json()
+            .await
+            .expect("check response is JSON");
+        assert_eq!(denied["allowed"], false);
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    #[tokio::test]
+    async fn kill_switch_endpoint_requires_the_admin_token() {
+        let (engine, dir) = test_engine("killswitch-http").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let rejected = client
+            .post(format!("{base}/v1/kill-switch/activate"))
+            .json(&json!({ "reason": "test", "admin_token": "wrong-token" }))
+            .send()
+            .await
+            .expect("activate request runs");
+        assert_eq!(rejected.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let activated = client
+            .post(format!("{base}/v1/kill-switch/activate"))
+            .json(&json!({ "reason": "test", "admin_token": "test-admin-token" }))
+            .send()
+            .await
+            .expect("activate request runs");
+        assert_eq!(activated.status(), reqwest::StatusCode::OK);
+
+        let denied: Value = client
+            .post(format!("{base}/v1/check"))
+            .json(&json!({
+                "principal": "jarvis",
+                "action": "execute",
+                "resource": "tool:filesystem.read",
+                "context": {},
+            }))
+            .send()
+            .await
+            .expect("check request runs")
+            .json()
+            .await
+            .expect("check response is JSON");
+        assert_eq!(denied["allowed"], false);
+
+        let deactivated = client
+            .post(format!("{base}/v1/kill-switch/deactivate"))
+            .json(&json!({ "admin_token": "test-admin-token" }))
+            .send()
+            .await
+            .expect("deactivate request runs");
+        assert_eq!(deactivated.status(), reqwest::StatusCode::OK);
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    #[tokio::test]
     async fn approval_request_is_denied_over_http() {
         let (engine, dir) = test_engine("deny").await;
         let base = start_server(engine).await;
