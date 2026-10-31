@@ -7,6 +7,9 @@ pub enum McpGatewayError {
     #[error("Tool not in allowlist: {0}")]
     NotAllowed(String),
 
+    #[error("Policy denied tool '{tool}' for principal '{principal}'")]
+    PolicyDenied { tool: String, principal: String },
+
     #[error("Principal '{principal}' is not allowed to execute tool '{tool}'")]
     PrincipalNotAllowed { principal: String, tool: String },
 

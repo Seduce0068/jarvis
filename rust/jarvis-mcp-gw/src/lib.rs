@@ -68,7 +68,11 @@ impl McpGateway {
             .is_allowed(principal, "execute", &resource, &args)
             .await;
         if !allowed {
-            return Err(anyhow::anyhow!("Policy denied: {}", tool));
+            return Err(error::McpGatewayError::PolicyDenied {
+                tool: tool.to_owned(),
+                principal: principal.to_owned(),
+            }
+            .into());
         }
 
         // Allowlist: the tool must be listed, the principal must be

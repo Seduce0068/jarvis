@@ -90,8 +90,22 @@ async fn execute_tool(
     let result = gateway
         .execute_tool(&req.tool, req.args, &req.principal)
         .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(http_status_for)?;
     Ok(Json(ExecuteToolResponse { result }))
+}
+
+/// Map gateway denials to 403 so clients can distinguish policy failures
+/// from internal errors.
+fn http_status_for(error: anyhow::Error) -> axum::http::StatusCode {
+    match error.downcast_ref::<crate::error::McpGatewayError>() {
+        Some(
+            crate::error::McpGatewayError::NotAllowed(_)
+            | crate::error::McpGatewayError::PolicyDenied { .. }
+            | crate::error::McpGatewayError::PrincipalNotAllowed { .. }
+            | crate::error::McpGatewayError::ApprovalRequired { .. },
+        ) => axum::http::StatusCode::FORBIDDEN,
+        _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 pub async fn serve(gateway: Arc<McpGateway>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
@@ -212,7 +226,7 @@ requires_approval = true
             .send()
             .await
             .expect("unknown request runs");
-        assert_eq!(unknown.status(), reqwest::StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(unknown.status(), reqwest::StatusCode::FORBIDDEN);
 
         // Approval-required tools are rejected until an approval flow exists.
         let approval = client
@@ -225,9 +239,6 @@ requires_approval = true
             .send()
             .await
             .expect("approval request runs");
-        assert_eq!(
-            approval.status(),
-            reqwest::StatusCode::INTERNAL_SERVER_ERROR
-        );
+        assert_eq!(approval.status(), reqwest::StatusCode::FORBIDDEN);
     }
 }
