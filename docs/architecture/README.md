@@ -86,7 +86,7 @@ interpretation, and mitigations.
 
 ## References
 
-- [Markdown + MPE + Rust Architecture Report](../../markdown_mpe_rust_latex_architecture_report_2026-10-09.md)
+- [Markdown + MPE + Rust Architecture Report](mpe-rust-latex-architecture-report.md)
 - [ADR-0001: Unified Architecture](../../adr/0001-unified-architecture.md)
 - [MPE Code Chunk Docs](https://github.com/shd101wyy/markdown-preview-enhanced/blob/master/docs/code-chunk.md)
 - [rust-script](https://github.com/fornwall/rust-script)

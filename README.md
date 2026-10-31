@@ -21,12 +21,14 @@ The unified decision is recorded in
 
 | Path | Contents |
 | --- | --- |
-| `rust/` | Cargo workspace for the sidecar services |
+| `rust/` | Cargo workspace: `jarvis-core` plus the four sidecar services |
 | `infra/` | OpenTofu modules, cloud-init, systemd units, deployed configs |
 | `adr/` | Architecture decision records |
 | `scripts/` | rust-script tooling (bootstrap, doctor, phone status) |
-| `docs/` | Architecture reports and calculations |
+| `config/` | Shell/git locale helpers and environment templates |
+| `docs/` | Architecture reports, calculations, and verification scripts |
 | `ci/` | Review-flow pipeline definitions |
+| `Makefile` | Common tasks (bootstrap, doctor, test, lint, deploy) |
 
 ## Verification
 
