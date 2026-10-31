@@ -85,13 +85,13 @@ impl Builder {
              VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (id) DO UPDATE SET content = $2, metadata = $3, updated_at = $6",
             &[
-                &memory.id.to_string(),
+                &memory.id,
                 &memory.content,
-                &memory.metadata.to_string(),
+                &memory.metadata,
                 &memory.source,
-                &memory.created_at.timestamp(),
-                &memory.updated_at.timestamp(),
-                &memory.expires_at.map(|t| t.timestamp()),
+                &memory.created_at,
+                &memory.updated_at,
+                &memory.expires_at,
             ],
         ).await?;
 

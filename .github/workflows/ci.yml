@@ -26,3 +26,7 @@ jobs:
         libssl-dev
         protobuf-compiler
       working_directory: rust
+      # Docker is available on ubuntu-latest; run the ignored testcontainers
+      # integration test explicitly.
+      extra_gates: |
+        cargo test -p jarvis-context -- --ignored
