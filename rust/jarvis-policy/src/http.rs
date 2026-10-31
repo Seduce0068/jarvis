@@ -243,3 +243,180 @@ pub async fn serve(engine: Arc<PolicyEngine>, addr: std::net::SocketAddr) -> any
     axum::serve(listener, app).await?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::PolicyConfig;
+    use serde_json::{Value, json};
+    use std::path::{Path, PathBuf};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jarvis-policy-http-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    async fn test_engine(label: &str) -> (Arc<PolicyEngine>, PathBuf) {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
+        let dir = temp_dir(label);
+        let model = dir.join("casbin_model.conf");
+        let policy = dir.join("casbin_policy.csv");
+        std::fs::copy(source.join("casbin_model.conf"), &model).expect("copy casbin model");
+        std::fs::copy(source.join("casbin_policy.csv"), &policy).expect("copy casbin policy");
+
+        let config = PolicyConfig {
+            cedar_policy_dir: dir.join("cedar").to_string_lossy().into_owned(),
+            casbin_model_path: model.to_string_lossy().into_owned(),
+            casbin_policy_path: policy.to_string_lossy().into_owned(),
+            kill_switch_admin_token: "test-admin-token".into(),
+            approval_timeout_secs: 5,
+            ..Default::default()
+        };
+        let engine = Arc::new(
+            PolicyEngine::new(config)
+                .await
+                .expect("policy engine starts"),
+        );
+        (engine, dir)
+    }
+
+    /// Serve the real router on an ephemeral port; tests drive it with a real
+    /// HTTP client so the wire format is covered end to end.
+    async fn start_server(engine: Arc<PolicyEngine>) -> String {
+        let app = router(engine);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("test server runs");
+        });
+        format!("http://{addr}")
+    }
+
+    fn pending_request(expires_at: i64) -> Value {
+        json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "principal": "jarvis",
+            "action": "execute",
+            "resource": "tool:filesystem.write",
+            "context": {},
+            "requested_at": chrono::Utc::now().timestamp(),
+            "expires_at": expires_at,
+        })
+    }
+
+    async fn wait_for_pending(client: &reqwest::Client, base: &str) -> String {
+        for _ in 0..50 {
+            let body: Value = client
+                .get(format!("{base}/v1/approvals"))
+                .send()
+                .await
+                .expect("list request runs")
+                .json()
+                .await
+                .expect("list response is JSON");
+            if let Some(id) = body["pending"]
+                .as_array()
+                .and_then(|pending| pending.first())
+                .and_then(|request| request["id"].as_str())
+            {
+                return id.to_string();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("approval request never appeared");
+    }
+
+    /// POST /v1/approval blocks until a decision arrives, so the request runs
+    /// concurrently with the approve/deny call, exactly like a real client.
+    #[tokio::test]
+    async fn approval_request_is_approved_over_http() {
+        let (engine, dir) = test_engine("approve").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let expires_at = chrono::Utc::now().timestamp() + 60;
+
+        let pending = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{base}/v1/approval");
+            async move {
+                client
+                    .post(url)
+                    .json(&pending_request(expires_at))
+                    .send()
+                    .await
+                    .expect("approval request runs")
+                    .json::<Value>()
+                    .await
+                    .expect("approval response is JSON")
+            }
+        });
+
+        let id = wait_for_pending(&client, &base).await;
+        let response = client
+            .post(format!("{base}/v1/approval/{id}/approve"))
+            .json(&json!({ "approved_by": "tester" }))
+            .send()
+            .await
+            .expect("approve request runs");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let decision = pending.await.expect("request task joins");
+        assert_eq!(decision["decision"], "Approved");
+        assert_eq!(decision["approved_by"], "tester");
+
+        let status: Value = client
+            .get(format!("{base}/v1/approval/{id}"))
+            .send()
+            .await
+            .expect("status request runs")
+            .json()
+            .await
+            .expect("status response is JSON");
+        assert_eq!(status["decision"], "Approved");
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    #[tokio::test]
+    async fn approval_request_is_denied_over_http() {
+        let (engine, dir) = test_engine("deny").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let expires_at = chrono::Utc::now().timestamp() + 60;
+
+        let pending = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{base}/v1/approval");
+            async move {
+                client
+                    .post(url)
+                    .json(&pending_request(expires_at))
+                    .send()
+                    .await
+                    .expect("approval request runs")
+                    .json::<Value>()
+                    .await
+                    .expect("approval response is JSON")
+            }
+        });
+
+        let id = wait_for_pending(&client, &base).await;
+        let response = client
+            .post(format!("{base}/v1/approval/{id}/deny"))
+            .json(&json!({ "reason": "not now" }))
+            .send()
+            .await
+            .expect("deny request runs");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+
+        let decision = pending.await.expect("request task joins");
+        assert_eq!(decision["decision"], "Denied");
+        assert_eq!(decision["reason"], "not now");
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+}
