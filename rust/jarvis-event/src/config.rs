@@ -20,7 +20,6 @@ pub struct EventConfig {
     /// OpenCode location (working directory) used for agent sessions.
     pub opencode_location: String,
     pub policy_grpc_addr: String,
-    pub context_grpc_addr: String,
 }
 
 impl EventConfig {
@@ -51,7 +50,6 @@ impl Default for EventConfig {
             opencode_url: "http://127.0.0.1:49374".into(),
             opencode_location: "/home/jarvis/repos".into(),
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
-            context_grpc_addr: "http://127.0.0.1:50054".into(),
         }
     }
 }
