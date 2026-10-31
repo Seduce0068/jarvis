@@ -173,16 +173,20 @@ impl Builder {
             .collect())
     }
 
-    fn truncate_context(&self, mut context: Value) -> Result<Value> {
-        // Simple truncation - in production would count tokens properly
-        let serialized = serde_json::to_string(&context)?;
-        if serialized.len() > self.config.max_context_tokens * 4 {
-            // rough char/token ratio
-            context["memories"] = Value::Array(vec![]);
-            context["recent"] = Value::Array(vec![]);
-        }
-        Ok(context)
+    fn truncate_context(&self, context: Value) -> Result<Value> {
+        truncate_context_to_tokens(context, self.config.max_context_tokens)
     }
+}
+
+/// Drop the memory arrays when the serialized context exceeds the configured
+/// budget (roughly 4 characters per token).
+fn truncate_context_to_tokens(mut context: Value, max_tokens: usize) -> Result<Value> {
+    let serialized = serde_json::to_string(&context)?;
+    if serialized.len() > max_tokens * 4 {
+        context["memories"] = Value::Array(vec![]);
+        context["recent"] = Value::Array(vec![]);
+    }
+    Ok(context)
 }
 
 pub mod memory {
@@ -298,5 +302,31 @@ pub mod memory {
                 }
             })
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn context_within_budget_is_unchanged() {
+        let context = json!({"memories": [1, 2], "recent": [3]});
+        let output = truncate_context_to_tokens(context.clone(), 1000).expect("truncate");
+        assert_eq!(output, context);
+    }
+
+    #[test]
+    fn oversized_context_drops_memory_arrays_but_keeps_event_data() {
+        let context = json!({
+            "memories": [{"content": "x".repeat(100)}],
+            "recent": [{"content": "y".repeat(100)}],
+            "event": "state_changed",
+        });
+        let output = truncate_context_to_tokens(context, 1).expect("truncate");
+        assert_eq!(output["memories"], json!([]));
+        assert_eq!(output["recent"], json!([]));
+        assert_eq!(output["event"], "state_changed");
     }
 }
