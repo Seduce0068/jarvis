@@ -2,6 +2,12 @@
 # JARVIS Host Cloud-Init Configuration
 # Target: Ubuntu 22.04 LTS on OCI Ampere A1 (Arm64)
 
+# Create the runtime directories before write_files runs; write_files is
+# applied before runcmd, so the directories must exist here.
+bootcmd:
+  - mkdir -p /opt/jarvis/{backups,bin,data,logs,scripts,rust} /opt/jarvis/data/qdrant /var/lib/jarvis /etc/jarvis
+  - chown -R jarvis:jarvis /opt/jarvis /var/lib/jarvis
+
 package_update: true
 package_upgrade: true
 packages:
@@ -89,12 +95,6 @@ write_files:
 
 # Directories
 runcmd:
-  # Create directories
-  - mkdir -p /opt/jarvis/{backups,bin,data,logs,scripts,rust}
-  - mkdir -p /opt/jarvis/data/qdrant
-  # Kill-switch state must survive policy restarts.
-  - mkdir -p /var/lib/jarvis
-  - chown jarvis:jarvis /var/lib/jarvis
   - mkdir -p /home/jarvis/repos
   # XDG dirs required by systemd ReadWritePaths (services start fails if missing)
   - mkdir -p /home/jarvis/.config/opencode /home/jarvis/.config/code-server /home/jarvis/.config/rclone
