@@ -41,11 +41,11 @@ SystemCallErrorNumber=EPERM
 
 # Environment
 Environment=RUST_LOG=info
+Environment=HOME=/opt/jarvis/data
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 
 # Resource limits
 LimitNOFILE=65536
-LimitNPROC=4096
 MemoryMax=2G
 CPUQuota=150%
 
