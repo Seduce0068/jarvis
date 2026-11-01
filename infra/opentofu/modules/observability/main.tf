@@ -26,25 +26,6 @@ resource "oci_logging_log_group" "jarvis" {
   freeform_tags = var.tags
 }
 
-resource "oci_logging_log" "jarvis_services" {
-  log_group_id = oci_logging_log_group.jarvis.id
-  display_name = "jarvis-services"
-  log_type     = "SERVICE"
-
-  configuration {
-    compartment_id = var.compartment_id
-
-    source {
-      category    = "all"
-      resource    = var.instance_id
-      service     = "compute"
-      source_type = "OCISERVICE"
-    }
-  }
-
-  freeform_tags = var.tags
-}
-
 # OCI Monitoring Alarm for Instance Health
 resource "oci_monitoring_alarm" "instance_health" {
   compartment_id = var.compartment_id
