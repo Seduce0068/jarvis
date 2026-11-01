@@ -44,7 +44,7 @@ resource "oci_core_instance" "this" {
 
   metadata = {
     "ssh_authorized_keys" = var.ssh_public_key
-    "user_data" = base64encode(templatefile(var.cloud_init_path, {
+    "user_data" = base64gzip(templatefile(var.cloud_init_path, {
       ssh_public_key     = var.ssh_public_key
       tailscale_auth_key = var.tailscale_auth_key
       systemd_dir        = abspath("${path.module}/../../../systemd")

@@ -39,15 +39,6 @@ resource "oci_core_internet_gateway" "igw" {
   freeform_tags = var.tags
 }
 
-resource "oci_core_nat_gateway" "nat" {
-  compartment_id = var.compartment_id
-  vcn_id         = oci_core_virtual_network.vcn.id
-  display_name   = "jarvis-nat"
-  block_traffic  = false
-
-  freeform_tags = var.tags
-}
-
 resource "oci_core_route_table" "public" {
   compartment_id = var.compartment_id
   vcn_id         = oci_core_virtual_network.vcn.id
@@ -62,25 +53,11 @@ resource "oci_core_route_table" "public" {
   freeform_tags = var.tags
 }
 
-resource "oci_core_route_table" "private" {
-  compartment_id = var.compartment_id
-  vcn_id         = oci_core_virtual_network.vcn.id
-  display_name   = "jarvis-rt-private"
-
-  route_rules {
-    network_entity_id = oci_core_nat_gateway.nat.id
-    destination       = "0.0.0.0/0"
-    destination_type  = "CIDR_BLOCK"
-  }
-
-  freeform_tags = var.tags
-}
-
 resource "oci_core_default_route_table" "default" {
   manage_default_resource_id = oci_core_virtual_network.vcn.default_route_table_id
 
   route_rules {
-    network_entity_id = oci_core_nat_gateway.nat.id
+    network_entity_id = oci_core_internet_gateway.igw.id
     destination       = "0.0.0.0/0"
     destination_type  = "CIDR_BLOCK"
   }
@@ -96,8 +73,4 @@ output "subnet_id" {
 
 output "igw_id" {
   value = oci_core_internet_gateway.igw.id
-}
-
-output "nat_id" {
-  value = oci_core_nat_gateway.nat.id
 }
