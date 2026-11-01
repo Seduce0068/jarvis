@@ -43,8 +43,8 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(jarvis_http_requests_total[5m]))",
-          "legendFormat": "requests/s",
+          "expr": "sum by (service) (rate(jarvis_http_requests_total[5m]))",
+          "legendFormat": "{{service}}",
           "refId": "A"
         }
       ],
@@ -83,8 +83,8 @@
       },
       "targets": [
         {
-          "expr": "sum(jarvis_http_requests_total)",
-          "legendFormat": "total",
+          "expr": "sum by (service) (jarvis_http_requests_total)",
+          "legendFormat": "{{service}}",
           "refId": "A"
         }
       ],
