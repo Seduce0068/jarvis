@@ -13,6 +13,7 @@ pub struct EventConfig {
     pub http_addr: String,
     pub webhook_addr: String,
     pub ha_url: String,
+    #[serde(default)]
     pub ha_token: String,
     pub android_mcp_url: String,
     /// OpenCode server URL that receives policy-approved events.
