@@ -33,12 +33,18 @@ for unit in \
   "${REPO_DIR}"/infra/systemd/jarvis-event.service \
   "${REPO_DIR}"/infra/systemd/jarvis-context.service \
   "${REPO_DIR}"/infra/systemd/qdrant.service \
-  "${REPO_DIR}"/infra/systemd/opencode.service; do
+  "${REPO_DIR}"/infra/systemd/opencode.service \
+  "${REPO_DIR}"/infra/systemd/code-server.service \
+  "${REPO_DIR}"/infra/systemd/otelcol.service; do
   name="$(basename "${unit}")"
   sed -e "s/^User=jarvis$/User=${JARVIS_USER}/" \
       -e "s/^Group=jarvis$/Group=${JARVIS_USER}/" \
       -e "s|/home/jarvis|/home/${JARVIS_USER}|g" \
       -e "s/--port 49374/--port 49375/" \
+      -e "/^EnvironmentFile=-\/etc\/jarvis\/op.env/d" \
+      -e "/^Environment=PASSWORD_FILE=/d" \
+      -e "s/^ProtectHome=yes$/ProtectHome=read-only/" \
+      -e "s|^ExecStart=/usr/bin/op run --env-file=/etc/jarvis/otel.env -- |ExecStart=|" \
       "${unit}" \
     | sudo tee "/etc/systemd/system/${name}" >/dev/null
 done

@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Self-hosted host setup for JARVIS (Ubuntu/Debian, x86_64).
+#
+# Run as root on the target host:
+#   sudo JARVIS_USER=koppe bash setup-selfhost.sh
+#
+# Installs the runtime dependencies, creates the JARVIS directories, and
+# provisions PostgreSQL. Building and deploying the Rust services is handled
+# by build-selfhost.sh.
+set -euo pipefail
+
+if [[ ${EUID} -ne 0 ]]; then
+  echo "run as root (sudo)" >&2
+  exit 1
+fi
+
+JARVIS_USER="${JARVIS_USER:-koppe}"
+QDRANT_VERSION="${QDRANT_VERSION:-v1.14.1}"
+BWS_VERSION="${BWS_VERSION:-2.1.0}"
+ARCH="$(uname -m)"
+
+if [[ ${ARCH} != "x86_64" ]]; then
+  echo "this script targets x86_64; detected ${ARCH}" >&2
+  exit 1
+fi
+
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y \
+  build-essential pkg-config libssl-dev protobuf-compiler \
+  postgresql postgresql-client firejail bubblewrap \
+  curl unzip jq ca-certificates
+
+# Qdrant (musl static binary)
+curl -fsSL -o /tmp/qdrant.tar.gz \
+  "https://github.com/qdrant/qdrant/releases/download/${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-musl.tar.gz"
+tar -xzf /tmp/qdrant.tar.gz -C /usr/local/bin qdrant
+chmod 0755 /usr/local/bin/qdrant
+
+# code-server
+if ! command -v code-server >/dev/null 2>&1; then
+  curl -fsSL https://code-server.dev/install.sh | sh
+fi
+
+# code-server password (generated once; the unit reads config.yaml)
+CODE_SERVER_CONFIG="/home/${JARVIS_USER}/.config/code-server/config.yaml"
+if [[ ! -f "${CODE_SERVER_CONFIG}" ]]; then
+  CODE_SERVER_PASSWORD="$(python3 -c 'import secrets; print(secrets.token_urlsafe(24))')"
+  install -d -o "${JARVIS_USER}" -g "${JARVIS_USER}" \
+    "/home/${JARVIS_USER}/.config/code-server" \
+    "/home/${JARVIS_USER}/.local/share/code-server" \
+    "/home/${JARVIS_USER}/repos"
+  cat > "${CODE_SERVER_CONFIG}" <<EOF
+bind-addr: 127.0.0.1:8080
+auth: password
+password: ${CODE_SERVER_PASSWORD}
+cert: false
+EOF
+  chown "${JARVIS_USER}:${JARVIS_USER}" "${CODE_SERVER_CONFIG}"
+  chmod 600 "${CODE_SERVER_CONFIG}"
+  echo "code-server password: ${CODE_SERVER_PASSWORD}"
+fi
+
+# OpenTelemetry Collector (deb package; the tarball was retired)
+if ! command -v otelcol-contrib >/dev/null 2>&1; then
+  OTELCOL_VERSION="${OTELCOL_VERSION:-0.164.0}"
+  curl -fsSL -o /tmp/otelcol.deb \
+    "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.deb"
+  rm -rf /tmp/otelcol-extract
+  dpkg -x /tmp/otelcol.deb /tmp/otelcol-extract
+  install -m 0755 /tmp/otelcol-extract/usr/bin/otelcol-contrib /usr/local/bin/otelcol-contrib
+fi
+
+# Bitwarden Secrets Manager CLI (musl static binary)
+curl -fsSL -o /tmp/bws.zip \
+  "https://github.com/bitwarden/sdk-sm/releases/download/bws-v${BWS_VERSION}/bws-x86_64-unknown-linux-musl-${BWS_VERSION}.zip"
+unzip -o /tmp/bws.zip -d /usr/local/bin
+chmod 0755 /usr/local/bin/bws
+
+# OpenCode is installed in the user's home by its installer.
+if [[ -x "/home/${JARVIS_USER}/.local/bin/opencode" ]]; then
+  ln -sf "/home/${JARVIS_USER}/.local/bin/opencode" /usr/local/bin/opencode
+fi
+
+# Directories
+mkdir -p /opt/jarvis/{bin,data,logs,scripts,rust} /etc/jarvis /var/lib/jarvis
+chown -R "${JARVIS_USER}:${JARVIS_USER}" /opt/jarvis /var/lib/jarvis
+
+# PostgreSQL
+systemctl enable --now postgresql
+sudo -u postgres psql -c "CREATE USER jarvis WITH PASSWORD 'jarvis';" || true
+sudo -u postgres psql -c "CREATE DATABASE jarvis OWNER jarvis;" || true
+sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE jarvis TO jarvis;" || true
+
+echo "base setup complete; run build-selfhost.sh as ${JARVIS_USER}"
