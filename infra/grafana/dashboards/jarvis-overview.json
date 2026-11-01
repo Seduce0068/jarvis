@@ -150,7 +150,7 @@
       },
       "targets": [
         {
-          "expr": "up{job=~\"jarvis-.*\"}",
+          "expr": "up{job=~\"jarvis/jarvis-.*\"}",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
@@ -217,7 +217,7 @@
       },
       "targets": [
         {
-          "expr": "up{job=~\"postgresql|qdrant|opencode|code-server|node-exporter\"}",
+          "expr": "up{job=~\"jarvis/(qdrant|opencode|code-server|postgresql|node-exporter)\"}",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
