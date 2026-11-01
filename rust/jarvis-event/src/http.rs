@@ -52,10 +52,28 @@ async fn track_metrics(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let response = next.run(request).await;
-    // metrics 0.21's label parser rejects `"key" => expr` here, so record the
-    // request total without dimensions.
-    metrics::counter!("jarvis_http_requests_total").increment(1);
+    metrics::counter!(
+        "jarvis_http_requests_total",
+        "service" => "jarvis-event",
+        "status" => status_label(response.status()),
+    )
+    .increment(1);
     response
+}
+
+fn status_label(status: axum::http::StatusCode) -> &'static str {
+    match status.as_u16() {
+        200 => "200",
+        201 => "201",
+        204 => "204",
+        400 => "400",
+        401 => "401",
+        403 => "403",
+        404 => "404",
+        409 => "409",
+        500 => "500",
+        _ => "other",
+    }
 }
 
 async fn health() -> &'static str {

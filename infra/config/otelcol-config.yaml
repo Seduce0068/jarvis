@@ -40,27 +40,9 @@ receivers:
             - targets: ['localhost:8084']
           metrics_path: '/metrics'
 
-        - job_name: 'opencode'
-          static_configs:
-            - targets: ['localhost:49374']
-          metrics_path: '/metrics'
-
-        - job_name: 'code-server'
-          static_configs:
-            - targets: ['localhost:8080']
-          metrics_path: '/metrics'
-
-        - job_name: 'postgresql'
-          static_configs:
-            - targets: ['localhost:9187']
-
         - job_name: 'qdrant'
           static_configs:
             - targets: ['localhost:6333']
-
-        - job_name: 'node-exporter'
-          static_configs:
-            - targets: ['localhost:9100']
 
   # File log receiver for systemd journals
   filelog:
