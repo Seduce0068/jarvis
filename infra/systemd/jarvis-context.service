@@ -9,10 +9,10 @@ Type=exec
 User=jarvis
 Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
-EnvironmentFile=-/etc/jarvis/op.env
+EnvironmentFile=-/etc/jarvis/bws.env
 
 # 1Password references in context.env are resolved at service start
-ExecStart=/usr/bin/op run --env-file=/etc/jarvis/context.env -- /opt/jarvis/bin/jarvis-context
+ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /opt/jarvis/bin/jarvis-context
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
@@ -42,14 +42,6 @@ SystemCallErrorNumber=EPERM
 # Environment
 Environment=RUST_LOG=info
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
-Environment=JARVIS_CONTEXT_GRPC_ADDR=127.0.0.1:50054
-Environment=JARVIS_CONTEXT_HTTP_ADDR=127.0.0.1:8084
-Environment=JARVIS_CONTEXT_PG_URL=postgres://jarvis:jarvis@localhost:5432/jarvis
-Environment=JARVIS_CONTEXT_QDRANT_URL=http://127.0.0.1:6334
-Environment=JARVIS_CONTEXT_COLLECTION_NAME=jarvis_memories
-Environment=JARVIS_CONTEXT_PII_PATTERNS_PATH=/etc/jarvis/pii_patterns.toml
-Environment=JARVIS_CONTEXT_MAX_CONTEXT_TOKENS=8000
-Environment=JARVIS_CONTEXT_POLICY_GRPC_ADDR=http://127.0.0.1:50051
 
 # Resource limits
 LimitNOFILE=65536

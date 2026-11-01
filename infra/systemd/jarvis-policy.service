@@ -9,10 +9,10 @@ Type=exec
 User=jarvis
 Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
-EnvironmentFile=-/etc/jarvis/op.env
+EnvironmentFile=-/etc/jarvis/bws.env
 
 # 1Password references in policy.env are resolved at service start
-ExecStart=/usr/bin/op run --env-file=/etc/jarvis/policy.env -- /opt/jarvis/bin/jarvis-policy
+ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /opt/jarvis/bin/jarvis-policy
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
@@ -42,12 +42,6 @@ SystemCallErrorNumber=EPERM
 # Environment
 Environment=RUST_LOG=info
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
-Environment=JARVIS_POLICY_GRPC_ADDR=127.0.0.1:50051
-Environment=JARVIS_POLICY_HTTP_ADDR=127.0.0.1:8081
-Environment=JARVIS_POLICY_CEDAR_POLICY_DIR=/etc/jarvis/policy
-Environment=JARVIS_POLICY_CASBIN_MODEL_PATH=/etc/jarvis/policy/casbin_model.conf
-Environment=JARVIS_POLICY_CASBIN_POLICY_PATH=/etc/jarvis/policy/casbin_policy.csv
-Environment=JARVIS_POLICY_KILL_SWITCH_STATE_PATH=/var/lib/jarvis/kill-switch.json
 
 # Resource limits
 LimitNOFILE=65536

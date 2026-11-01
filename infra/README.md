@@ -193,31 +193,31 @@ next call without a restart.
 
 ### Secret Management
 
-Secrets use **1Password CLI** references (`op://`):
+Secrets are stored in **Bitwarden Secrets Manager** and injected by
+`bws run`:
 
-- `.env` files under `infra/config/` hold only `op://` refs (no plaintext
-  secrets) and are shipped to `/etc/jarvis/` by `rust-script
-  rust/scripts/deploy.rs`.
-- Services resolve them at start via `op run --env-file=...` (see the systemd
-  units). This requires the `OP_SERVICE_ACCOUNT_TOKEN` environment variable,
-  which systemd reads from the root-owned `/etc/jarvis/op.env`.
+- The `jarvis` project holds the `JARVIS_*` keys as secrets whose names
+  match the environment variables the services read.
+- The systemd units run
+  `/usr/local/bin/bws run --project-id <id> -- /opt/jarvis/bin/<service>`.
+  `bws` reads `BWS_ACCESS_TOKEN` from the root-owned
+  `/etc/jarvis/bws.env`.
+- The access token is a machine-account token scoped to the `jarvis`
+  project.
 
-Provision the service account token once after the host is created:
+Provision the access token once after the host is created:
 
 ```bash
-sudo sh -c 'umask 077; echo "OP_SERVICE_ACCOUNT_TOKEN=ops_..." > /etc/jarvis/op.env'
-sudo systemctl restart jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context otelcol
+sudo sh -c 'umask 077; echo "BWS_ACCESS_TOKEN=0.xxxx.yyyy:zzzz" > /etc/jarvis/bws.env'
+sudo systemctl restart jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context
 ```
 
-Required 1Password vault items:
+`otelcol` still uses 1Password (`op run`) until the Grafana credentials are
+migrated.
 
-- `JARVIS/Policy/admin_token`
-- `JARVIS/PostgreSQL/connection_string`
-- `JARVIS/Home Assistant/long_lived_token`
-- `JARVIS/Gmail/client_id`, `client_secret`
-- `JARVIS/Google Calendar/client_id`, `client_secret`
-- `JARVIS/Grafana/instance`, `token`
-- `JARVIS/OCI/access_key_id`, `secret_access_key`, `endpoint`
+`infra/config/*.env` files remain the reference for which environment
+variables each service expects, and `deploy.rs` still ships them to
+`/etc/jarvis/` for troubleshooting.
 
 ### Backup & DR
 

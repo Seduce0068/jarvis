@@ -115,6 +115,9 @@ runcmd:
   - echo "deb [arch=arm64 signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/arm64 stable main" > /etc/apt/sources.list.d/1password.list
   - apt-get update && apt-get install -y 1password-cli
 
+  # Install Bitwarden Secrets Manager CLI (arm64 musl static binary)
+  - curl -fsSL -o /tmp/bws.zip https://github.com/bitwarden/sdk-sm/releases/download/bws-v2.1.0/bws-aarch64-unknown-linux-musl-2.1.0.zip && unzip -o /tmp/bws.zip -d /usr/local/bin && chmod 0755 /usr/local/bin/bws
+
   # Install OpenCode V2 (as jarvis: the installer targets ~/.local/bin)
   - sudo -u jarvis bash -c 'curl -fsSL https://opencode.ai/v2/install | bash'
   - ln -sf /home/jarvis/.local/bin/opencode /usr/local/bin/opencode

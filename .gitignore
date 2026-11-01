@@ -45,3 +45,4 @@ crash.log
 
 /rust/target/
 .env
+infra/config/bws.env
