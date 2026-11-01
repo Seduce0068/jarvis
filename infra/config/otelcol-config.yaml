@@ -139,23 +139,11 @@ processors:
           sampling_percentage: 10
 
 exporters:
-  # OTLP exporter for Grafana Cloud (traces & logs)
-  otlp:
-    endpoint: "https://otlp.${env:GRAFANA_CLOUD_INSTANCE}.grafana.net:4317"
-    headers:
-      Authorization: "Bearer ${env:GRAFANA_CLOUD_TOKEN}"
-    compression: gzip
-    retry_on_failure:
-      enabled: true
-      initial_interval: 5s
-      max_interval: 30s
-      max_elapsed_time: 120s
-
   # Prometheus Remote Write for metrics
   prometheusremotewrite:
-    endpoint: "https://prometheus-${env:GRAFANA_CLOUD_INSTANCE}.grafana.net/api/prom/push"
+    endpoint: "https://prometheus-prod-49-prod-ap-northeast-0.grafana.net/api/prom/push"
     headers:
-      Authorization: "Bearer ${env:GRAFANA_CLOUD_TOKEN}"
+      Authorization: "Basic ${env:GRAFANA_CLOUD_AUTH}"
     resource_to_telemetry_conversion:
       enabled: true
 
@@ -171,7 +159,7 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch, resource, transform, filter, tail_sampling]
-      exporters: [otlp, debug]
+      exporters: [debug]
 
     metrics:
       receivers: [otlp, prometheus]
@@ -181,7 +169,7 @@ service:
     logs:
       receivers: [otlp, filelog]
       processors: [memory_limiter, batch, resource]
-      exporters: [otlp, debug]
+      exporters: [debug]
 
   telemetry:
     logs:
