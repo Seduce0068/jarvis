@@ -12,6 +12,11 @@ use tokio::process::Command;
 /// Maximum bytes returned by a native read/git handler.
 const NATIVE_MAX_OUTPUT: usize = 1024 * 1024;
 
+/// `web.fetch` のデフォルト/上限サイズと最大リダイレクト数。
+const WEB_FETCH_DEFAULT_MAX_BYTES: usize = 256 * 1024;
+const WEB_FETCH_HARD_MAX_BYTES: usize = 1024 * 1024;
+const WEB_FETCH_MAX_REDIRECTS: usize = 3;
+
 #[derive(Clone)]
 pub struct Sandbox {
     sandbox_type: crate::config::SandboxType,
@@ -49,7 +54,7 @@ impl Sandbox {
         // Tools with a native Rust handler never depend on an agent runtime CLI.
         if matches!(
             tool,
-            "filesystem.read" | "filesystem.list" | "git.status" | "git.diff"
+            "filesystem.read" | "filesystem.list" | "git.status" | "git.diff" | "web.fetch"
         ) {
             return self.execute_native(tool, args, tool_config).await;
         }
@@ -84,9 +89,103 @@ impl Sandbox {
                     .await
             }
             "git.diff" => self.native_git(&args, tool_config, &["diff"]).await,
+            "web.fetch" => self.native_web_fetch(&args, tool_config).await,
             other => bail!(
                 "no native handler for tool '{other}'; register an upstream MCP server for it"
             ),
+        }
+    }
+
+    /// HTTP(S) GET with SSRF protections: public addresses only, manual
+    /// redirect validation, textual content only, and a hard size cap.
+    async fn native_web_fetch(
+        &self,
+        args: &Value,
+        tool_config: &crate::allowlist::AllowedTool,
+    ) -> Result<Value> {
+        let raw = args
+            .get("url")
+            .and_then(Value::as_str)
+            .context("missing 'url' argument")?;
+        let mut url = validate_http_url(raw)?;
+        let max_bytes = web_max_bytes(args);
+        let timeout_ms = tool_config.timeout_ms.clamp(1_000, 15_000);
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("jarvis-mcp-gw/web-fetch")
+            .build()
+            .context("build http client")?;
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
+        let mut redirects = 0usize;
+        loop {
+            ensure_public_host(&url).await?;
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                bail!("web.fetch timed out");
+            }
+            let resp = tokio::time::timeout(remaining, client.get(url.clone()).send())
+                .await
+                .context("web.fetch request timed out")?
+                .with_context(|| format!("GET {url}"))?;
+            let status = resp.status();
+            if status.is_redirection()
+                && let Some(location) = resp
+                    .headers()
+                    .get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok())
+            {
+                redirects += 1;
+                if redirects > WEB_FETCH_MAX_REDIRECTS {
+                    bail!("too many redirects (> {WEB_FETCH_MAX_REDIRECTS})");
+                }
+                url = resolve_redirect(&url, location)?;
+                continue;
+            }
+            let content_type = resp
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            if !is_textual_content_type(&content_type) {
+                bail!("unsupported content type: '{content_type}'");
+            }
+            if let Some(len) = resp.content_length()
+                && len as usize > max_bytes
+            {
+                bail!("response too large ({len} bytes > {max_bytes})");
+            }
+            let mut resp = resp;
+            let mut body: Vec<u8> = Vec::new();
+            let mut truncated = false;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    bail!("web.fetch body timed out");
+                }
+                match tokio::time::timeout(remaining, resp.chunk()).await {
+                    Err(_) => bail!("web.fetch body timed out"),
+                    Ok(Err(err)) => return Err(err).context("read response body"),
+                    Ok(Ok(None)) => break,
+                    Ok(Ok(Some(chunk))) => {
+                        if body.len() + chunk.len() > max_bytes {
+                            let take = max_bytes.saturating_sub(body.len());
+                            body.extend_from_slice(&chunk[..take]);
+                            truncated = true;
+                            break;
+                        }
+                        body.extend_from_slice(&chunk);
+                    }
+                }
+            }
+            let text = String::from_utf8_lossy(&body).to_string();
+            return Ok(json!({
+                "url": url.as_str(),
+                "status": status.as_u16(),
+                "content_type": content_type,
+                "truncated": truncated,
+                "body": text,
+            }));
         }
     }
 
@@ -308,6 +407,94 @@ impl Sandbox {
     }
 }
 
+fn web_max_bytes(args: &Value) -> usize {
+    let requested = args
+        .get("max_bytes")
+        .and_then(Value::as_u64)
+        .unwrap_or(WEB_FETCH_DEFAULT_MAX_BYTES as u64) as usize;
+    requested.clamp(1024, WEB_FETCH_HARD_MAX_BYTES)
+}
+
+fn validate_http_url(raw: &str) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).with_context(|| format!("invalid url: {raw}"))?;
+    match url.scheme() {
+        "http" | "https" => {}
+        other => bail!("unsupported scheme '{other}' (http/https only)"),
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        bail!("credentials in URL are not allowed");
+    }
+    if url.host_str().is_none() {
+        bail!("url has no host");
+    }
+    Ok(url)
+}
+
+fn resolve_redirect(base: &reqwest::Url, location: &str) -> Result<reqwest::Url> {
+    let next = base
+        .join(location)
+        .with_context(|| format!("invalid redirect location: {location}"))?;
+    validate_http_url(next.as_str())
+}
+
+fn is_public_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            !(v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_multicast()
+                || v4.is_documentation()
+                || v4.octets()[0] == 0
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])))
+        }
+        std::net::IpAddr::V6(v6) => {
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_public_ip(&std::net::IpAddr::V4(mapped));
+            }
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local())
+        }
+    }
+}
+
+async fn ensure_public_host(url: &reqwest::Url) -> Result<()> {
+    let host = url.host_str().context("url has no host")?;
+    let port = url.port_or_known_default().unwrap_or(80);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .with_context(|| format!("dns lookup failed: {host}"))?;
+    let mut any = false;
+    for addr in addrs {
+        any = true;
+        if !is_public_ip(&addr.ip()) {
+            bail!(
+                "refusing to fetch non-public address {} for host {host}",
+                addr.ip()
+            );
+        }
+    }
+    if !any {
+        bail!("dns lookup returned no addresses for {host}");
+    }
+    Ok(())
+}
+
+fn is_textual_content_type(content_type: &str) -> bool {
+    let ct = content_type.to_ascii_lowercase();
+    ct.starts_with("text/")
+        || ct.contains("json")
+        || ct.contains("xml")
+        || ct.contains("xhtml")
+        || ct.contains("javascript")
+        || ct.contains("ecmascript")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -330,6 +517,64 @@ mod tests {
             timeout_ms,
             requires_approval: false,
         }
+    }
+
+    #[test]
+    fn blocks_non_public_ip_ranges() {
+        use std::net::IpAddr;
+        for ip in [
+            "127.0.0.1",
+            "10.0.0.1",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "224.0.0.1",
+            "100.64.0.1",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+        ] {
+            assert!(
+                !is_public_ip(&ip.parse::<IpAddr>().unwrap()),
+                "{ip} should be blocked"
+            );
+        }
+        for ip in ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"] {
+            assert!(
+                is_public_ip(&ip.parse::<IpAddr>().unwrap()),
+                "{ip} should be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn validates_fetch_url() {
+        assert!(validate_http_url("https://example.com/path").is_ok());
+        assert!(validate_http_url("http://example.com").is_ok());
+        assert!(validate_http_url("file:///etc/passwd").is_err());
+        assert!(validate_http_url("ftp://example.com").is_err());
+        assert!(validate_http_url("https://user:pass@example.com").is_err());
+        assert!(validate_http_url("not a url").is_err());
+    }
+
+    #[test]
+    fn resolves_relative_redirects() {
+        let base = validate_http_url("https://example.com/a/b").unwrap();
+        let next = resolve_redirect(&base, "../c").unwrap();
+        assert_eq!(next.as_str(), "https://example.com/c");
+        let abs = resolve_redirect(&base, "https://other.example/d").unwrap();
+        assert_eq!(abs.as_str(), "https://other.example/d");
+    }
+
+    #[test]
+    fn caps_web_fetch_max_bytes() {
+        assert_eq!(web_max_bytes(&json!({})), WEB_FETCH_DEFAULT_MAX_BYTES);
+        assert_eq!(web_max_bytes(&json!({"max_bytes": 1})), 1024);
+        assert_eq!(
+            web_max_bytes(&json!({"max_bytes": 10 * 1024 * 1024})),
+            WEB_FETCH_HARD_MAX_BYTES
+        );
     }
 
     #[test]

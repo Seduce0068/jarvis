@@ -42,3 +42,16 @@ sudo install -o root -g root -m 0755 target/release/jarvis-mcp-gw /opt/jarvis/bi
 sudo systemctl restart jarvis-mcp-gw
 curl -s http://127.0.0.1:8082/health
 ```
+
+## web.fetch（ネイティブ実装・2026-11-09）
+
+- `web.fetch` をネイティブハンドラとして実装（HTTP/HTTPS GET）。
+  - 公開IPのみ許可（loopback/private/link-local/ULA/multicast等は拒否）
+  - リダイレクトは手動検証（最大3回・各ホップで公開IP確認）
+  - テキスト系content-typeのみ、サイズ上限1MiB（既定256KiB）
+  - URL内の認証情報を拒否
+- **既定では未公開**。有効化（root・明示承認）:
+  1. `infra/config/mcp_allowlist.toml` に `web.fetch` エントリを追加（`requires_approval = true` 推奨）
+  2. `infra/config/policy/casbin_policy.csv` に `tool:web.fetch` のexecute権限を追加
+  3. バイナリを再配置して `systemctl restart jarvis-mcp-gw`
+- 有効化後は、取得先・サイズ・リダイレクトの制約をテストで確認すること。
