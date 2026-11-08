@@ -192,6 +192,9 @@ impl Sandbox {
     fn native_read(&self, args: &Value) -> Result<Value> {
         let path = self.resolve_path(args)?;
         let meta = std::fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+        if meta.is_dir() {
+            bail!("path is a directory: {}", path.display());
+        }
         if meta.len() > NATIVE_MAX_OUTPUT as u64 {
             bail!("file too large to read ({} bytes)", meta.len());
         }

@@ -139,7 +139,7 @@ fn http_status_for(error: &anyhow::Error, message: &str) -> axum::http::StatusCo
 /// Native handlers reject bad input with these message prefixes; such errors
 /// are caller mistakes (400), not gateway failures (500).
 fn is_client_error(message: &str) -> bool {
-    const PREFIXES: [&str; 14] = [
+    const PREFIXES: [&str; 19] = [
         "missing '",
         "invalid url",
         "unsupported scheme",
@@ -154,6 +154,11 @@ fn is_client_error(message: &str) -> bool {
         "no native handler",
         "path escapes",
         "invalid git path",
+        "path is a directory",
+        "stat ",
+        "read ",
+        "read_dir ",
+        "canonicalize ",
     ];
     PREFIXES.iter().any(|prefix| message.starts_with(prefix))
 }
