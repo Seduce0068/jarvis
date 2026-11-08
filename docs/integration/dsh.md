@@ -59,3 +59,12 @@ curl -s http://127.0.0.1:8082/health
   2. `infra/config/policy/casbin_policy.csv` に `tool:web.fetch` のexecute権限を追加
   3. バイナリを再配置して `systemctl restart jarvis-mcp-gw`
 - 有効化後は、取得先・サイズ・リダイレクトの制約をテストで確認すること。
+
+## 安全デプロイ（2026-11-09）
+
+```bash
+cd ~/ドキュメント/作業用/jarvis/jarvis
+bash infra/scripts/deploy-mcp-gw-safe.sh --allow-web-fetch          # 乾燥実行（計画+スモーク）
+sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply --allow-web-fetch
+bash infra/scripts/check-deploy-drift.sh                            # 事後確認
+```
