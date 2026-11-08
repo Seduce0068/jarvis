@@ -16,7 +16,11 @@ env_dir="$repo_root/infra/opentofu/environments/prod"
 ts="$(date +%Y%m%d-%H%M%S)"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-command -v tofu >/dev/null || die "tofu が見つかりません（OpenTofuを導入してください）"
+TOFU=$(command -v tofu 2>/dev/null || true)
+[ -z "$TOFU" ] && [ -x /snap/bin/tofu ] && TOFU=/snap/bin/tofu
+[ -n "$TOFU" ] || die "tofu が見つかりません（OpenTofuを導入してください）"
+echo "  tofu: $TOFU"
+
 [ -d "$env_dir" ] || die "環境ディレクトリがありません: $env_dir"
 
 cd "$env_dir"
@@ -24,7 +28,7 @@ echo "== 1. init =="
 tofu init -input=false >/dev/null
 
 echo "== 2. state確認 =="
-state_list="$(tofu state list 2>/dev/null || true)"
+state_list="$("$TOFU" state list 2>/dev/null || true)"
 [ -n "$state_list" ] || die "state が空です（対象が無いか、state参照先が違います）"
 echo "$state_list" | head -n 20 | sed 's/^/  /'
 count="$(echo "$state_list" | wc -l)"
