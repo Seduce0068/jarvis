@@ -71,6 +71,52 @@ else
   if grep -qi 'example domain' "$tmp/r1"; then echo "  PASS: fetched example.com body"; ok=$((ok+1)); else echo "  FAIL: body missing Example Domain"; fail=$((fail+1)); fi
 fi
 
+# MCPエンドポイント: initialize → tools/list
+curl -q -s -D "$tmp/mcp.h" -o "$tmp/mcp.b" -X POST "http://127.0.0.1:$port/mcp" \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
+check mcp-initialize 200 "$(head -n1 "$tmp/mcp.h" | grep -q '200' && echo 200 || echo fail)"
+sid=$(grep -i '^mcp-session-id:' "$tmp/mcp.h" | tr -d '\r' | cut -d' ' -f2)
+if [ -n "$sid" ]; then echo "  PASS: mcp-session-id issued"; ok=$((ok+1)); else echo "  FAIL: no session id"; fail=$((fail+1)); fi
+curl -q -s -o /dev/null -X POST "http://127.0.0.1:$port/mcp" \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -H "mcp-session-id: $sid" \
+  -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
+curl -q -s -o "$tmp/tools.b" -X POST "http://127.0.0.1:$port/mcp" \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -H "mcp-session-id: $sid" \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+python3 - "$tmp/tools.b" >"$tmp/tools.names" <<'PY'
+import json, re, sys
+t = open(sys.argv[1]).read()
+objs = []
+for m in re.finditer(r'data:\s*(\{.*?\})\s*(?:\n|$)', t, re.S):
+    try: objs.append(json.loads(m.group(1)))
+    except Exception: pass
+if not objs:
+    try: objs = [json.loads(t)]
+    except Exception: pass
+names = []
+for o in objs:
+    if isinstance(o, dict) and 'result' in o:
+        names = [tool.get('name') for tool in o['result'].get('tools', [])]
+print('\n'.join(names))
+PY
+# requires_approval=true のツールは tools/list から隠される仕様
+if [ "$mode" = "approval" ]; then
+  if grep -qx 'filesystem.read' "$tmp/tools.names" && ! grep -qx 'web.fetch' "$tmp/tools.names"; then
+    echo "  PASS: mcp tools/list (filesystem.read表示 / web.fetchは承認待ちのため非表示)"; ok=$((ok+1))
+  else
+    echo "  FAIL: mcp tools/list (approval mode)"; fail=$((fail+1))
+  fi
+else
+  if grep -qx 'filesystem.read' "$tmp/tools.names" && grep -qx 'web.fetch' "$tmp/tools.names"; then
+    echo "  PASS: mcp tools/list (filesystem.read, web.fetch)"; ok=$((ok+1))
+  else
+    echo "  FAIL: mcp tools/list missing expected tools"; fail=$((fail+1))
+  fi
+fi
+
 # 引数エラー → 400（ディレクトリ読取）
 code=$(curl -q -s -o "$tmp/r2" -w '%{http_code}' -X POST "http://127.0.0.1:$port/v1/execute" \
   -H 'content-type: application/json' -d '{"tool":"filesystem.read","args":{},"principal":"opencode"}')

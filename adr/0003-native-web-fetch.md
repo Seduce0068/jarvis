@@ -37,3 +37,9 @@ ADR-0002で「読み取り系ツールはゲートウェイ内のRust実装で�
 
 - 既存の`web.search`は未実装のまま（呼ぶと400 `no native handler`）。
 - デプロイ前に allowlist の `requires_approval` をレビューすること。
+
+## 補足: 承認必須ツールの見え方
+
+`requires_approval = true` のツールは `AllowList::tools_for_principal` のフィルタにより
+**MCPの`tools/list`に表示されない**（呼び出しも`ApprovalRequired`で403）。
+したがって承認必須化後は、エージェントからは「存在しないツール」として扱われる。
