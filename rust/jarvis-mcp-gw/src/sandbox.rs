@@ -307,3 +307,83 @@ impl Sandbox {
         self.execute_docker(tool, args, tool_config).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture() -> (PathBuf, Sandbox) {
+        let base = std::env::temp_dir().join(format!("jarvis-sandbox-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(base.join("sub")).unwrap();
+        std::fs::write(base.join("hello.txt"), b"hello sandbox").unwrap();
+        let sandbox = Sandbox::with_base(base.clone(), json!({}));
+        (base, sandbox)
+    }
+
+    fn allowed(tool: &str, timeout_ms: u64) -> crate::allowlist::AllowedTool {
+        crate::allowlist::AllowedTool {
+            name: tool.to_string(),
+            description: String::new(),
+            allowed_principals: vec!["opencode".to_string()],
+            max_args_size: 65536,
+            timeout_ms,
+            requires_approval: false,
+        }
+    }
+
+    #[test]
+    fn reads_file_under_base() {
+        let (base, sandbox) = fixture();
+        let out = sandbox.native_read(&json!({"path": "hello.txt"})).unwrap();
+        assert_eq!(out["content"], "hello sandbox");
+        assert!(
+            out["path"]
+                .as_str()
+                .unwrap()
+                .starts_with(base.to_str().unwrap())
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn lists_directory_entries_sorted() {
+        let (base, sandbox) = fixture();
+        let out = sandbox.native_list(&json!({"path": "."})).unwrap();
+        let names: Vec<&str> = out["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["name"].as_str().unwrap())
+            .collect();
+        assert!(names.contains(&"hello.txt"));
+        assert!(names.contains(&"sub"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn rejects_path_escape() {
+        let (base, sandbox) = fixture();
+        let err = sandbox
+            .native_read(&json!({"path": "../etc/passwd"}))
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("escapes workspace") || msg.contains("canonicalize"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn unknown_tool_reports_no_handler() {
+        let (base, sandbox) = fixture();
+        let err = tokio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(sandbox.execute_native(
+                "no.such.tool",
+                json!({}),
+                &allowed("no.such.tool", 1000),
+            ))
+            .unwrap_err();
+        assert!(err.to_string().contains("no native handler"));
+        let _ = std::fs::remove_dir_all(base);
+    }
+}
