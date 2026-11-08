@@ -32,7 +32,14 @@ pub struct OpenCodeClient {
 
 impl OpenCodeClient {
     pub fn new(config: &crate::config::EventConfig) -> Result<Self> {
+        let mut headers = reqwest::header::HeaderMap::new();
+        if let Some(password) = &config.opencode_password {
+            let value = reqwest::header::HeaderValue::from_str(&format!("Bearer {password}"))
+                .context("invalid OpenCode password header")?;
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+        }
         let http = reqwest::Client::builder()
+            .default_headers(headers)
             .timeout(Duration::from_secs(30))
             .build()
             .context("building OpenCode HTTP client")?;

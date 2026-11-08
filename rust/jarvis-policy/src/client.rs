@@ -60,7 +60,7 @@ impl PolicyClient {
                     principal,
                     action,
                     resource,
-                    %error,
+                    error = ?error,
                     "policy check failed; denying (fail-closed)"
                 );
                 false
@@ -77,11 +77,13 @@ impl PolicyClient {
         context: &serde_json::Value,
     ) -> Result<bool> {
         let mut client = PolicyServiceClient::new(self.channel.clone());
+        // Cedar rejects JSON nulls, so strip them before sending the context.
+        let context = without_nulls(context);
         let mut request = tonic::Request::new(CheckRequest {
             principal: principal.to_owned(),
             action: action.to_owned(),
             resource: resource.to_owned(),
-            context: serde_json::to_string(context)?,
+            context: serde_json::to_string(&context)?,
         });
         request.set_timeout(CHECK_TIMEOUT);
         let response = client
@@ -90,6 +92,27 @@ impl PolicyClient {
             .with_context(|| format!("policy check RPC to {} failed", self.endpoint))?
             .into_inner();
         Ok(response.allowed)
+    }
+}
+
+/// Remove `null` object values and array elements because Cedar's JSON
+/// context parser rejects `null`.
+fn without_nulls(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(items) => serde_json::Value::Array(
+            items
+                .iter()
+                .filter(|item| !item.is_null())
+                .map(without_nulls)
+                .collect(),
+        ),
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .filter(|(_, value)| !value.is_null())
+                .map(|(key, value)| (key.clone(), without_nulls(value)))
+                .collect(),
+        ),
+        other => other.clone(),
     }
 }
 
@@ -214,5 +237,17 @@ mod tests {
                 .await,
             "an unreachable policy service must deny"
         );
+    }
+
+    #[test]
+    fn strips_nulls_from_the_policy_context() {
+        let context = serde_json::json!({
+            "event": { "id": null, "type": "state_changed" },
+            "recent": [{ "expires_at": null, "content": "x" }],
+        });
+        let sanitized = without_nulls(&context);
+        assert!(sanitized["event"].get("id").is_none());
+        assert!(sanitized["recent"][0].get("expires_at").is_none());
+        assert_eq!(sanitized["event"]["type"], "state_changed");
     }
 }

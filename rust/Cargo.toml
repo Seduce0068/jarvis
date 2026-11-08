@@ -38,7 +38,7 @@ opentelemetry-otlp = { version = "0.33", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.33"
 tracing-opentelemetry = "0.34"
 metrics = "0.22"
-metrics-exporter-prometheus = "0.14"
+metrics-exporter-prometheus = { version = "0.14", default-features = false }
 
 # Error handling
 thiserror = "1.0"
@@ -54,7 +54,7 @@ http = "1.2"
 axum = { version = "0.7", features = ["tracing"] }
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 futures-util = "0.3"
 
 # Policy / Auth

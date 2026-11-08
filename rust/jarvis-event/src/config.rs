@@ -20,6 +20,9 @@ pub struct EventConfig {
     pub opencode_url: String,
     /// OpenCode location (working directory) used for agent sessions.
     pub opencode_location: String,
+    /// OpenCode server password (when the server requires authentication).
+    #[serde(default)]
+    pub opencode_password: Option<String>,
     pub policy_grpc_addr: String,
 }
 
@@ -50,6 +53,7 @@ impl Default for EventConfig {
             android_mcp_url: "http://127.0.0.1:49374".into(),
             opencode_url: "http://127.0.0.1:49374".into(),
             opencode_location: "/home/jarvis/repos".into(),
+            opencode_password: None,
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
         }
     }

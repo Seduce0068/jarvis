@@ -34,6 +34,7 @@ p, agent, tool:homeassistant.get_state, execute
 p, agent, tool:android.get_device_info, execute
 p, agent, tool:web.search, execute
 p, agent, tool:web.fetch, execute
+p, agent, event:state_changed, auto_respond
 g, jarvis, agent
 
 # OpenCode agent role - mirrors the `opencode` grants in mcp_allowlist.toml
