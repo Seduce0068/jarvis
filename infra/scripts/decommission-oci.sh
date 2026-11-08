@@ -25,29 +25,37 @@ echo "  tofu: $TOFU"
 
 cd "$env_dir"
 echo "== 1. init =="
-tofu init -input=false >/dev/null
+"$TOFU" init -input=false >/dev/null
 
 echo "== 2. state確認 =="
 state_list="$("$TOFU" state list 2>/dev/null || true)"
-[ -n "$state_list" ] || die "state が空です（対象が無いか、state参照先が違います）"
+if [ -z "$state_list" ]; then
+  echo "ERROR: state が空です。" >&2
+  echo "  考えられる原因:" >&2
+  echo "   - terraform.tfvars が無い（prod/terraform.tfvars.example から作成）" >&2
+  echo "   - terraform.tfstate が別の場所/失われている（OCI側に未追跡リソースが残っている可能性）" >&2
+  echo "  → OCIコンソール/CLIで実リソースを確認し、必要なら import してから再実行してください。" >&2
+  echo "  → 未追跡なら手動削除（OCIコンソール推奨）。A1 Free枠の再取得不可に注意。" >&2
+  exit 1
+fi
 echo "$state_list" | head -n 20 | sed 's/^/  /'
 count="$(echo "$state_list" | wc -l)"
 echo "  リソース数: $count"
 
 echo "== 3. 最終stateバックアップ =="
 backup="$HOME/jarvis-oci-state-$ts.json"
-tofu state pull > "$backup"
+"$TOFU" state pull > "$backup"
 chmod 600 "$backup"
 echo "  $backup"
 
 echo "== 4. destroy plan =="
 plan="destroy-$ts.tfplan"
-tofu plan -destroy -out "$plan"
+"$TOFU" plan -destroy -out "$plan"
 echo "  plan: $env_dir/$plan"
 
 if [ "$apply" -eq 1 ]; then
   echo "== 5. 適用（OCIリソースを削除） =="
-  tofu apply "$plan"
+  "$TOFU" apply "$plan"
   echo "完了。Tailscale管理コンソールから jarvis-host を削除してください。"
 else
   echo "乾燥実行のみ。実行するには --apply を付けてください。"
