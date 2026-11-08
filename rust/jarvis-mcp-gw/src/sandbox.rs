@@ -500,7 +500,10 @@ mod tests {
     use super::*;
 
     fn fixture() -> (PathBuf, Sandbox) {
-        let base = std::env::temp_dir().join(format!("jarvis-sandbox-{}", std::process::id()));
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let base = std::env::temp_dir().join(format!("jarvis-sandbox-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("sub")).unwrap();
         std::fs::write(base.join("hello.txt"), b"hello sandbox").unwrap();
