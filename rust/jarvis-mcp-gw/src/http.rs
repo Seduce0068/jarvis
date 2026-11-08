@@ -9,6 +9,7 @@ use axum::{
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::sync::{Arc, OnceLock};
 use tracing::instrument;
 
@@ -104,17 +105,25 @@ async fn metrics() -> String {
 async fn execute_tool(
     State(gateway): State<Arc<McpGateway>>,
     Json(req): Json<ExecuteToolRequest>,
-) -> Result<Json<ExecuteToolResponse>, axum::http::StatusCode> {
+) -> Result<Json<ExecuteToolResponse>, (axum::http::StatusCode, Json<Value>)> {
     let result = gateway
         .execute_tool(&req.tool, req.args, &req.principal)
         .await
-        .map_err(http_status_for)?;
+        .map_err(http_error)?;
     Ok(Json(ExecuteToolResponse { result }))
 }
 
-/// Map gateway denials to 403 so clients can distinguish policy failures
-/// from internal errors.
-fn http_status_for(error: anyhow::Error) -> axum::http::StatusCode {
+/// Build a JSON error body alongside the mapped status so callers can
+/// distinguish denials (403), bad arguments (400), and internal failures.
+fn http_error(error: anyhow::Error) -> (axum::http::StatusCode, Json<Value>) {
+    let message = error.to_string();
+    (
+        http_status_for(&error, &message),
+        Json(json!({ "error": message })),
+    )
+}
+
+fn http_status_for(error: &anyhow::Error, message: &str) -> axum::http::StatusCode {
     match error.downcast_ref::<crate::error::McpGatewayError>() {
         Some(
             crate::error::McpGatewayError::NotAllowed(_)
@@ -122,8 +131,31 @@ fn http_status_for(error: anyhow::Error) -> axum::http::StatusCode {
             | crate::error::McpGatewayError::PrincipalNotAllowed { .. }
             | crate::error::McpGatewayError::ApprovalRequired { .. },
         ) => axum::http::StatusCode::FORBIDDEN,
+        _ if is_client_error(message) => axum::http::StatusCode::BAD_REQUEST,
         _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     }
+}
+
+/// Native handlers reject bad input with these message prefixes; such errors
+/// are caller mistakes (400), not gateway failures (500).
+fn is_client_error(message: &str) -> bool {
+    const PREFIXES: [&str; 14] = [
+        "missing '",
+        "invalid url",
+        "unsupported scheme",
+        "url has no host",
+        "credentials in URL",
+        "unsupported content type",
+        "response too large",
+        "too many redirects",
+        "refusing to fetch",
+        "dns lookup",
+        "file too large",
+        "no native handler",
+        "path escapes",
+        "invalid git path",
+    ];
+    PREFIXES.iter().any(|prefix| message.starts_with(prefix))
 }
 
 pub async fn serve(gateway: Arc<McpGateway>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
@@ -258,5 +290,17 @@ requires_approval = true
             .await
             .expect("approval request runs");
         assert_eq!(approval.status(), reqwest::StatusCode::FORBIDDEN);
+    }
+    #[test]
+    fn client_errors_map_to_400_with_json_body() {
+        let (status, body) = http_error(anyhow::anyhow!("missing 'url' argument"));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("missing 'url'"));
+        let (status, _) = http_error(anyhow::anyhow!("kaboom"));
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let (status, _) = http_error(anyhow::anyhow!(
+            "refusing to fetch non-public address 127.0.0.1"
+        ));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
     }
 }

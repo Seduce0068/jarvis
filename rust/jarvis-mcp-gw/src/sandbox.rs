@@ -466,7 +466,15 @@ fn is_public_ip(ip: &std::net::IpAddr) -> bool {
 async fn ensure_public_host(url: &reqwest::Url) -> Result<()> {
     let host = url.host_str().context("url has no host")?;
     let port = url.port_or_known_default().unwrap_or(80);
-    let addrs = tokio::net::lookup_host((host, port))
+    // Literal IPs (including bracketed IPv6) are checked directly without DNS.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+        if !is_public_ip(&ip) {
+            bail!("refusing to fetch non-public address {ip} for host {host}");
+        }
+        return Ok(());
+    }
+    let addrs = tokio::net::lookup_host((bare, port))
         .await
         .with_context(|| format!("dns lookup failed: {host}"))?;
     let mut any = false;
@@ -568,6 +576,20 @@ mod tests {
         assert_eq!(next.as_str(), "https://example.com/c");
         let abs = resolve_redirect(&base, "https://other.example/d").unwrap();
         assert_eq!(abs.as_str(), "https://other.example/d");
+    }
+
+    #[tokio::test]
+    async fn web_fetch_rejects_loopback_targets() {
+        let (base, sandbox) = fixture();
+        let cfg = allowed("web.fetch", 2_000);
+        for url in ["http://127.0.0.1:9/", "http://[::1]:9/"] {
+            let err = sandbox
+                .execute("web.fetch", json!({ "url": url }), &cfg)
+                .await
+                .expect_err("loopback URLs must be rejected");
+            assert!(err.to_string().contains("non-public"), "{err}");
+        }
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
