@@ -50,5 +50,6 @@
 - **approvalモード**（`requires_approval = true`）: `web.fetch` → **403**（安全）
 - **activeモード**（現行allowlistのまま）: `web.fetch` → **200・example.com取得成功**
 
-→ 現行allowlistのままデプロイすると、**web.fetchが承認なしで有効化される**ことを実証。
-デプロイ前に`web_fetch_approval.patch`を適用する判断の根拠。
+→ **配備済みの`/etc/jarvis/mcp_allowlist.toml`も同一内容（web.fetchあり・承認false）**であることを
+`check-deploy-drift.sh`で確認。デプロイすると**allowlist同期なしでもweb.fetchが有効化**される。
+デプロイ前に`/etc/jarvis/mcp_allowlist.toml`の`web.fetch`を承認必須化すること。

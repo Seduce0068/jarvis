@@ -21,8 +21,9 @@ ADR-0002で「読み取り系ツールはゲートウェイ内のRust実装で�
 
 ## セキュリティ上の注意
 
-- allowlistに`web.fetch`が既に存在するため、**新バイナリのデプロイで有効化される**。
-  現行allowlistは `requires_approval = false`。
+- **配備済みの `/etc/jarvis/mcp_allowlist.toml` にも `web.fetch` が既に存在**し、
+  `requires_approval = false`（`check-deploy-drift.sh`で確認）。
+  したがって**新バイナリのデプロイで（allowlist同期なしでも）有効化される**。
 - データ持ち出し（URLに秘密を埋めて外部へGET）を防ぐには、
   `requires_approval = true` に変更するか、宛先ドメインのallowlistを導入する。
 - 承認フローが未実装の間は `requires_approval = true` が安全（呼び出しは拒否される）。
