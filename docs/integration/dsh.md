@@ -50,7 +50,11 @@ curl -s http://127.0.0.1:8082/health
   - リダイレクトは手動検証（最大3回・各ホップで公開IP確認）
   - テキスト系content-typeのみ、サイズ上限1MiB（既定256KiB）
   - URL内の認証情報を拒否
-- **既定では未公開**。有効化（root・明示承認）:
+- **注意**: allowlistには`web.fetch`が既に登録済み（`requires_approval = false`）。
+  そのため**新バイナリのデプロイで有効化される**。安全のため、デプロイ前に
+  `requires_approval = true` へ変更するか宛先制限を導入すること
+  （`adr/0003-native-web-fetch.md`）。
+- 有効化/安全化の手順:
   1. `infra/config/mcp_allowlist.toml` に `web.fetch` エントリを追加（`requires_approval = true` 推奨）
   2. `infra/config/policy/casbin_policy.csv` に `tool:web.fetch` のexecute権限を追加
   3. バイナリを再配置して `systemctl restart jarvis-mcp-gw`
