@@ -42,3 +42,13 @@
 - [ ] `sandbox_type`キーの整理方針を決定
 - [ ] `jarvis-mcp-gw`リリースバイナリのSHA256記録
 - [ ] デプロイ後に `/mcp` の `tools/list` で意図したツールだけ出ることを確認
+
+## スモークテストによる実証（2026-11-09 05:08）
+
+`infra/scripts/smoke-mcp-gw.sh` で新バイナリを別ポート起動して確認:
+
+- **approvalモード**（`requires_approval = true`）: `web.fetch` → **403**（安全）
+- **activeモード**（現行allowlistのまま）: `web.fetch` → **200・example.com取得成功**
+
+→ 現行allowlistのままデプロイすると、**web.fetchが承認なしで有効化される**ことを実証。
+デプロイ前に`web_fetch_approval.patch`を適用する判断の根拠。
