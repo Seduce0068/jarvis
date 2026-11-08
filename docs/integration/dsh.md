@@ -21,3 +21,24 @@
 ## Zed / ACP
 - Zed は ACP クライアント。`dsh --profile acp` をエージェントとして登録可能。
 - OpenCode も ACP 対応なら同一UIで切替可能（ADR-0002の交換可能性）。
+
+
+## 更新（2026-11-09 01:07）: ネイティブハンドラ実装
+- `sandbox.rs` の `execute_native` を **Rustネイティブ実装**へ置換（opencode CLI依存を排除）。
+  - `filesystem.read` / `filesystem.list` / `git.status` / `git.diff`
+  - パスは `JARVIS_MCP_GW_BASE_DIR`（既定 `/home/koppe`）配下に制限（canonicalizeで脱出拒否）
+  - 読み取り上限 1MiB、gitはツール設定のtimeoutを適用
+- 別ポートの実バイナリでE2E検証:
+  - `tools/list` = 7ツール（filesystem.list/read, git.diff/status, homeassistant.get_state, web.fetch/search）
+  - `filesystem.list` / `filesystem.read` / `git.status` の **tools/call 成功**
+- 未実装（明確なエラーを返す）: `web.*` / `homeassistant.*` は**上流MCPサーバー登録**で対応予定。
+  approval系（write/shell/commit）は従来通りfirejail等のレガシー経路（要見直し）。
+
+### デプロイ手順（要root）
+```bash
+cd ~/ドキュメント/作業用/jarvis/jarvis/rust
+cargo build --release -p jarvis-mcp-gw
+sudo install -o root -g root -m 0755 target/release/jarvis-mcp-gw /opt/jarvis/bin/jarvis-mcp-gw
+sudo systemctl restart jarvis-mcp-gw
+curl -s http://127.0.0.1:8082/health
+```
