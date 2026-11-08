@@ -578,6 +578,31 @@ mod tests {
         assert_eq!(abs.as_str(), "https://other.example/d");
     }
 
+    /// 実ネットワーク検証（CIでは実行しない）: cargo test -p jarvis-mcp-gw --lib -- --ignored
+    #[tokio::test]
+    #[ignore = "requires public network"]
+    async fn web_fetch_public_example_com() {
+        let (base, sandbox) = fixture();
+        let cfg = allowed("web.fetch", 10_000);
+        let out = sandbox
+            .execute(
+                "web.fetch",
+                json!({ "url": "https://example.com/", "max_bytes": 65536 }),
+                &cfg,
+            )
+            .await
+            .expect("public fetch should succeed");
+        assert_eq!(out["status"], 200);
+        assert!(
+            out["body"]
+                .as_str()
+                .unwrap()
+                .to_lowercase()
+                .contains("example domain")
+        );
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[tokio::test]
     async fn web_fetch_rejects_loopback_targets() {
         let (base, sandbox) = fixture();
