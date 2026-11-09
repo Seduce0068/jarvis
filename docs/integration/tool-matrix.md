@@ -53,3 +53,11 @@
 → **配備済みの`/etc/jarvis/mcp_allowlist.toml`も同一内容（web.fetchあり・承認false）**であることを
 `check-deploy-drift.sh`で確認。デプロイすると**allowlist同期なしでもweb.fetchが有効化**される。
 デプロイ前に`/etc/jarvis/mcp_allowlist.toml`の`web.fetch`を承認必須化すること。
+
+## デプロイ結果（2026-11-10 01:30）
+
+- `deploy-mcp-gw-safe.sh --apply --allow-web-fetch` で配置・再起動。
+- バイナリ: repo/installed のSHA256一致、`jarvis-mcp-gw` **active**。
+- `web.fetch`: `requires_approval = true` で配置し、実サービスのMCP `tools/list` に**非表示**を確認。
+- allowlist/policy: `/etc`とrepoが一致（policy 1行も同期）、`check-deploy-drift.sh` → **RESULT OK**。
+- 既知: 未実装ツール（web.search等）は引き続き400/承認待ち。承認フロー実装後にweb.fetchの扱いを再検討。
