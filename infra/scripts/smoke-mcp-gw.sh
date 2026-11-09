@@ -25,9 +25,13 @@ allowed_principals = ["jarvis", "opencode"]
 max_args_size = 5242880
 timeout_ms = 30000
 requires_approval = false'''
-new = old.replace('requires_approval = false', 'requires_approval = true')
-assert old in text, 'web.fetch entry not found'
-open(sys.argv[2], 'w').write(text.replace(old, new, 1))
+if old in text:
+    new = old.replace('requires_approval = false', 'requires_approval = true')
+    open(sys.argv[2], 'w').write(text.replace(old, new, 1))
+elif old.replace('requires_approval = false', 'requires_approval = true') in text:
+    open(sys.argv[2], 'w').write(text)  # 既に承認必須
+else:
+    raise SystemExit('web.fetch entry not found')
 PY
 else
   cp "$repo/infra/config/mcp_allowlist.toml" "$tmp/config/mcp_allowlist.toml"

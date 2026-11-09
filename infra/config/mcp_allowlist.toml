@@ -131,5 +131,5 @@ description = "Fetch web page content"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 5242880
 timeout_ms = 30000
-requires_approval = false
+requires_approval = true
 sandbox_type = "none"
