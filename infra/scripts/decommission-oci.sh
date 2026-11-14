@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # OCI jarvis-host の削除手順（既定は乾燥実行。--apply で実行）
+# NOTE: OCI は使用しない方針（ADR-0004）。本スクリプトは過去に作成した OCI
+#       リソースの後始末専用レガシーであり、新規プロビジョニングには使わない。
 #
 # 前提:
 #   - OpenTofu (tofu) がインストール済み

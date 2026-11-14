@@ -1,12 +1,19 @@
 # JARVIS Infrastructure
 
-This directory contains all IaC and deployment config for JARVIS personal AI system.
+> **2026-11-15 決定（[ADR-0004](../adr/0004-local-only-no-oci.md)）: OCI は使用しない。**
+> 現在の実行基盤は自宅 Kubuntu PC 上の systemd（`systemd/`）で、配置・検証は
+> `scripts/` のローカル向けスクリプトで行う。`opentofu/` と `cloud-init.yaml`
+> は未使用のレガシーであり、以下の「Deployment」以降は当時の OCI 手順である。
+
+This directory contains the systemd units, deploy/verify scripts, and config
+templates for the **local Kubuntu host**. The OpenTofu/cloud-init assets under
+`opentofu/` are legacy (OCI is not used; ADR-0004).
 
 ## Structure
 
 ```text
 infra/
-├── opentofu/                    # OpenTofu (Terraform) modules
+├── opentofu/                    # 未使用レガシー: OpenTofu modules (OCI)
 │   ├── environments/prod/       # Production environment
 │   └── modules/
 │       ├── compute/             # OCI Compute (A1 Flex)
@@ -48,10 +55,10 @@ infra/
 ├── grafana/                     # Importable Grafana dashboards
 │   ├── README.md
 │   └── dashboards/jarvis-overview.json
-└── cloud-init.yaml             # OCI instance initialization
+└── cloud-init.yaml             # 未使用レガシー: OCI instance initialization
 ```
 
-## Deployment
+## Deployment (legacy: OCI)
 
 ### Prerequisites
 

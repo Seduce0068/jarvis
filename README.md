@@ -11,8 +11,8 @@ with Rust sidecar services enforcing security and context boundaries.
   - `jarvis-mcp-gw` — MCP tool allowlist, policy checks, sandboxing
   - `jarvis-event` — Home Assistant / Android / webhook event normalization
   - `jarvis-context` — PostgreSQL + Qdrant memory, PII filtering
-- **Infrastructure:** OCI Always Free (Ampere A1), OpenTofu, systemd,
-  1Password CLI, Tailscale
+- **Infrastructure:** 自宅 Kubuntu PC 上の systemd、Bitwarden Secrets Manager
+  (`bws`)、Tailscale。OCI は使用しない（[ADR-0004](adr/0004-local-only-no-oci.md)）
 
 The unified decision is recorded in
 [adr/0001-unified-architecture.md](adr/0001-unified-architecture.md).
@@ -22,7 +22,7 @@ The unified decision is recorded in
 | Path | Contents |
 | --- | --- |
 | `rust/` | Cargo workspace: `jarvis-core` plus the four sidecar services |
-| `infra/` | OpenTofu modules, cloud-init, systemd units, deployed configs |
+| `infra/` | systemd units, deploy/verify scripts, configs（OpenTofu/cloud-init は未使用レガシー） |
 | `adr/` | Architecture decision records |
 | `scripts/` | rust-script tooling (bootstrap, doctor, phone status) |
 | `config/` | Shell/git locale helpers and environment templates |
@@ -39,14 +39,22 @@ cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 
-# Deployment target (matches rust/scripts/deploy.rs)
-cargo build --release --workspace --target aarch64-unknown-linux-gnu
+# ローカル配置用バイナリ（x86_64）
+cargo build --release --workspace
 ```
 
 ## Deployment
 
-See [infra/README.md](infra/README.md). Production services bind to
-`127.0.0.1` and are reached over Tailscale.
+OCI は使用しない（[ADR-0004](adr/0004-local-only-no-oci.md)）。実行基盤は
+自宅 Kubuntu PC 上の systemd で、サービスは `127.0.0.1` bind、外部アクセスは
+Tailscale 経由。手順は [infra/README.md](infra/README.md) を参照。
+
+```bash
+# jarvis-mcp-gw の安全デプロイ（乾燥実行が既定。適用は root が必要）
+bash infra/scripts/deploy-mcp-gw-safe.sh
+sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply
+bash infra/scripts/check-deploy-drift.sh
+```
 
 ## Development conventions
 

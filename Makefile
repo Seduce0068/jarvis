@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -11,7 +11,7 @@ SHELL := $(shell command -v bash 2>/dev/null || echo /bin/sh)
 help: ## ヘルプ表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-bootstrap-server: ## サーバー(Linux/OCI/VPS)をブートストラップ
+bootstrap-server: ## サーバー(Linux/VPS)をブートストラップ
 	@rust-script scripts/bootstrap/bootstrap.rs --target server --source-root . --root $(JARVIS_ROOT)
 
 bootstrap-server-dry: ## サーバーブートストラップ (ドライラン)
@@ -29,11 +29,14 @@ doctor: ## 環境診断実行 (サーバー)
 phone-status: ## 端末ステータス取得 (Termux)
 	@rust-script scripts/utils/phone-status-json.rs
 
-deploy: ## サーバーへデプロイ (HOST=jarvis-host)
+deploy: ## (レガシー) リモートホストへデプロイ (HOST=jarvis-host)
 	@rust-script rust/scripts/deploy.rs --rust-dir rust $(HOST) deploy
 
-deploy-dry: ## デプロイ内容の確認 (dry-run, HOST=jarvis-host)
+deploy-dry: ## (レガシー) リモートデプロイ内容の確認 (dry-run, HOST=jarvis-host)
 	@rust-script rust/scripts/deploy.rs --rust-dir rust $(HOST) deploy --dry-run
+
+deploy-mcp-gw: ## jarvis-mcp-gw をローカルへ安全デプロイ（乾燥実行が既定）
+	@bash infra/scripts/deploy-mcp-gw-safe.sh
 
 lint: ## Rust script の整形・起動確認
 	@rustfmt --check rust/scripts/*.rs scripts/doctor/*.rs scripts/utils/*.rs scripts/bootstrap/*.rs config/*.rs docs/architecture/verify.rs docs/architecture/calc.rs

@@ -7,7 +7,6 @@ tags:
   - jarvis
   - opencode
   - rust
-  - oci
 generated:
   by: Sovereign AI Agent
   at: "2026-10-09T00:00:00+09:00"
@@ -26,7 +25,7 @@ generated:
 ## Overview
 
 - **Repository:** `jarvis` — JARVIS Personal AI System
-- **Architecture:** Unified ADR at `adr/0001-unified-architecture.md`
+- **Architecture:** Unified ADR at `adr/0001-unified-architecture.md`; local-only infra in `adr/0004-local-only-no-oci.md`
 - **Core Decision:** OpenCode V2 = Official Agent Runtime; JARVIS Rust services = Policy/MCP/Event/Context sidecars
 
 ## Project Structure
@@ -34,21 +33,20 @@ generated:
 ```
 jarvis/
 ├── adr/                          # Architecture Decision Records
-│   └── 0001-unified-architecture.md
+│   ├── 0001-unified-architecture.md
+│   └── 0004-local-only-no-oci.md
 ├── rust/                         # JARVIS Rust Services (Cargo Workspace)
 │   ├── Cargo.toml                # Workspace root
 │   ├── jarvis-policy/            # Policy Engine (Cedar/Casbin, Kill Switch)
 │   ├── jarvis-mcp-gw/            # MCP Gateway (Allowlist, Sandbox)
 │   ├── jarvis-event/             # Event Normalizer (HA, Android, Webhooks)
 │   └── jarvis-context/           # Context Builder (PostgreSQL, Qdrant, PII)
-├── infra/                        # Infrastructure as Code
-│   ├── opentofu/                 # OpenTofu modules (OCI)
-│   │   ├── environments/prod/    # Production env
-│   │   └── modules/              # compute, network, security, storage, observability
-│   ├── systemd/                  # Systemd service units
-│   ├── scripts/                  # Compatibility launchers for rust-script tools
+├── infra/                        # Infrastructure (local systemd)
+│   ├── systemd/                  # Systemd service units (現行の実行基盤)
+│   ├── scripts/                  # デプロイ・検証・互換ランチャー
 │   ├── config/                   # Config templates (pii_patterns, mcp_allowlist, policies)
-│   └── cloud-init.yaml           # OCI instance initialization
+│   ├── opentofu/                 # 未使用レガシー（OCI IaC / cloud-init, ADR-0004）
+│   └── grafana/                  # Grafana dashboards
 ├── ci/                           # Review-flow pipeline definitions
 │   └── review-gate.yml           # review-flow pipeline (not wired to Actions yet)
 ├── jarvis_personal_ai_architecture.md
@@ -60,9 +58,9 @@ jarvis/
 ### Rust Services (Cargo Workspace)
 
 ```bash
-# Build all services (cross-compile for Arm64)
+# Build all services (local x86_64)
 cd rust
-cargo build --release --workspace --target aarch64-unknown-linux-gnu
+cargo build --release --workspace
 
 # Run tests
 cargo test --workspace
@@ -77,26 +75,22 @@ cargo fmt --all --check
 cargo check --workspace
 ```
 
-### Infrastructure (OpenTofu)
+### Infrastructure (local systemd; OCI unused)
+
+OCI is not used ([ADR-0004](adr/0004-local-only-no-oci.md)). Services run as
+systemd units on the local Kubuntu desktop; `infra/opentofu/` and its
+cloud-init are frozen legacy. Install/update a unit and restart it locally:
 
 ```bash
-cd infra/opentofu/environments/prod
+# Install/update a unit (root required)
+sudo install -o root -g root -m 0644 infra/systemd/jarvis-mcp-gw.service \
+  /etc/systemd/system/jarvis-mcp-gw.service
+sudo systemctl daemon-reload
+sudo systemctl restart jarvis-mcp-gw
 
-# Initialize
-tofu init
-
-# Format & validate
-tofu fmt -recursive
-tofu validate
-
-# Plan
-tofu plan -var-file=terraform.tfvars
-
-# Apply
-tofu apply -var-file=terraform.tfvars
-
-# Deploy services after instance provisioned
-../../scripts/deploy.sh jarvis-host
+# Safe jarvis-mcp-gw deploy (dry-run by default; --apply needs root)
+bash infra/scripts/deploy-mcp-gw-safe.sh
+sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply
 ```
 
 ### CI/CD
@@ -128,33 +122,30 @@ opencode run "/review-flow metrics --days 30 --json"
 ### Operational Scripts
 
 ```bash
-# Deploy Rust services to host
-rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy
-
-# Manual backup
-ssh jarvis@jarvis-host "sudo systemctl start jarvis-backup"
+# Deploy/verify jarvis-mcp-gw locally (dry-run by default; --apply needs root)
+bash infra/scripts/deploy-mcp-gw-safe.sh
+sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply
+bash infra/scripts/check-deploy-drift.sh
 
 # View logs
-ssh jarvis@jarvis-host "sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-context -f"
+sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-context -f
 
-# Review a restore plan (pass --confirm only after verifying the backup)
-rust-script rust/scripts/restore.rs latest --dry-run
+# Backup: 保存先未決定のため未運用（ADR-0004）。
+# rust/scripts/backup.rs / restore.rs は OCI Object Storage 前提のレガシー。
 ```
 
 ## Key Commands
 
 | Task | Command |
 |------|---------|
-| Build all Rust services | `cd rust && cargo build --release --workspace --target aarch64-unknown-linux-gnu` |
+| Build all Rust services | `cd rust && cargo build --release --workspace` |
 | Run tests | `cd rust && cargo test --workspace` |
 | Lint | `cd rust && cargo clippy --workspace -- -D warnings` |
 | Format check | `cd rust && cargo fmt --all --check` |
-| OpenTofu plan | `cd infra/opentofu/environments/prod && tofu plan` |
-| OpenTofu apply | `cd infra/opentofu/environments/prod && tofu apply` |
-| Deploy services | `rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy` |
+| Deploy jarvis-mcp-gw | `bash infra/scripts/deploy-mcp-gw-safe.sh`（適用は `sudo ... --apply`） |
+| Deploy drift check | `bash infra/scripts/check-deploy-drift.sh` |
 | Run gate-check | `opencode run "/review-flow gate-check <pr>"` |
 | Run cross-review | `opencode run "/cross-review"` |
-| SSH to host | `tailscale ssh jarvis@jarvis-host` |
 
 ## Service Ports (localhost only, accessed via Tailscale)
 
@@ -170,17 +161,15 @@ rust-script rust/scripts/restore.rs latest --dry-run
 
 ## Configuration
 
-All secrets managed via **1Password CLI** (`op://` references in `.env` files).
+Rust services receive secrets from **Bitwarden Secrets Manager** via
+`bws run`, using the root-owned `/etc/jarvis/bws.env` (`BWS_ACCESS_TOKEN`).
+`otelcol` may still use 1Password (`op run`) until migrated.
 
-Required 1Password items:
-- `JARVIS/Policy/admin_token`
-- `JARVIS/PostgreSQL/connection_string`
-- `JARVIS/Home Assistant/long_lived_token`
-- `JARVIS/Gmail/client_id`, `client_secret`
-- `JARVIS/Google Calendar/client_id`, `client_secret`
-- `GRAFANA_CLOUD_INSTANCE`, `GRAFANA_CLOUD_TOKEN`
+The `infra/config/*.env` files are reference templates and retain legacy
+`op://` references; the current systemd units do not use them directly.
 
-Config files in `/etc/jarvis/` on the host (populated by cloud-init + 1Password).
+Config files live in `/etc/jarvis/` on the local host and are provisioned by the
+deploy scripts.
 
 ## Architecture Boundaries
 
@@ -200,13 +189,12 @@ Config files in `/etc/jarvis/` on the host (populated by cloud-init + 1Password)
 - MCP tools require allowlist + policy approval; destructive ops need explicit approval
 - Kill switch (`jarvis-policy`) can disable all automated actions instantly
 - PII filtering on all context sent to LLMs
-- Audit logging to PostgreSQL + OCI Object Storage
+- Audit logging to PostgreSQL（OCI は使用しない）
 
 ## References
 
 - [ADR-0001: Unified Architecture](adr/0001-unified-architecture.md)
+- [ADR-0004: Local-only (no OCI)](adr/0004-local-only-no-oci.md)
 - [OpenCode V2 Docs](https://opencode.ai/v2/docs)
 - [Cedar Policy Language](https://www.cedarpolicy.com/)
 - [rmcp - Rust MCP SDK](https://github.com/rmcp-rs/rmcp)
-- [OpenTofu](https://opentofu.org/)
-- [OCI Always Free](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
