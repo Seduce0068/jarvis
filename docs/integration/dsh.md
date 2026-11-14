@@ -68,3 +68,29 @@ bash infra/scripts/deploy-mcp-gw-safe.sh --allow-web-fetch          # 乾燥実�
 sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply --allow-web-fetch
 bash infra/scripts/check-deploy-drift.sh                            # 事後確認
 ```
+
+## 2026-11-15 現状確認: systemd 配下での実行不能と修正
+
+DSH からの接続自体は成立している（jarvis-mcp-gw のログに `dsh-mcp-client` の
+initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の実サービスでは
+`tools/list` に出る全ツールが実行不能だった。
+
+- 症状: `filesystem.*` / `git.*` は `canonicalize base /home/koppe: Permission denied`、
+  `web.search` / `homeassistant.get_state` は firejail フォールバック失敗。
+- 原因: unit の `ProtectHome=yes` と基準ディレクトリ既定値 `/home/koppe` の不整合。
+- 修正: unit を `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=/home/koppe` に変更し、
+  未実装ツールを承認必須化（`tools/list` 非表示）。repo 反映済み・デプロイ待ち。
+- デプロイ: `sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply`
+  （事後E2Eが OK になるまでを合格条件とし、失敗時は自動ロールバック）。
+
+修正後の期待状態:
+
+- `tools/list` = 4ツール（filesystem.list/read, git.diff/status）
+- 上記4ツールの `tools/call` が成功する
+- `web.fetch` 等の承認必須ツールは非表示のまま
+
+未確認事項:
+
+- DSH 側で jarvis MCP をどの設定が有効化しているか。`~/.dsh/profiles/*/cordis.patch.yml`
+  には github / rustxng の定義のみで、jarvis の定義は見当たらなかった。
+  接続は成立しているため、セッション単位または GUI 側の設定と推測される（要確認）。

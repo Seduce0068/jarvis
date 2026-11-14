@@ -6,12 +6,12 @@ Wants=jarvis-policy.service
 
 [Service]
 Type=exec
-User=jarvis
-Group=jarvis
+User=koppe
+Group=koppe
 WorkingDirectory=/opt/jarvis/rust
 EnvironmentFile=-/etc/jarvis/bws.env
 
-# 1Password references in mcp_gateway.env are resolved at service start
+# Secrets are injected by Bitwarden Secrets Manager (bws) at service start
 ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /opt/jarvis/bin/jarvis-mcp-gw
 Restart=on-failure
 RestartSec=5
@@ -25,7 +25,10 @@ SendSIGKILL=yes
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
+# Read-only tools (filesystem.*, git.*) read the user's home. ProtectHome=yes
+# masks /home entirely, which made every native handler fail with EACCES on
+# canonicalize. Keep the home mount visible but read-only.
+ProtectHome=read-only
 ReadWritePaths=/opt/jarvis/data /opt/jarvis/logs /etc/jarvis /tmp
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
@@ -40,9 +43,12 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
 # Environment
-Environment=RUST_LOG=info
 Environment=HOME=/opt/jarvis/data
+Environment=RUST_LOG=info
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
+# Workspace root for the native read-only handlers. Must stay readable under
+# ProtectHome=read-only; the value is also the path-escape boundary.
+Environment=JARVIS_MCP_GW_BASE_DIR=/home/koppe
 
 # Resource limits
 LimitNOFILE=65536

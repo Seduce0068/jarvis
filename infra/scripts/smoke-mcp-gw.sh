@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # 新jarvis-mcp-gwのデプロイ前スモークテスト（既存サービスとは別ポート・別設定）
 # 使い方:
-#   smoke-mcp-gw.sh [binary]              # web.fetch承認必須化を仮定（安全策適用時）
-#   smoke-mcp-gw.sh [binary] active       # 現行allowlistのまま（web.fetchが有効化される事実の確認）
+#   smoke-mcp-gw.sh [binary]              # repo の allowlist をそのまま使う（承認必須ツールは非表示）
+#   smoke-mcp-gw.sh [binary] active       # web.fetch を強制的に承認不要へ戻し、取得実装を確認
 set -uo pipefail
 bin="${1:-/home/koppe/ドキュメント/作業用/jarvis/jarvis/rust/target/release/jarvis-mcp-gw}"
 mode="${2:-approval}"
@@ -12,6 +12,8 @@ grpc=15052
 tmp="$(mktemp -d)"
 trap 'kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 [ -x "$bin" ] || { echo "FAIL: binary not found: $bin"; exit 1; }
+# 一時ディレクトリへ cd してから起動するため、相対パスを絶対パスへ解決する
+bin="$(realpath "$bin")"
 mkdir -p "$tmp/config"
 
 if [ "$mode" = "approval" ]; then
@@ -35,6 +37,23 @@ else:
 PY
 else
   cp "$repo/infra/config/mcp_allowlist.toml" "$tmp/config/mcp_allowlist.toml"
+  # active モード: web.fetch だけ承認不要へ戻して実取得を検証する
+  python3 - "$tmp/config/mcp_allowlist.toml" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = '''name = "web.fetch"
+description = "Fetch web page content"
+allowed_principals = ["jarvis", "opencode"]
+max_args_size = 5242880
+timeout_ms = 30000
+requires_approval = true'''
+new = old.replace('requires_approval = true', 'requires_approval = false')
+if old in text:
+    open(path, 'w').write(text.replace(old, new, 1))
+else:
+    raise SystemExit('web.fetch entry not found')
+PY
 fi
 
 cat > "$tmp/config/mcp_gateway.toml" <<TOML
@@ -108,8 +127,11 @@ print('\n'.join(names))
 PY
 # requires_approval=true のツールは tools/list から隠される仕様
 if [ "$mode" = "approval" ]; then
-  if grep -qx 'filesystem.read' "$tmp/tools.names" && ! grep -qx 'web.fetch' "$tmp/tools.names"; then
-    echo "  PASS: mcp tools/list (filesystem.read表示 / web.fetchは承認待ちのため非表示)"; ok=$((ok+1))
+  if grep -qx 'filesystem.read' "$tmp/tools.names" \
+    && ! grep -qx 'web.fetch' "$tmp/tools.names" \
+    && ! grep -qx 'web.search' "$tmp/tools.names" \
+    && ! grep -qx 'homeassistant.get_state' "$tmp/tools.names"; then
+    echo "  PASS: mcp tools/list (読み取り系のみ表示 / 未実装・承認待ちは非表示)"; ok=$((ok+1))
   else
     echo "  FAIL: mcp tools/list (approval mode)"; fail=$((fail+1))
   fi
@@ -119,6 +141,48 @@ else
   else
     echo "  FAIL: mcp tools/list missing expected tools"; fail=$((fail+1))
   fi
+fi
+
+# ネイティブ読み取り系の tools/call が実際に成功すること
+tool_call_ok() { # file needle
+  python3 - "$1" "$2" <<'PY'
+import json, re, sys
+path, needle = sys.argv[1], sys.argv[2]
+text = open(path).read()
+objs = []
+for m in re.finditer(r'data:\s*(\{.*\})', text, re.S):
+    try: objs.append(json.loads(m.group(1)))
+    except Exception: pass
+if not objs:
+    try: objs = [json.loads(text)]
+    except Exception: sys.exit(1)
+for o in objs:
+    r = o.get('result') or {}
+    if r.get('isError') is True:
+        sys.exit(1)
+    for c in r.get('content') or []:
+        if c.get('type') == 'text' and needle in c.get('text', ''):
+            sys.exit(0)
+sys.exit(1)
+PY
+}
+curl -q -s -o "$tmp/c1" -X POST "http://127.0.0.1:$port/mcp" \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -H "mcp-session-id: $sid" \
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"filesystem.list","arguments":{"path":"."}}}'
+if tool_call_ok "$tmp/c1" '"entries"'; then
+  echo "  PASS: tools/call filesystem.list"; ok=$((ok+1))
+else
+  echo "  FAIL: tools/call filesystem.list"; fail=$((fail+1))
+fi
+curl -q -s -o "$tmp/c2" -X POST "http://127.0.0.1:$port/mcp" \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -H "mcp-session-id: $sid" \
+  -d "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\"name\":\"git.status\",\"arguments\":{\"path\":\"$repo\"}}}"
+if tool_call_ok "$tmp/c2" '"stdout"'; then
+  echo "  PASS: tools/call git.status"; ok=$((ok+1))
+else
+  echo "  FAIL: tools/call git.status"; fail=$((fail+1))
 fi
 
 # 引数エラー → 400（ディレクトリ読取）

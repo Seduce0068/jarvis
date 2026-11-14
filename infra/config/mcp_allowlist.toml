@@ -86,7 +86,8 @@ description = "Get Home Assistant entity state"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
 timeout_ms = 5000
-requires_approval = false
+# ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
+requires_approval = true
 sandbox_type = "none"
 
 [[tools]]
@@ -104,7 +105,8 @@ description = "Get Android device info via MCP"
 allowed_principals = ["jarvis"]
 max_args_size = 1048576
 timeout_ms = 10000
-requires_approval = false
+# ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
+requires_approval = true
 sandbox_type = "none"
 
 [[tools]]
@@ -122,7 +124,8 @@ description = "Search the web"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
 timeout_ms = 30000
-requires_approval = false
+# ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
+requires_approval = true
 sandbox_type = "none"
 
 [[tools]]
