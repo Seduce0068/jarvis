@@ -127,11 +127,14 @@ print('\n'.join(names))
 PY
 # requires_approval=true のツールは tools/list から隠される仕様
 if [ "$mode" = "approval" ]; then
-  if grep -qx 'filesystem.read' "$tmp/tools.names" \
-    && ! grep -qx 'web.fetch' "$tmp/tools.names" \
-    && ! grep -qx 'web.search' "$tmp/tools.names" \
-    && ! grep -qx 'homeassistant.get_state' "$tmp/tools.names"; then
-    echo "  PASS: mcp tools/list (読み取り系のみ表示 / 未実装・承認待ちは非表示)"; ok=$((ok+1))
+  if python3 - "$tmp/tools.names" <<'PY'
+import sys
+names = set(open(sys.argv[1]).read().split())
+expected = {'filesystem.list', 'filesystem.read', 'git.diff', 'git.status'}
+sys.exit(0 if names == expected else 1)
+PY
+  then
+    echo "  PASS: mcp tools/list (期待4ツールのみ / 未実装・承認待ちは非表示)"; ok=$((ok+1))
   else
     echo "  FAIL: mcp tools/list (approval mode)"; fail=$((fail+1))
   fi

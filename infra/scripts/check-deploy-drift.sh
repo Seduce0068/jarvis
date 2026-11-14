@@ -48,35 +48,86 @@ fi
 # 6) 実行時E2E: systemd 配下の実サービスに読み取り系 tools/call を行う。
 #    ProtectHome の取り違えのように「設定一致でも実行不能」な乖離を検出する。
 runtime_check() {
+  local mcp_url="${JARVIS_MCP_GW_URL:-http://127.0.0.1:8082}"
   local tmp sid code
   tmp="$(mktemp -d)" || return 1
-  curl -q -s -D "$tmp/h" -o /dev/null -m 5 -X POST http://127.0.0.1:8082/mcp \
+  curl -q -s -D "$tmp/h" -o /dev/null -m 5 -X POST "${mcp_url}/mcp" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
     -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"drift-check","version":"0"}}}' || { rm -rf "$tmp"; return 1; }
   sid=$(grep -i '^mcp-session-id:' "$tmp/h" | tr -d '\r' | cut -d' ' -f2)
   [ -n "$sid" ] || { rm -rf "$tmp"; return 1; }
-  curl -q -s -o /dev/null -m 5 -X POST http://127.0.0.1:8082/mcp \
+  curl -q -s -o /dev/null -m 5 -X POST "${mcp_url}/mcp" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
     -H "mcp-session-id: $sid" -d '{"jsonrpc":"2.0","method":"notifications/initialized"}'
-  # filesystem.list（読み取り）と git.status（外部プロセス起動）を確認
-  curl -q -s -o "$tmp/r1" -m 8 -X POST http://127.0.0.1:8082/mcp \
+  # filesystem.list（読み取り）・git.status（外部プロセス起動）・tools/list を確認
+  curl -q -s -o "$tmp/r1" -m 8 -X POST "${mcp_url}/mcp" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
     -H "mcp-session-id: $sid" \
     -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"filesystem.list","arguments":{"path":"."}}}'
-  curl -q -s -o "$tmp/r2" -m 8 -X POST http://127.0.0.1:8082/mcp \
+  curl -q -s -o "$tmp/r2" -m 8 -X POST "${mcp_url}/mcp" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
     -H "mcp-session-id: $sid" \
     -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"git.status\",\"arguments\":{\"path\":\"$repo\"}}}"
-  code=0
-  grep -q '"entries"' "$tmp/r1" || code=1
-  grep -q 'Permission denied' "$tmp/r1" && code=1
-  grep -q '"stdout"' "$tmp/r2" || code=1
-  grep -q 'Permission denied' "$tmp/r2" && code=1
+  curl -q -s -o "$tmp/r3" -m 8 -X POST "${mcp_url}/mcp" \
+    -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+    -H "mcp-session-id: $sid" \
+    -d '{"jsonrpc":"2.0","id":4,"method":"tools/list","params":{}}'
+  # SSE の JSON を正しくパースして判定する（生テキストの grep は
+  # エスケープされた \"entries\" に一致せず誤検知するため）。
+  python3 - "$tmp/r1" "$tmp/r2" "$tmp/r3" <<'PY'
+import json, re, sys
+
+def parse(path):
+    text = open(path).read()
+    objs = []
+    for m in re.finditer(r'data:\s*(\{.*\})', text, re.S):
+        try:
+            objs.append(json.loads(m.group(1)))
+        except Exception:
+            pass
+    if not objs:
+        try:
+            objs = [json.loads(text)]
+        except Exception:
+            pass
+    return objs
+
+def text_of(path):
+    objs = [o for o in parse(path) if 'result' in o]
+    if not objs:
+        return None
+    r = objs[-1].get('result') or {}
+    if r.get('isError') is True:
+        return None
+    parts = [c.get('text', '') for c in (r.get('content') or []) if c.get('type') == 'text']
+    return '\n'.join(parts)
+
+ok = True
+t1 = text_of(sys.argv[1])
+if not t1 or '"entries"' not in t1:
+    print('  detail: filesystem.list の応答が不正', file=sys.stderr)
+    ok = False
+t2 = text_of(sys.argv[2])
+if not t2 or '"stdout"' not in t2:
+    print('  detail: git.status の応答が不正', file=sys.stderr)
+    ok = False
+names = set()
+for o in parse(sys.argv[3]):
+    r = o.get('result') or {}
+    if 'tools' in r:
+        names = {t.get('name') for t in r['tools']}
+expected = {'filesystem.list', 'filesystem.read', 'git.diff', 'git.status'}
+if names != expected:
+    print(f'  detail: tools/list が期待と不一致 actual={sorted(names)}', file=sys.stderr)
+    ok = False
+sys.exit(0 if ok else 1)
+PY
+  code=$?
   rm -rf "$tmp"
   return "$code"
 }
 if systemctl is-active --quiet jarvis-mcp-gw 2>/dev/null; then
-  if runtime_check; then say "runtime tools/call" "OK (filesystem.list/git.status)"; else say "runtime tools/call" "DANGER: systemd 配下で実行失敗"; danger=1; fi
+  if runtime_check; then say "runtime tools/call" "OK (tools/call + tools/list)"; else say "runtime tools/call" "DANGER: systemd 配下で実行失敗"; danger=1; fi
 else
   say "runtime tools/call" "SKIP (service inactive)"
 fi
