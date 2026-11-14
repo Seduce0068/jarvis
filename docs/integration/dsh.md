@@ -89,8 +89,12 @@ initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の�
 - 上記4ツールの `tools/call` が成功する
 - `web.fetch` 等の承認必須ツールは非表示のまま
 
-未確認事項:
+DSH 側の設定箇所（2026-11-15 確認）:
 
-- DSH 側で jarvis MCP をどの設定が有効化しているか。`~/.dsh/profiles/*/cordis.patch.yml`
-  には github / rustxng の定義のみで、jarvis の定義は見当たらなかった。
-  接続は成立しているため、セッション単位または GUI 側の設定と推測される（要確認）。
+- このセッションの DSH は `DSH_HOME=/home/koppe/.dsh-agentrouter` で起動しており、
+  `~/.dsh-agentrouter/profiles/agentrouter/cordis.patch.yml` に
+  `mcp-jarvis`（`serverName: jarvis`, `transport: streamable-http`,
+  `url: http://127.0.0.1:8082/mcp`, `failOnStartupError: false`）が定義されている。
+- 既定の `~/.dsh` 側には定義がないため、`DSH_HOME` の取り違えに注意。
+- ゲートウェイ側の修正デプロイ後は、同じ設定のまま `filesystem.*` / `git.*` が
+  実行可能になる（再起動や設定変更は不要）。
