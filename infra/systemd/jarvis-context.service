@@ -1,6 +1,6 @@
 [Unit]
 Description=JARVIS Context Builder
-Documentation=https://github.com/onoderakeita/jarvis
+Documentation=https://github.com/Seduce0068/jarvis
 After=network.target postgresql.service qdrant.service jarvis-policy.service
 Wants=postgresql.service qdrant.service jarvis-policy.service
 

@@ -1,6 +1,6 @@
 [Unit]
 Description=JARVIS MCP Gateway
-Documentation=https://github.com/onoderakeita/jarvis
+Documentation=https://github.com/Seduce0068/jarvis
 After=network.target jarvis-policy.service
 Wants=jarvis-policy.service
 

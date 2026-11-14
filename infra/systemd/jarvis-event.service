@@ -1,6 +1,6 @@
 [Unit]
 Description=JARVIS Event Normalizer
-Documentation=https://github.com/onoderakeita/jarvis
+Documentation=https://github.com/Seduce0068/jarvis
 After=network.target jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
 Wants=jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
 

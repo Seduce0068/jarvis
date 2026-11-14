@@ -102,7 +102,7 @@ tofu apply -var-file=terraform.tfvars
 ### CI/CD
 
 Pushes to `master` and pull requests run `.github/workflows/ci.yml`, which
-delegates to the shared `onoderakeita/workflows` `rust-gates.yml@v1` workflow
+delegates to the shared `Seduce0068/workflows` `rust-gates.yml@v1` workflow
 (fmt, check, test, clippy) with `working_directory: rust`.
 
 `ci/review-gate.yml` defines a 3-stage review pipeline (automated gates, cross
