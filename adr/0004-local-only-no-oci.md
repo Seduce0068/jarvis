@@ -22,6 +22,8 @@ code-server / OpenCode を集約する構成を前提としていた。しかし
   後始末専用レガシーとして残す（ローカル state は `.terraform/` にあり
   `.gitignore` 済み）。
 - サービスは引き続き `127.0.0.1` bind、外部アクセスは Tailscale 経由とする。
+- 2026-11-15 の実機確認で、OCI に依存する active unit / timer / cron は無い
+  （稼働中は jarvis 4サービス、qdrant、opencode、code-server、otelcol）。
 
 ## 影響
 
@@ -29,8 +31,9 @@ code-server / OpenCode を集約する構成を前提としていた。しかし
   `infra/scripts/deploy.sh` はローカル運用では使わない。ローカル配置は
   `infra/systemd/` と `infra/scripts/deploy-mcp-gw-safe.sh` 等で行う。
 - **バックアップ**: `rust/scripts/backup.rs` は OCI Object Storage（rclone）前提。
-  ローカルでは `jarvis-backup.timer` 未導入のため、保存先の再決定が必要
-  （未解決）。
+  2026-11-15 の実機確認では `jarvis-backup.timer` は未導入、rclone 設定
+  （`~/.config/rclone/rclone.conf`）も無く、バックアップジョブは稼働していない。
+  保存先の再決定が必要（未解決）。
 - **監視**: OCI Monitoring / Alarms 前提の記述は無効。Grafana Cloud と
   `otelcol` による OTLP は継続する。
 - **ADR-0001 との関係**: インフラ選定（OCI）部分は本 ADR で置き換える。
