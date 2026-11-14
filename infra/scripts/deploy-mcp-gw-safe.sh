@@ -20,6 +20,24 @@ unit="/etc/systemd/system/jarvis-mcp-gw.service"
 repo_unit="$repo/infra/systemd/jarvis-mcp-gw.service"
 ts="$(date +%Y%m%d-%H%M%S)"
 die() { echo "ERROR: $*" >&2; exit 1; }
+# 適用後の任意の失敗（再起動失敗・事後E2E失敗）で変更を戻す
+rollback() {
+  echo "== ロールバック: 変更を戻します ==" >&2
+  if [ -f "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" ]; then
+    install -o root -g root -m 0755 "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" /opt/jarvis/bin/jarvis-mcp-gw
+  fi
+  if [ "${allowlist_changed:-0}" -eq 1 ] && [ -f "$allowlist.bak-$ts" ]; then
+    install -o root -g root -m 0644 "$allowlist.bak-$ts" "$allowlist"
+  fi
+  if [ "${unit_changed:-0}" -eq 1 ] && [ -f "$unit.bak-$ts" ]; then
+    install -o root -g root -m 0644 "$unit.bak-$ts" "$unit"
+    systemctl daemon-reload || true
+  fi
+  systemctl restart jarvis-mcp-gw || true
+  for _ in $(seq 1 20); do curl -q -s -o /dev/null http://127.0.0.1:8082/health && break; sleep 0.5; done
+  echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$(curl -q -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8082/health)" >&2
+  exit 1
+}
 
 [ -x "$bin" ] || die "リリースバイナリがありません: cargo build --release -p jarvis-mcp-gw"
 if [ "$apply" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then die "rootで実行してください（sudo）"; fi
@@ -102,9 +120,9 @@ echo "== 5. 配置・再起動 =="
 if [ "$apply" -eq 1 ]; then
   [ -f /opt/jarvis/bin/jarvis-mcp-gw ] && cp -a /opt/jarvis/bin/jarvis-mcp-gw "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts"
   install -o root -g root -m 0755 "$bin" /opt/jarvis/bin/jarvis-mcp-gw
-  systemctl restart jarvis-mcp-gw
+  systemctl restart jarvis-mcp-gw || { echo "再起動に失敗しました" >&2; rollback; }
   for _ in $(seq 1 20); do curl -q -s -o /dev/null http://127.0.0.1:8082/health && break; sleep 0.5; done
-  systemctl is-active --quiet jarvis-mcp-gw || die "サービスが起動していません"
+  systemctl is-active --quiet jarvis-mcp-gw || { echo "サービスが起動していません" >&2; rollback; }
   echo "  deployed: $(systemctl is-active jarvis-mcp-gw)"
 else
   echo "  DRY: would install $bin -> /opt/jarvis/bin/jarvis-mcp-gw and restart"
@@ -116,19 +134,8 @@ if [ "$apply" -eq 1 ]; then
     echo "== DONE: APPLIED（事後確認 OK） =="
     exit 0
   fi
-  echo "== 事後確認 NG: 変更をロールバックします ==" >&2
-  [ -f "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" ] && install -o root -g root -m 0755 "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" /opt/jarvis/bin/jarvis-mcp-gw
-  if [ "$allowlist_changed" -eq 1 ] && [ -f "$allowlist.bak-$ts" ]; then
-    install -o root -g root -m 0644 "$allowlist.bak-$ts" "$allowlist"
-  fi
-  if [ "$unit_changed" -eq 1 ] && [ -f "$unit.bak-$ts" ]; then
-    install -o root -g root -m 0644 "$unit.bak-$ts" "$unit"
-    systemctl daemon-reload
-  fi
-  systemctl restart jarvis-mcp-gw || true
-  for _ in $(seq 1 20); do curl -q -s -o /dev/null http://127.0.0.1:8082/health && break; sleep 0.5; done
-  echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$(curl -q -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8082/health)" >&2
-  exit 1
+  echo "== 事後確認 NG ==" >&2
+  rollback
 else
   echo "  DRY: 適用後に check-deploy-drift.sh が OK を返すまでを合格条件とする"
   echo "== DONE: DRY-RUN =="
