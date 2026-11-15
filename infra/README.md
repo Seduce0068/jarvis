@@ -178,7 +178,7 @@ policy-checked and must have an entry in `/etc/jarvis/mcp_allowlist.toml`
   re-register after a gateway restart.
 
 ```bash
-# grpcurl is not provisioned by cloud-init yet; install it on the host first.
+# grpcurl is not provisioned by cloud-init yet; install it on the host first. (legacy note; verify tool availability on the current host)
 grpcurl -plaintext \
   -d '{"name": "filesystem",
        "command": ["/usr/local/bin/mcp-server-filesystem"]}' \
@@ -199,8 +199,7 @@ next call without a restart.
 - Activation and deactivation both require the admin token
   (`JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN`); a local process cannot stop the
   system unilaterally.
-- The state directory is created by cloud-init and writable by the service
-  through `ReadWritePaths=/var/lib/jarvis`.
+- The state directory was described as cloud-init-created in the legacy setup; on the current local host, ensure the directory and permissions exist as required by the installed unit (see `ReadWritePaths=/var/lib/jarvis` where applicable).
 
 ### Secret Management
 
@@ -209,14 +208,16 @@ Secrets are stored in **Bitwarden Secrets Manager** and injected by
 
 - The `jarvis` project holds the `JARVIS_*` keys as secrets whose names
   match the environment variables the services read.
-- The systemd units run
-  `/usr/local/bin/bws run --project-id <id> -- /opt/jarvis/bin/<service>`.
-  `bws` reads `BWS_ACCESS_TOKEN` from the root-owned
-  `/etc/jarvis/bws.env`.
+- The systemd units run the service via `bws run` (example legacy path form:
+  `/usr/local/bin/bws run --project-id <id> -- /opt/jarvis/bin/<service>`).
+  `bws` reads `BWS_ACCESS_TOKEN` from the root-owned `/etc/jarvis/bws.env`.
+  Verify the actual `ExecStart`, binary path, and project ID against the
+  installed unit files on the host.
 - The access token is a machine-account token scoped to the `jarvis`
   project.
 
-Provision the access token once after the host is created:
+Provision/update the access token as needed (verify target path, ownership, and
+mode on the host before restarting services):
 
 ```bash
 sudo sh -c 'umask 077; echo "BWS_ACCESS_TOKEN=0.xxxx.yyyy:zzzz" > /etc/jarvis/bws.env'
