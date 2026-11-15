@@ -48,7 +48,7 @@ Environment=RUST_LOG=info
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 # Workspace root for the native read-only handlers. Must stay readable under
 # ProtectHome=read-only; the value is also the path-escape boundary.
-Environment=JARVIS_MCP_GW_BASE_DIR=/home/koppe
+Environment=JARVIS_MCP_GW_BASE_DIR=/home/koppe/ドキュメント/作業用/jarvis/jarvis
 
 # Resource limits
 LimitNOFILE=65536

@@ -71,7 +71,7 @@ for p in "$port" "$grpc"; do
     echo "FAIL: port $p is already in use"; exit 1
   fi
 done
-(cd "$tmp" && exec env RUST_LOG=error OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317 "$bin") >"$tmp/gw.log" 2>&1 &
+(cd "$tmp" && exec env RUST_LOG=error OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317 JARVIS_MCP_GW_BASE_DIR="$repo" "$bin") >"$tmp/gw.log" 2>&1 &
 pid=$!
 
 ok=0; fail=0
