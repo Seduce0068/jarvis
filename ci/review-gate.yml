@@ -1,3 +1,6 @@
+# CI-1: not wired into .github/workflows/ (manual/reference pipeline only).
+# CI-2: depends on OpenCode CLI/credentials and a runner with JARVIS toolchain.
+# See docs/integration/remaining-tasks.md for current status and decisions.
 name: JARVIS Review Flow
 
 on:
