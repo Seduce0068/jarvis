@@ -57,9 +57,11 @@
 - `web.fetch`: `requires_approval = true` で配置し、実サービスのMCP `tools/list` に**非表示**を確認。
 - allowlist/policy: `/etc`とrepoが一致（policy 1行も同期）、`check-deploy-drift.sh` → **RESULT OK**。
 
-## 2026-11-15 現状確認: systemd hardening との不整合を検出
+## 2026-11-15 現状確認: systemd hardening との不整合を検出（検出時の記録）
 
-稼働中サービス（systemd 配下）に対する実測で、**`tools/list` に出る全ツールが実行不能**であることが判明した。
+> 注: 以下は修正前に検出した状態です。修正内容と適用後の実測は「修正（2026-11-15 デプロイ適用済み）」および「デプロイ結果（2026-11-15 11:36、実測）」を参照してください。
+
+稼働中サービス（systemd 配下）に対する実測で、当時は **`tools/list` に出る全ツールが実行不能** であることが判明した。
 
 | 確認項目 | 結果 |
 |---|---|
