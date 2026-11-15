@@ -188,11 +188,12 @@ policy-checked and must have an entry in `/etc/jarvis/mcp_allowlist.toml`
   re-register after a gateway restart.
 
 ```bash
-# grpcurl is not provisioned by cloud-init yet; install it on the host first. (legacy note; verify tool availability on the current host)
-grpcurl -plaintext \
-  -d '{"name": "filesystem",
-       "command": ["/usr/local/bin/mcp-server-filesystem"]}' \
-  localhost:50052 jarvis.mcp.gateway.v1.McpGatewayService/RegisterMcpServer
+# Example only (legacy/cloud-init note). Verify grpcurl availability, target service, command path, and impact before use.
+# Registering changes in-memory gateway state until restart and may affect running behavior; do not run without explicit need/approval.
+# grpcurl -plaintext \
+#   -d '{"name": "filesystem",
+#        "command": ["/usr/local/bin/mcp-server-filesystem"]}' \
+#   localhost:50052 jarvis.mcp.gateway.v1.McpGatewayService/RegisterMcpServer
 ```
 
 ### Kill Switch
