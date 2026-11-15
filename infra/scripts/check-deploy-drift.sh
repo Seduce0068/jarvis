@@ -117,7 +117,9 @@ for o in parse(sys.argv[3]):
     if 'tools' in r:
         names = {t.get('name') for t in r['tools']}
 expected = {'filesystem.list', 'filesystem.read', 'git.diff', 'git.status'}
-if names != expected:
+# MCP-1 承認フロー実装後は requires_approval=true のツールも tools/list に
+# 表示されるため、読み取り系4ツールの部分集合で判定する。
+if not expected <= names:
     print(f'  detail: tools/list が期待と不一致 actual={sorted(names)}', file=sys.stderr)
     ok = False
 sys.exit(0 if ok else 1)

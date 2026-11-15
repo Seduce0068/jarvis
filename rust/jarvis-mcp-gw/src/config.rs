@@ -15,6 +15,10 @@ pub struct McpGatewayConfig {
     pub sandbox_type: SandboxType,
     pub sandbox_config: serde_json::Value,
     pub policy_grpc_addr: String,
+    /// HTTP base URL of `jarvis-policy`, used for the human approval flow
+    /// (`POST /v1/approval`). Approval stays HTTP-only by design so a
+    /// long-running human decision never occupies a gRPC stream.
+    pub policy_http_addr: String,
     /// Principal identity used for tool calls that arrive over the MCP
     /// server endpoint (`/mcp`). Calls still pass policy and allowlist
     /// checks; the client never chooses the principal.
@@ -42,6 +46,7 @@ impl Default for McpGatewayConfig {
             sandbox_type: SandboxType::None,
             sandbox_config: serde_json::json!({}),
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
+            policy_http_addr: "http://127.0.0.1:8081".into(),
             mcp_principal: "opencode".into(),
         }
     }

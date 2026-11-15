@@ -1,6 +1,7 @@
 //! JARVIS MCP Gateway - Main library
 
 pub mod allowlist;
+pub mod approval;
 pub mod config;
 pub mod error;
 pub mod gateway;
@@ -23,6 +24,7 @@ pub struct McpGateway {
     allowlist: Arc<allowlist::AllowList>,
     sandbox: Arc<sandbox::Sandbox>,
     policy_client: Arc<jarvis_policy::PolicyClient>,
+    approval: Arc<approval::ApprovalClient>,
 }
 
 impl McpGateway {
@@ -35,6 +37,9 @@ impl McpGateway {
         let gateway = Arc::new(
             gateway::Gateway::new(config.clone(), allowlist.clone(), sandbox.clone()).await?,
         );
+        let approval = Arc::new(approval::ApprovalClient::new(
+            config.policy_http_addr.clone(),
+        ));
 
         Ok(Self {
             config,
@@ -42,6 +47,7 @@ impl McpGateway {
             allowlist,
             sandbox,
             policy_client,
+            approval,
         })
     }
 
@@ -96,10 +102,52 @@ impl McpGateway {
             .into());
         }
         if tool_config.requires_approval {
-            return Err(error::McpGatewayError::ApprovalRequired {
-                tool: tool.to_owned(),
+            // Human-in-the-loop (MCP-1): the call blocks on the policy
+            // approval workflow until an operator decides or the approval
+            // window elapses. Any failure is a denial (fail-closed).
+            use approval::ApprovalOutcome;
+            match self
+                .approval
+                .request_approval(principal, "execute", &resource, &args)
+                .await
+            {
+                Ok(ApprovalOutcome::Approved { approved_by, .. }) => {
+                    tracing::info!(
+                        tool,
+                        principal,
+                        approved_by,
+                        "tool call approved by operator"
+                    );
+                }
+                Ok(ApprovalOutcome::Denied { reason }) => {
+                    return Err(error::McpGatewayError::ApprovalDenied {
+                        tool: tool.to_owned(),
+                        reason,
+                    }
+                    .into());
+                }
+                Ok(ApprovalOutcome::Expired) => {
+                    return Err(error::McpGatewayError::ApprovalDenied {
+                        tool: tool.to_owned(),
+                        reason: "approval request expired".to_owned(),
+                    }
+                    .into());
+                }
+                Ok(outcome @ ApprovalOutcome::Pending) => {
+                    tracing::error!(tool, principal, ?outcome, "unexpected pending approval");
+                    return Err(error::McpGatewayError::ApprovalRequired {
+                        tool: tool.to_owned(),
+                    }
+                    .into());
+                }
+                Err(error) => {
+                    tracing::error!(tool, principal, %error, "approval request failed; denying (fail-closed)");
+                    return Err(error::McpGatewayError::ApprovalRequired {
+                        tool: tool.to_owned(),
+                    }
+                    .into());
+                }
             }
-            .into());
         }
 
         // Route to a registered MCP server or the sandbox fallback.

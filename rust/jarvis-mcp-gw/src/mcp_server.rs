@@ -156,6 +156,9 @@ requires_approval = true
 
         let config = McpGatewayConfig {
             allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            // Unreachable by construction: tests must not reach a policy
+            // service that happens to listen on the default address.
+            policy_http_addr: "http://127.0.0.1:1".into(),
             ..Default::default()
         };
         let policy = Arc::new(testing::shipped_policy_client(name).await);
@@ -221,8 +224,8 @@ requires_approval = true
         let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert_eq!(
             names,
-            vec!["filesystem.read"],
-            "only non-approval tools granted to the endpoint principal are listed"
+            vec!["filesystem.read", "shell.execute"],
+            "approval-required tools are listed and routed through human approval"
         );
 
         let result = client
@@ -277,8 +280,10 @@ requires_approval = true
         let text = first_text(&result);
         assert!(text.contains("Policy denied"), "unexpected: {text}");
 
-        // The allowlist grants this tool to OpenCode, but marks it as
-        // approval-required. No approval flow is connected to execution.
+        // The allowlist grants this tool to OpenCode and marks it as
+        // approval-required. With no policy HTTP server reachable in this
+        // test, the approval request fails and the call is denied
+        // (fail-closed).
         let result = client
             .peer()
             .call_tool(CallToolRequestParam {

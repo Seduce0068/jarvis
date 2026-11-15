@@ -129,7 +129,8 @@ fn http_status_for(error: &anyhow::Error, message: &str) -> axum::http::StatusCo
             crate::error::McpGatewayError::NotAllowed(_)
             | crate::error::McpGatewayError::PolicyDenied { .. }
             | crate::error::McpGatewayError::PrincipalNotAllowed { .. }
-            | crate::error::McpGatewayError::ApprovalRequired { .. },
+            | crate::error::McpGatewayError::ApprovalRequired { .. }
+            | crate::error::McpGatewayError::ApprovalDenied { .. },
         ) => axum::http::StatusCode::FORBIDDEN,
         _ if is_client_error(message) => axum::http::StatusCode::BAD_REQUEST,
         _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
@@ -210,6 +211,9 @@ requires_approval = true
 
         let config = McpGatewayConfig {
             allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            // Unreachable by construction: tests must not reach a policy
+            // service that happens to listen on the default address.
+            policy_http_addr: "http://127.0.0.1:1".into(),
             ..Default::default()
         };
         let policy = Arc::new(testing::shipped_policy_client(label).await);
@@ -283,7 +287,8 @@ requires_approval = true
             .expect("unknown request runs");
         assert_eq!(unknown.status(), reqwest::StatusCode::FORBIDDEN);
 
-        // Approval-required tools are rejected until an approval flow exists.
+        // Approval-required tools fail closed while the approval service is
+        // unreachable (the fixture points at a port nothing serves).
         let approval = client
             .post(format!("{base}/v1/execute"))
             .json(&json!({
@@ -295,6 +300,99 @@ requires_approval = true
             .await
             .expect("approval request runs");
         assert_eq!(approval.status(), reqwest::StatusCode::FORBIDDEN);
+    }
+
+    /// Full human-in-the-loop path (MCP-1): the gateway raises an approval
+    /// request against the real policy HTTP surface, the operator approves
+    /// it, and the call then executes on the registered upstream server.
+    #[tokio::test]
+    async fn execute_endpoint_blocks_until_operator_approval() {
+        let policy_http = testing::start_policy_http("execute-approval").await;
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-http-execute-approval");
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist_path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist_path, EXECUTE_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+
+        let config = McpGatewayConfig {
+            allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            policy_http_addr: policy_http.clone(),
+            ..Default::default()
+        };
+        let policy = Arc::new(testing::shipped_policy_client("execute-approval").await);
+        let gateway = Arc::new(
+            McpGateway::new(config, policy)
+                .await
+                .expect("gateway starts"),
+        );
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(testing::run_mock_mcp_server(
+            server_side,
+            "shell.execute",
+            false,
+        ));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock server registers");
+
+        let base = start_server(gateway).await;
+        let http = reqwest::Client::new();
+
+        let call = tokio::spawn({
+            let base = base.clone();
+            async move {
+                reqwest::Client::new()
+                    .post(format!("{base}/v1/execute"))
+                    .json(&json!({
+                        "tool": "shell.execute",
+                        "args": {},
+                        "principal": "opencode",
+                    }))
+                    .send()
+                    .await
+                    .expect("execute request runs")
+            }
+        });
+
+        // Operator approves the pending request raised by the gateway.
+        let id = loop {
+            let pending: Value = http
+                .get(format!("{policy_http}/v1/approvals"))
+                .send()
+                .await
+                .expect("list approvals")
+                .json()
+                .await
+                .expect("pending list is JSON");
+            if let Some(entry) = pending["pending"]
+                .as_array()
+                .and_then(|items| items.first())
+            {
+                break entry["id"].as_str().expect("id is a string").to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        let decision: Value = http
+            .post(format!("{policy_http}/v1/approval/{id}/approve"))
+            .json(&json!({ "approved_by": "koppe" }))
+            .send()
+            .await
+            .expect("approve request runs")
+            .json()
+            .await
+            .expect("approve response is JSON");
+        assert_eq!(decision["decision"], "Approved");
+
+        let response = call.await.expect("execute call task");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.expect("execute response is JSON");
+        assert_eq!(body["result"]["isError"], false);
+        assert_eq!(body["result"]["content"][0]["text"], "pong");
     }
     #[test]
     fn client_errors_map_to_400_with_json_body() {

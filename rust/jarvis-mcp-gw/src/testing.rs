@@ -91,7 +91,7 @@ pub(crate) async fn shipped_policy_client(label: &str) -> PolicyClient {
 
 /// Policy engine over the shipped policy files, with throwaway copies of
 /// the Casbin files (the engine persists policy edits to its own copy).
-async fn shipped_policy_engine(label: &str) -> PolicyEngine {
+pub(crate) async fn shipped_policy_engine(label: &str) -> PolicyEngine {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
     let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-policy-{label}"));
     tokio::fs::create_dir_all(&dir)
@@ -116,4 +116,21 @@ async fn shipped_policy_engine(label: &str) -> PolicyEngine {
     PolicyEngine::new(config)
         .await
         .expect("policy engine starts")
+}
+
+/// Start the real policy HTTP router on an ephemeral port and return its
+/// base URL, mirroring the wire path the gateway uses in production.
+pub(crate) async fn start_policy_http(label: &str) -> String {
+    let engine = Arc::new(shipped_policy_engine(label).await);
+    let app = jarvis_policy::http::router(engine);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind policy http test server");
+    let addr = listener.local_addr().expect("policy http test address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("policy http test server runs");
+    });
+    format!("http://{addr}")
 }

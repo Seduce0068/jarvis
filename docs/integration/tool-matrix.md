@@ -5,22 +5,28 @@
 
 ## 実装状況（2026-11-15 更新）
 
+> **2026-11-15 追記（MCP-1 承認フロー実装・repo側）**: `requires_approval = true` の
+> ツールも `tools/list` に表示されるよう変更（旧「非表示」ワークアラウンド廃止）。
+> 呼び出すと gateway が jarvis-policy の承認要求に転送し、オペレータが
+> `POST /v1/approval/{id}/approve|deny` で決定するまで待機する（fail-closed）。
+> 実機への有効化は次回デプロイ適用時。
+
 | ツール | allowlist | 承認 | ネイティブ実装 | デプロイ後の挙動 |
 |---|---|---|---|---|
 | `filesystem.read` | あり | 不要 | **✓** | 動作（workspace配下に限定・`ProtectHome=read-only` で systemd 配下も可） |
 | `filesystem.list` | あり | 不要 | **✓** | 動作（同上） |
 | `git.status` | あり | 不要 | **✓** | 動作（同上） |
 | `git.diff` | あり | 不要 | **✓** | 動作（同上） |
-| `web.fetch` | あり | **必須** | **✓** | `tools/list` 非表示（承認フロー未配線） |
-| `web.search` | あり | **必須**（2026-11-15〜） | ✗ | `tools/list` 非表示（ネイティブ実装待ち） |
-| `homeassistant.get_state` | あり | **必須**（2026-11-15〜） | ✗ | `tools/list` 非表示（上流MCP登録待ち） |
-| `homeassistant.call_service` | あり | 要 | ✗ | `tools/list` 非表示（承認待ち） |
-| `android.get_device_info` | あり | **必須**（2026-11-15〜） | ✗ | `tools/list` 非表示（ネイティブ実装待ち） |
-| `android.send_notification` | あり | 要 | ✗ | `tools/list` 非表示（承認待ち） |
-| `filesystem.write` | あり | 要 | ✗ | `tools/list` 非表示（承認フロー未実装のため実質拒否） |
-| `shell.execute` | あり | 要 | ✗ | `tools/list` 非表示（同上） |
-| `git.commit` | あり | 要 | ✗ | `tools/list` 非表示（同上） |
-| `github.create_pr` | あり | 要 | ✗ | `tools/list` 非表示（同上） |
+| `web.fetch` | あり | **必須** | **✓** | `tools/list` 表示・呼び出しは人間承認待ち（MCP-1 実装済み・未適用） |
+| `web.search` | あり | **必須**（2026-11-15〜） | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（ネイティブ実装待ち） |
+| `homeassistant.get_state` | あり | **必須**（2026-11-15〜） | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（上流MCP登録待ち） |
+| `homeassistant.call_service` | あり | 要 | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（MCP-1 実装済み・未適用） |
+| `android.get_device_info` | あり | **必須**（2026-11-15〜） | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（ネイティブ実装待ち） |
+| `android.send_notification` | あり | 要 | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（MCP-1 実装済み・未適用） |
+| `filesystem.write` | あり | 要 | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（MCP-1 実装済み・未適用） |
+| `shell.execute` | あり | 要 | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（MCP-1 実装済み・未適用） |
+| `git.commit` | あり | 要 | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（MCP-1 実装済み・未適用） |
+| `github.create_pr` | あり | 要 | ✗ | `tools/list` 表示・呼び出しは人間承認待ち（MCP-1 実装済み・未適用） |
 
 ## 設定上のドリフト（要整理・継続）
 
@@ -33,7 +39,8 @@
    - 実装/upstream登録後に承認要否を再設計する。
 3. **`web.fetch`の承認**
    - 2026-11-10 に `requires_approval = true` を配備済み。承認フロー実装後に扱いを再検討。
-   - 承認フロー実装後は、宛先ドメイン制限（egress allowlist）も検討。
+   - 2026-11-15: 承認フロー実装済み（MCP-1）。`requires_approval = true` のままでも
+     呼び出しごとに人間承認を待つため実行可能。宛先ドメイン制限（egress allowlist）は引き続き検討事項。
 
 ## デプロイ前チェックリスト
 

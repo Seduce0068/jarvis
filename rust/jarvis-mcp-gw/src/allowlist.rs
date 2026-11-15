@@ -68,8 +68,10 @@ impl AllowList {
     }
 
     /// Tools `principal` may call: the principal must be admitted, and each
-    /// returned tool entry must grant the principal. Sorted by name so tool
-    /// listings are deterministic.
+    /// returned tool entry must grant the principal. Approval-required tools
+    /// are listed as well — executing one routes through the human approval
+    /// flow (see [`crate::approval`]). Sorted by name so tool listings are
+    /// deterministic.
     pub fn tools_for_principal(&self, principal: &str) -> Vec<AllowedTool> {
         if !self.is_principal_allowed(principal) {
             return Vec::new();
@@ -80,11 +82,9 @@ impl AllowList {
             .unwrap()
             .values()
             .filter(|tool| {
-                !tool.requires_approval
-                    && tool
-                        .allowed_principals
-                        .iter()
-                        .any(|allowed| allowed == principal)
+                tool.allowed_principals
+                    .iter()
+                    .any(|allowed| allowed == principal)
             })
             .cloned()
             .collect();

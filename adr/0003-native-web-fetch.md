@@ -43,3 +43,10 @@ ADR-0002で「読み取り系ツールはゲートウェイ内のRust実装で�
 `requires_approval = true` のツールは `AllowList::tools_for_principal` のフィルタにより
 **MCPの`tools/list`に表示されない**（呼び出しも`ApprovalRequired`で403）。
 したがって承認必須化後は、エージェントからは「存在しないツール」として扱われる。
+
+### 2026-11-15 追記（MCP-1 承認フロー実装）
+
+上記の「非表示」は承認フロー未実装時の暫定挙動だった。MCP-1 の承認フロー実装
+（gateway → jarvis-policy HTTP 承認要求 → オペレータ決定 → 実行、失敗時 fail-closed）
+に伴い、承認必須ツールも `tools/list` に表示され、呼び出しは人間承認を待つ挙動に変更した。
+本 ADR の決定（`web.fetch` のネイティブ実装・SSRF 対策）は変更なし。

@@ -110,6 +110,20 @@ DSH 側の設定箇所（2026-11-15 確認）:
 - ゲートウェイ側の修正デプロイ後は、同じ設定のまま `filesystem.*` / `git.*` が
   実行可能になる（再起動や設定変更は不要）。
 
+## 承認フロー（MCP-1、2026-11-15 実装・未適用）
+
+- `requires_approval = true` のツールも `tools/list` に表示されるようになる
+  （旧「非表示」ワークアラウンド廃止。次回デプロイ適用後から有効）。
+- 呼び出すと gateway が jarvis-policy の承認要求へ転送し、オペレータが
+  承認/却下するまで応答を待つ（policy 側の既定タイムアウトは300秒、
+  期限切れは拒否）。クライアントは HTTP/MCP タイムアウトを長めに設定すること。
+- オペレータの承認方法（ローカルホストから）:
+  1. `curl -s http://127.0.0.1:8081/v1/approvals` で保留中の要求を確認
+  2. 承認: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/approve -H 'content-type: application/json' -d '{"approved_by":"koppe"}'`
+     却下: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/deny -H 'content-type: application/json' -d '{"reason":"not now"}'`
+- jarvis-policy の HTTP（8081）に到達できない場合の呼び出しは fail-closed で拒否される。
+- 承認UI・通知・監査永続化（PostgreSQL）は今後の拡張（[remaining-tasks.md](remaining-tasks.md) MCP-1）。
+
 ## 関連
 
 - プロジェクト全体の残タスク/判断待ち事項: [remaining-tasks.md](remaining-tasks.md)
