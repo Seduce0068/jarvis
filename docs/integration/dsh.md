@@ -79,15 +79,18 @@ initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の�
   `web.search` / `homeassistant.get_state` は firejail フォールバック失敗。
 - 原因: unit の `ProtectHome=yes` と基準ディレクトリ既定値 `/home/koppe` の不整合。
 - 修正: unit を `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=/home/koppe` に変更し、
-  未実装ツールを承認必須化（`tools/list` 非表示）。repo 反映済み・デプロイ待ち。
+  未実装ツールを承認必須化（`tools/list` 非表示）。**2026-11-15 11:36 にデプロイ適用済み。**
 - デプロイ: `sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply`
   （事後E2Eが OK になるまでを合格条件とし、失敗時は自動ロールバック）。
 
-修正後の期待状態:
+デプロイ後の実測（2026-11-15 11:36）:
 
 - `tools/list` = 4ツール（filesystem.list/read, git.diff/status）
-- 上記4ツールの `tools/call` が成功する
-- `web.fetch` 等の承認必須ツールは非表示のまま
+- 上記4ツールの `tools/call` が成功する（`entries` / `stdout` を確認）
+- `web.fetch` 等の承認必須ツールは非表示、呼ぶと承認必須エラー
+- `check-deploy-drift.sh` → `RESULT: OK`
+- 注意: ゲートウェイ再起動で MCP セッションは失効するため、クライアントは
+  再接続（再 initialize）が必要。
 
 DSH 側の設定箇所（2026-11-15 確認）:
 

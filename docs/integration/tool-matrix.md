@@ -75,7 +75,7 @@
 
 従来のスモークテストは systemd 外で別ポート起動していたため、この乖離を検出できなかった。
 
-### 修正（repo 反映済み・要デプロイ）
+### 修正（2026-11-15 デプロイ適用済み）
 
 - `infra/systemd/jarvis-mcp-gw.service`
   - `ProtectHome=yes` → `ProtectHome=read-only`（`/home` を読み取り専用で参照可能に）
@@ -101,12 +101,25 @@ sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply # 同期・再起動・事
 bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 ```
 
-### 修正後の期待状態（デプロイ後に確認）
+### デプロイ結果（2026-11-15 11:36、実測）
 
-- `tools/list` = 4ツール（filesystem.list/read, git.diff/status）のみ
-- 上記4ツールの `tools/call` が成功（`entries` / `stdout` を返す）
-- `web.fetch` / `web.search` / `homeassistant.*` / `android.*` は非表示
-- `check-deploy-drift.sh` → **RESULT: OK**
+`sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply` を実行。事後E2Eまで含めて合格。
+
+| 確認項目 | 結果 |
+|---|---|
+| `deploy-mcp-gw-safe.sh --apply` | `DONE: APPLIED（事後確認 OK）` / `DEPLOY_EXIT=0` |
+| `check-deploy-drift.sh`（独立再実行） | binary/allowlist/policy/unit **全て OK**、`RESULT: OK`（exit 0） |
+| 稼働 unit | `User=koppe`, `ProtectHome=read-only`, `JARVIS_MCP_GW_BASE_DIR=/home/koppe` |
+| サービス | `jarvis-mcp-gw` active（2026-11-15 11:36:49 起動） |
+| `/health` | OK |
+| `tools/list` | **4ツールのみ**（filesystem.list/read, git.diff/status） |
+| `filesystem.list` / `filesystem.read` | 成功（`entries` / 本文を返す） |
+| `git.status` / `git.diff` | 成功（`stdout` を返す） |
+| `web.fetch` / `homeassistant.get_state` | 承認必須で拒否（`requires human approval`） |
+| スモーク（approval モード） | PASS (ok=11 fail=0) |
+
+注: ゲートウェイ再起動により MCP セッションは失効する。クライアント（DSH 等）は
+再接続（再 initialize）が必要。
 
 ## 残リスク（要検討）
 
