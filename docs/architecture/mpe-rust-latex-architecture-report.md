@@ -18,6 +18,8 @@ verified:
 status: "proposed"
 ---
 
+> **Status note (2026-11-15):** 本書は MPE/Rust/LaTeX 文書構成に関する参照レポート（proposed）です。現行 JARVIS の実行基盤・運用タスクの管理は [ADR-0004: Local-only (no OCI)](../../adr/0004-local-only-no-oci.md) と [docs/integration/remaining-tasks.md](../../docs/integration/remaining-tasks.md) を参照してください。
+
 ## 1. エグゼクティブサマリー
 
 ### 1.1 結論

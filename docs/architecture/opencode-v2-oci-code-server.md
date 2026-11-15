@@ -22,6 +22,8 @@ stale_after: "2026-11-04T13:23:00+09:00"
 > **Status: incorporated.** This report is an input to ADR-0001 and is kept
 > for context. The unified architecture is defined in
 > [ADR-0001](../../adr/0001-unified-architecture.md).
+>
+> **2026-11-15 注記:** OCI は使用しない方針（[ADR-0004](../../adr/0004-local-only-no-oci.md)）により、本書の OCI/OpenTofu/cloud-init/Tailscale 常設等の前提は現行インフラ手順ではありません。現行の残タスク・運用状況は [docs/integration/remaining-tasks.md](../../docs/integration/remaining-tasks.md) を参照してください。
 
 ## エグゼクティブサマリー
 
