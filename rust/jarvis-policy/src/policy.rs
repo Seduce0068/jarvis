@@ -334,6 +334,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn shipped_cedar_schema_parses() {
+        let text = include_str!("../../../infra/config/policy/cedar_schema.cedarschema");
+        let parsed = text.parse::<cedar_policy::Schema>();
+        assert!(
+            parsed.is_ok(),
+            "shipped cedar_schema.cedarschema must parse: {:?}",
+            parsed.err().map(|err| err.to_string())
+        );
+    }
+
     fn casbin_files(label: &str) -> (PathBuf, PathBuf) {
         let dir = temp_dir(label);
         let model = dir.join("casbin_model.conf");

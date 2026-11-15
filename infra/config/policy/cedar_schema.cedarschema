@@ -1,47 +1,72 @@
-// JARVIS Cedar schema (informational).
+// JARVIS Cedar schema.
 //
-// Documents the intended entity model for future policy validation.
-// This file is NOT parsed at runtime yet; enforcement comes from
-// policies.cedar (+ optional entities.json) in this directory.
+// Documents the entity model and request shapes used by the services.
+// This file is still NOT parsed for enforcement at runtime; enforcement
+// comes from policies.cedar (+ optional entities.json) in this directory.
+// A test in `rust/jarvis-policy/src/policy.rs` validates that this schema
+// parses and accepts the request/entity shapes below.
 //
-// TODO: align the schema with the request context actually passed by the
-// services (actions need `context` declarations, and the approval workflow
-// needs a concrete ApprovalRequest entity) before enabling schema validation.
+// 2026-11-15: aligned with the requests actually built by
+// `CedarEngine::is_authorized`:
+// - principals/actions/resources are bare string UIDs with no required
+//   attributes (the richer ABAC attributes below are optional placeholders),
+// - actions declare no context attributes yet: the gateway passes tool
+//   arguments as an untyped context object, which cannot be expressed as a
+//   closed record. Enabling schema validation at runtime therefore requires
+//   a typed context contract per tool (or open-record support) first.
 
-namespace jarvis;
+namespace jarvis {
 
+// Runtime requests reference principals/resources by UID only
+// (e.g. jarvis::Principal::"jarvis_admin"). Attributes are optional so an
+// empty entities.json still validates once schema validation is enabled.
 entity Principal {
-    uid: String,
-    role: String,  // "admin", "user", "agent", "system"
-    capabilities: Set<String>
-}
+    uid?: String,
+    role?: String,  // "admin", "user", "agent", "system"
+    capabilities?: Set<String>
+};
 
 entity Resource {
-    uid: String,
-    type: String,  // "tool", "service", "data", "device"
-    owner: String,
-    sensitivity: String,  // "public", "private", "confidential", "restricted"
-    tags: Set<String>
-}
+    uid?: String,
+    type?: String,  // "tool", "service", "data", "device"
+    owner?: String,
+    sensitivity?: String,  // "public", "private", "confidential", "restricted"
+    tags?: Set<String>
+};
 
-entity Action {
-    uid: String,
-    name: String,  // "read", "write", "execute", "delete", "approve"
-    risk_level: String,  // "low", "medium", "high", "critical"
-    requires_approval: Boolean
-}
+// Concrete record for the approval workflow (mirrors
+// `jarvis_policy::policy::ApprovalRequest`). `context` (arbitrary JSON) is
+// intentionally excluded: Cedar schemas cannot express open JSON payloads.
+entity ApprovalRequest {
+    id: String,
+    principal: String,
+    action: String,
+    resource: String,
+    requested_at: String,  // RFC 3339
+    expires_at: String  // RFC 3339
+};
 
-entity Context {
-    correlation_id: String,
-    timestamp: String,
-    source: String,  // "ha", "android", "email", "calendar", "web", "manual"
-    event_type: String,
-    auto_respond: Boolean
+// Actions served by the policy engine. Context is intentionally undeclared
+// (defaults to an empty record) until a typed per-tool context contract
+// exists; see the header comment.
+action "read" appliesTo {
+    principal: Principal,
+    resource: Resource
+};
+action "write" appliesTo {
+    principal: Principal,
+    resource: Resource
+};
+action "execute" appliesTo {
+    principal: Principal,
+    resource: Resource
+};
+action "delete" appliesTo {
+    principal: Principal,
+    resource: Resource
+};
+action "approve" appliesTo {
+    principal: Principal,
+    resource: Resource
+};
 }
-
-// Actions
-action "read" appliesTo (Principal, Resource);
-action "write" appliesTo (Principal, Resource);
-action "execute" appliesTo (Principal, Resource);
-action "delete" appliesTo (Principal, Resource);
-action "approve" appliesTo (Principal, Resource);
