@@ -15,13 +15,17 @@ tags:
 generated:
   by: "GPT-5.6 Sol"
   at: "2026-09-27T23:31:00+09:00"
-status: draft
+status: superseded
 ---
 
 > **Status: superseded.** This document predates ADR-0001 and is kept for
 > historical context. The current architecture is defined in
-> [ADR-0001](../../adr/0001-unified-architecture.md). References to OpenClaw
-> describe the earlier design; OpenCode V2 is the current agent runtime.
+> [ADR-0001](../../adr/0001-unified-architecture.md) and the current
+> infrastructure/deployment policy in
+> [ADR-0004: Local-only (no OCI)](../../adr/0004-local-only-no-oci.md).
+> References to OpenClaw and OCI-era assumptions describe the earlier design;
+> OpenCode V2 is the current agent runtime and current operations are local
+> Kubuntu + systemd (OCI unused).
 
 ## 目的
 
