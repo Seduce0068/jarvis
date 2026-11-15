@@ -66,6 +66,8 @@ infra/
 
 ### Prerequisites (legacy)
 
+> **注記**: OCI/OpenTofu/旧ホスト前提。現行ローカル Kubuntu + systemd 運用ではそのまま必要条件・手順にならない。
+
 1. OCI Account with Always Free eligibility
 2. OpenTofu installed (`tofu version`)
 3. OCI CLI configured (`oci setup config`)
@@ -75,6 +77,8 @@ infra/
 6. SSH key pair
 
 ### Quick Start (legacy)
+
+> **注記**: 以下は OCI 環境向けの旧手順。現行ローカル運用では実行しないこと。OCI 関連の実行・削除は [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md)（BK-3）と [adr/0004-local-only-no-oci.md](../adr/0004-local-only-no-oci.md) を確認し、前提確認・承認・資格情報が揃う場合にのみ別判断で行う。
 
 ```bash
 # 1. Navigate to production environment
@@ -100,6 +104,8 @@ tofu apply
 
 ### Post-Deployment (legacy, cloud-init)
 
+> **注記**: OCI インスタンス + cloud-init 前提の旧手順。現行ローカル Kubuntu + systemd ホストでは、パッケージ導入・ユーザー/配置・サービス構成・確認コマンドが異なる場合があるため、そのまま実行しないこと。
+
 After the instance is provisioned, cloud-init would:
 
 1. Install packages (Rust, OpenCode, code-server, PostgreSQL, Docker, Tailscale)
@@ -111,13 +117,13 @@ After the instance is provisioned, cloud-init would:
 7. Generate code-server password
 8. Enable all services
 
-Wait 5-10 minutes for cloud-init to complete, then:
+Wait 5-10 minutes for cloud-init to complete, then (legacy example):
 
 ```bash
-# Check service status via Tailscale SSH
+# Check service status via Tailscale SSH (legacy OCI host example)
 tailscale ssh jarvis@jarvis-host
 
-# Verify services
+# Verify services (adjust unit names/host as needed)
 sudo systemctl status jarvis-* opencode code-server otelcol
 
 # Check logs
