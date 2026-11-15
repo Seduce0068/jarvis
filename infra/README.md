@@ -130,7 +130,9 @@ sudo systemctl status jarvis-* opencode code-server otelcol
 sudo journalctl -u jarvis-policy -f
 ```
 
-### Idle Compute Recovery
+### Idle Compute Recovery (legacy: OCI, 現行非使用)
+
+> **注記**: OCI/OpenTofu 前提の設計メモ。現行ローカル運用とは無関係だが、`infra/opentofu/` 資産の扱い（BK-3）や将来の整理判断の文脈として残す。
 
 Automatic `tofu apply` recovery is intentionally not enabled. The current
 production configuration uses a local `terraform.tfstate` backend, and that
