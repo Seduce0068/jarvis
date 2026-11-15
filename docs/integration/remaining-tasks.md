@@ -24,7 +24,7 @@
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| BK-1 | バックアップ保存先の再決定と実装更新 | [adr/0004-local-only-no-oci.md](../../adr/0004-local-only-no-oci.md) で OCI 非使用・保存先再決定が未解決。`rust/scripts/backup.rs` / `restore.rs` / `infra/scripts/backup.sh` は OCI Object Storage(rclone)・`op inject`・`/opt/jarvis` `/home/jarvis` 前提のレガシー。 | 保存先（例: ローカル/NAS/別ストレージ）・保持期間・暗号化・復旧手順を決めてスクリプトを再設計 |
+| BK-1 | バックアップ保存先の再決定と実装更新 | [adr/0004-local-only-no-oci.md](../../adr/0004-local-only-no-oci.md) で OCI 非使用・保存先再決定が未解決。`rust/scripts/backup.rs` / `restore.rs` / `infra/scripts/backup.sh` は OCI Object Storage(rclone)・`op inject`・`/opt/jarvis` `/home/jarvis` 前提のレガシー。2026-11-15: [backup-redesign-notes.md](backup-redesign-notes.md) に要件・論点・移行ステップのドラフトを整理。 | 保存先（例: ローカル/NAS/別ストレージ）・保持期間・暗号化・復旧手順を決めてスクリプト/README/unit を再設計（実装・実機導入は別判断） |
 | BK-2 | バックアップ timer/service のローカル運用化 | `infra/systemd/jarvis-backup.service` / `.timer` は存在するがローカル未導入（not-installed）。unit 内容もレガシー前提（`User=jarvis`, `op.env`, `/run/rclone` 等）。 | BK-1 決定後に unit を現行環境へ合わせて導入、`systemctl enable --now` と復旧テストを実施 |
 | BK-3 | OpenTofu/OCI 後始末資産の扱い決定 | [infra/opentofu/](../../infra/opentofu/) は未使用レガシー（[infra/opentofu/README.md](../../infra/opentofu/README.md)）。後始末用に [infra/scripts/decommission-oci.sh](../../infra/scripts/decommission-oci.sh) あり。`infra/opentofu/environments/prod/.terraform/terraform.tfstate` の存在を確認。 | 「保持」「削除」「OCI リソース削除実行」の方針決定。削除時は state 保持要否を確認（state 内容の妥当性は未確認） |
 | BK-4 | レガシー設定テンプレートの整理 | `infra/config/*.env` に `op://` 参照が残る（`policy.env`, `context.env`, `event.env`, `otel.env`）。[AGENTS.md](../../AGENTS.md)/[infra/README.md](../../infra/README.md) では参照テンプレート扱い。2026-11-15: 各ファイル先頭に legacy/reference template 注記を追加（実機 secret/運用変更なし）。 | 残りの具体値（パス・認証方式等）の整備/削除方針は現行運用確定後に判断（実機 secret の変更は別判断） |
