@@ -157,7 +157,7 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 - [ ] Grafana Cloud アラート — **継続タスク（未ID化、要方針・設定確認）**
 - [x] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル) — **要再評価（成果物としては存在するが、OCI Object Storage 前提・現行ローカルでは未運用。ADR-0004/BK-1 参照）**
 - [ ] Idle Compute 対策: ヘルスチェック + `tofu apply` 自動再実行 (systemd timer) — **非適用（ADR-0004: OCI 不使用）**
-- [ ] review-flow CI ゲート統合 — **継続タスク（`ci/review-gate.yml` は未配線、CI-1 参照）**
+- [ ] review-flow CI ゲート統合 — **継続タスク（`ci/review-gate.yml` は未配線、CI-1/CI-2 参照）**
 
 ---
 
