@@ -48,7 +48,7 @@
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
 | DOC-1 | ADR-0001 未チェック項目の棚卸し・更新 | [adr/0001-unified-architecture.md](../../adr/0001-unified-architecture.md) に未チェック項目が残る（OCI A1+Tailscale 疎通、1Password CLI 設定、同一ワークスペース共有確認、Grafana Cloud アラート、Idle Compute 対策、review-flow CI ゲート統合）。OCI 前提項目は ADR-0004 により陳腐化。 | 「完了」「不要/置換」「継続タスク」へ再分類し、注記または別 ADR/タスク化 |
-| DOC-2 | 参照ドキュメントの未解決事項の要否判断 | `docs/architecture/mpe-rust-latex-architecture-report.md` / `docs/architecture/opencode-v2-oci-code-server.md` に未解決事項セクションあり。 | 現行プロジェクトのアクティブタスクか、参照資料として保留かを判断 |
+| DOC-2 | 参照ドキュメントの未解決事項の要否判断 | `docs/architecture/mpe-rust-latex-architecture-report.md` §12 / `docs/architecture/opencode-v2-oci-code-server.md` §未解決事項 に未解決事項があるが、いずれも提案/参照時点の検証・設計選択事項（MPE実機検証、旧OCI構成前提の選択肢等）であり、現行 JARVIS ローカル運用のアクティブタスクとは別。 | **保留（参照資料扱い）**: 該当テーマを実施する場合に個別タスク化する |
 
 ## 6. 運用上のフォローアップ（優先度: 低〜中）
 
