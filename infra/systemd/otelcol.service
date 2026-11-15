@@ -6,12 +6,16 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=jarvis
-Group=jarvis
-EnvironmentFile=-/etc/jarvis/op.env
+User=koppe
+Group=koppe
 
-# Grafana Cloud credentials in otel.env are resolved at service start
-ExecStart=/usr/bin/op run --env-file=/etc/jarvis/otel.env -- /usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml
+# SEC-1 (2026-11-15): aligned with the installed (working) unit.
+# The installed service runs otelcol-contrib directly against
+# /etc/jarvis/otelcol-config.yaml and does not use op run / bws.
+# The credential supply path for Grafana Cloud is not yet identified
+# (otel.env / op.env are absent on the host); do not reintroduce
+# op run here without confirming the secret source.
+ExecStart=/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=30
