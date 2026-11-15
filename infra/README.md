@@ -149,9 +149,11 @@ not automate `tofu apply` from a host-local timer or an ephemeral CI runner.
 
 ### Access
 
-- **code-server (IDE)**: `http://jarvis-host.tailnet.ts.net:8080` (pw in `/etc/jarvis/code-server-password`)
-- **OpenCode Web**: `http://jarvis-host.tailnet.ts.net:49374`
-- **Metrics**: Policy `:8081`, MCP GW `:8082`, Event `:8083`, Context `:8084`
+> Note: Hostnames, paths, ports, and exposure depend on the installed units/configuration on the current host (services typically bind to `127.0.0.1`; remote access, if any, is environment-dependent). Verify against the actual service config and network setup.
+
+- **code-server (IDE)**: example `http://jarvis-host.tailnet.ts.net:8080` (password path may differ; verify on the host, e.g. `/etc/jarvis/code-server-password` in legacy setups)
+- **OpenCode Web**: example `http://jarvis-host.tailnet.ts.net:49374`
+- **Metrics**: Policy `:8081`, MCP GW `:8082`, Event `:8083`, Context `:8084` (verify bind address/availability on the host)
 
 ### MCP Gateway
 
@@ -273,16 +275,18 @@ rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy --dry-run
 
 ### Monitoring
 
-- **Grafana Cloud Free**: Traces, metrics, logs
+> Note: The following reflects intended/repo configuration and may vary by host. Verify installed `otelcol`/service configs, endpoints, credentials, and exporters before assuming active telemetry.
+
+- **Grafana Cloud Free**: Traces, metrics, logs (if configured)
 - **Prometheus scraping**: `otelcol` scrapes `/metrics` on policy `:8081`,
-  MCP GW `:8082`, event `:8083`, and context `:8084`. Each service installs
+  MCP GW `:8082`, event `:8083`, and context `:8084` (verify actual targets/config on the host). Each service installs
   a Prometheus recorder at startup and exposes `jarvis_http_requests_total`
   alongside exporter-provided metrics.
-- **OTLP traces**: every service exports spans to `otelcol` at
+- **OTLP traces**: services can export spans to `otelcol` at
   `http://127.0.0.1:4317` (`OTEL_EXPORTER_OTLP_ENDPOINT`); the collector
-  forwards them to Grafana Cloud.
+  forwards them to Grafana Cloud when configured.
 - **OCI Monitoring**: レガシー（OCI 非使用。現行はローカル運用。ADR-0004 参照）
-- **Tailscale**: Network connectivity
+- **Tailscale**: Network connectivity (environment-dependent)
 
 ### Troubleshooting（環境依存・一部レガシー例を含む）
 
