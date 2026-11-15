@@ -125,3 +125,7 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 
 - 基準ディレクトリが `/home/koppe` 全体のため、読み取りツールは SSH 鍵や `.env` 等の機微ファイルにも到達し得る（localhost 限定・policy/allowlist 前提）。基準ディレクトリの絞り込み（例: 作業ディレクトリのみ）や機微パスの拒否リストを次段で検討する。
 - 承認フローは未実装。`web.fetch` 等は「承認必須・非表示」のまま実用不可。
+
+## 全体タスク一覧
+
+MCP 以外を含むプロジェクト全体の残タスク・判断待ち事項は [remaining-tasks.md](remaining-tasks.md) を参照。
