@@ -1,17 +1,18 @@
 # DSH 連携メモ（2026-11-09 実測）
 
+> **2026-11-15 追記（最新確認）**: 本ドキュメント冒頭の 2026-11-09 実測・結論は当時の状態です。2026-11-15 11:36 の安全デプロイ適用後は、systemd 配下の `jarvis-mcp-gw` で read-only native ツール 4 件（`filesystem.list/read`, `git.diff/status`）の `tools/list` 公開と `tools/call` 成功を確認済みです（詳細は末尾「2026-11-15 現状確認」「運用メモ: 再起動後の再接続（OPS-1）」参照）。再起動後は MCP セッション失効のためクライアント再接続/再 `initialize` が必要です。公開ツール・挙動は実機の `tools/list` / allowlist / unit 設定を正としてください。
+
 ## 接続面
 - jarvis-mcp-gw: MCP Streamable HTTP `http://127.0.0.1:8082/mcp`（rmcp）
   - `initialize` は成功（serverInfo: jarvis-mcp-gw 0.1.0）
   - `tools/list` は `Accept: application/json, text/event-stream` の両方が必須（片方だと406）
-  - 上流MCPサーバー未登録のため公開ツールは現状なし
-  - `/v1/execute` は500（sandbox fallback が `opencode` CLI 依存で現行CLIと不整合）
+  - 上流MCPサーバー未登録のため公開ツールは現状なし（2026-11-09 当時）
+  - `/v1/execute` は500（sandbox fallback が `opencode` CLI 依存で現行CLIと不整合、2026-11-09 当時）
 - DSH側: `dsh --profile acp` でACPサーバ、`dsh-mcp-client` でMCPクライアント。
 
 ## 現時点の結論
-- MCPゲートウェイの**ツール公開と実行バックエンドが未完成**のため、
-  DSHからの接続は「土台はあるが実用前」。
-- 接続順序（推奨）:
+- （2026-11-09 当時）MCPゲートウェイの**ツール公開と実行バックエンドが未完成**のため、DSHからの接続は「土台はあるが実用前」だった。
+- 接続順序（推奨、当時メモ）:
   1. jarvis-mcp-gw の `tools/list` 応答をSSE/JSONどちらでも成立するよう確認
   2. allowlist由来ツールを `tools/list` に出す（現在は上流サーバー登録のみが対象）
   3. sandbox fallback を runtime-agnostic に置換（opencode CLI 依存を解消）
