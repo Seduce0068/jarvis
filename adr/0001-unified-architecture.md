@@ -107,18 +107,22 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 > 進捗メモ (2026-10-31): `[x]` はリポジトリ成果物としての実装完了を示す。
 > 実機 (OCI) での稼働・疎通確認はデプロイ時に別途行う。
+>
+> **2026-11-15 更新（ADR-0004 反映）**: インフラ前提は OCI からローカル Kubuntu + systemd 運用へ変更。
+> OCI 固有の未実施項目は「非適用（ADR-0004）」、前提が変わった項目は「要再評価」として扱う。
+> 全体の現行残タスク整理は [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md) を参照。
 
 ### Phase 0: 統合基盤 (Week 1)
 
 - [x] この ADR 承認・マージ
-- [ ] OpenTofu で OCI A1 VM + Tailscale 疎通
-- [ ] 1Password CLI 設定・秘密情報注入確認
+- [ ] OpenTofu で OCI A1 VM + Tailscale 疎通 — **非適用（ADR-0004: OCI 不使用、ローカル運用）**
+- [ ] 1Password CLI 設定・秘密情報注入確認 — **要再評価（現行は `bws` 利用、`otelcol` 等の移行状況は要確認）**
 
 ### Phase 1: 開発環境 + Agent Runtime (Week 1-2)
 
 - [x] code-server systemd 化
 - [x] OpenCode V2 インストール・`opencode serve` systemd 化
-- [ ] 同一ワークスペース (`~/repos`) 共有確認
+- [ ] 同一ワークスペース (`~/repos`) 共有確認 — **要再評価（ローカル運用での現行要件・実態を確認）**
 
 ### Phase 2: JARVIS Rust サービス雛形 (Week 2-3)
 
@@ -142,10 +146,10 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 - [x] サービスからの OTLP トレースエクスポート (`OTEL_EXPORTER_OTLP_ENDPOINT`)
 - [x] Prometheus メトリクス公開 (`/metrics`)
 - [x] Grafana Cloud ダッシュボード (`infra/grafana/dashboards/jarvis-overview.json`)
-- [ ] Grafana Cloud アラート
-- [x] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル)
-- [ ] Idle Compute 対策: ヘルスチェック + `tofu apply` 自動再実行 (systemd timer)
-- [ ] review-flow CI ゲート統合
+- [ ] Grafana Cloud アラート — **継続タスク（要方針・設定確認）**
+- [x] rclone バックアップ (PostgreSQL dump, Qdrant snapshot, 設定ファイル) — **要再評価（成果物としては存在するが、OCI Object Storage 前提・現行ローカルでは未運用。ADR-0004/BK-1 参照）**
+- [ ] Idle Compute 対策: ヘルスチェック + `tofu apply` 自動再実行 (systemd timer) — **非適用（ADR-0004: OCI 不使用）**
+- [ ] review-flow CI ゲート統合 — **継続タスク（`ci/review-gate.yml` は未配線、CI-1 参照）**
 
 ---
 
