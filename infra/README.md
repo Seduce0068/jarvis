@@ -229,9 +229,10 @@ sudo systemctl restart jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context
 `otelcol` still uses 1Password (`op run`) until the Grafana credentials are
 migrated.
 
-`infra/config/*.env` files remain the reference for which environment
-variables each service expects, and `deploy.rs` still ships them to
-`/etc/jarvis/` for troubleshooting.
+`infra/config/*.env` files remain a reference for which environment
+variables each service expects. 旧デプロイ資産（`deploy.rs`）は
+`/etc/jarvis/` への配送を想定する記述/実装があるが、現行ローカル運用での
+適用可否・実際の配置は host/deploy 手順により異なるため確認が必要。
 
 ### Backup & DR（レガシー記述 / ADR-0004 により要再設計）
 
@@ -248,13 +249,14 @@ Daily backups run via `jarvis-backup.timer`（旧構成）:
 
 Retention: 7 days local, 30 days remote（旧構成メモ）。
 
-To test disaster recovery（旧構成・要見直し）:
+To test disaster recovery（旧構成・要再設計。現行ローカル環境ではそのまま実行しない）:
 
 ```bash
-# On fresh instance after tofu apply
-rust-script /opt/jarvis/scripts/restore.rs latest --dry-run
+# Legacy example only (OCI/rclone/op/env, /opt/jarvis 配置, 旧ホスト前提)。現行ホストでは実行しないこと。
+# 実施する場合も BK-1/BK-2/SEC-2 の再設計・保存先/認証/復旧手順の確定・隔離先での検証・必要な承認後に別途判断する。
+# rust-script /opt/jarvis/scripts/restore.rs latest --dry-run
 # After checking the selected backup, execute the destructive restore:
-rust-script /opt/jarvis/scripts/restore.rs latest --confirm
+# rust-script /opt/jarvis/scripts/restore.rs latest --confirm
 ```
 
 ### Updating Services（レガシー/参照: 旧リモートデプロイ前提）
@@ -303,8 +305,8 @@ sudo journalctl -u jarvis-policy -n 100
 tailscale status
 sudo ufw status
 
-# Check disk space (path depends on host layout)
-df -h /opt/jarvis
+# Check disk space (path depends on host layout; /opt/jarvis is a legacy example)
+df -h /
 
 # Manual backup (legacy/not-installed in current local setup; see BK-1/BK-2)
 sudo systemctl start jarvis-backup
