@@ -69,3 +69,24 @@ status: draft
 3. 非破壊なバックアップ実装（ローカル出力先）を先に作り、`--dry-run` 相当と整合性確認を整備する。
 4. 復旧テスト手順を文書化し、テスト環境または隔離先で検証してから timer を有効化する。
 5. 実機導入時は systemd/権限/秘密情報の変更を伴うため、変更差分とロールバック手順を明確にして実施する。
+
+## 追加確認項目（2026-11-15、設計前チェックリスト）
+
+> 実機の実在パス・容量・権限・稼働状態は環境依存のため、実装/導入前に read-only で再確認する（秘密情報の内容は確認しない）。
+
+### BK-1: 対象データ・所在・復旧単位の棚卸し
+
+- **設定**: `/etc/jarvis`（実体、所有者/パーミッション、必要ファイルの最小集合）。repo の [infra/config](../../infra/config) はテンプレート/参照であり実機設定と同一視しない。
+- **DB**: PostgreSQL のデータディレクトリ/接続方式/ダンプに必要な権限・実行ユーザー、復旧時の整合性（停止順序、既存データ上書きの扱い）。
+- **ベクトルDB**: Qdrant のデータ所在・snapshot/backup 手段・サービス停止要否、整合性確認方法。
+- **アプリ/状態**: ログ、キャッシュ、`jarvis` サービスが参照する作業データ、復旧に不要な一時データの除外基準。
+- **復旧単位**: 「設定のみ」「DBのみ」「Qdrantのみ」「全体」の可否と、部分復旧時の依存関係・検証手順（health endpoint、`systemctl status` 等）。
+- **保持/検証**: 世代数・保持期間、チェックサム/マニフェスト、定期 restore test の実施場所（本番上書きを避ける隔離先）と成功判定。
+
+### BK-2: systemd unit/timer 現行化時の確認項目（導入は別判断）
+
+- **実行主体とパス**: 現行 unit は `User=jarvis`・`/opt/jarvis`・`/home/jarvis/.cache/rust-script`・`/run/rclone` 前提。現行ホストの配置/実行ユーザー/バイナリ・スクリプト配置に合わせて `User/Group`, `ExecStart`, `WorkingDirectory`, `ReadWritePaths`, `RuntimeDirectory` を再設計する。
+- **認証/秘密管理**: 現行 unit は `/etc/jarvis/op.env`（`OP_SERVICE_ACCOUNT_TOKEN` 想定）参照、既存スクリプトは `op inject`/rclone 前提（SEC-2/BK-4 と連携）。採用する保存先・認証方式（bws/op/ローカル資格情報/マウント資格情報等）に合わせ、秘密情報の供給経路・最小権限・ローテーションを設計する（実機 secret の内容確認/変更は別判断）。
+- **転送方式**: rclone + OCI Object Storage 前提を、選定した保存先（ローカル別ディスク/NAS/別ストレージ等）に応じた実装へ置換する。オフライン/マウント未接続時の失敗挙動と通知を明確化する。
+- **hardening**: `ProtectSystem=strict`, `ProtectHome`, `PrivateTmp`, `NoNewPrivileges` 等を維持しつつ、バックアップ/restore に必要な最小の read/write パスのみ許可する（過剰権限を避ける）。
+- **有効化前**: 手動実行で非破壊検証（dry-run/出力先確認/整合性確認）→ restore test（隔離先）→ `systemctl enable --now`、失敗時の停止/ロールバック手順を用意する。
