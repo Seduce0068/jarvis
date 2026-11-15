@@ -2,6 +2,9 @@
 
 This directory contains architecture decision records and resource calculations for the JARVIS Personal AI system.
 
+> **2026-11-15 注記（ADR-0004）:** OCI は現行の実行基盤ではありません（ローカル Kubuntu + systemd）。
+> 本ディレクトリの一部資料（特に `report.md` / `dist/` 系のリソース試算）は OCI Always Free 前提の参照資料です。現行のインフラ方針・運用状況・残タスクは [ADR-0004: Local-only (no OCI)](../../adr/0004-local-only-no-oci.md) と [docs/integration/remaining-tasks.md](../integration/remaining-tasks.md) を参照してください。
+
 ## Structure
 
 ```
@@ -55,9 +58,9 @@ This repo includes `.vscode/settings.json` enabling script execution **only for 
 
 **Never enable globally** — see `AGENTS.md` for security rules.
 
-## Current Report
+## OCI Resource Analysis Report (`report.md`, OCI 前提・参照用)
 
-The `report.md` analyzes **OCI Always Free (A1 Flex: 2 OCPU, 12 GB)** resource utilization for all JARVIS services:
+`report.md` analyzes **OCI Always Free (A1 Flex: 2 OCPU, 12 GB)** resource utilization for all JARVIS services (ADR-0004 により OCI は現行の実行基盤ではありません):
 
 | Service | OCPUs | Memory (GB) | Disk (GB) |
 |---------|-------|-------------|-----------|
