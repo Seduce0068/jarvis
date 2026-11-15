@@ -2,7 +2,12 @@
 
 *Document source: `report.md` | Calculations: `calc.rs` | Generated: `dist/`*
 
-> **2026-11-15 注記（ADR-0004）:** 本書は **OCI Always Free (Ampere A1 Flex)** を前提としたリソース試算の参照資料です。OCI は現行の実行基盤ではありません（現行はローカル Kubuntu + systemd）。現行のインフラ方針・運用状況・残タスクは [ADR-0004: Local-only (no OCI)](../../adr/0004-local-only-no-oci.md) と [docs/integration/remaining-tasks.md](../integration/remaining-tasks.md) を参照してください。
+> **2026-11-15 注記（ADR-0004）:** 本書は **OCI Always Free (Ampere A1 Flex)**
+> を前提としたリソース試算の参照資料です。OCI は現行の実行基盤ではありません
+> （現行はローカル Kubuntu + systemd）。現行のインフラ方針・運用状況・残タスクは
+> [ADR-0004: Local-only (no OCI)](../../adr/0004-local-only-no-oci.md) と
+> [docs/integration/remaining-tasks.md](../integration/remaining-tasks.md)
+> を参照してください。
 
 ---
 
