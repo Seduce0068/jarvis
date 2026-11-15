@@ -36,13 +36,16 @@ JARVIS を「ランタイム非依存のポリシー・記憶・イベント基�
 - OpenCode / code-server は `profiles/` 配下の交換可能な実装へ降格する。
 - DSH は `acp` プロファイル（ACPサーバ）と MCPクライアントで接続できる。
 - `jarvis-event/src/opencode.rs` は固有アダプタとして分離し、汎用イベントへ写像する。
-- `jarvis-mcp-gw` の sandbox fallback は現在 `opencode` CLI に依存しており、
-  ランタイム非依存の実行バックエンドへ置き換える（TODO）。
+- `jarvis-mcp-gw` の sandbox fallback（`opencode` CLI 依存）は撤去済み（2026-11-15 実装）。
+  実行バックエンドは「ネイティブ Rust ハンドラ（読み取り系）+ 上流 MCP サーバ登録
+  （`register_mcp_server`）」のランタイム非依存構成で置き換え、未実装ツールは
+  明示的なエラーを返す。`JARVIS_MCP_GW_SANDBOX_TYPE` の設定値は互換性のため
+  解析のみに残す（実行経路には影響しない）。
 - ポリシー迂回を避けるため、ランタイムのネイティブツール利用は明示的に制限する。
 
 ## Migration (incremental)
 1. 契約の文書化（本ADR）
 2. DSH統合: ACP起動・MCPクライアント接続・イベントアダプタ
 3. code-serverのオプション化、Zed(ACP)対応
-4. sandbox fallbackの汎用化
+4. sandbox fallbackの汎用化（2026-11-15 完了: opencode CLI 依存の撤去）
 5. 契約テスト（MCP tools/call、ACP session、doctor）

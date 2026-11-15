@@ -52,6 +52,12 @@ impl Default for McpGatewayConfig {
     }
 }
 
+/// Sandbox type selected for the gateway.
+///
+/// Retained for configuration compatibility (`JARVIS_MCP_GW_SANDBOX_TYPE` /
+/// `sandbox_type` in `mcp_gateway.toml` keep parsing). Execution is
+/// runtime-agnostic (ADR-0002): native handlers and upstream MCP servers
+/// serve all tools, and this value no longer selects an execution backend.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxType {

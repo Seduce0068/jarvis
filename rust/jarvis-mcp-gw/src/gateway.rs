@@ -1,14 +1,16 @@
 //! Gateway core - orchestrates MCP tool execution.
 //!
-//! Tool calls can be served by two backends:
+//! Tool calls are served by two backends:
 //!
-//! 1. **Registered MCP servers** - upstream MCP servers spawned as child
+//! 1. **Native Rust handlers** - read-only tools (`filesystem.*`, `git.*`,
+//!    `web.fetch`) implemented in the gateway itself (ADR-0002/0003).
+//! 2. **Registered MCP servers** - upstream MCP servers spawned as child
 //!    processes and driven by the official `rmcp` client over stdio. Tools
 //!    are discovered at registration time via `tools/list`.
-//! 2. **Sandbox fallback** - shelling out to the `opencode` CLI inside
-//!    firejail/bwrap/docker/none.
 //!
-//! Both backends are only reachable for tools that pass the allowlist and
+//! There is no agent-runtime CLI fallback (ADR-0002): tools with neither a
+//! native handler nor an upstream server return a clear error. Both
+//! backends are only reachable for tools that pass the allowlist and
 //! policy checks enforced by [`crate::McpGateway`]. Registering a server
 //! never widens the allowlist: the allowlist file remains the single
 //! source of truth for which tools may run at all.

@@ -1,7 +1,10 @@
-//! Sandbox execution for MCP tools.
+//! Tool execution for MCP tools.
 //!
 //! Runtime-agnostic design (ADR-0002): read-only tools are implemented
-//! natively in Rust so the gateway does not depend on any agent runtime CLI.
+//! natively in Rust and everything else is delegated to upstream MCP
+//! servers registered with the gateway. There is no agent-runtime CLI
+//! fallback; the former firejail/bwrap/docker/gvisor wrappers around the
+//! `opencode` CLI were removed (ADR-0002).
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
@@ -19,8 +22,6 @@ const WEB_FETCH_MAX_REDIRECTS: usize = 3;
 
 #[derive(Clone)]
 pub struct Sandbox {
-    sandbox_type: crate::config::SandboxType,
-    config: Value,
     base_dir: PathBuf,
 }
 
@@ -28,21 +29,18 @@ impl Sandbox {
     pub async fn new(config: &crate::config::McpGatewayConfig) -> Result<Self> {
         let base_dir =
             std::env::var("JARVIS_MCP_GW_BASE_DIR").unwrap_or_else(|_| "/home/koppe".to_string());
+        // `config.sandbox_config` is kept in the gateway config for
+        // compatibility; the sandbox itself no longer shells out (ADR-0002).
+        let _ = &config.sandbox_config;
         Ok(Self {
-            sandbox_type: config.sandbox_type.clone(),
-            config: config.sandbox_config.clone(),
             base_dir: PathBuf::from(base_dir),
         })
     }
 
     /// Test/embedding constructor with an explicit workspace root.
     #[allow(dead_code)]
-    fn with_base(base: PathBuf, config: Value) -> Self {
-        Self {
-            sandbox_type: crate::config::SandboxType::None,
-            config,
-            base_dir: base,
-        }
+    fn with_base(base: PathBuf) -> Self {
+        Self { base_dir: base }
     }
 
     pub async fn execute(
@@ -58,21 +56,10 @@ impl Sandbox {
         ) {
             return self.execute_native(tool, args, tool_config).await;
         }
-        match self.sandbox_type {
-            crate::config::SandboxType::None => {
-                bail!("no native handler for tool '{tool}'; register an upstream MCP server for it")
-            }
-            crate::config::SandboxType::Firejail => {
-                self.execute_firejail(tool, args, tool_config).await
-            }
-            crate::config::SandboxType::Bwrap => self.execute_bwrap(tool, args, tool_config).await,
-            crate::config::SandboxType::Docker => {
-                self.execute_docker(tool, args, tool_config).await
-            }
-            crate::config::SandboxType::Gvisor => {
-                self.execute_gvisor(tool, args, tool_config).await
-            }
-        }
+        // Runtime-agnostic fallback (ADR-0002): there is no agent-runtime CLI
+        // to shell out to. Unimplemented tools are delegated to upstream MCP
+        // servers registered with the gateway, and error out clearly here.
+        bail!("no native handler for tool '{tool}'; register an upstream MCP server for it")
     }
 
     async fn execute_native(
@@ -276,138 +263,6 @@ impl Sandbox {
         }
         Ok(resolved)
     }
-
-    async fn execute_firejail(
-        &self,
-        tool: &str,
-        args: Value,
-        tool_config: &crate::allowlist::AllowedTool,
-    ) -> Result<Value> {
-        let timeout = Duration::from_millis(tool_config.timeout_ms);
-        let output = tokio::time::timeout(
-            timeout,
-            Command::new("firejail")
-                .arg("--quiet")
-                .arg("--noprofile")
-                .arg("--private")
-                .arg("--net=none")
-                .arg("--")
-                .arg("opencode")
-                .arg("mcp")
-                .arg("call")
-                .arg(tool)
-                .arg(serde_json::to_string(&args)?)
-                .output(),
-        )
-        .await??;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Sandboxed tool failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        Ok(serde_json::from_slice(&output.stdout)?)
-    }
-
-    async fn execute_bwrap(
-        &self,
-        tool: &str,
-        args: Value,
-        tool_config: &crate::allowlist::AllowedTool,
-    ) -> Result<Value> {
-        let timeout = Duration::from_millis(tool_config.timeout_ms);
-        let output = tokio::time::timeout(
-            timeout,
-            Command::new("bwrap")
-                .arg("--ro-bind")
-                .arg("/usr")
-                .arg("/usr")
-                .arg("--ro-bind")
-                .arg("/lib")
-                .arg("/lib")
-                .arg("--ro-bind")
-                .arg("/lib64")
-                .arg("/lib64")
-                .arg("--proc")
-                .arg("/proc")
-                .arg("--dev")
-                .arg("/dev")
-                .arg("--unshare-all")
-                .arg("--die-with-parent")
-                .arg("--")
-                .arg("opencode")
-                .arg("mcp")
-                .arg("call")
-                .arg(tool)
-                .arg(serde_json::to_string(&args)?)
-                .output(),
-        )
-        .await??;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Bwrap tool failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        Ok(serde_json::from_slice(&output.stdout)?)
-    }
-
-    async fn execute_docker(
-        &self,
-        tool: &str,
-        args: Value,
-        tool_config: &crate::allowlist::AllowedTool,
-    ) -> Result<Value> {
-        let timeout = Duration::from_millis(tool_config.timeout_ms);
-        let image = self
-            .config
-            .get("docker_image")
-            .and_then(|v| v.as_str())
-            .unwrap_or("jarvis-mcp-runner:latest");
-
-        let output = tokio::time::timeout(
-            timeout,
-            Command::new("docker")
-                .arg("run")
-                .arg("--rm")
-                .arg("--network=none")
-                .arg("--memory=512m")
-                .arg("--cpus=0.5")
-                .arg("--read-only")
-                .arg("--tmpfs=/tmp:exec,size=100m")
-                .arg(image)
-                .arg("opencode")
-                .arg("mcp")
-                .arg("call")
-                .arg(tool)
-                .arg(serde_json::to_string(&args)?)
-                .output(),
-        )
-        .await??;
-
-        if !output.status.success() {
-            return Err(anyhow::anyhow!(
-                "Docker tool failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            ));
-        }
-
-        Ok(serde_json::from_slice(&output.stdout)?)
-    }
-
-    async fn execute_gvisor(
-        &self,
-        tool: &str,
-        args: Value,
-        tool_config: &crate::allowlist::AllowedTool,
-    ) -> Result<Value> {
-        // Similar to docker but with runsc
-        self.execute_docker(tool, args, tool_config).await
-    }
 }
 
 fn web_max_bytes(args: &Value) -> usize {
@@ -518,7 +373,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
         std::fs::create_dir_all(base.join("sub")).unwrap();
         std::fs::write(base.join("hello.txt"), b"hello sandbox").unwrap();
-        let sandbox = Sandbox::with_base(base.clone(), json!({}));
+        let sandbox = Sandbox::with_base(base.clone());
         (base, sandbox)
     }
 
