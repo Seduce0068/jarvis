@@ -226,18 +226,22 @@ migrated.
 variables each service expects, and `deploy.rs` still ships them to
 `/etc/jarvis/` for troubleshooting.
 
-### Backup & DR
+### Backup & DR（レガシー記述 / ADR-0004 により要再設計）
 
-Daily backups run via `jarvis-backup.timer`:
+> 注: [ADR-0004](../adr/0004-local-only-no-oci.md) により OCI は使用しない。2026-11-15 時点で `jarvis-backup.timer` は未導入、バックアップジョブは未稼働。以下は OCI Object Storage / 旧パス前提のレガシー手順であり、現行運用ではそのまま使用しない。  
+> 現状の論点・再設計メモ: [docs/integration/backup-redesign-notes.md](../docs/integration/backup-redesign-notes.md)  
+> 関連タスク: [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md)（BK-1/BK-2/SEC-2）
+
+Daily backups run via `jarvis-backup.timer`（旧構成）:
 
 - PostgreSQL dump → OCI Object Storage
 - Qdrant snapshot → OCI Object Storage
 - Config files → OCI Object Storage
 - Git bundles → OCI Object Storage
 
-Retention: 7 days local, 30 days remote.
+Retention: 7 days local, 30 days remote（旧構成メモ）。
 
-To test disaster recovery:
+To test disaster recovery（旧構成・要見直し）:
 
 ```bash
 # On fresh instance after tofu apply
