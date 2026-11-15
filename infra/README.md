@@ -218,13 +218,17 @@ Secrets are stored in **Bitwarden Secrets Manager** and injected by
 
 - The `jarvis` project holds the `JARVIS_*` keys as secrets whose names
   match the environment variables the services read.
-- The systemd units run the service via `bws run` (example legacy path form:
+- The systemd units run the service via `bws run` (example form:
   `/usr/local/bin/bws run --project-id <id> -- /opt/jarvis/bin/<service>`).
-  `bws` reads `BWS_ACCESS_TOKEN` from the root-owned `/etc/jarvis/bws.env`.
-  Verify the actual `ExecStart`, binary path, and project ID against the
-  installed unit files on the host.
-- The access token is a machine-account token scoped to the `jarvis`
-  project.
+  `bws` reads `BWS_ACCESS_TOKEN` from `/etc/jarvis/bws.env` (commonly
+  root-owned; verify path, ownership, mode, and `EnvironmentFile` in the
+  installed unit). 2026-11-15 の read-only 確認では、ローカルの
+  `jarvis-policy` / `jarvis-mcp-gw` / `jarvis-event` / `jarvis-context` の
+  installed units も `bws run` + `/opt/jarvis/bin/<service>` を使用していたが、
+  実行ユーザー/グループや project ID 等は host/unit ごとに異なりうるため、
+  実際の `ExecStart`・バイナリ配置・認証設定を必ず確認すること。
+- The access token is a machine-account token scoped to the corresponding
+  Bitwarden Secrets Manager project (project/name/ID は実機 unit を確認)。
 
 Provision/update the access token as needed (verify target path, ownership, and
 mode on the host before restarting services):
