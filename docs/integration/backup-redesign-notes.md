@@ -62,6 +62,18 @@ status: draft
 - `jarvis-backup.service`/`.timer` は現行化後にローカル導入し、`systemctl enable --now` と復旧テストを行う（実機変更のため別判断・手順が必要）。
 - [infra/README.md](../../infra/README.md) のバックアップ/復旧/更新手順は現行実態に合わせて更新が必要（ドキュメントドリフト）。
 
+## レガシー資産の前提棚卸し（2026-11-15 read-only 確認）
+
+> 実装置換時の確認観点。secret 値・実機上の有無/内容は未確認。
+
+- [infra/scripts/backup.sh](../../infra/scripts/backup.sh): 互換ランチャー。`rust-script "$REPO_ROOT/rust/scripts/backup.rs"` を実行する（`rust-script` 前提）。
+- [infra/systemd/jarvis-backup.service](../../infra/systemd/jarvis-backup.service): `Type=oneshot`, `User=jarvis`, `EnvironmentFile=/etc/jarvis/op.env`, `ExecStart=/usr/bin/rust-script /opt/jarvis/scripts/backup.rs`, `WorkingDirectory=/opt/jarvis/scripts`, `ReadWritePaths=/opt/jarvis /home/jarvis/.cache/rust-script`, `RuntimeDirectory=rclone`。コメントに `OP_SERVICE_ACCOUNT_TOKEN` 供給前提あり。
+- [infra/systemd/jarvis-backup.timer](../../infra/systemd/jarvis-backup.timer): `OnCalendar=daily`, `Persistent=true`, `RandomizedDelaySec=1h`, `WantedBy=timers.target`（2026-11-15 時点ローカル未導入）。
+- [rust/scripts/backup.rs](../../rust/scripts/backup.rs): 既定値 `--remote oci`, `--bucket jarvis-backups`, `--backup-dir /opt/jarvis/backups`。`op inject` で rclone 設定を `/run/rclone/rclone.conf` に生成し、`rclone` で `oci:<bucket>/<hostname>/<date>/...` へアップロード/世代削除する前提（OCI Object Storage）。PostgreSQL/Qdrant/`/etc/jarvis`/リポジトリ等の取得・配置前提も旧環境依存の可能性あり（詳細は実装時に再確認）。
+- [rust/scripts/restore.rs](../../rust/scripts/restore.rs): 同様に `oci`/`jarvis-backups`/`/opt/jarvis/backups` 既定、`op inject` + rclone でリモートから取得し restore する前提（破壊的操作を含みうるため再設計・隔離検証が必須）。
+
+**置換時の主な着眼点**: 実行ユーザー/パス配置、`rust-script`・`rclone`・`op` 依存の要否、保存先 URI/転送方式、資格情報供給（`bws`/`op`/マウント認証等）、対象データ取得コマンドと権限、dry-run/整合性検証、失敗通知、restore の安全手順（確認・隔離先・ロールバック困難性）。
+
 ## 安全に進めるための次ステップ（提案）
 
 1. 保存先候補と RPO/RTO/保持ポリシーを決定する（人間判断を含む）。
