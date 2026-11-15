@@ -40,7 +40,7 @@
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| CI-1 | review-gate の Actions 配線方針決定 | [ci/review-gate.yml](../../ci/review-gate.yml) は存在するが `.github/workflows/` には未配線（`.github/workflows/review-gate.yml` 不在）。[AGENTS.md](../../AGENTS.md), [adr/0001-unified-architecture.md](../../adr/0001-unified-architecture.md) にも未統合の記載。 | OpenCode 認証情報・runner 要件を踏まえ、配線/手動運用継続/代替手段を決定 |
+| CI-1 | review-gate の Actions 配線方針決定 | [ci/review-gate.yml](../../ci/review-gate.yml) は 3-stage workflow 定義として存在するが `.github/workflows/` には未配線（2026-11-15 確認: `.github/workflows/` は `ci.yml` のみ）。OpenCode CLI / `opencode run`、review-flow/cross-review 実行、追加ツール導入、必要な認証情報・runner 環境が前提（[AGENTS.md](../../AGENTS.md), [adr/0001-unified-architecture.md](../../adr/0001-unified-architecture.md)）。 | OpenCode 認証情報・runner 要件を踏まえ、配線/手動運用継続/代替手段を決定（配線する場合は workflow の前提・ターゲット環境も要見直し） |
 | CI-2 | `opencode run` 依存の置換検討 | [adr/0002-runtime-agnostic.md](../../adr/0002-runtime-agnostic.md) に TODO。review-gate や運用手順にも `opencode run` 前提が残る。 | 置換範囲（review-gate, AGENTS 手順等）と移行ステップを定義 |
 
 ## 5. アーキテクチャ/ドキュメント整合性（優先度: 中）
