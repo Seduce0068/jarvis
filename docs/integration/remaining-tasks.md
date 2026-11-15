@@ -47,7 +47,7 @@
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| DOC-1 | ADR-0001 未チェック項目の棚卸し・更新 | [adr/0001-unified-architecture.md](../../adr/0001-unified-architecture.md) に未チェック項目が残る（OCI A1+Tailscale 疎通、1Password CLI 設定、同一ワークスペース共有確認、Grafana Cloud アラート、Idle Compute 対策、review-flow CI ゲート統合）。OCI 前提項目は ADR-0004 により陳腐化。 | 「完了」「不要/置換」「継続タスク」へ再分類し、注記または別 ADR/タスク化 |
+| DOC-1 | ADR-0001 未チェック項目の棚卸し・更新 | [adr/0001-unified-architecture.md](../../adr/0001-unified-architecture.md) に未チェック項目が残る（OCI A1+Tailscale 疎通、1Password CLI 設定、同一ワークスペース共有確認、Grafana Cloud アラート、Idle Compute 対策、review-flow CI ゲート統合）。OCI 前提項目は ADR-0004 により陳腐化。2026-11-15 時点の再分類メモ（ADR本文の状態変更は別判断）: **非適用候補（ADR-0004）**= Phase 0「OCI A1+Tailscale 疎通」、Phase 4「Idle Compute 対策」 / **継続・要再評価**= Phase 0「1Password CLI 設定・秘密情報注入確認」（現行 `bws` 利用、`otelcol` 等は SEC-1 で実機整合確認）、Phase 1「同一ワークスペース共有確認」（ローカル運用での現行要件・実態確認が必要）、Phase 4「Grafana Cloud アラート」（方針/設定確認）、Phase 4「review-flow CI ゲート統合」（CI-1/CI-2） / **備考**= Phase 4「rclone バックアップ」は成果物チェック済みだが OCI Object Storage 前提・現行未運用の注記あり（BK-1/BK-2/SEC-2）。 | ADR-0001 本文のチェック状態・注記を上記分類に沿って更新するか、必要に応じて補助ADR/個別タスクへ分離（実態確認・設定変更が必要な項目は別途証跡を取る）。 |
 | DOC-2 | 参照ドキュメントの未解決事項の要否判断 | `docs/architecture/mpe-rust-latex-architecture-report.md` §12 / `docs/architecture/opencode-v2-oci-code-server.md` §未解決事項 に未解決事項があるが、いずれも提案/参照時点の検証・設計選択事項（MPE実機検証、旧OCI構成前提の選択肢等）であり、現行 JARVIS ローカル運用のアクティブタスクとは別。 | **保留（参照資料扱い）**: 該当テーマを実施する場合に個別タスク化する |
 
 ## 6. 運用上のフォローアップ（優先度: 低〜中）
