@@ -230,16 +230,16 @@ Secrets are stored in **Bitwarden Secrets Manager** and injected by
 - The access token is a machine-account token scoped to the corresponding
   Bitwarden Secrets Manager project (project/name/ID は実機 unit を確認)。
 
-Provision/update the access token as needed (verify target path, ownership, and
-mode on the host before restarting services):
+Provision/update the access token as needed (example; 実行前に対象パス・所有者・権限・内容の扱い・影響範囲を確認し、必要な権限/承認のもとで実施すること。再起動は稼働中サービスへ影響する):
 
 ```bash
-sudo sh -c 'umask 077; echo "BWS_ACCESS_TOKEN=0.xxxx.yyyy:zzzz" > /etc/jarvis/bws.env'
-sudo systemctl restart jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context
+# Example only - verify path/ownership/mode/unit scope before use; do not paste real secrets into shared logs/history
+# sudo sh -c 'umask 077; echo "BWS_ACCESS_TOKEN=<token>" > /etc/jarvis/bws.env'
+# sudo systemctl restart jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context
 ```
 
 `otelcol` still uses 1Password (`op run`) until the Grafana credentials are
-migrated.
+migrated（SEC-1: repo unit と installed unit の差異あり。実機変更は別判断）。
 
 `infra/config/*.env` files remain a reference for which environment
 variables each service expects. 旧デプロイ資産（`deploy.rs`）は
