@@ -121,6 +121,12 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 注: ゲートウェイ再起動により MCP セッションは失効する。クライアント（DSH 等）は
 再接続（再 initialize）が必要。
 
+## 運用メモ: 再起動後の再接続（OPS-1）
+
+- `jarvis-mcp-gw` の再起動・デプロイ適用後は既存 MCP セッションが無効になる。
+- 旧セッションでの呼び出しは `Unauthorized: Session not found` になり得る。
+- 対処: クライアント側で接続を再確立し `initialize` から再実行する（endpoint/設定変更は通常不要）。
+
 ## 残リスク（要検討）
 
 - 基準ディレクトリが `/home/koppe` 全体のため、読み取りツールは SSH 鍵や `.env` 等の機微ファイルにも到達し得る（localhost 限定・policy/allowlist 前提）。基準ディレクトリの絞り込み（例: 作業ディレクトリのみ）や機微パスの拒否リストを次段で検討する。

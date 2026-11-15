@@ -33,7 +33,7 @@
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| SEC-1 | otelcol unit の repo/実機差分の整合 | repo: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) は `op run` + `/etc/jarvis/op.env` + `User=jarvis`。2026-11-15 実機確認: `/etc/systemd/system/otelcol.service` は `User=koppe`/`Group=koppe` かつ `op run`・`EnvironmentFile` なしで `/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml` を直接起動、`active`/`enabled`（secret ファイル内容は未確認）。[AGENTS.md](../../AGENTS.md) には op→bws 移行未完了の記載あり。 | 実機の正しい起動/認証方式（資格情報の供給元含む）を追加確認し、repo か実機のどちらかに統一（変更時は監視停止リスクに注意） |
+| SEC-1 | otelcol unit の repo/実機差分の整合 | repo: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) は `op run` + `/etc/jarvis/op.env` + `User=jarvis`。2026-11-15 実機確認: `/etc/systemd/system/otelcol.service` は `User=koppe`/`Group=koppe` かつ `op run`・`EnvironmentFile` なしで `/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml` を直接起動、`active`/`enabled`。同日追加確認: `/etc/jarvis/otel.env`・`/etc/jarvis/op.env` は存在せず、installed unit にも該当指定なし（資格情報供給元は未特定、内容確認は未実施）。[AGENTS.md](../../AGENTS.md) には op→bws 移行未完了の記載あり。 | 実機の正しい起動/認証方式（資格情報の供給元含む）を追加確認し、repo か実機のどちらかに統一（変更時は監視停止リスクに注意） |
 | SEC-2 | バックアップ系の 1Password 依存解消 | `backup.rs`/`restore.rs`/`jarvis-backup.service` が `op inject`・`OP_SERVICE_ACCOUNT_TOKEN` 等に依存。 | BK-1 の保存先/認証設計と合わせて解消 |
 
 ## 4. CI/CD・レビュー基盤（優先度: 中）
@@ -54,7 +54,7 @@
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| OPS-1 | MCP クライアント再接続の運用明文化 | gateway 再起動後に MCP セッションが失効し再初期化が必要（前ゴールで `Session not found` を確認）。 | 再接続手順・影響範囲を運用ドキュメントに明記、必要なら自動復旧の検討 |
+| OPS-1 | MCP クライアント再接続の運用明文化 | gateway 再起動後に MCP セッションが失効し再初期化が必要（前ゴールで `Session not found` を確認）。2026-11-15: [dsh.md](dsh.md) / [tool-matrix.md](tool-matrix.md) に再接続手順の注記を追記。 | 必要に応じてクライアント実装側の自動再接続/再初期化の要否を検討 |
 
 ## メモ
 

@@ -92,6 +92,13 @@ initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の�
 - 注意: ゲートウェイ再起動で MCP セッションは失効するため、クライアントは
   再接続（再 initialize）が必要。
 
+### 運用メモ: 再起動後の再接続（OPS-1）
+
+- `jarvis-mcp-gw` の再起動・デプロイ適用後、既存の MCP セッションは無効になる。
+- 症状例: `tools/call` 等で `Unauthorized: Session not found` が返る。
+- 対処: クライアント側で MCP 接続を再確立し、`initialize` からやり直す（同じ endpoint 設定のままで可）。
+- DSH ではセッション失効後に jarvis MCP を使う操作を再試行する前に再接続状態を確認する。
+
 DSH 側の設定箇所（2026-11-15 確認）:
 
 - このセッションの DSH は `DSH_HOME=/home/koppe/.dsh-agentrouter` で起動しており、
