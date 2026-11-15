@@ -180,7 +180,7 @@ MPE プレビューで以下を実行：
 
 ## 9. 参考資料
 
-- [ADR-0001: Unified Architecture](../adr/0001-unified-architecture.md)
+- [ADR-0001: Unified Architecture](../../adr/0001-unified-architecture.md)
 - [OCI Always Free Resources](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm)
 - [OpenCode V2 Docs](https://opencode.ai/v2/docs)
 - [MPE Code Chunk](https://github.com/shd101wyy/markdown-preview-enhanced/blob/master/docs/code-chunk.md)
