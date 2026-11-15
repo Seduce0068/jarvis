@@ -130,7 +130,7 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 - [x] code-server systemd 化
 - [x] OpenCode V2 インストール・`opencode serve` systemd 化
-- [ ] 同一ワークスペース (`~/repos`) 共有確認 — **要再評価（ローカル運用での現行要件・実態を確認）**
+- [ ] 同一ワークスペース (`~/repos`) 共有確認 — **要再評価（未ID化、ローカル運用での現行要件・実態を確認）**
 
 ### Phase 2: JARVIS Rust サービス雛形 (Week 2-3)
 
