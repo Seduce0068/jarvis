@@ -321,8 +321,8 @@ sudo ufw status
 # Check disk space (path depends on host layout; /opt/jarvis is a legacy example)
 df -h /
 
-# Manual backup (legacy/not-installed in current local setup; see BK-1/BK-2)
-sudo systemctl start jarvis-backup
+# Manual backup (legacy/not-installed in current local setup; see BK-1/BK-2; do not run until BK-1/BK-2/SEC-2 are resolved and host state is verified)
+# sudo systemctl start jarvis-backup
 ```
 
 ## Architecture Reference
