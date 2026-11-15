@@ -277,14 +277,14 @@ To test disaster recovery（旧構成・要再設計。現行ローカル環境�
 > 現行のローカル配置・検証は `systemd/` と `scripts/` を参照（例: jarvis-mcp-gw は [scripts/deploy-mcp-gw-safe.sh](scripts/deploy-mcp-gw-safe.sh), [scripts/check-deploy-drift.sh](scripts/check-deploy-drift.sh), [scripts/smoke-mcp-gw.sh](scripts/smoke-mcp-gw.sh)。他サービスの現行更新手順は未整理の可能性あり）。
 
 Deploy from the workstation. `deploy.rs` builds for aarch64, ships binaries,
-units and configs, restarts services, and runs health checks:
+units and configs, restarts services, and runs health checks（旧リモートデプロイ前提の例。現行ローカル運用ではそのまま実行しないこと）:
 
 ```bash
-# Full deploy
-rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy
+# Legacy example only (remote aarch64 deploy target `jarvis-host`; do not run on current local-only setup)
+# rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy
 
-# Verify the remote command shapes without touching the host
-rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy --dry-run
+# Verify the remote command shapes without touching the host (legacy example; still executes the script locally)
+# rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy --dry-run
 ```
 
 ### Monitoring
