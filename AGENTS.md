@@ -101,7 +101,8 @@ delegates to the shared `Seduce0068/workflows` `rust-gates.yml@v1` workflow
 
 `ci/review-gate.yml` defines a 3-stage review pipeline (automated gates, cross
 review, merge gate), but it is not wired into `.github/workflows/` yet because
-it requires OpenCode credentials and a runner with the JARVIS toolchain. Run it
+it requires OpenCode credentials and a runner with the JARVIS toolchain
+(tracked as CI-1/CI-2 in [docs/integration/remaining-tasks.md](docs/integration/remaining-tasks.md)). Run it
 manually:
 
 1. **Stage 1 - Automated Gates** (lint, typecheck, test, build, vuln scan, secret scan)
