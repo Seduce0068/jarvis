@@ -54,6 +54,11 @@ status: draft
 
 - 旧パス（`/opt/jarvis`, `/home/jarvis`, `/run/rclone`）と旧ユーザー（`jarvis`）前提を、現行ホスト/運用ユーザー/配置に合わせて見直す。
 - rclone + OCI 固有設定を、選定した保存先に応じた転送実装へ置換する。
+- 認証/秘密管理の依存を見直す（2026-11-15 repo 確認）:
+  - [infra/systemd/jarvis-backup.service](../../infra/systemd/jarvis-backup.service): `/etc/jarvis/op.env`（`OP_SERVICE_ACCOUNT_TOKEN` 想定の注記あり）を参照
+  - [rust/scripts/backup.rs](../../rust/scripts/backup.rs), [rust/scripts/restore.rs](../../rust/scripts/restore.rs): `op inject` 呼び出しを含む
+  - [infra/config/policy.env](../../infra/config/policy.env), [context.env](../../infra/config/context.env), [event.env](../../infra/config/event.env), [otel.env](../../infra/config/otel.env): 参照テンプレートに `op://` 記述が残る（BK-4）
+  - 現行 core services は bws 系運用の記載があり、バックアップ系の最終方式は BK-1/SEC-2 で整合判断が必要（実機 secret 内容は未確認）
 - `jarvis-backup.service`/`.timer` は現行化後にローカル導入し、`systemctl enable --now` と復旧テストを行う（実機変更のため別判断・手順が必要）。
 - [infra/README.md](../../infra/README.md) のバックアップ/復旧/更新手順は現行実態に合わせて更新が必要（ドキュメントドリフト）。
 

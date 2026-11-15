@@ -27,14 +27,14 @@
 | BK-1 | バックアップ保存先の再決定と実装更新 | [adr/0004-local-only-no-oci.md](../../adr/0004-local-only-no-oci.md) で OCI 非使用・保存先再決定が未解決。`rust/scripts/backup.rs` / `restore.rs` / `infra/scripts/backup.sh` は OCI Object Storage(rclone)・`op inject`・`/opt/jarvis` `/home/jarvis` 前提のレガシー。2026-11-15: [backup-redesign-notes.md](backup-redesign-notes.md) に要件・論点・移行ステップのドラフトを整理。 | 保存先（例: ローカル/NAS/別ストレージ）・保持期間・暗号化・復旧手順を決めてスクリプト/README/unit を再設計（実装・実機導入は別判断） |
 | BK-2 | バックアップ timer/service のローカル運用化 | `infra/systemd/jarvis-backup.service` / `.timer` は存在するがローカル未導入（not-installed）。unit 内容もレガシー前提（`User=jarvis`, `op.env`, `/run/rclone` 等）。 | BK-1 決定後に unit を現行環境へ合わせて導入、`systemctl enable --now` と復旧テストを実施 |
 | BK-3 | OpenTofu/OCI 後始末資産の扱い決定 | [infra/opentofu/](../../infra/opentofu/) は未使用レガシー（[infra/opentofu/README.md](../../infra/opentofu/README.md)）。後始末用に [infra/scripts/decommission-oci.sh](../../infra/scripts/decommission-oci.sh) あり（既定は dry-run、`tofu`/OCI CLI/init/state 等が前提）。2026-11-15 確認: `infra/opentofu/environments/prod/.terraform/terraform.tfstate` がローカルに存在（内容は未確認）。 | 「保持」「削除」「OCI リソース削除実行」の方針決定。state のバックアップ・所在・妥当性確認と、OCI 実リソース有無の確認を行った上で判断（実削除/OCI 操作は別判断・手順） |
-| BK-4 | レガシー設定テンプレートの整理 | `infra/config/*.env` に `op://` 参照が残る（`policy.env`, `context.env`, `event.env`, `otel.env`）。[AGENTS.md](../../AGENTS.md)/[infra/README.md](../../infra/README.md) では参照テンプレート扱い。2026-11-15: 各ファイル先頭に legacy/reference template 注記を追加（実機 secret/運用変更なし）。 | 残りの具体値（パス・認証方式等）の整備/削除方針は現行運用確定後に判断（実機 secret の変更は別判断） |
+| BK-4 | レガシー設定テンプレートの整理 | `infra/config/*.env` に `op://` 参照が残る（2026-11-15 確認: [policy.env](../../infra/config/policy.env), [context.env](../../infra/config/context.env), [event.env](../../infra/config/event.env), [otel.env](../../infra/config/otel.env)）。[AGENTS.md](../../AGENTS.md)/[infra/README.md](../../infra/README.md) では参照テンプレート扱いで、各ファイル先頭に legacy/reference template 注記あり（実機 secret/運用変更なし）。 | 残りの具体値（パス・認証方式等）の整備/削除方針は現行運用（bws/op 等）確定後に判断（実機 secret の変更は別判断） |
 
 ## 3. シークレット管理・構成ドリフト（優先度: 中〜高）
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
 | SEC-1 | otelcol unit の repo/実機差分の整合 | repo: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) は `op run` + `/etc/jarvis/op.env` + `User=jarvis`。2026-11-15 実機確認: `/etc/systemd/system/otelcol.service` は `User=koppe`/`Group=koppe` かつ `op run`・`EnvironmentFile` なしで `/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml` を直接起動、`active`/`enabled`。同日追加確認: `/etc/jarvis/otel.env`・`/etc/jarvis/op.env` は存在せず、installed unit にも該当指定なし（資格情報供給元は未特定、内容確認は未実施）。[AGENTS.md](../../AGENTS.md) には op→bws 移行未完了の記載あり。 | 実機の正しい起動/認証方式（資格情報の供給元含む）を追加確認し、repo か実機のどちらかに統一（変更時は監視停止リスクに注意） |
-| SEC-2 | バックアップ系の 1Password 依存解消 | `backup.rs`/`restore.rs`/`jarvis-backup.service` が `op inject`・`OP_SERVICE_ACCOUNT_TOKEN` 等に依存。 | BK-1 の保存先/認証設計と合わせて解消 |
+| SEC-2 | バックアップ系の 1Password 依存解消 | バックアップ系レガシー資産に 1Password 依存が残る（2026-11-15 確認）: [infra/systemd/jarvis-backup.service](../../infra/systemd/jarvis-backup.service) は `/etc/jarvis/op.env`（`OP_SERVICE_ACCOUNT_TOKEN` 想定）を参照、[rust/scripts/backup.rs](../../rust/scripts/backup.rs) / [rust/scripts/restore.rs](../../rust/scripts/restore.rs) は `op inject` を使用。OCI/rclone 前提とも結合。 | BK-1 の保存先/認証設計と合わせて解消（現行運用の秘密管理方式との整合を要確認、実機 secret 変更は別判断） |
 
 ## 4. CI/CD・レビュー基盤（優先度: 中）
 
