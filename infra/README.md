@@ -33,9 +33,16 @@ infra/
 │   ├── jarvis-backup.service
 │   └── jarvis-backup.timer
 ├── scripts/                     # Operational scripts
-│   ├── backup.sh               # Compatibility launcher to Rust script
-│   ├── deploy.sh               # Compatibility launcher to Rust script
-│   └── restore.sh              # Compatibility launcher to Rust script
+│   ├── backup.sh               # Launcher -> rust/scripts/backup.rs
+│   ├── build-selfhost.sh       # Build/deploy Rust sidecars (self-hosted)
+│   ├── check-deploy-drift.sh   # Read-only drift/runtime check (jarvis-mcp-gw)
+│   ├── decommission-oci.sh     # Legacy OCI decommission (dry-run default)
+│   ├── deploy-mcp-gw-safe.sh   # Safe jarvis-mcp-gw deploy (dry-run default)
+│   ├── deploy.sh               # Launcher -> rust/scripts/deploy.rs (legacy)
+│   ├── install-mcp-gateway.sh  # Install jarvis-mcp-gw binary and restart
+│   ├── restore.sh              # Launcher -> rust/scripts/restore.rs
+│   ├── setup-selfhost.sh       # Self-hosted host setup (Ubuntu/Debian)
+│   └── smoke-mcp-gw.sh         # Pre-deploy smoke test (jarvis-mcp-gw)
 ├── config/                      # Configuration files
 │   ├── pii_patterns.toml       # PII detection patterns
 │   ├── mcp_allowlist.toml      # MCP tool allowlist
