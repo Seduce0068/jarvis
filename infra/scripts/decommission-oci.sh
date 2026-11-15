@@ -61,5 +61,5 @@ if [ "$apply" -eq 1 ]; then
   echo "完了。Tailscale管理コンソールから jarvis-host を削除してください。"
 else
   echo "乾燥実行のみ。実行するには --apply を付けてください。"
-  echo "  bash $SCRIPT_DIR/decommission-oci.sh --apply"
+  echo "  bash $script_dir/decommission-oci.sh --apply"
 fi
