@@ -18,7 +18,7 @@
 | MCP-1 | 承認フローの設計・実装・E2E 配線 | 承認必須ツールは `tools/list` 非表示で実用不可（`web.fetch` 等）。allowlist で `requires_approval=true` の項目あり（[infra/config/mcp_allowlist.toml](../../infra/config/mcp_allowlist.toml), [tool-matrix.md](tool-matrix.md), [dsh.md](dsh.md), [adr/0003-native-web-fetch.md](../../adr/0003-native-web-fetch.md)）。policy 側には承認待ち/決定の仕組みがある（`rust/jarvis-policy/src/approval.rs` 等）。 | 承認主体・UI/API・タイムアウト・監査要件を決め、gateway〜クライアント〜policy の通しフローを実装/検証 |
 | MCP-2 | 未実装ツールのネイティブ実装または上流 MCP 登録 | `web.search` / `homeassistant.get_state` / `android.get_device_info` はネイティブ未実装のため承認必須化・非表示。`filesystem.write` / `shell.execute` / `git.commit` / `github.create_pr` / `homeassistant.call_service` / `android.send_notification` も承認待ち/非表示（[tool-matrix.md](tool-matrix.md), [dsh.md](dsh.md)）。 | 利用要件の高い順に実装方針（native or upstream）と安全制約（承認・egress・sandbox）を決定 |
 | MCP-3 | allowlist `sandbox_type`（ツール単位）の整理 | allowlist 各ツールに `sandbox_type` があるが、[rust/jarvis-mcp-gw/src/allowlist.rs](../../rust/jarvis-mcp-gw/src/allowlist.rs) の `AllowedTool` は当該フィールドを持たず読み取らない（[infra/config/mcp_allowlist.toml](../../infra/config/mcp_allowlist.toml)）。`sandbox_type` は [rust/jarvis-mcp-gw/src/config.rs](../../rust/jarvis-mcp-gw/src/config.rs) / [sandbox.rs](../../rust/jarvis-mcp-gw/src/sandbox.rs) のゲートウェイ全体設定として利用（2026-11-15 確認）。 | 「死んだ設定を削除」か「ツール単位ルーティングを実装」を選択（repo config 変更時は `/etc/jarvis` 実機との差分・デプロイ手順も考慮） |
-| MCP-4 | 読み取り基準ディレクトリの絞り込み | `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=/home/koppe` によりホーム配下全体が読み取り可能（[tool-matrix.md](tool-matrix.md)）。機微ファイルへの到達リスクが残る。 | 実運用に必要な最小ディレクトリへ限定し、drift/smoke テストで確認 |
+| MCP-4 | 読み取り基準ディレクトリの絞り込み | `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=/home/koppe` によりホーム配下全体が読み取り可能（2026-11-15 実測/文書: [tool-matrix.md](tool-matrix.md), [infra/systemd/jarvis-mcp-gw.service](../../infra/systemd/jarvis-mcp-gw.service)）。`filesystem.*` / `git.*` はこの基準配下で動作するが、機微ファイルへの到達リスクが残る。 | 実運用に必要な最小ディレクトリへ限定し、unit/env・allowlist 想定・drift/smoke（`tools/call`）で確認（変更時はデプロイ/ロールバック手順に従う） |
 
 ## 2. バックアップ / DR・OCI レガシー整理（優先度: 高）
 
@@ -54,7 +54,7 @@
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| OPS-1 | MCP クライアント再接続の運用明文化 | gateway 再起動後に MCP セッションが失効し再初期化が必要（前ゴールで `Session not found` を確認）。2026-11-15: [dsh.md](dsh.md) / [tool-matrix.md](tool-matrix.md) に再接続手順の注記を追記。 | 必要に応じてクライアント実装側の自動再接続/再初期化の要否を検討 |
+| OPS-1 | MCP クライアント再接続の運用明文化 | gateway 再起動後に MCP セッションが失効し再初期化が必要（前ゴールで `tools/call` 等が `Unauthorized: Session not found` となる事象を確認）。2026-11-15: [dsh.md](dsh.md) / [tool-matrix.md](tool-matrix.md) に再接続手順の注記を追記。 | クライアント実装側の自動再接続/再初期化（失敗時リトライ含む）の要否を検討し、必要なら実装タスク化 |
 
 ## メモ
 

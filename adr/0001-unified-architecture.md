@@ -111,6 +111,14 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 > **2026-11-15 更新（ADR-0004 反映）**: インフラ前提は OCI からローカル Kubuntu + systemd 運用へ変更。
 > OCI 固有の未実施項目は「非適用（ADR-0004）」、前提が変わった項目は「要再評価」として扱う。
 > 全体の現行残タスク整理は [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md) を参照。
+>
+> **2026-11-15 追記（DOC-1 継続タスク参照）**: 本 ADR の未チェック/要再評価項目は backlog で個別管理する。
+> - Phase 0「1Password CLI 設定・秘密情報注入確認」: 現行は `bws` 利用が主、`otelcol` 等の実機/設定整合は **SEC-1**（[remaining-tasks.md](../docs/integration/remaining-tasks.md)）で要確認。
+> - Phase 1「同一ワークスペース共有確認」: ローカル運用での現行要件・実態の確認が必要（未ID化、要再評価）。
+> - Phase 4「Grafana Cloud アラート」: 方針・設定確認が必要（継続タスク）。
+> - Phase 4「rclone バックアップ」: 成果物はあるが OCI 前提・現行未運用。保存先/認証/運用化は **BK-1, BK-2, SEC-2**。
+> - Phase 4「review-flow CI ゲート統合」: `ci/review-gate.yml` 未配線、`opencode run` 依存整理含め **CI-1, CI-2**。
+> - 関連する運用/セキュリティフォローアップ: **MCP-4**（読み取り基準ディレクトリ縮小）、**OPS-1**（gateway 再起動後の MCP 再初期化）。
 
 ### Phase 0: 統合基盤 (Week 1)
 
