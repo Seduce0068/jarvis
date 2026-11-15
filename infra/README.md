@@ -254,7 +254,10 @@ rust-script /opt/jarvis/scripts/restore.rs latest --dry-run
 rust-script /opt/jarvis/scripts/restore.rs latest --confirm
 ```
 
-### Updating Services
+### Updating Services（レガシー/参照: 旧リモートデプロイ前提）
+
+> **2026-11-15 注記（ADR-0004）**: 現行の実行基盤はローカル Kubuntu + systemd です。以下の `deploy.rs` + `jarvis-host`（aarch64 ビルド/リモート配送）手順は旧構成前提のため、現行運用のそのままの手順ではありません。  
+> 現行のローカル配置・検証は `systemd/` と `scripts/` を参照（例: jarvis-mcp-gw は [scripts/deploy-mcp-gw-safe.sh](scripts/deploy-mcp-gw-safe.sh), [scripts/check-deploy-drift.sh](scripts/check-deploy-drift.sh), [scripts/smoke-mcp-gw.sh](scripts/smoke-mcp-gw.sh)。他サービスの現行更新手順は未整理の可能性あり）。
 
 Deploy from the workstation. `deploy.rs` builds for aarch64, ships binaries,
 units and configs, restarts services, and runs health checks:
@@ -280,23 +283,25 @@ rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy --dry-run
 - **OCI Monitoring**: レガシー（OCI 非使用。現行はローカル運用。ADR-0004 参照）
 - **Tailscale**: Network connectivity
 
-### Troubleshooting
+### Troubleshooting（環境依存・一部レガシー例を含む）
+
+> **注記**: `cloud-init` や `/opt/jarvis`、`jarvis-backup` の手動起動は旧 OCI/旧パス/未導入資産前提の例を含みます。現行ローカル systemd 環境では、対象サービス・ログ先・データ配置・Tailscale/UFW の有無に応じて読み替えてください（実機状態は read-only で確認）。
 
 ```bash
-# View cloud-init logs
+# View cloud-init logs (legacy; local systemd host may not use cloud-init)
 sudo journalctl -u cloud-init -f
 
 # Check specific service
 sudo journalctl -u jarvis-policy -n 100
 
-# Verify network
+# Verify network (if applicable)
 tailscale status
 sudo ufw status
 
-# Check disk space
+# Check disk space (path depends on host layout)
 df -h /opt/jarvis
 
-# Manual backup
+# Manual backup (legacy/not-installed in current local setup; see BK-1/BK-2)
 sudo systemctl start jarvis-backup
 ```
 
