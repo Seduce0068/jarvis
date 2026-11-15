@@ -58,9 +58,13 @@ infra/
 └── cloud-init.yaml             # 未使用レガシー: OCI instance initialization
 ```
 
-## Deployment (legacy: OCI)
+## Deployment (legacy: OCI, 現行非使用)
 
-### Prerequisites
+> **2026-11-15 注記（ADR-0004）**: OCI は使用しないため、以下の OCI/OpenTofu/cloud-init 手順は現行のデプロイ手順ではありません。
+> 現在の実行基盤はローカル Kubuntu + systemd です。現行の配置/検証は `systemd/` と `scripts/`（例: [scripts/deploy-mcp-gw-safe.sh](scripts/deploy-mcp-gw-safe.sh), [scripts/check-deploy-drift.sh](scripts/check-deploy-drift.sh), [scripts/smoke-mcp-gw.sh](scripts/smoke-mcp-gw.sh)）を参照してください。
+> レガシー資産の扱い・残タスクは [adr/0004-local-only-no-oci.md](../adr/0004-local-only-no-oci.md) と [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md)（BK-3 等）を参照。
+
+### Prerequisites (legacy)
 
 1. OCI Account with Always Free eligibility
 2. OpenTofu installed (`tofu version`)
@@ -70,7 +74,7 @@ infra/
 5. Tailscale account (for secure access)
 6. SSH key pair
 
-### Quick Start
+### Quick Start (legacy)
 
 ```bash
 # 1. Navigate to production environment
@@ -94,9 +98,9 @@ tofu plan
 tofu apply
 ```
 
-### Post-Deployment
+### Post-Deployment (legacy, cloud-init)
 
-After the instance is provisioned, cloud-init will:
+After the instance is provisioned, cloud-init would:
 
 1. Install packages (Rust, OpenCode, code-server, PostgreSQL, Docker, Tailscale)
 2. Create `jarvis` user and directories
@@ -273,7 +277,7 @@ rust-script rust/scripts/deploy.rs --rust-dir rust jarvis-host deploy --dry-run
 - **OTLP traces**: every service exports spans to `otelcol` at
   `http://127.0.0.1:4317` (`OTEL_EXPORTER_OTLP_ENDPOINT`); the collector
   forwards them to Grafana Cloud.
-- **OCI Monitoring**: Instance health, CPU, memory alarms
+- **OCI Monitoring**: レガシー（OCI 非使用。現行はローカル運用。ADR-0004 参照）
 - **Tailscale**: Network connectivity
 
 ### Troubleshooting
