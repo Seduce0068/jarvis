@@ -15,7 +15,6 @@ allowed_principals = ["jarvis", "opencode", "user"]
 max_args_size = 1048576
 timeout_ms = 5000
 requires_approval = false
-sandbox_type = "none"
 
 [[tools]]
 name = "filesystem.write"
@@ -24,7 +23,6 @@ allowed_principals = ["jarvis", "opencode", "user"]
 max_args_size = 1048576
 timeout_ms = 5000
 requires_approval = true
-sandbox_type = "firejail"
 
 [[tools]]
 name = "filesystem.list"
@@ -33,7 +31,6 @@ allowed_principals = ["jarvis", "opencode", "user"]
 max_args_size = 1048576
 timeout_ms = 3000
 requires_approval = false
-sandbox_type = "none"
 
 [[tools]]
 name = "shell.execute"
@@ -42,7 +39,6 @@ allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
 timeout_ms = 30000
 requires_approval = true
-sandbox_type = "firejail"
 
 [[tools]]
 name = "git.status"
@@ -51,7 +47,6 @@ allowed_principals = ["jarvis", "opencode", "user"]
 max_args_size = 1048576
 timeout_ms = 5000
 requires_approval = false
-sandbox_type = "none"
 
 [[tools]]
 name = "git.diff"
@@ -60,7 +55,6 @@ allowed_principals = ["jarvis", "opencode", "user"]
 max_args_size = 1048576
 timeout_ms = 5000
 requires_approval = false
-sandbox_type = "none"
 
 [[tools]]
 name = "git.commit"
@@ -69,7 +63,6 @@ allowed_principals = ["jarvis", "opencode", "user"]
 max_args_size = 1048576
 timeout_ms = 10000
 requires_approval = true
-sandbox_type = "none"
 
 [[tools]]
 name = "github.create_pr"
@@ -78,7 +71,6 @@ allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
 timeout_ms = 30000
 requires_approval = true
-sandbox_type = "none"
 
 [[tools]]
 name = "homeassistant.get_state"
@@ -88,7 +80,6 @@ max_args_size = 1048576
 timeout_ms = 5000
 # ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
 requires_approval = true
-sandbox_type = "none"
 
 [[tools]]
 name = "homeassistant.call_service"
@@ -97,7 +88,6 @@ allowed_principals = ["jarvis"]
 max_args_size = 1048576
 timeout_ms = 10000
 requires_approval = true
-sandbox_type = "none"
 
 [[tools]]
 name = "android.get_device_info"
@@ -107,7 +97,6 @@ max_args_size = 1048576
 timeout_ms = 10000
 # ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
 requires_approval = true
-sandbox_type = "none"
 
 [[tools]]
 name = "android.send_notification"
@@ -116,7 +105,6 @@ allowed_principals = ["jarvis"]
 max_args_size = 1048576
 timeout_ms = 5000
 requires_approval = true
-sandbox_type = "none"
 
 [[tools]]
 name = "web.search"
@@ -126,7 +114,6 @@ max_args_size = 1048576
 timeout_ms = 30000
 # ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
 requires_approval = true
-sandbox_type = "none"
 
 [[tools]]
 name = "web.fetch"
@@ -135,4 +122,3 @@ allowed_principals = ["jarvis", "opencode"]
 max_args_size = 5242880
 timeout_ms = 30000
 requires_approval = true
-sandbox_type = "none"
