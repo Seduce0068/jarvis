@@ -30,6 +30,9 @@ PLACEHOLDER = re.compile(
 )
 # These files define detection regexes or document credential NAMES, not values.
 SAFE_PATHS = (
+    # Scanners/pattern definitions legitimately contain credential-shaped
+    # literals (e.g. `PRIVATE_KEY = re.compile(...)`); treat as review-only.
+    "ci/scripts/secret_scan.py",
     "infra/config/pii_patterns.toml",
     "AGENTS.md",
     "docs/",
