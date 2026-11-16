@@ -246,6 +246,29 @@ impl Sandbox {
         }))
     }
 
+    /// Reject paths that are known to carry credentials even though they may
+    /// live beneath the configured base directory. This is defense in depth:
+    /// `secret_scan` keeps such files out of the repo today, but a future
+    /// accidental `.env` must not become readable through the MCP tool.
+    fn reject_sensitive_path(path: &Path) -> Result<()> {
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let sensitive = name == ".env"
+            || name.starts_with(".env.")
+            || name.contains("bws.env")
+            || name.contains("token")
+            || name.contains("secret")
+            || name.ends_with(".pem")
+            || name.ends_with(".key");
+        if sensitive {
+            bail!("refusing to read sensitive file: {}", path.display());
+        }
+        Ok(())
+    }
+
     /// Resolve `args.path` (default ".") beneath the configured base directory.
     fn resolve_path(&self, args: &Value) -> Result<PathBuf> {
         let requested = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -261,6 +284,7 @@ impl Sandbox {
         if !resolved.starts_with(&base) {
             bail!("path escapes workspace: {}", resolved.display());
         }
+        Self::reject_sensitive_path(&resolved)?;
         Ok(resolved)
     }
 }
@@ -538,5 +562,24 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("no native handler"));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn sensitive_paths_are_refused() {
+        let dir =
+            std::env::temp_dir().join(format!("jarvis-mcp-gw-sensitive-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for name in [".env", "bws.env", "api_token.txt", "server.key"] {
+            let path = dir.join(name);
+            std::fs::write(&path, b"x").unwrap();
+            assert!(
+                Sandbox::reject_sensitive_path(&path).is_err(),
+                "{name} must be refused"
+            );
+        }
+        let normal = dir.join("notes.txt");
+        std::fs::write(&normal, b"x").unwrap();
+        assert!(Sandbox::reject_sensitive_path(&normal).is_ok());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

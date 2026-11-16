@@ -21,6 +21,9 @@
   配置・有効化・手動実行・整合性検証まで自動実施される。
 - **承認 API**: オプションのトークン認証を追加（既定は無効で後方互換）。
   4コンポーネント横断の契約テスト済み。
+- **読み取りツールの機微ファイル拒否**: `sandbox.rs` のパス解決で `.env`,
+  `bws.env`, `*token*`, `*secret*`, `*.pem`, `*.key` を拒否する defensive
+  check を追加（MCP-4 の残リスク低減）。回帰テスト・smoke 12/12 成功。
 - **手動 review gate の健全性**: クリーンな clone（`/tmp` に HEAD を clone）で
   `make ci-local` が成功（8 safety checks）。GitHub Actions の
   ubuntu-latest でも同じく Rust Toolchain + Python3 で動作する根拠。
