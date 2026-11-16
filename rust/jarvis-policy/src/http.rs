@@ -284,7 +284,7 @@ mod tests {
         dir
     }
 
-    async fn test_engine(label: &str) -> (Arc<PolicyEngine>, PathBuf) {
+    async fn test_engine_with_cap(label: &str, max_pending: usize) -> (Arc<PolicyEngine>, PathBuf) {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
         let dir = temp_dir(label);
         let model = dir.join("casbin_model.conf");
@@ -298,6 +298,7 @@ mod tests {
             casbin_policy_path: policy.to_string_lossy().into_owned(),
             kill_switch_admin_token: "test-admin-token".into(),
             approval_timeout_secs: 5,
+            approval_max_pending: max_pending,
             ..Default::default()
         };
         let engine = Arc::new(
@@ -306,6 +307,10 @@ mod tests {
                 .expect("policy engine starts"),
         );
         (engine, dir)
+    }
+
+    async fn test_engine(label: &str) -> (Arc<PolicyEngine>, PathBuf) {
+        test_engine_with_cap(label, 100).await
     }
 
     /// Serve the real router on an ephemeral port; tests drive it with a real
@@ -534,5 +539,69 @@ mod tests {
         assert_eq!(decision["reason"], "not now");
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    #[tokio::test]
+    async fn approval_endpoint_returns_denied_when_queue_is_full() {
+        let (engine, _dir) = test_engine_with_cap("http-cap", 1).await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let pending = pending_request(chrono::Utc::now().timestamp() + 60);
+
+        // The approval POST blocks until decided, so run the first request in
+        // the background and wait for it to appear in the pending list.
+        let first_call = tokio::spawn({
+            let base = base.clone();
+            let client = client.clone();
+            let pending = pending.clone();
+            async move {
+                client
+                    .post(format!("{base}/v1/approval"))
+                    .json(&pending)
+                    .send()
+                    .await
+                    .expect("first request")
+                    .json::<serde_json::Value>()
+                    .await
+                    .expect("json")
+            }
+        });
+        let id = loop {
+            let list: serde_json::Value = client
+                .get(format!("{base}/v1/approvals"))
+                .send()
+                .await
+                .expect("list")
+                .json()
+                .await
+                .expect("json");
+            if let Some(entry) = list["pending"].as_array().and_then(|v| v.first()) {
+                break entry["id"].as_str().expect("id").to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+
+        // A distinct id avoids the duplicate-id guard; the cap must trigger.
+        let mut second_pending = pending_request(chrono::Utc::now().timestamp() + 60);
+        second_pending["id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
+        let second = client
+            .post(format!("{base}/v1/approval"))
+            .json(&second_pending)
+            .send()
+            .await
+            .expect("second request")
+            .json::<serde_json::Value>()
+            .await
+            .expect("json");
+        assert_eq!(second["decision"], "Denied");
+        assert_eq!(second["reason"], "approval queue full");
+
+        client
+            .post(format!("{base}/v1/approval/{id}/approve"))
+            .json(&serde_json::json!({ "approved_by": "koppe" }))
+            .send()
+            .await
+            .expect("approve");
+        let _ = first_call.await.expect("first call task");
     }
 }

@@ -19,7 +19,14 @@ pub struct PolicyConfig {
     /// Unset keeps the switch in memory (tests, ephemeral runs).
     pub kill_switch_state_path: Option<String>,
     pub approval_timeout_secs: u64,
+    /// Upper bound on simultaneously pending approval requests.
+    #[serde(default = "default_approval_max_pending")]
+    pub approval_max_pending: usize,
     pub default_deny: bool,
+}
+
+fn default_approval_max_pending() -> usize {
+    crate::approval::DEFAULT_MAX_PENDING
 }
 
 impl PolicyConfig {
@@ -45,6 +52,7 @@ impl Default for PolicyConfig {
             kill_switch_admin_token: "changeme".into(),
             kill_switch_state_path: None,
             approval_timeout_secs: 300,
+            approval_max_pending: default_approval_max_pending(),
             default_deny: true,
         }
     }
@@ -53,5 +61,50 @@ impl Default for PolicyConfig {
 impl PolicyConfig {
     pub fn kill_switch_admin_token(&self) -> &str {
         &self.kill_switch_admin_token
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use figment::providers::Format;
+
+    /// Config files written before the pending-approval cap was introduced
+    /// must still load (the MCP-1 approval flow depends on this).
+    #[test]
+    fn legacy_config_without_cap_uses_default() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "changeme"
+approval_timeout_secs = 300
+default_deny = true
+"#;
+        let config: PolicyConfig = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("legacy config parses");
+        assert_eq!(config.approval_max_pending, 100);
+    }
+
+    #[test]
+    fn explicit_cap_is_honoured() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "changeme"
+approval_timeout_secs = 300
+approval_max_pending = 7
+default_deny = true
+"#;
+        let config: PolicyConfig = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("config parses");
+        assert_eq!(config.approval_max_pending, 7);
     }
 }

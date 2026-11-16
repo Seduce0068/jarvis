@@ -48,9 +48,10 @@ impl PolicyEngine {
                  set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN"
             );
         }
-        let approvals = approval::ApprovalStore::new(std::time::Duration::from_secs(
-            config.approval_timeout_secs,
-        ));
+        let approvals = approval::ApprovalStore::with_max_pending(
+            std::time::Duration::from_secs(config.approval_timeout_secs),
+            config.approval_max_pending,
+        );
 
         Ok(Self {
             config,
