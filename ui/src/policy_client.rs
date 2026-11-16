@@ -1,0 +1,128 @@
+//! Loopback HTTP client for the `jarvis-policy` approval API.
+//!
+//! Endpoints (see `rust/jarvis-policy/src/http.rs`):
+//! - `GET  /v1/approvals`             -> `{ "pending": [ApprovalRequest, ..] }`
+//! - `POST /v1/approval/{id}/approve` -> `{ "decision": "Approved", .. }`
+//! - `POST /v1/approval/{id}/deny`    -> `{ "decision": "Denied", .. }`
+//!
+//! This client is intentionally **blocking**: GPUI drives its own executor,
+//! so a Tokio-based client such as reqwest has no reactor here. Callers must
+//! run these methods on GPUI's background executor (see `approvals.rs`).
+//! The console only ever talks to the configured loopback base URL.
+
+use anyhow::{Context as _, Result};
+use serde::{Deserialize, Serialize};
+
+/// A pending approval request as returned by `jarvis-policy`.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct ApprovalRequest {
+    pub id: String,
+    pub principal: String,
+    pub action: String,
+    pub resource: String,
+    #[serde(default)]
+    pub context: serde_json::Value,
+    #[serde(default)]
+    pub requested_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default)]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PendingResponse {
+    #[serde(default)]
+    pending: Vec<ApprovalRequest>,
+}
+
+#[derive(Serialize)]
+struct ApproveBody<'a> {
+    approved_by: &'a str,
+}
+
+#[derive(Serialize)]
+struct DenyBody<'a> {
+    reason: &'a str,
+}
+
+/// Blocking client for the policy approval endpoints.
+#[derive(Clone)]
+pub struct PolicyClient {
+    base_url: String,
+}
+
+impl PolicyClient {
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+        }
+    }
+
+    /// Requests currently awaiting an operator decision.
+    pub fn pending(&self) -> Result<Vec<ApprovalRequest>> {
+        let url = format!("{}/v1/approvals", self.base_url);
+        let mut response = ureq::get(&url)
+            .call()
+            .with_context(|| format!("GET {url} failed"))?;
+        let body: PendingResponse = response
+            .body_mut()
+            .read_json()
+            .context("invalid JSON from /v1/approvals")?;
+        Ok(body.pending)
+    }
+
+    /// Approve the request `id` as `approved_by`.
+    pub fn approve(&self, id: &str, approved_by: &str) -> Result<()> {
+        self.decide(id, "approve", &ApproveBody { approved_by })
+    }
+
+    /// Deny the request `id` with `reason`.
+    pub fn deny(&self, id: &str, reason: &str) -> Result<()> {
+        self.decide(id, "deny", &DenyBody { reason })
+    }
+
+    fn decide<B: Serialize + ?Sized>(&self, id: &str, verb: &str, body: &B) -> Result<()> {
+        let url = format!("{}/v1/approval/{id}/{verb}", self.base_url);
+        ureq::post(&url)
+            .send_json(body)
+            .with_context(|| format!("POST {url} failed"))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_pending_list_and_tolerates_extra_fields() {
+        let body = serde_json::json!({
+            "pending": [{
+                "id": "4d1a1f2e-0000-0000-0000-000000000000",
+                "principal": "opencode",
+                "action": "execute",
+                "resource": "tool:shell.execute",
+                "context": {"cmd": "ls"},
+                "requested_at": "2026-11-15T08:00:00Z",
+                "expires_at": "2026-11-15T08:05:00Z",
+                "unknown_future_field": true
+            }]
+        });
+        let parsed: PendingResponse = serde_json::from_value(body).expect("parses");
+        assert_eq!(parsed.pending.len(), 1);
+        assert_eq!(parsed.pending[0].principal, "opencode");
+        assert_eq!(parsed.pending[0].resource, "tool:shell.execute");
+    }
+
+    #[test]
+    fn empty_pending_list_is_accepted() {
+        let parsed: PendingResponse =
+            serde_json::from_value(serde_json::json!({ "pending": [] })).expect("parses");
+        assert!(parsed.pending.is_empty());
+    }
+
+    #[test]
+    fn base_url_trailing_slash_is_normalized() {
+        let client = PolicyClient::new("http://127.0.0.1:8081/");
+        assert_eq!(client.base_url, "http://127.0.0.1:8081");
+    }
+}

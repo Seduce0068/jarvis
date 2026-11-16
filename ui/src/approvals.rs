@@ -1,0 +1,270 @@
+//! Approval queue view: lists pending `jarvis-policy` approval requests and
+//! lets the operator approve or deny each one.
+
+use gpui::{
+    ClickEvent, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
+    prelude::*, rgb,
+};
+
+use crate::policy_client::{ApprovalRequest, PolicyClient};
+
+/// Background refresh cadence for the pending queue.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+pub struct ApprovalsView {
+    client: PolicyClient,
+    pending: Vec<ApprovalRequest>,
+    status: SharedString,
+    /// Last polling error, shown in the header until it clears.
+    error: Option<SharedString>,
+    /// Set once the first poll completes so the first frame shows a hint.
+    loaded: bool,
+}
+
+impl ApprovalsView {
+    pub fn new(base_url: String, cx: &mut Context<Self>) -> Self {
+        let view = Self {
+            client: PolicyClient::new(base_url),
+            pending: Vec::new(),
+            status: "承認要求を読み込み中…".into(),
+            error: None,
+            loaded: false,
+        };
+        view.spawn_poller(cx);
+        view
+    }
+
+    /// Poll the policy service until the window goes away.
+    fn spawn_poller(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |weak, cx| {
+            loop {
+                // Window closed: stop polling.
+                let Some(entity) = weak.upgrade() else {
+                    return;
+                };
+                let client = entity.read_with(cx, |view, _| view.client.clone());
+                // Blocking HTTP must run on the background thread pool, never
+                // on GPUI's foreground executor (it would freeze the window).
+                let result = cx
+                    .background_executor()
+                    .spawn(async move { client.pending() })
+                    .await;
+
+                let stopped = weak
+                    .update(cx, |view, cx| {
+                        view.apply_poll(result);
+                        cx.notify();
+                    })
+                    .is_err();
+                if stopped {
+                    return;
+                }
+
+                cx.background_executor().timer(POLL_INTERVAL).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Fold a poll result into the view state.
+    fn apply_poll(&mut self, result: anyhow::Result<Vec<ApprovalRequest>>) {
+        self.loaded = true;
+        match result {
+            Ok(pending) => {
+                self.status = format!("保留中: {} 件", pending.len()).into();
+                self.error = None;
+                self.pending = pending;
+            }
+            Err(error) => {
+                // Keep the last known list visible, but surface the failure so
+                // a stale queue is not mistaken for an empty one.
+                self.status = "jarvis-policy に接続できません".into();
+                self.error = Some(format!("{error:#}").into());
+            }
+        }
+    }
+
+    /// Apply an operator decision, then refresh immediately.
+    fn decide(&mut self, id: String, approve: bool, cx: &mut Context<Self>) {
+        let client = self.client.clone();
+        let label: SharedString = if approve { "承認" } else { "却下" }.into();
+        self.status = format!("{label}を送信中… ({id})").into();
+
+        cx.spawn(async move |weak, cx| {
+            let decide_client = client.clone();
+            let decide_id = id.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if approve {
+                        decide_client.approve(&decide_id, "koppe")
+                    } else {
+                        decide_client.deny(&decide_id, "operator denied")
+                    }
+                })
+                .await;
+            let refresh = cx
+                .background_executor()
+                .spawn(async move { client.pending() })
+                .await;
+
+            let _ = weak.update(cx, |view, cx| {
+                match result {
+                    Ok(()) => {
+                        view.status = format!("{label}しました").into();
+                        view.error = None;
+                    }
+                    Err(error) => {
+                        // The request may already be decided or expired; show
+                        // the reason rather than dropping it silently.
+                        view.status = format!("{label}に失敗しました").into();
+                        view.error = Some(format!("{error:#}").into());
+                    }
+                }
+                view.apply_poll(refresh);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_row(&self, request: &ApprovalRequest, cx: &mut Context<Self>) -> impl IntoElement {
+        let expires = request
+            .expires_at
+            .map(|t| t.format("%H:%M:%S").to_string())
+            .unwrap_or_else(|| "-".to_string());
+
+        let approve_id = request.id.clone();
+        let deny_id = request.id.clone();
+
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .p_3()
+            .bg(rgb(0x2a2a2a))
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_lg()
+                            .child(format!("{}  ·  {}", request.principal, request.resource)),
+                    )
+                    .child(muted(format!(
+                        "action={}  期限={}  id={}",
+                        request.action, expires, request.id
+                    )))
+                    .child(muted(format!(
+                        "args: {}",
+                        truncate(&request.context.to_string(), 120)
+                    ))),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("approve-{}", request.id)))
+                            .px_3()
+                            .py_1()
+                            .bg(rgb(0x2e7d32))
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .child("承認")
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                                view.decide(approve_id.clone(), true, cx)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("deny-{}", request.id)))
+                            .px_3()
+                            .py_1()
+                            .bg(rgb(0x8b2f2f))
+                            .text_color(rgb(0xffffff))
+                            .cursor_pointer()
+                            .child("却下")
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
+                                view.decide(deny_id.clone(), false, cx)
+                            })),
+                    ),
+            )
+    }
+}
+
+impl Render for ApprovalsView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Clone so the row listeners can take `cx` mutably while rendering.
+        let pending = self.pending.clone();
+
+        let mut list = div().flex().flex_col().gap_2().overflow_hidden();
+        if !self.loaded {
+            list = list.child(muted("読み込み中…"));
+        } else if pending.is_empty() {
+            list = list.child(muted("保留中の承認要求はありません。"));
+        } else {
+            for request in &pending {
+                list = list.child(self.render_row(request, cx));
+            }
+        }
+
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .bg(rgb(0x1e1e1e))
+            .text_color(rgb(0xe0e0e0))
+            .p_4()
+            .gap_3()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .child(div().text_xl().child("JARVIS 承認コンソール"))
+                    .child(muted(self.status.clone())),
+            )
+            .child(match &self.error {
+                Some(error) => div().bg(rgb(0x4a1f1f)).p_2().text_sm().child(error.clone()),
+                None => div(),
+            })
+            .child(div().flex_1().child(list))
+    }
+}
+
+fn muted(text: impl Into<SharedString>) -> impl IntoElement {
+    div().text_sm().text_color(rgb(0x9a9a9a)).child(text.into())
+}
+
+fn truncate(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let head: String = text.chars().take(max_chars).collect();
+    format!("{head}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_keeps_short_text() {
+        assert_eq!(truncate("abc", 10), "abc");
+    }
+
+    #[test]
+    fn truncate_respects_char_boundaries() {
+        // Multi-byte characters must not be split mid-character.
+        let text = "承認要求ありがとうございます";
+        assert_eq!(truncate(text, 3), "承認要…");
+    }
+}

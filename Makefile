@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -37,6 +37,15 @@ deploy-dry: ## (レガシー) リモートデプロイ内容の確認 (dry-run, 
 
 deploy-mcp-gw: ## jarvis-mcp-gw をローカルへ安全デプロイ（乾燥実行が既定）
 	@bash infra/scripts/deploy-mcp-gw-safe.sh
+
+ui-build: ## GPUI 承認コンソールをビルド（独立クレート、CI 対象外）
+	@cd ui && cargo build --release
+
+ui-run: ## GPUI 承認コンソールを起動
+	@cd ui && cargo run
+
+ui-test: ## GPUI 承認コンソールの検証（fmt/clippy/test）
+	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 
 lint: ## Rust script の整形・起動確認
 	@rustfmt --check rust/scripts/*.rs scripts/doctor/*.rs scripts/utils/*.rs scripts/bootstrap/*.rs config/*.rs docs/architecture/verify.rs docs/architecture/calc.rs
