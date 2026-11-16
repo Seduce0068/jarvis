@@ -47,5 +47,17 @@ for script in backup-local.sh verify-backup.sh install-backup-timer.sh; do
   fi
 done
 
+# install-backup-timer.sh must roll back on every explicit failure after the
+# install phase. Static guard: no bare "exit 1" in the post-install region.
+install_script="$repo/infra/scripts/install-backup-timer.sh"
+post_install="$(sed -n '/^install -o root/,$p' "$install_script")"
+if printf '%s' "$post_install" | grep -qE '[[:space:]]exit 1'; then
+  echo "  FAIL: install-backup-timer.sh has bare exit 1 after install (rollback skipped)"
+  fail=$((fail+1))
+else
+  echo "  PASS: install-backup-timer.sh uses fail() for post-install errors"
+  ok=$((ok+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

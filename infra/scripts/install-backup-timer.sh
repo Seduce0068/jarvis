@@ -31,15 +31,23 @@ fi
 
 [ "$(id -u)" -eq 0 ] || { echo "ERROR: --apply requires root" >&2; exit 1; }
 
+# ERR trap must be disarmed before rollback runs: otherwise a failure inside
+# rollback would re-enter it. Explicit `exit 1` paths call fail() instead.
 rollback() {
+  trap - ERR
   echo "== ROLLBACK ==" >&2
-  if [ -f "$service_dst.bak-$ts" ]; then mv -f "$service_dst.bak-$ts" "$service_dst"; else rm -f "$service_dst"; fi
-  if [ -f "$timer_dst.bak-$ts" ]; then mv -f "$timer_dst.bak-$ts" "$timer_dst"; else rm -f "$timer_dst"; fi
-  if [ -f "$script_dst.bak-$ts" ]; then mv -f "$script_dst.bak-$ts" "$script_dst"; else rm -f "$script_dst"; fi
+  if [ -f "$service_dst.bak-$ts" ]; then mv -f "$service_dst.bak-$ts" "$service_dst" || true; else rm -f "$service_dst" || true; fi
+  if [ -f "$timer_dst.bak-$ts" ]; then mv -f "$timer_dst.bak-$ts" "$timer_dst" || true; else rm -f "$timer_dst" || true; fi
+  if [ -f "$script_dst.bak-$ts" ]; then mv -f "$script_dst.bak-$ts" "$script_dst" || true; else rm -f "$script_dst" || true; fi
   systemctl daemon-reload || true
 }
 
 trap 'rollback' ERR
+fail() {
+  echo "ERROR: $*" >&2
+  rollback
+  exit 1
+}
 
 install -o root -g root -m 0755 "$script_src" "$script_dst"
 for pair in "$service_src:$service_dst" "$timer_src:$timer_dst"; do
@@ -61,14 +69,13 @@ sleep 2
 # run succeeds (non-destructive payloads only; no retention pruning).
 echo "== post-install verification =="
 systemctl is-active --quiet jarvis-backup.timer \
-  || { echo "ERROR: timer not active" >&2; exit 1; }
+  || fail "timer not active"
 echo "  timer: active"
 
 next_elapse="$(systemctl list-timers jarvis-backup.timer --no-pager 2>/dev/null \
   | awk 'NR==2 {print $1, $2, $3}')"
 if [ -z "$next_elapse" ]; then
-  echo "ERROR: timer has no next elapse" >&2
-  exit 1
+  fail "timer has no next elapse"
 fi
 echo "  next elapse: $next_elapse"
 
@@ -76,14 +83,12 @@ echo "  next elapse: $next_elapse"
 # writes only to the dedicated backup dir and never prunes (no --retain-days).
 echo "  running service once (manual trigger) ..."
 if ! systemctl start jarvis-backup.service; then
-  echo "ERROR: backup service failed on manual run" >&2
   systemctl status jarvis-backup.service --no-pager -l >&2 || true
-  exit 1
+  fail "backup service failed on manual run"
 fi
 if ! systemctl is-active --quiet jarvis-backup.service \
    && [ "$(systemctl show -p ExecMainStatus --value jarvis-backup.service)" != "0" ]; then
-  echo "ERROR: backup service exited non-zero" >&2
-  exit 1
+  fail "backup service exited non-zero"
 fi
 echo "  manual run: OK"
 
@@ -94,8 +99,7 @@ if command -v jq >/dev/null 2>&1 && [ -f "$repo/infra/scripts/verify-backup.sh" 
   install -o root -g root -m 0755 "$verify_src" "$verify_dst"
   echo "  verifying backup integrity ..."
   if ! sudo -u postgres bash "$verify_dst" --backup-dir "$backup_dir" | tail -20; then
-    echo "ERROR: backup integrity verification failed" >&2
-    exit 1
+    fail "backup integrity verification failed"
   fi
 fi
 
