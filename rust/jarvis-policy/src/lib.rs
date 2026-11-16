@@ -62,6 +62,12 @@ impl PolicyEngine {
         })
     }
 
+    /// Optional token required by the HTTP approval endpoints. `None` keeps
+    /// the legacy unauthenticated (loopback-only) behavior.
+    pub fn approval_api_token(&self) -> Option<&str> {
+        self.config.approval_api_token.as_deref()
+    }
+
     /// Check if action is allowed (async, with Casbin fast path)
     pub async fn is_allowed(
         &self,

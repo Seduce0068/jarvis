@@ -22,6 +22,11 @@ pub struct PolicyConfig {
     /// Upper bound on simultaneously pending approval requests.
     #[serde(default = "default_approval_max_pending")]
     pub approval_max_pending: usize,
+    /// Optional bearer token for the HTTP approval endpoints. When unset
+    /// (the default), behavior is unchanged; set it before exposing the
+    /// listener beyond loopback.
+    #[serde(default)]
+    pub approval_api_token: Option<String>,
     pub default_deny: bool,
 }
 
@@ -53,6 +58,7 @@ impl Default for PolicyConfig {
             kill_switch_state_path: None,
             approval_timeout_secs: 300,
             approval_max_pending: default_approval_max_pending(),
+            approval_api_token: None,
             default_deny: true,
         }
     }

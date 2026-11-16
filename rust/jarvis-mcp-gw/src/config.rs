@@ -21,6 +21,9 @@ pub struct McpGatewayConfig {
     /// Optional in config files: older deployments fall back to the default.
     #[serde(default = "default_policy_http_addr")]
     pub policy_http_addr: String,
+    /// Optional token sent as X-Jarvis-Approval-Token to jarvis-policy.
+    #[serde(default)]
+    pub approval_api_token: Option<String>,
     /// Principal identity used for tool calls that arrive over the MCP
     /// server endpoint (`/mcp`). Calls still pass policy and allowlist
     /// checks; the client never chooses the principal.
@@ -53,6 +56,7 @@ impl Default for McpGatewayConfig {
             sandbox_config: serde_json::json!({}),
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
             policy_http_addr: default_policy_http_addr(),
+            approval_api_token: None,
             mcp_principal: "opencode".into(),
         }
     }

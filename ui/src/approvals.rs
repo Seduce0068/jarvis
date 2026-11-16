@@ -22,9 +22,9 @@ pub struct ApprovalsView {
 }
 
 impl ApprovalsView {
-    pub fn new(base_url: String, cx: &mut Context<Self>) -> Self {
+    pub fn new(base_url: String, token: Option<String>, cx: &mut Context<Self>) -> Self {
         let view = Self {
-            client: PolicyClient::new(base_url),
+            client: PolicyClient::new_with_token(base_url, token),
             pending: Vec::new(),
             status: "承認要求を読み込み中…".into(),
             error: None,

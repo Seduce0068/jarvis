@@ -68,13 +68,19 @@ pub enum ApprovalOutcome {
 #[derive(Clone)]
 pub struct ApprovalClient {
     endpoint: String,
+    token: Option<String>,
     http: reqwest::Client,
 }
 
 impl ApprovalClient {
     pub fn new(endpoint: impl Into<String>) -> Self {
+        Self::new_with_token(endpoint, None)
+    }
+
+    pub fn new_with_token(endpoint: impl Into<String>, token: Option<String>) -> Self {
         Self::with_timeouts(
             endpoint,
+            token,
             Duration::from_secs(APPROVAL_HTTP_TIMEOUT_SECS),
             Duration::from_secs(CONNECT_TIMEOUT_SECS),
         )
@@ -83,6 +89,7 @@ impl ApprovalClient {
     /// Constructor with explicit deadlines (used by tests to keep them fast).
     fn with_timeouts(
         endpoint: impl Into<String>,
+        token: Option<String>,
         request_timeout: Duration,
         connect_timeout: Duration,
     ) -> Self {
@@ -93,6 +100,7 @@ impl ApprovalClient {
             .expect("approval HTTP client must build");
         Self {
             endpoint: endpoint.into(),
+            token,
             http,
         }
     }
@@ -119,9 +127,11 @@ impl ApprovalClient {
             requested_at: now.timestamp(),
             expires_at: (now + ChronoDuration::seconds(APPROVAL_WINDOW_SECS)).timestamp(),
         };
-        let response = self
-            .http
-            .post(format!("{}/v1/approval", self.endpoint))
+        let mut request = self.http.post(format!("{}/v1/approval", self.endpoint));
+        if let Some(token) = &self.token {
+            request = request.header("X-Jarvis-Approval-Token", token);
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -321,8 +331,12 @@ mod tests {
                 .expect("hung test server runs");
         });
 
-        let client =
-            ApprovalClient::with_timeouts(base, Duration::from_millis(200), Duration::from_secs(1));
+        let client = ApprovalClient::with_timeouts(
+            base,
+            None,
+            Duration::from_millis(200),
+            Duration::from_secs(1),
+        );
         let started = tokio::time::Instant::now();
         let outcome = client
             .request_approval("opencode", "execute", "tool:shell.execute", &json!({}))

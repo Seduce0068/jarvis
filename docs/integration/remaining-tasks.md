@@ -96,11 +96,13 @@
 ### MCP-1 承認フローのセキュリティ境界（2026-11-16 レビュー）
 
 - jarvis-policy の承認 API（`/v1/approval`, `/v1/approvals`,
-  `/v1/approval/{id}/approve|deny`）は **認証トークンを要求しない**。
-  現在は `127.0.0.1` bind + systemd の実行ユーザー分離により
-  ローカルプロセス以外からは到達できないため許容しているが、
-  **ループバック外へ公開する前に認証（至少 admin token または
-  mTLS）を追加する必要がある**。
+  `/v1/approval/{id}/approve|deny`）は既定では認証トークンを要求しない
+  （後方互換）。2026-11-17 に **オプションのトークン認証を追加**した。
+  `JARVIS_POLICY_APPROVAL_TOKEN` を設定すると全承認ルートが
+  `X-Jarvis-Approval-Token` ヘッダを要求し、未設定/不正は 401 で拒否する。
+  gateway (`JARVIS_MCP_GW_APPROVAL_API_TOKEN`) と UI
+  (`JARVIS_POLICY_APPROVAL_TOKEN`) が同じ値を送信する。health/metrics/check/
+  kill-switch は認証対象外。ループバック外へ公開する場合はトークン設定が必須。
 - `jarvis-mcp-gw` の承認 HTTP クライアントには 330 秒の overall timeout と
   2 秒の connect timeout を設定済み（2026-11-16 修正）。
   policy が応答を返さない場合も MCP 呼び出しは有限時間で fail-closed となる

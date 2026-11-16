@@ -70,29 +70,76 @@ fn default_deny_reason() -> String {
     "denied by user".to_string()
 }
 
-// SECURITY NOTE (2026-11-16): the approval endpoints below are intentionally
-// unauthenticated. The HTTP listener binds to 127.0.0.1 and the host is a
-// single-user desktop with systemd service isolation. They are NOT safe to
-// expose beyond loopback: any local process could list, approve or deny
-// pending requests (and the MCP gateway's approval client relies on this).
-// Adding auth requires coordinated changes to jarvis-mcp-gw, ui/, and this
-// router; it is tracked in docs/integration/remaining-tasks.md.
+// SECURITY NOTE: the approval endpoints are unauthenticated by default for
+// backward compatibility with the loopback-only deployment. Set
+// `JARVIS_POLICY_APPROVAL_TOKEN` to require the X-Jarvis-Approval-Token header
+// before exposing the listener beyond loopback. The MCP gateway and UI read
+// the same value from their own configuration and send it on every call.
 
 pub fn router(engine: Arc<PolicyEngine>) -> Router {
+    // Approval routes are grouped so optional token auth can be applied to
+    // them without affecting health/metrics/check/kill-switch endpoints.
+    let approvals = Router::new()
+        .route("/", post(request_approval))
+        .route("/list", get(list_approvals))
+        .route("/:id", get(approval_status))
+        .route("/:id/approve", post(approve_approval))
+        .route("/:id/deny", post(deny_approval))
+        .layer(axum::middleware::from_fn_with_state(
+            engine.clone(),
+            require_approval_token,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .route("/v1/check", post(check))
-        .route("/v1/approval", post(request_approval))
-        .route("/v1/approvals", get(list_approvals))
-        .route("/v1/approval/:id", get(approval_status))
-        .route("/v1/approval/:id/approve", post(approve_approval))
-        .route("/v1/approval/:id/deny", post(deny_approval))
+        .nest("/v1/approval", approvals)
+        .route(
+            "/v1/approvals",
+            get(list_approvals).layer(axum::middleware::from_fn_with_state(
+                engine.clone(),
+                require_approval_token,
+            )),
+        )
         .route("/v1/kill-switch", get(kill_switch_status))
         .route("/v1/kill-switch/activate", post(activate_kill_switch))
         .route("/v1/kill-switch/deactivate", post(deactivate_kill_switch))
         .with_state(engine)
         .layer(axum::middleware::from_fn(track_metrics))
+}
+
+/// Optional token gate for approval endpoints.
+///
+/// When `approval_api_token` is unset the endpoint keeps its historical
+/// loopback-only behavior. When set, callers must send the exact value in
+/// the `X-Jarvis-Approval-Token` header. This lets the same HTTP contract be
+/// used safely if the listener is ever exposed beyond loopback.
+async fn require_approval_token(
+    State(engine): State<Arc<PolicyEngine>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let Some(expected) = engine.approval_api_token() else {
+        return Ok(next.run(request).await);
+    };
+    let provided = request
+        .headers()
+        .get("x-jarvis-approval-token")
+        .and_then(|v| v.to_str().ok());
+    // Constant-time-ish comparison: length check then byte compare. Tokens
+    // are low-value local secrets, but avoid trivial timing leaks.
+    let authorized = provided.is_some_and(|p| {
+        p.len() == expected.len()
+            && p.bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    });
+    if !authorized {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
 }
 
 /// Count every HTTP request so `/metrics` exposes more than an empty page
@@ -284,7 +331,11 @@ mod tests {
         dir
     }
 
-    async fn test_engine_with_cap(label: &str, max_pending: usize) -> (Arc<PolicyEngine>, PathBuf) {
+    async fn test_engine_with_cap_and_token(
+        label: &str,
+        max_pending: usize,
+        token: Option<String>,
+    ) -> (Arc<PolicyEngine>, PathBuf) {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
         let dir = temp_dir(label);
         let model = dir.join("casbin_model.conf");
@@ -299,6 +350,7 @@ mod tests {
             kill_switch_admin_token: "test-admin-token".into(),
             approval_timeout_secs: 5,
             approval_max_pending: max_pending,
+            approval_api_token: token,
             ..Default::default()
         };
         let engine = Arc::new(
@@ -307,6 +359,10 @@ mod tests {
                 .expect("policy engine starts"),
         );
         (engine, dir)
+    }
+
+    async fn test_engine_with_cap(label: &str, max_pending: usize) -> (Arc<PolicyEngine>, PathBuf) {
+        test_engine_with_cap_and_token(label, max_pending, None).await
     }
 
     async fn test_engine(label: &str) -> (Arc<PolicyEngine>, PathBuf) {
@@ -603,5 +659,72 @@ mod tests {
             .await
             .expect("approve");
         let _ = first_call.await.expect("first call task");
+    }
+
+    #[tokio::test]
+    async fn approval_token_auth_rejects_missing_and_accepts_correct_header() {
+        let (engine, _dir) =
+            test_engine_with_cap_and_token("http-token", 10, Some("test-token".into())).await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        // Missing token -> 401 on every approval route.
+        let no_token = client
+            .get(format!("{base}/v1/approvals"))
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(no_token, reqwest::StatusCode::UNAUTHORIZED);
+
+        // Wrong token -> 401.
+        let wrong = client
+            .get(format!("{base}/v1/approvals"))
+            .header("x-jarvis-approval-token", "wrong")
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(wrong, reqwest::StatusCode::UNAUTHORIZED);
+
+        // Correct token -> 200.
+        let ok = client
+            .get(format!("{base}/v1/approvals"))
+            .header("x-jarvis-approval-token", "test-token")
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(ok, reqwest::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn health_and_check_remain_unauthenticated_when_token_is_set() {
+        let (engine, _dir) =
+            test_engine_with_cap_and_token("http-token-public", 10, Some("t".into())).await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let health = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(health, reqwest::StatusCode::OK);
+
+        let check = client
+            .post(format!("{base}/v1/check"))
+            .json(&serde_json::json!({
+                "principal": "jarvis",
+                "action": "execute",
+                "resource": "tool:filesystem.read",
+                "context": {}
+            }))
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(check, reqwest::StatusCode::OK);
     }
 }

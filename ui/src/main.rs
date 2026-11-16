@@ -19,6 +19,7 @@ use approvals::ApprovalsView;
 fn main() {
     let base_url = std::env::var("JARVIS_POLICY_HTTP_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
+    let approval_token = std::env::var("JARVIS_POLICY_APPROVAL_TOKEN").ok();
 
     application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(980.), px(680.)), cx);
@@ -31,7 +32,9 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|cx| ApprovalsView::new(base_url.clone(), cx)),
+            |_window, cx| {
+                cx.new(|cx| ApprovalsView::new(base_url.clone(), approval_token.clone(), cx))
+            },
         )
         .expect("open the JARVIS approval window");
         cx.activate(true);

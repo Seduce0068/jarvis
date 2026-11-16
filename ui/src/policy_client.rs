@@ -54,18 +54,26 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub struct PolicyClient {
     base_url: String,
+    token: Option<String>,
     agent: ureq::Agent,
 }
 
 impl PolicyClient {
+    /// Convenience constructor (used by tests and embedders).
+    #[allow(dead_code)]
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_timeouts(base_url, REQUEST_TIMEOUT, CONNECT_TIMEOUT)
+        Self::new_with_token(base_url, None)
+    }
+
+    pub fn new_with_token(base_url: impl Into<String>, token: Option<String>) -> Self {
+        Self::with_timeouts(base_url, token, REQUEST_TIMEOUT, CONNECT_TIMEOUT)
     }
 
     /// Constructor with explicit deadlines (used by timeout tests).
     #[allow(dead_code)]
     fn with_timeouts(
         base_url: impl Into<String>,
+        token: Option<String>,
         request_timeout: Duration,
         connect_timeout: Duration,
     ) -> Self {
@@ -77,6 +85,7 @@ impl PolicyClient {
             .build();
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            token,
             agent: ureq::Agent::new_with_config(config),
         }
     }
@@ -84,9 +93,11 @@ impl PolicyClient {
     /// Requests currently awaiting an operator decision.
     pub fn pending(&self) -> Result<Vec<ApprovalRequest>> {
         let url = format!("{}/v1/approvals", self.base_url);
-        let mut response = self
-            .agent
-            .get(&url)
+        let mut request = self.agent.get(&url);
+        if let Some(token) = &self.token {
+            request = request.header("X-Jarvis-Approval-Token", token);
+        }
+        let mut response = request
             .call()
             .with_context(|| format!("GET {url} failed"))?;
         let body: PendingResponse = response
@@ -108,8 +119,11 @@ impl PolicyClient {
 
     fn decide<B: Serialize + ?Sized>(&self, id: &str, verb: &str, body: &B) -> Result<()> {
         let url = format!("{}/v1/approval/{id}/{verb}", self.base_url);
-        self.agent
-            .post(&url)
+        let mut request = self.agent.post(&url);
+        if let Some(token) = &self.token {
+            request = request.header("X-Jarvis-Approval-Token", token);
+        }
+        request
             .send_json(body)
             .with_context(|| format!("POST {url} failed"))?;
         Ok(())
@@ -171,6 +185,7 @@ mod tests {
 
         let client = PolicyClient::with_timeouts(
             format!("http://{addr}"),
+            None,
             Duration::from_millis(150),
             Duration::from_secs(1),
         );

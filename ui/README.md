@@ -64,6 +64,9 @@ JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
 ## セキュリティ
 
 - 接続先は `JARVIS_POLICY_HTTP_URL` のみ（既定は loopback）。
+- policy 側で `JARVIS_POLICY_APPROVAL_TOKEN` が設定されている場合は、
+  同じ値を `JARVIS_POLICY_APPROVAL_TOKEN` に設定すると全リクエストに
+  `X-Jarvis-Approval-Token` ヘッダを付与する。
 - 特権操作・外部送信・秘密情報の読み取りは行いません。
 - 決定時の `approved_by` は既定で `koppe`（オペレータ）です。
 
