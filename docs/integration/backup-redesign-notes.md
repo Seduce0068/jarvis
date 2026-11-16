@@ -229,3 +229,13 @@ systemctl list-timers jarvis-backup.timer --no-pager
 ```
 
 restore 手順の隔離検証は未実施（bk-1 の残課題）。
+
+### 整合性検証ツール（2026-11-17 追加）
+
+[infra/scripts/verify-backup.sh](../../infra/scripts/verify-backup.sh)（`make verify-backup`）
+で、manifest.txt に記録されたサイズと SHA-256 を実ファイルと照合する。
+読み取り専用で、破壊操作は一切行わない。
+
+実バックアップ2セットに対して実行し **ok=11 fail=0** を確認（1セット目は
+ディレクトリ hash 修正前に作られたため config-policy.tar が manifest に無いが、
+記録済みファイルはすべて整合）。

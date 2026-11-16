@@ -154,6 +154,7 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 | Secret scan (値を出力しない) | `make secret-scan` |
 | Backup preflight (read-only) | `make backup-preflight` |
 | Install backup timer (dry-run default) | `make install-backup-timer`（適用は `sudo ... --apply`） |
+| Verify backup integrity | `make verify-backup`（読み取り専用） |
 | Legacy guard regression | `make safety-test`（`ci-local` にも含まれる） |
 
 ## Service Ports (localhost only, accessed via Tailscale)
