@@ -92,7 +92,7 @@
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
 | SEC-1 | otelcol unit の repo/実機差分の整合 | **2026-11-16 解消（repo側）**: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) を実機の稼働 unit と機能一致させた（`User/Group=koppe`、`op run`/`EnvironmentFile` 撤去、直接 `otelcol-contrib --config`）。functional diff で一致を確認。資格情報の供給元は未特定（secret 値は未確認）。 | 実機適用は不要（repo が実機に追従）。Grafana 認証の供給経路が判明した場合に unit 注記を更新する。 |
-| SEC-2 | バックアップ系の 1Password 依存解消 | バックアップ系レガシー資産に 1Password 依存が残る（2026-11-15 確認）: [infra/systemd/jarvis-backup.service](../../infra/systemd/jarvis-backup.service) は `/etc/jarvis/op.env`（`OP_SERVICE_ACCOUNT_TOKEN` 想定）を参照、[rust/scripts/backup.rs](../../rust/scripts/backup.rs) / [rust/scripts/restore.rs](../../rust/scripts/restore.rs) は `op inject` を使用。OCI/rclone 前提とも結合。 | BK-1 の保存先/認証設計と合わせて解消（現行運用の秘密管理方式との整合を要確認、実機 secret 変更は別判断） |
+| SEC-2 | バックアップ系の 1Password 依存解消 | **2026-11-17 実質解消**: 現行バックアップは [backup-local.sh](../../infra/scripts/backup-local.sh) で OCI/rclone/op 非依存、実バックアップ検証済み。レガシー [backup.rs](../../rust/scripts/backup.rs) / [restore.rs](../../rust/scripts/restore.rs) の `op inject` は残存するが、[backup.sh](../../infra/scripts/backup.sh) / [restore.sh](../../infra/scripts/restore.sh) は fail-closed 化され実機では呼ばれない（`make safety-test` が担保）。unit も `op.env` 参照を撤去済み。 | レガシー実装の `op inject` コード自体は参照用として残置。実機 secret 変更は不要（新バックアップは secret を読まない）。 |
 
 ### Cedar schema の整備状況（2026-11-16、ユーザー指定項目）
 
