@@ -22,7 +22,6 @@ if ! command -v "$runner" >/dev/null 2>&1; then
   exit 127
 fi
 
-# shellcheck disable=SC2086  # $extra is intentionally a flag list
 extra=()
 for arg in "$@"; do
   case "$arg" in
