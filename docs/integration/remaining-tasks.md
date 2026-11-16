@@ -48,6 +48,21 @@
 | SEC-1 | otelcol unit の repo/実機差分の整合 | repo: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) は `op run` + `/etc/jarvis/op.env` + `User=jarvis`。2026-11-15 実機確認（メタデータ/設定内容の閲覧なし）: `/etc/systemd/system/otelcol.service` は `User=koppe`/`Group=koppe` かつ `op run`・`EnvironmentFile` なしで `/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml` を直接起動し `active`/`enabled`。`/etc/jarvis/otel.env`・`/etc/jarvis/op.env` は存在せず、`/etc/jarvis/otelcol-config.yaml` は `root:root 0644`（資格情報供給元は未特定）。[AGENTS.md](../../AGENTS.md) には op→bws 移行未完了の記載あり。 | 実機の正しい起動/認証方式を非破壊で特定し（資格情報の供給元・参照先・必要権限、**secret の値は確認/記録/共有しない**）、repo か実機のどちらを正とするか決定。統一時は実行ユーザー/グループ、`EnvironmentFile`/`op run`/`bws` 等、config 読取権限、`/var/log/jarvis` 等の書込先を含めて整合させ、監視停止・認証失敗リスクを考慮したデプロイ/ロールバック手順で実施。**非破壊確認の例（read-only・値を出さない）**: `systemctl status otelcol --no-pager`、`systemctl cat otelcol.service`（unit 本文に資格情報が直書きされていないか目視確認）、`find /etc/systemd -path '*otelcol*' -ls`（drop-in/override 有無と権限）、`ls -ld /etc/jarvis /var/log/jarvis 2>/dev/null; ls -l /etc/jarvis/otelcol* /etc/jarvis/otel.env /etc/jarvis/op.env 2>/dev/null`（存在・所有者・mode のみ）、`journalctl -u otelcol -n 200 --no-pager`（認証失敗/endpoint エラー等の有無を確認し、共有時は秘匿情報をマスク）。`systemctl show -p Environment/EnvironmentFiles ...` や env ファイル/設定本文の表示は secret 値を露出し得るため原則行わない（必要時は権限管理された手順で別途判断）。 |
 | SEC-2 | バックアップ系の 1Password 依存解消 | バックアップ系レガシー資産に 1Password 依存が残る（2026-11-15 確認）: [infra/systemd/jarvis-backup.service](../../infra/systemd/jarvis-backup.service) は `/etc/jarvis/op.env`（`OP_SERVICE_ACCOUNT_TOKEN` 想定）を参照、[rust/scripts/backup.rs](../../rust/scripts/backup.rs) / [rust/scripts/restore.rs](../../rust/scripts/restore.rs) は `op inject` を使用。OCI/rclone 前提とも結合。 | BK-1 の保存先/認証設計と合わせて解消（現行運用の秘密管理方式との整合を要確認、実機 secret 変更は別判断） |
 
+### Cedar schema の整備状況（2026-11-16、ユーザー指定項目）
+
+[infra/config/policy/cedar_schema.cedarschema](../../infra/config/policy/cedar_schema.cedarschema):7 の TODO に対応し、
+以下を実施済み:
+
+- namespace を braces 形式へ修正し schema 自体が parse 可能に。
+- entity 属性を optional 化し、`ApprovalRequest` entity を追加。
+- `shipped_cedar_schema_parses` と `shipped_policies_validate_against_shipped_schema`
+  の2テストを追加（後者は `cedar_policy::Validator` の strict mode で
+  `policies.cedar` が schema に適合することを検証）。
+
+**未実施**: gateway が渡す tool 引数は untyped JSON のため closed record として
+表現できず、**runtime での schema validation は有効化していない**（schema は
+引き続き informational）。有効化にはツール単位の typed context 契約が必要。
+
 ### MCP-1 承認フローのセキュリティ境界（2026-11-16 レビュー）
 
 - jarvis-policy の承認 API（`/v1/approval`, `/v1/approvals`,
