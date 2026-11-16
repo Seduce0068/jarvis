@@ -12,6 +12,7 @@
 
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 /// A pending approval request as returned by `jarvis-policy`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -44,23 +45,48 @@ struct DenyBody<'a> {
     reason: &'a str,
 }
 
+/// Overall deadline for a single policy HTTP exchange.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Connect deadline (loopback connects are immediate).
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Blocking client for the policy approval endpoints.
 #[derive(Clone)]
 pub struct PolicyClient {
     base_url: String,
+    agent: ureq::Agent,
 }
 
 impl PolicyClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        Self::with_timeouts(base_url, REQUEST_TIMEOUT, CONNECT_TIMEOUT)
+    }
+
+    /// Constructor with explicit deadlines (used by timeout tests).
+    #[allow(dead_code)]
+    fn with_timeouts(
+        base_url: impl Into<String>,
+        request_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Self {
+        // Both polling and decision posts are short; a hung policy service
+        // must not occupy a GPUI background thread indefinitely.
+        let config = ureq::config::Config::builder()
+            .timeout_global(Some(request_timeout))
+            .timeout_connect(Some(connect_timeout))
+            .build();
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
+            agent: ureq::Agent::new_with_config(config),
         }
     }
 
     /// Requests currently awaiting an operator decision.
     pub fn pending(&self) -> Result<Vec<ApprovalRequest>> {
         let url = format!("{}/v1/approvals", self.base_url);
-        let mut response = ureq::get(&url)
+        let mut response = self
+            .agent
+            .get(&url)
             .call()
             .with_context(|| format!("GET {url} failed"))?;
         let body: PendingResponse = response
@@ -82,7 +108,8 @@ impl PolicyClient {
 
     fn decide<B: Serialize + ?Sized>(&self, id: &str, verb: &str, body: &B) -> Result<()> {
         let url = format!("{}/v1/approval/{id}/{verb}", self.base_url);
-        ureq::post(&url)
+        self.agent
+            .post(&url)
             .send_json(body)
             .with_context(|| format!("POST {url} failed"))?;
         Ok(())
@@ -124,5 +151,36 @@ mod tests {
     fn base_url_trailing_slash_is_normalized() {
         let client = PolicyClient::new("http://127.0.0.1:8081/");
         assert_eq!(client.base_url, "http://127.0.0.1:8081");
+    }
+
+    #[test]
+    fn hung_policy_endpoint_times_out() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("test address");
+        let handle = std::thread::spawn(move || {
+            // Accept the connection and keep it open without answering.
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            std::thread::sleep(Duration::from_millis(600));
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+        });
+
+        let client = PolicyClient::with_timeouts(
+            format!("http://{addr}"),
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+        );
+        let started = std::time::Instant::now();
+        let result = client.pending();
+        assert!(result.is_err(), "hung endpoint must error: {result:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "must fail within the configured deadline"
+        );
+        let _ = handle.join();
     }
 }
