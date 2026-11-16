@@ -131,8 +131,9 @@ bash infra/scripts/check-deploy-drift.sh
 # View logs
 sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-context -f
 
-# Backup: 保存先未決定のため未運用（ADR-0004）。
-# rust/scripts/backup.rs / restore.rs は OCI Object Storage 前提のレガシー。
+# Backup: ローカル専用バックアップ（ADR-0004, BK-1/BK-2）。
+# bash infra/scripts/backup-local.sh --apply   # postgres ユーザーで実行
+# make install-backup-timer                     # 導入は dry-run が既定
 ```
 
 ## Key Commands
@@ -152,6 +153,7 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 | Local CI gates (CI 停止時の代替) | `make ci-local` |
 | Secret scan (値を出力しない) | `make secret-scan` |
 | Backup preflight (read-only) | `make backup-preflight` |
+| Install backup timer (dry-run default) | `make install-backup-timer`（適用は `sudo ... --apply`） |
 | Legacy guard regression | `make safety-test`（`ci-local` にも含まれる） |
 
 ## Service Ports (localhost only, accessed via Tailscale)

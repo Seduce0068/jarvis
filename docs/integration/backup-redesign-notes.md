@@ -181,3 +181,51 @@ ExecStart パスだけ直しても導入可能にならない。**BK-1 の保存
 
 参照・調査は `rust-script <script> --help` で直接可能（実装自体は残置）。
 `make lint` の `--help` 起動確認も引き続き成功する。
+
+## 2026-11-17: ローカルバックアップの実装と timer 導入準備（BK-1/BK-2）
+
+ユーザーから「timer導入」の明示指示を受け、OCI を使わない前提で実装した。
+
+### 決定（方針）
+
+- **保存先**: `/var/lib/postgresql/jarvis-backups/<host>-<timestamp>/`（ローカルディスク、
+  postgres:postgres 0700）。OCI/NAS は使用しない（ADR-0004）。
+- **実行主体**: `postgres` OS ユーザー。`pg_dump -d jarvis` が peer 認証で動く。
+  レガシー unit の `User=jarvis` は実機にユーザーが存在しないため使用不可。
+- **対象**: PostgreSQL `jarvis` DB dump / Qdrant `jarvis_memories` snapshot /
+  非 secret 設定 allowlist（mcp_allowlist, pii_patterns, otelcol-config, policy/）。
+  **secret（`*.env`, `bws.env`, token）は一切読まない**。
+- **完全性**: `manifest.txt` に各ファイルのサイズと SHA-256 を記録。
+- **安全装置**: 既定は dry-run、`--apply` で実書き込み、保持削除は `--retain-days` opt-in。
+
+### 実装物
+
+- [infra/scripts/backup-local.sh](../../infra/scripts/backup-local.sh): 本体
+  （`set -euo pipefail`、shellcheck クリーン）。
+- [infra/systemd/jarvis-backup.service](../../infra/systemd/jarvis-backup.service)
+  と [.timer](../../infra/systemd/jarvis-backup.timer) を現行化。
+  `systemd-analyze verify` 成功。
+- [infra/scripts/install-backup-timer.sh](../../infra/scripts/install-backup-timer.sh):
+  導入スクリプト（dry-run 既定、`--apply` は root 必須、rollback 付き）。
+
+### 検証（Runtime Proof）
+
+- `sudo -u postgres ... backup-local.sh --backup-dir ...`（dry-run）成功。
+- 実バックアップ1回成功: `postgres-jarvis.sql.gz` (1832 B),
+  `qdrant-snapshot.bin` (247296 B), 設定4点, `manifest.txt` 生成。
+  secret ファイルは生成物に不在（確認済み）、set の権限 0700。
+- `systemd-analyze verify` で unit 2件エラーなし。
+- `make install-backup-timer`（dry-run）成功。
+
+### 未完了（要ユーザー操作）
+
+このセッションでは **sudo が対話認証を要求するため特権適用が不可**。
+実機導入には以下をユーザーが実行する必要がある:
+
+```bash
+cd ~/ドキュメント/作業用/jarvis/jarvis
+sudo bash infra/scripts/install-backup-timer.sh --apply
+systemctl list-timers jarvis-backup.timer --no-pager
+```
+
+restore 手順の隔離検証は未実施（bk-1 の残課題）。

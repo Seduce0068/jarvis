@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -49,6 +49,9 @@ secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は�
 
 safety-test: ## レガシー backup/restore/deploy が fail-closed であることを検証
 	@bash ci/scripts/test-legacy-guards.sh
+
+install-backup-timer: ## ローカルバックアップ timer を導入（既定は dry-run）
+	@bash infra/scripts/install-backup-timer.sh
 
 backup-preflight: ## バックアップ前提の読み取り専用チェック（BK-1 安全ゲート）
 	@bash infra/scripts/backup-preflight.sh

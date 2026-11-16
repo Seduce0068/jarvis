@@ -31,6 +31,15 @@
 
 ### BK/SEC 進捗（2026-11-16 追記）
 
+### BK-2 進捗（2026-11-17）
+
+- **BK-1/BK-2 のローカル実装完了**: `backup-local.sh` + 現行 unit + `install-backup-timer.sh`
+  を追加。実バックアップ1回成功（PG dump/Qdrant snapshot/非 secret 設定/
+  SHA-256 manifest、secret 不在・0700 を確認）。`systemd-analyze verify` 成功。
+- **timer の実機有効化は未完了**: このセッションで sudo が対話認証を要求し
+  特権適用不可。ユーザーが `sudo bash infra/scripts/install-backup-timer.sh --apply`
+  を実行する必要がある（[backup-redesign-notes.md](backup-redesign-notes.md) 参照）。
+
 - **レガシー backup.sh / restore.sh は fail-closed 化済み**: `--dry-run` でも
   ローカル削除が走る backup.rs / 破壊的な restore.rs への委譲を止め、
   実行時に理由と `backup-preflight.sh` への導線を表示（exit 2）。
