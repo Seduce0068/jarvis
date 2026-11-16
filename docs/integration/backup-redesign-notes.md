@@ -146,3 +146,20 @@ status: draft
 - **認証/暗号化**: `bws.env` を含む `/etc/jarvis` をどう暗号化して保管するか未決定。
 - **復旧検証**: 隔離先での restore test 手順が未確立。
 - 上記が揃うまで定期バックアップ（timer）は有効化しない（既存の安全ゲートを維持）。
+
+### `systemd-analyze verify` 的结果（2026-11-16 追記）
+
+`systemd-analyze verify infra/systemd/*.service infra/systemd/*.timer` を
+読み取り専用で実行した結果、他の unit は問題なしだが
+`jarvis-backup.service` のみ以下を検出:
+
+```
+jarvis-backup.service: Command /usr/local/bin/rust-script is not executable
+```
+
+実機の `rust-script` は `/home/koppe/.cargo/bin/rust-script` に存在し
+`/usr/local/bin` には無い。ただしこの unit は `User=jarvis` /
+`/opt/jarvis/scripts` / `/run/rclone` / `op.env` 前提のレガシーであり、
+ExecStart パスだけ直しても導入可能にならない。**BK-1 の保存先・認証設計が
+確定するまで unit 自体を再設計し、verify を通してから導入する**（現状は
+未導入を維持）。
