@@ -63,6 +63,37 @@ for set in "${sets[@]}"; do
       fail=$((fail+1))
     fi
   done < "$manifest"
+
+  # Format-level checks: prove the payloads are structurally readable
+  # (does NOT restore or touch production data).
+  if [ -f "$set/postgres-jarvis.sql.gz" ]; then
+    if gzip -t "$set/postgres-jarvis.sql.gz" 2>/dev/null; then
+      echo "  FORMAT OK: postgres dump (gzip readable)"
+      ok=$((ok+1))
+    else
+      echo "  FORMAT MISMATCH: postgres dump gzip corrupt"
+      fail=$((fail+1))
+    fi
+  fi
+  if [ -f "$set/qdrant-snapshot.bin" ]; then
+    if tar -tf "$set/qdrant-snapshot.bin" >/dev/null 2>&1; then
+      echo "  FORMAT OK: qdrant snapshot (tar readable)"
+      ok=$((ok+1))
+    else
+      echo "  FORMAT MISMATCH: qdrant snapshot unreadable"
+      fail=$((fail+1))
+    fi
+  fi
+  for archive in "$set"/config-*.tar; do
+    [ -f "$archive" ] || continue
+    if tar -tf "$archive" >/dev/null 2>&1; then
+      echo "  FORMAT OK: $(basename "$archive") (tar readable)"
+      ok=$((ok+1))
+    else
+      echo "  FORMAT MISMATCH: $(basename "$archive") unreadable"
+      fail=$((fail+1))
+    fi
+  done
 done
 
 echo "== result: ok=$ok fail=$fail =="
