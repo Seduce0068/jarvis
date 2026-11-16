@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -41,10 +41,14 @@ ci-local: ## CI と同一の Rust ゲートをローカル実行（CI 停止時�
 	@cd rust && cargo test --all-targets --locked
 	@cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+	@bash ci/scripts/test-legacy-guards.sh
 	@echo "ci-local: all gates passed"
 
 secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は出力しない）
 	@python3 ci/scripts/secret_scan.py
+
+safety-test: ## レガシー backup/restore/deploy が fail-closed であることを検証
+	@bash ci/scripts/test-legacy-guards.sh
 
 backup-preflight: ## バックアップ前提の読み取り専用チェック（BK-1 安全ゲート）
 	@bash infra/scripts/backup-preflight.sh

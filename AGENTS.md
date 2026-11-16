@@ -152,6 +152,7 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 | Local CI gates (CI 停止時の代替) | `make ci-local` |
 | Secret scan (値を出力しない) | `make secret-scan` |
 | Backup preflight (read-only) | `make backup-preflight` |
+| Legacy guard regression | `make safety-test`（`ci-local` にも含まれる） |
 
 ## Service Ports (localhost only, accessed via Tailscale)
 
