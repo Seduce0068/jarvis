@@ -8,7 +8,7 @@ tags:
   - gpui
   - desktop-ui
   - approval
-status: proposed
+status: accepted
 deciders:
   - "Sovereign AI Agent"
 date: "2026-11-16"
