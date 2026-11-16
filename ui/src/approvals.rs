@@ -159,10 +159,9 @@ impl ApprovalsView {
                         "action={}  期限={}  id={}",
                         request.action, expires, request.id
                     )))
-                    .child(muted(format!(
-                        "args: {}",
-                        truncate(&request.context.to_string(), 120)
-                    ))),
+                    // Show the full argument payload: truncating here would
+                    // let an operator approve a command they never saw.
+                    .child(muted(format_args(&request.context))),
             )
             .child(
                 div()
@@ -204,7 +203,12 @@ impl Render for ApprovalsView {
         // Clone so the row listeners can take `cx` mutably while rendering.
         let pending = self.pending.clone();
 
-        let mut list = div().flex().flex_col().gap_2().overflow_hidden();
+        let mut list = div()
+            .id(SharedString::from("approval-list"))
+            .flex()
+            .flex_col()
+            .gap_2()
+            .overflow_y_scroll();
         if !self.loaded {
             list = list.child(muted("読み込み中…"));
         } else if pending.is_empty() {
@@ -244,27 +248,39 @@ fn muted(text: impl Into<SharedString>) -> impl IntoElement {
     div().text_sm().text_color(rgb(0x9a9a9a)).child(text.into())
 }
 
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_string();
-    }
-    let head: String = text.chars().take(max_chars).collect();
-    format!("{head}…")
+/// Format the approval payload for display. Deliberately untruncated: an
+/// operator must see the whole command before deciding.
+fn format_args(context: &serde_json::Value) -> String {
+    let body = serde_json::to_string_pretty(context).unwrap_or_else(|_| context.to_string());
+    format!("args: {body}")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
+    use super::format_args;
+    use serde_json::json;
 
     #[test]
-    fn truncate_keeps_short_text() {
-        assert_eq!(truncate("abc", 10), "abc");
+    fn approval_args_are_never_truncated() {
+        let long = "あ".repeat(500);
+        let context = json!({ "cmd": long });
+        let rendered = format_args(&context);
+        assert!(
+            rendered.contains(&long),
+            "full payload must be visible before approval"
+        );
+        assert!(rendered.starts_with("args: {"));
     }
 
     #[test]
-    fn truncate_respects_char_boundaries() {
-        // Multi-byte characters must not be split mid-character.
-        let text = "承認要求ありがとうございます";
-        assert_eq!(truncate(text, 3), "承認要…");
+    fn simple_context_is_rendered() {
+        let expected = format!(
+            "args: {}",
+            serde_json::to_string_pretty(&json!({"url": "https://example.com/"})).unwrap()
+        );
+        assert_eq!(
+            format_args(&json!({"url": "https://example.com/"})),
+            expected
+        );
     }
 }
