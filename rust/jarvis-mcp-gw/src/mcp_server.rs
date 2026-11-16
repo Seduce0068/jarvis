@@ -36,20 +36,68 @@ impl JarvisMcpServer {
 
     /// Tools the endpoint principal may call, in stable order.
     fn tools(&self) -> Vec<Tool> {
-        // Allowlist entries do not carry argument schemas; the gateway
-        // accepts a JSON object per the upstream tool's own contract.
-        let schema = Arc::new(
-            serde_json::json!({ "type": "object", "additionalProperties": true })
-                .as_object()
-                .cloned()
-                .unwrap_or_default(),
-        );
         self.gateway
             .tools_for_principal(&self.principal)
             .into_iter()
-            .map(|tool| Tool::new(tool.name, tool.description, schema.clone()))
+            .map(|tool| {
+                Tool::new(
+                    tool.name.clone(),
+                    tool.description,
+                    Arc::new(tool_input_schema(&tool.name)),
+                )
+            })
             .collect()
     }
+}
+
+/// JSON Schema for a tool's arguments.
+///
+/// Native handlers have well-known contracts that clients should see so
+/// they can validate calls before asking for an approval. Unknown tools
+/// fall back to a permissive object schema (upstream MCP tools publish
+/// their own schema).
+fn tool_input_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
+    let path = serde_json::json!({
+        "type": "string",
+        "description": "Path relative to the configured base directory"
+    });
+    let max_bytes = serde_json::json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 1048576,
+        "description": "Maximum bytes returned"
+    });
+    let schema = match name {
+        "filesystem.read" => serde_json::json!({
+            "type": "object",
+            "properties": { "path": path, "max_bytes": max_bytes },
+            "required": ["path"],
+            "additionalProperties": true
+        }),
+        "filesystem.list" | "git.status" | "git.diff" => serde_json::json!({
+            "type": "object",
+            "properties": { "path": path },
+            "required": ["path"],
+            "additionalProperties": true
+        }),
+        "web.fetch" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "url": {
+                    "type": "string",
+                    "description": "Public HTTP(S) URL (private addresses are refused)"
+                },
+                "max_bytes": max_bytes
+            },
+            "required": ["url"],
+            "additionalProperties": true
+        }),
+        _ => serde_json::json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+    };
+    schema.as_object().cloned().unwrap_or_default()
 }
 
 impl ServerHandler for JarvisMcpServer {
@@ -196,6 +244,22 @@ requires_approval = true
             .as_str()
             .unwrap_or_default()
             .to_string()
+    }
+
+    #[test]
+    fn native_tools_advertise_required_arguments() {
+        use super::tool_input_schema;
+
+        let read = tool_input_schema("filesystem.read");
+        assert_eq!(read["required"], serde_json::json!(["path"]));
+        assert!(read["properties"]["path"].is_object());
+
+        let fetch = tool_input_schema("web.fetch");
+        assert_eq!(fetch["required"], serde_json::json!(["url"]));
+
+        let unknown = tool_input_schema("some.upstream.tool");
+        assert_eq!(unknown["type"], "object");
+        assert_eq!(unknown["additionalProperties"], true);
     }
 
     #[tokio::test]

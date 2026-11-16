@@ -63,6 +63,7 @@ allowlist_path = "$tmp/config/mcp_allowlist.toml"
 sandbox_type = "none"
 sandbox_config = {}
 policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
 mcp_principal = "opencode"
 TOML
 
@@ -109,7 +110,7 @@ curl -q -s -o "$tmp/tools.b" -X POST "http://127.0.0.1:$port/mcp" \
   -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
   -H "mcp-session-id: $sid" \
   -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
-python3 - "$tmp/tools.b" >"$tmp/tools.names" <<'PY'
+python3 - "$tmp/tools.b" >"$tmp/tools.names" 2>"$tmp/tools.schema" <<'PY'
 import json, re, sys
 t = open(sys.argv[1]).read()
 objs = []
@@ -120,10 +121,18 @@ if not objs:
     try: objs = [json.loads(t)]
     except Exception: pass
 names = []
+schemas_ok = False
 for o in objs:
     if isinstance(o, dict) and 'result' in o:
-        names = [tool.get('name') for tool in o['result'].get('tools', [])]
+        tools = o['result'].get('tools', [])
+        names = [tool.get('name') for tool in tools]
+        schemas_ok = any(
+            tool.get('name') == 'filesystem.read'
+            and 'path' in (tool.get('inputSchema') or {}).get('required', [])
+            for tool in tools
+        )
 print('\n'.join(names))
+print('SCHEMA_OK' if schemas_ok else 'SCHEMA_MISSING', file=sys.stderr)
 PY
 # MCP-1 承認フロー実装後は requires_approval=true のツールも tools/list に
 # 表示される（呼び出すと人間承認を待つ）。読み取り系4ツールが必ず含まれる
@@ -146,6 +155,13 @@ else
   else
     echo "  FAIL: mcp tools/list missing expected tools"; fail=$((fail+1))
   fi
+fi
+
+# MCP 契約: 既知のネイティブツールは引数スキーマを公開する
+if grep -q SCHEMA_OK "$tmp/tools.schema"; then
+  echo "  PASS: mcp tools/list inputSchema (filesystem.read requires path)"; ok=$((ok+1))
+else
+  echo "  FAIL: mcp tools/list inputSchema"; fail=$((fail+1))
 fi
 
 # ネイティブ読み取り系の tools/call が実際に成功すること
