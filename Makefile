@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -34,6 +34,9 @@ deploy: ## (レガシー) リモートホストへデプロイ (HOST=jarvis-host
 
 deploy-dry: ## (レガシー) リモートデプロイ内容の確認 (dry-run, HOST=jarvis-host)
 	@rust-script rust/scripts/deploy.rs --rust-dir rust $(HOST) deploy --dry-run
+
+backup-preflight: ## バックアップ前提の読み取り専用チェック（BK-1 安全ゲート）
+	@bash infra/scripts/backup-preflight.sh
 
 deploy-mcp-gw: ## jarvis-mcp-gw をローカルへ安全デプロイ（乾燥実行が既定）
 	@bash infra/scripts/deploy-mcp-gw-safe.sh

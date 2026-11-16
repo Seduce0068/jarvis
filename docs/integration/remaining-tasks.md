@@ -29,6 +29,18 @@
 | BK-3 | OpenTofu/OCI 後始末資産の扱い決定 | [infra/opentofu/](../../infra/opentofu/) は未使用レガシー（[infra/opentofu/README.md](../../infra/opentofu/README.md)）。後始末用に [infra/scripts/decommission-oci.sh](../../infra/scripts/decommission-oci.sh) あり（既定は dry-run、`--apply` で destroy 実行。`tofu`/OCI CLI 設定/`infra/opentofu/environments/prod` の init/state 等が前提。実行時は `tofu init`・`state list`・最終 state バックアップ（`$HOME/jarvis-oci-state-<ts>.json`）・`destroy` plan 作成を行う）。2026-11-15 確認: `infra/opentofu/environments/prod/.terraform/terraform.tfstate` がローカルに存在（内容は未確認）。 | 「保持」「削除」「OCI リソース削除実行」の方針決定。**実行判断/実行前の確認例（read-only・dry-run優先）**: (1) `tofu`/OCI CLI/認証情報・対象 tenancy/region・`terraform.tfvars` 等の前提を確認し、state の所在・鮮度・バックアップ（別保管含む）を確保する。(2) OCI コンソール/CLI で実リソース有無・保護すべきデータ（Object Storage/Block Volume 等）の残存を確認し、未追跡リソースや state 不整合がないか点検する（A1 Free 枠再取得不可等の影響も考慮）。(3) まず dry-run（既定）で `state list` と destroy plan の対象を確認し、出力を保存/レビューしてから `--apply` の要否を判断する。(4) 実削除時のロールバック困難性・Tailscale 管理画面の後処理等を手順化し、必要な承認/権限のもとで実施する（実削除/OCI 操作は別判断・手順）。 |
 | BK-4 | レガシー設定テンプレートの整理 | `infra/config/*.env` は参照テンプレート扱いだが記述状態が混在（2026-11-15 確認）: [policy.env](../../infra/config/policy.env), [context.env](../../infra/config/context.env), [event.env](../../infra/config/event.env), [otel.env](../../infra/config/otel.env) は先頭に legacy/reference template 注記があり `op://` 参照を含む。一方 [code_server.env](../../infra/config/code_server.env), [mcp_gateway.env](../../infra/config/mcp_gateway.env) は `op://` を含まないが「Populated by 1Password CLI at runtime」等の旧前提記述が残り、現行 unit/`bws`/実機配置との整合は未確認（実機 secret/運用変更なし）。 | ファイル単位で棚卸しし、「現行参照テンプレートとして維持」「注記/値の更新」「legacy 凍結」「削除」の方針を現行運用（bws/op 等）・installed unit 実態確定後に判断する（実機 secret の変更・不要ファイル削除は別判断）。 |
 
+### BK/SEC 進捗（2026-11-16 追記）
+
+- **BK-1/BK-2/SEC-2 の安全ゲート実装済み**: [backup-preflight.sh](../../infra/scripts/backup-preflight.sh)
+  （`make backup-preflight`）で、サービス状態・ツール有無・設定ファイル列挙（secret 値は読まない）・
+  `op://` テンプレート数・timer 状態を読み取り専用で検査。実機 run は fail=0 / warn=2。
+- **しかし保存先・認証/暗号化方式・復旧検証手順は未決定**のため、バックアップ本体の
+  再実装と timer 有効化は行っていない（[backup-redesign-notes.md](backup-redesign-notes.md) の
+  「仍未解決（ブロッカー）」を維持）。OCI は ADR-0004 で除外。
+- **BK-3**: OCI リソース削除は「ociは使わない」方針のもと実行しない（後始末スクリプトは参照用に保留）。
+- **BK-4 / SEC-2**: `op://` 参照4ファイルと `bws.env` の扱いは、現行の秘密管理方式を
+  確定した上で判断する（実機 secret の内容は確認していない）。
+
 ## 3. シークレット管理・構成ドリフト（優先度: 中〜高）
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
