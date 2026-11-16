@@ -1,0 +1,41 @@
+# CI-1 (safe wiring): manual-dispatch-only review gate.
+#
+# The full 3-stage pipeline lives in ci/review-gate.yml. That file is kept as
+# the reference implementation (it includes auto-merge) and is NOT wired here
+# verbatim: auto-merge and PR-triggered execution require credentials and
+# policy decisions that are not yet made.
+#
+# This workflow exposes only the read-only gate-check stage on manual
+# dispatch. It never merges, comments, or modifies repository state.
+name: Review Gate (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to check (read-only)"
+        required: true
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-gate-${{ github.event.inputs.pr_number }}
+  cancel-in-progress: true
+
+jobs:
+  gate-check:
+    name: Read-only gate check
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Run repository gates locally
+        # Use the repo's own verified gate suite instead of opencode/CLI.
+        # This avoids OpenCode credentials entirely while still checking
+        # fmt / check / test / clippy / UI / secret scan / safety guards.
+        run: make ci-local
