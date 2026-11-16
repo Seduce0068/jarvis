@@ -40,7 +40,6 @@
   （dry-run 既定）へ誘導（exit 2）。`make deploy-dry` は直接実装を呼ぶため
   従来どおり動作。
 
-
 - **BK-1/BK-2/SEC-2 の安全ゲート実装済み**: [backup-preflight.sh](../../infra/scripts/backup-preflight.sh)
   （`make backup-preflight`）で、サービス状態・ツール有無・設定ファイル列挙（secret 値は読まない）・
   `op://` テンプレート数・timer 状態を読み取り専用で検査。実機 run は fail=0 / warn=2。
