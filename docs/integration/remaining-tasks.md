@@ -72,6 +72,17 @@
 表現できず、**runtime での schema validation は有効化していない**（schema は
 引き続き informational）。有効化にはツール単位の typed context 契約が必要。
 
+### 承認フロー堅牢化（2026-11-17 追加）
+
+- `jarvis-policy` の承認キューに保留数上限（`JARVIS_POLICY_APPROVAL_MAX_PENDING`、
+  既定100・後方互換）と重複 ID 拒否を追加。loopback の無認証エンドポイント
+  に対するリソース枯渇・保留ハイジャックを防ぐ（テスト追加）。
+- `jarvis-mcp-gw` は承認後に policy を再チェック（kill switch の承認中発動で
+  fail-closed）、allowlist の `max_args_size` を実効化、ツール入力スキーマを
+  `tools/list` で公開。
+- 旧 backup/restore/deploy ランチャーは fail-closed 化し、`make safety-test`
+  で回帰検証（ci-local に組込）。
+
 ### MCP-1 承認フローのセキュリティ境界（2026-11-16 レビュー）
 
 - jarvis-policy の承認 API（`/v1/approval`, `/v1/approvals`,
