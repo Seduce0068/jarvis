@@ -46,7 +46,7 @@ for set in "${sets[@]}"; do
     continue
   fi
   while read -r name expected_bytes expected_sha; do
-    [ -z "$name" ] && continue
+    case "$name" in ''|\#*) continue ;; esac
     path="$set/$name"
     if [ ! -f "$path" ]; then
       echo "  MISSING: $name"

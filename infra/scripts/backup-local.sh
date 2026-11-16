@@ -48,7 +48,8 @@ mkdir -p "$set_dir"
 chmod 0700 "$set_dir"
 
 manifest="$set_dir/manifest.txt"
-: > "$manifest"
+# Header line carries the creation time for precise, opt-in retention.
+printf '# created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$manifest"
 
 record() { # name path
   local name="$1" path="$2" bytes sha
@@ -101,9 +102,21 @@ echo "Backup complete: $set_dir"
 
 if [ -n "$retain_days" ]; then
   echo "Retention: ${retain_days} days (opt-in, destructive)"
-  find "$backup_dir" -mindepth 1 -maxdepth 1 -type d -mtime "+${retain_days}" -print \
-    | while IFS= read -r old; do
-        echo "PRUNE: $old"
-        rm -rf "$old"
-      done
+  cutoff_ts="$(( $(date +%s) - retain_days * 86400 ))"
+  while IFS= read -r old; do
+    # Prefer the manifest timestamp; fall back to the <host>-<YYYYMMDD-HHMMSS>
+    # directory name used by this script and the earlier Rust implementation.
+    created="$(sed -n 's/^# created_at=//p' "$old/manifest.txt" 2>/dev/null | head -1)"
+    if [ -n "$created" ]; then
+      epoch="$(date -u -d "$created" +%s 2>/dev/null || echo 0)"
+    else
+      base="$(basename "$old")"
+      stamp="${base##*-}"
+      epoch="$(date -d "${stamp:0:8} ${stamp:9:2}:${stamp:11:2}:${stamp:13:2}" +%s 2>/dev/null || echo 0)"
+    fi
+    if [ "$epoch" -gt 0 ] && [ "$epoch" -lt "$cutoff_ts" ]; then
+      echo "PRUNE: $old (created epoch=$epoch)"
+      rm -rf "$old"
+    fi
+  done < <(find "$backup_dir" -mindepth 1 -maxdepth 1 -type d | sort)
 fi
