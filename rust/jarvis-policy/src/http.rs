@@ -70,6 +70,14 @@ fn default_deny_reason() -> String {
     "denied by user".to_string()
 }
 
+// SECURITY NOTE (2026-11-16): the approval endpoints below are intentionally
+// unauthenticated. The HTTP listener binds to 127.0.0.1 and the host is a
+// single-user desktop with systemd service isolation. They are NOT safe to
+// expose beyond loopback: any local process could list, approve or deny
+// pending requests (and the MCP gateway's approval client relies on this).
+// Adding auth requires coordinated changes to jarvis-mcp-gw, ui/, and this
+// router; it is tracked in docs/integration/remaining-tasks.md.
+
 pub fn router(engine: Arc<PolicyEngine>) -> Router {
     Router::new()
         .route("/health", get(health))
