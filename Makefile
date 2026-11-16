@@ -53,7 +53,8 @@ safety-test: ## レガシー backup/restore/deploy が fail-closed であるこ�
 install-backup-timer: ## ローカルバックアップ timer を導入（既定は dry-run）
 	@bash infra/scripts/install-backup-timer.sh
 
-verify-backup: ## バックアップの整合性を検証（読み取り専用）
+verify-backup: ## バックアップの整合性を検証（読み取り専用・最新スクリプトを同期）
+	@install -m 0755 infra/scripts/verify-backup.sh /opt/jarvis/scripts/verify-backup.sh
 	@sudo -u postgres bash /opt/jarvis/scripts/verify-backup.sh
 
 backup-preflight: ## バックアップ前提の読み取り専用チェック（BK-1 安全ゲート）
