@@ -347,4 +347,43 @@ mod tests {
             "must fail within the configured deadline, not hang"
         );
     }
+
+    /// The configured token must reach jarvis-policy as the exact header.
+    #[tokio::test]
+    async fn token_is_sent_as_approval_header() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_for_handler = seen.clone();
+        let app = axum::Router::new().route(
+            "/v1/approval",
+            axum::routing::post(move |headers: axum::http::HeaderMap| {
+                let value = headers
+                    .get("x-jarvis-approval-token")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("")
+                    .to_string();
+                *seen_for_handler.lock().expect("lock") = Some(value);
+                async { axum::Json(json!({ "decision": "Pending" })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let client = ApprovalClient::new_with_token(base, Some("secret-token".into()));
+        let _ = client
+            .request_approval("opencode", "execute", "tool:shell.execute", &json!({}))
+            .await
+            .expect("request succeeds");
+        assert_eq!(
+            seen.lock().expect("lock").as_deref(),
+            Some("secret-token"),
+            "header must carry the configured token"
+        );
+    }
 }

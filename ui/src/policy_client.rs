@@ -198,4 +198,44 @@ mod tests {
         );
         let _ = handle.join();
     }
+
+    /// The UI must send the configured token to jarvis-policy as well.
+    #[test]
+    fn approval_token_is_sent_as_header() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let seen_for_thread = seen.clone();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).expect("read");
+            let request = String::from_utf8_lossy(&buf[..n]).to_string();
+            let token = request
+                .lines()
+                .find(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with("x-jarvis-approval-token:")
+                })
+                .and_then(|line| line.split_once(':'))
+                .map(|(_, value)| value.trim().to_string());
+            *seen_for_thread.lock().expect("lock") = token;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"pending\":[]}")
+                .expect("write");
+        });
+
+        let client =
+            PolicyClient::new_with_token(format!("http://{addr}"), Some("ui-token".to_string()));
+        // The request fails to parse only if the body is malformed; an empty
+        // pending list is valid, so this must succeed.
+        let result = client.pending();
+        handle.join().expect("server thread");
+        assert!(result.is_ok(), "unexpected: {result:?}");
+        assert_eq!(seen.lock().expect("lock").as_deref(), Some("ui-token"));
+    }
 }

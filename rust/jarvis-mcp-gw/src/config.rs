@@ -100,6 +100,41 @@ mcp_principal = "opencode"
         assert_eq!(config.policy_http_addr, "http://127.0.0.1:8081");
     }
 
+    /// Config files written before the approval token was introduced must
+    /// still load (the token is optional, default None).
+    #[test]
+    fn legacy_config_without_approval_token_still_loads() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+mcp_principal = "opencode"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
+        assert_eq!(config.approval_api_token, None);
+    }
+
+    #[test]
+    fn explicit_approval_token_is_honoured() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+approval_api_token = "test-token"
+mcp_principal = "opencode"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
+        assert_eq!(config.approval_api_token.as_deref(), Some("test-token"));
+    }
+
     #[test]
     fn explicit_policy_http_addr_is_honoured() {
         let toml = r#"
