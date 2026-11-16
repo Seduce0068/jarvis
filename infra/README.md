@@ -57,7 +57,7 @@ infra/
 │   ├── mcp_gateway.env         # MCP Gateway env (1Password)
 │   ├── event.env               # Event Normalizer env (1Password)
 │   ├── context.env             # Context Builder env (1Password)
-│   ├── otel.env                # OTel Collector env (1Password)
+│   ├── otel.env                # OTel Collector env (legacy template, op://)
 │   └── code_server.env         # code-server env (1Password)
 ├── grafana/                     # Importable Grafana dashboards
 │   ├── README.md
@@ -246,8 +246,9 @@ Provision/update the access token as needed (example; 実行前に対象パス�
 # sudo systemctl restart jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context
 ```
 
-`otelcol` still uses 1Password (`op run`) until the Grafana credentials are
-migrated（SEC-1: repo unit と installed unit の差異あり。実機変更は別判断）。
+The repo `otelcol.service` now matches the installed unit and runs
+`otelcol-contrib` directly (no `op run`, SEC-1 2026-11-16). The Grafana
+credential supply path remains unidentified; do not assume `otel.env` is used.
 
 `infra/config/*.env` files remain a reference for which environment
 variables each service expects. 旧デプロイ資産（`deploy.rs`）は

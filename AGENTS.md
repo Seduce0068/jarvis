@@ -169,7 +169,9 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 
 Rust services receive secrets from **Bitwarden Secrets Manager** via
 `bws run`, using the root-owned `/etc/jarvis/bws.env` (`BWS_ACCESS_TOKEN`).
-`otelcol` may still use 1Password (`op run`) until migrated.
+`otelcol` runs directly (no `op run` / `bws run` in its unit, SEC-1 2026-11-16);
+the Grafana credential supply path is not yet identified. Do not assume
+`infra/config/otel.env` is in use.
 
 The `infra/config/*.env` files are reference templates and retain legacy
 `op://` references; the current systemd units do not use them directly.
