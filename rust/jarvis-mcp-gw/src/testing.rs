@@ -133,7 +133,40 @@ pub(crate) async fn shipped_policy_engine(label: &str) -> PolicyEngine {
 /// Start the real policy HTTP router on an ephemeral port and return its
 /// base URL, mirroring the wire path the gateway uses in production.
 pub(crate) async fn start_policy_http(label: &str) -> String {
-    let engine = Arc::new(shipped_policy_engine(label).await);
+    start_policy_http_with_token(label, None).await
+}
+
+/// Same as [`start_policy_http`] but configures the policy engine with an
+/// optional approval API token, so cross-crate auth tests can use the real
+/// `jarvis-policy` router.
+pub(crate) async fn start_policy_http_with_token(label: &str, token: Option<String>) -> String {
+    // Build the engine directly so the token can be injected before serving.
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
+    let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-policy-{label}"));
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .expect("create temp policy dir");
+    let model = dir.join("casbin_model.conf");
+    let policy = dir.join("casbin_policy.csv");
+    tokio::fs::copy(source.join("casbin_model.conf"), &model)
+        .await
+        .expect("copy casbin model");
+    tokio::fs::copy(source.join("casbin_policy.csv"), &policy)
+        .await
+        .expect("copy casbin policy");
+    let config = PolicyConfig {
+        casbin_model_path: model.to_string_lossy().into_owned(),
+        casbin_policy_path: policy.to_string_lossy().into_owned(),
+        cedar_policy_dir: dir.join("cedar").to_string_lossy().into_owned(),
+        kill_switch_admin_token: "test-admin-token".into(),
+        approval_api_token: token,
+        ..Default::default()
+    };
+    let engine = Arc::new(
+        PolicyEngine::new(config)
+            .await
+            .expect("policy engine starts"),
+    );
     let app = jarvis_policy::http::router(engine);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await

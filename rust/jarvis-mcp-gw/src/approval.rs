@@ -386,4 +386,58 @@ mod tests {
             "header must carry the configured token"
         );
     }
+
+    /// Cross-crate E2E: the real jarvis-policy router with token auth must
+    /// accept a correctly configured gateway client and reject a wrong one.
+    #[tokio::test]
+    async fn real_policy_router_enforces_token() {
+        use crate::testing::start_policy_http_with_token;
+
+        let base =
+            start_policy_http_with_token("approval-auth-e2e", Some("e2e-token".to_string())).await;
+
+        let good = ApprovalClient::new_with_token(base.clone(), Some("e2e-token".into()));
+        let http = reqwest::Client::new();
+        let approver_base = base.clone();
+        let approver = tokio::spawn(async move {
+            loop {
+                let pending: serde_json::Value = http
+                    .get(format!("{approver_base}/v1/approvals"))
+                    .header("X-Jarvis-Approval-Token", "e2e-token")
+                    .send()
+                    .await
+                    .expect("list")
+                    .json()
+                    .await
+                    .expect("json");
+                if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
+                    let id = entry["id"].as_str().expect("id").to_owned();
+                    http.post(format!("{approver_base}/v1/approval/{id}/approve"))
+                        .header("X-Jarvis-Approval-Token", "e2e-token")
+                        .json(&json!({ "approved_by": "koppe" }))
+                        .send()
+                        .await
+                        .expect("approve");
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        });
+        let outcome = good
+            .request_approval("opencode", "execute", "tool:shell.execute", &json!({}))
+            .await
+            .expect("correct token is accepted");
+        approver.await.expect("approver task");
+        assert!(
+            matches!(outcome, ApprovalOutcome::Approved { .. }),
+            "unexpected: {outcome:?}"
+        );
+
+        let bad = ApprovalClient::new_with_token(base, Some("wrong-token".into()));
+        let error = bad
+            .request_approval("opencode", "execute", "tool:shell.execute", &json!({}))
+            .await
+            .expect_err("wrong token must be rejected by the policy router");
+        assert!(error.to_string().contains("401"), "unexpected: {error}");
+    }
 }
