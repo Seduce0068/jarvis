@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -34,6 +34,14 @@ deploy: ## (レガシー) リモートホストへデプロイ (HOST=jarvis-host
 
 deploy-dry: ## (レガシー) リモートデプロイ内容の確認 (dry-run, HOST=jarvis-host)
 	@rust-script rust/scripts/deploy.rs --rust-dir rust $(HOST) deploy --dry-run
+
+ci-local: ## CI と同一の Rust ゲートをローカル実行（CI 停止時の代替）
+	@cd rust && cargo fmt --all -- --check
+	@cd rust && cargo check --all-targets --locked
+	@cd rust && cargo test --all-targets --locked
+	@cd rust && cargo clippy --all-targets --locked -- -D warnings
+	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+	@echo "ci-local: all gates passed"
 
 backup-preflight: ## バックアップ前提の読み取り専用チェック（BK-1 安全ゲート）
 	@bash infra/scripts/backup-preflight.sh

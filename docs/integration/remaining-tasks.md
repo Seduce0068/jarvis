@@ -48,6 +48,24 @@
 | SEC-1 | otelcol unit の repo/実機差分の整合 | repo: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) は `op run` + `/etc/jarvis/op.env` + `User=jarvis`。2026-11-15 実機確認（メタデータ/設定内容の閲覧なし）: `/etc/systemd/system/otelcol.service` は `User=koppe`/`Group=koppe` かつ `op run`・`EnvironmentFile` なしで `/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml` を直接起動し `active`/`enabled`。`/etc/jarvis/otel.env`・`/etc/jarvis/op.env` は存在せず、`/etc/jarvis/otelcol-config.yaml` は `root:root 0644`（資格情報供給元は未特定）。[AGENTS.md](../../AGENTS.md) には op→bws 移行未完了の記載あり。 | 実機の正しい起動/認証方式を非破壊で特定し（資格情報の供給元・参照先・必要権限、**secret の値は確認/記録/共有しない**）、repo か実機のどちらを正とするか決定。統一時は実行ユーザー/グループ、`EnvironmentFile`/`op run`/`bws` 等、config 読取権限、`/var/log/jarvis` 等の書込先を含めて整合させ、監視停止・認証失敗リスクを考慮したデプロイ/ロールバック手順で実施。**非破壊確認の例（read-only・値を出さない）**: `systemctl status otelcol --no-pager`、`systemctl cat otelcol.service`（unit 本文に資格情報が直書きされていないか目視確認）、`find /etc/systemd -path '*otelcol*' -ls`（drop-in/override 有無と権限）、`ls -ld /etc/jarvis /var/log/jarvis 2>/dev/null; ls -l /etc/jarvis/otelcol* /etc/jarvis/otel.env /etc/jarvis/op.env 2>/dev/null`（存在・所有者・mode のみ）、`journalctl -u otelcol -n 200 --no-pager`（認証失敗/endpoint エラー等の有無を確認し、共有時は秘匿情報をマスク）。`systemctl show -p Environment/EnvironmentFiles ...` や env ファイル/設定本文の表示は secret 値を露出し得るため原則行わない（必要時は権限管理された手順で別途判断）。 |
 | SEC-2 | バックアップ系の 1Password 依存解消 | バックアップ系レガシー資産に 1Password 依存が残る（2026-11-15 確認）: [infra/systemd/jarvis-backup.service](../../infra/systemd/jarvis-backup.service) は `/etc/jarvis/op.env`（`OP_SERVICE_ACCOUNT_TOKEN` 想定）を参照、[rust/scripts/backup.rs](../../rust/scripts/backup.rs) / [rust/scripts/restore.rs](../../rust/scripts/restore.rs) は `op inject` を使用。OCI/rclone 前提とも結合。 | BK-1 の保存先/認証設計と合わせて解消（現行運用の秘密管理方式との整合を要確認、実機 secret 変更は別判断） |
 
+### CI 停止の原因（2026-11-16 実機確認・重要）
+
+`master` への push  triggered CI は 2026-11-15 05:22 UTC 以降 **全件 failure**
+（job は 1〜3 秒で steps なしで終了）。GitHub Checks API の annotation で
+原因を特定した:
+
+> "The job was not started because recent account payments have failed or
+> your spending limit needs to be increased. Please check the 'Billing & plans'
+> section in your settings"
+
+つまり **コード・ワークフロー設定の不具合ではなく、GitHub アカウントの
+支払い/ spending limit の問題**。再 run（attempt 2）でも同一だった。
+最後の成功 run は 2026-11-15 02:38 UTC（`43668759909`）。
+解決にはユーザーによる GitHub の Billing & plans での対応が必要
+（エージェント権限外）。CI 復旧後は最新 push の gates 結果を再確認する。
+
+CI が動かない間は `make ci-local`（後述）で同一ゲートをローカル実行できる。
+
 ## 4. CI/CD・レビュー基盤（優先度: 中）
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
