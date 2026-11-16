@@ -41,6 +41,7 @@ ci-local: ## CI と同一の Rust ゲートをローカル実行（CI 停止時�
 	@cd rust && cargo test --all-targets --locked
 	@cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
+	@python3 ci/scripts/secret_scan.py
 	@bash ci/scripts/test-legacy-guards.sh
 	@echo "ci-local: all gates passed"
 
