@@ -35,6 +35,10 @@
   ローカル削除が走る backup.rs / 破壊的な restore.rs への委譲を止め、
   実行時に理由と `backup-preflight.sh` への導線を表示（exit 2）。
   実装自体は `rust-script ... --help` で参照可能、`make lint` も成功。
+- **レガシー deploy.sh も fail-closed 化済み**: 旧 `jarvis-host` 宛リモート
+  デプロイ（OCI 時代の資産）への委譲を停止し、`deploy-mcp-gw-safe.sh`
+  （dry-run 既定）へ誘導（exit 2）。`make deploy-dry` は直接実装を呼ぶため
+  従来どおり動作。
 
 
 - **BK-1/BK-2/SEC-2 の安全ゲート実装済み**: [backup-preflight.sh](../../infra/scripts/backup-preflight.sh)
