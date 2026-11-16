@@ -25,7 +25,7 @@ generated:
 ## Overview
 
 - **Repository:** `jarvis` — JARVIS Personal AI System
-- **Architecture:** Unified ADR at `adr/0001-unified-architecture.md`; local-only infra in `adr/0004-local-only-no-oci.md`
+- **Architecture:** Unified ADR at `adr/0001-unified-architecture.md`; local-only infra in `adr/0004-local-only-no-oci.md`; GPUI desktop UI in `adr/0005-gpui-desktop-adoption.md`
 - **Core Decision:** OpenCode V2 = Official Agent Runtime; JARVIS Rust services = Policy/MCP/Event/Context sidecars
 
 ## Project Structure
@@ -47,8 +47,12 @@ jarvis/
 │   ├── config/                   # Config templates (pii_patterns, mcp_allowlist, policies)
 │   ├── opentofu/                 # 未使用レガシー（OCI IaC / cloud-init, ADR-0004）
 │   └── grafana/                  # Grafana dashboards
+├── ui/                           # GPUI approval console (standalone crate)
+│   ├── Cargo.toml                # gpui-pre / gpui-pre-platform / ureq
+│   └── src/                      # approvals.rs, policy_client.rs, main.rs
 ├── ci/                           # Review-flow pipeline definitions
-│   └── review-gate.yml           # review-flow pipeline (not wired to Actions yet)
+│   ├── review-gate.yml           # review-flow pipeline (not wired to Actions yet)
+│   └── scripts/                  # review-run.sh (runtime adapter), secret_scan.py
 ├── jarvis_personal_ai_architecture.md
 └── opencode-v2-oci-code-server-architecture-report.md
 ```
@@ -110,14 +114,10 @@ manually:
 3. **Stage 3 - Merge Gate** (re-run Stage 1, then auto-merge)
 
 ```bash
-# Run gate-check locally (requires OpenCode CLI)
-opencode run "/review-flow gate-check <pr-number> --json"
-
-# Run cross-review locally
-opencode run "/cross-review"
-
-# View metrics
-opencode run "/review-flow metrics --days 30 --json"
+# Runtime-agnostic adapter (JARVIS_REVIEW_RUNNER, default: opencode)
+bash ci/scripts/review-run.sh "/review-flow gate-check <pr-number>" --json
+bash ci/scripts/review-run.sh "/cross-review"
+bash ci/scripts/review-run.sh "/review-flow metrics --days 30 --json"
 ```
 
 ### Operational Scripts
@@ -145,8 +145,13 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 | Format check | `cd rust && cargo fmt --all --check` |
 | Deploy jarvis-mcp-gw | `bash infra/scripts/deploy-mcp-gw-safe.sh`（適用は `sudo ... --apply`） |
 | Deploy drift check | `bash infra/scripts/check-deploy-drift.sh` |
-| Run gate-check | `opencode run "/review-flow gate-check <pr>"` |
-| Run cross-review | `opencode run "/cross-review"` |
+| Run gate-check | `bash ci/scripts/review-run.sh "/review-flow gate-check <pr>" --json` |
+| Run cross-review | `bash ci/scripts/review-run.sh "/cross-review"` |
+| Build/run approval UI | `make ui-build` / `make ui-run`（詳細は [ui/README.md](ui/README.md)） |
+| Verify UI gates | `make ui-test` |
+| Local CI gates (CI 停止時の代替) | `make ci-local` |
+| Secret scan (値を出力しない) | `make secret-scan` |
+| Backup preflight (read-only) | `make backup-preflight` |
 
 ## Service Ports (localhost only, accessed via Tailscale)
 
@@ -196,6 +201,7 @@ deploy scripts.
 
 - [ADR-0001: Unified Architecture](adr/0001-unified-architecture.md)
 - [ADR-0004: Local-only (no OCI)](adr/0004-local-only-no-oci.md)
+- [ADR-0005: GPUI desktop adoption](adr/0005-gpui-desktop-adoption.md)
 - [OpenCode V2 Docs](https://opencode.ai/v2/docs)
 - [Cedar Policy Language](https://www.cedarpolicy.com/)
 - [rmcp - Rust MCP SDK](https://github.com/rmcp-rs/rmcp)

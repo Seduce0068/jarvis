@@ -22,13 +22,14 @@ The unified decision is recorded in
 | Path | Contents |
 | --- | --- |
 | `rust/` | Cargo workspace: `jarvis-core` plus the four sidecar services |
+| `ui/` | GPUI approval console (standalone crate; see [ui/README.md](ui/README.md)) |
 | `infra/` | systemd units, deploy/verify scripts, configs（OpenTofu/cloud-init は未使用レガシー） |
 | `adr/` | Architecture decision records |
 | `scripts/` | rust-script tooling (bootstrap, doctor, phone status) |
 | `config/` | Shell/git locale helpers and environment templates |
 | `docs/` | Architecture reports, calculations, and verification scripts |
 | `ci/` | Review-flow pipeline definitions |
-| `Makefile` | Common tasks (bootstrap, doctor, test, lint, deploy) |
+| `Makefile` | Common tasks incl. `ci-local`, `secret-scan`, `ui-*` |
 
 ## Verification
 
