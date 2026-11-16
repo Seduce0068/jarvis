@@ -68,15 +68,43 @@ else
   pass "legacy op:// templates"
 fi
 
-# 5) Backup timer state (must NOT be enabled before the design is settled).
+# 5) Backup timer state. The local-only design is settled (BK-1/BK-2), so an
+# active timer is now the desired end state; a missing timer means the user
+# still has to run the privileged install step.
 if systemctl list-unit-files jarvis-backup.timer --no-pager 2>/dev/null | grep -q jarvis-backup.timer; then
   if systemctl is-active --quiet jarvis-backup.timer 2>/dev/null; then
-    fails "backup timer" "active before design settled (BK-1/BK-2 gate)"
+    pass "backup timer" "active"
   else
-    warns "backup timer" "installed but inactive"
+    warns "backup timer" "installed but inactive (start with systemctl)"
   fi
 else
-  pass "backup timer" "not installed - expected"
+  warns "backup timer" "not installed - run 'sudo bash infra/scripts/install-backup-timer.sh --apply'"
+fi
+
+# 6) Repo-side install readiness (all checks are read-only/basic syntax).
+for artifact in infra/systemd/jarvis-backup.service infra/systemd/jarvis-backup.timer \
+                infra/scripts/backup-local.sh infra/scripts/verify-backup.sh \
+                infra/scripts/install-backup-timer.sh; do
+  if [ -f "$repo/$artifact" ]; then
+    pass "repo:$artifact"
+  else
+    fails "repo:$artifact" "missing"
+  fi
+done
+if command -v systemd-analyze >/dev/null 2>&1 \
+   && systemd-analyze verify "$repo/infra/systemd/jarvis-backup.service" \
+                             "$repo/infra/systemd/jarvis-backup.timer" >/dev/null 2>&1; then
+  pass "unit syntax" "systemd-analyze verify"
+else
+  fails "unit syntax" "systemd-analyze verify failed"
+fi
+# The new implementation must not reintroduce OCI/rclone/op dependencies.
+# Ignore comment lines: the header documents that OCI is *not* used.
+if grep -vE '^[[:space:]]*#' "$repo/infra/scripts/backup-local.sh" 2>/dev/null \
+   | grep -qiE 'rclone|op[[:space:]]+inject|op://|\boci\b'; then
+  fails "backup deps" "legacy OCI/op reference found in backup-local.sh"
+else
+  pass "backup deps" "no OCI/rclone/op"
 fi
 
 echo "== result: ok=$ok warn=$warn fail=$fail =="
