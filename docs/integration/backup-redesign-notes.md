@@ -153,7 +153,7 @@ status: draft
 読み取り専用で実行した結果、他の unit は問題なしだが
 `jarvis-backup.service` のみ以下を検出:
 
-```
+```text
 jarvis-backup.service: Command /usr/local/bin/rust-script is not executable
 ```
 
