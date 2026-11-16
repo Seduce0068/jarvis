@@ -1,5 +1,7 @@
-# CI-1: not wired into .github/workflows/ (manual/reference pipeline only).
-# CI-2: depends on OpenCode CLI/credentials and a runner with JARVIS toolchain.
+# CI-1: still not wired into .github/workflows/ (manual/reference pipeline).
+# CI-2: runtime-agnostic adapter in ci/scripts/review-run.sh (JARVIS_REVIEW_RUNNER,
+#       default `opencode`). Credentials/runner provisioning remains a decision.
+# 2026-11-16: fixed invalid gh commands, missing job outputs/install, npm cache.
 # See docs/integration/remaining-tasks.md for current status and decisions.
 name: JARVIS Review Flow
 
@@ -13,7 +15,14 @@ on:
         required: true
         type: number
 
+permissions:
+  contents: read
+  pull-requests: write
+  checks: write
+
 env:
+  # CI-2: swap the agent runtime without editing job definitions.
+  JARVIS_REVIEW_RUNNER: ${{ vars.JARVIS_REVIEW_RUNNER || 'opencode' }}
   OPENCODE_CLI_CONFIG_CONTENT: '{"session":{"permissions":"autoaccept"}}'
 
 jobs:
@@ -44,7 +53,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: 'npm'
 
       - name: Install OpenCode CLI
         run: |
@@ -61,7 +69,7 @@ jobs:
       - name: Run gate-check
         id: gate
         run: |
-          opencode run "/review-flow gate-check ${{ github.event.pull_request.number || github.event.inputs.pr_number }}" --json > gate-result.json
+          bash ci/scripts/review-run.sh "/review-flow gate-check ${{ github.event.pull_request.number || github.event.inputs.pr_number }}" --json > gate-result.json
           cat gate-result.json
           PASSED=$(jq -r '.passed' gate-result.json)
           SUMMARY=$(jq -c '.summary' gate-result.json)
@@ -77,13 +85,15 @@ jobs:
           retention-days: 7
 
       - name: Post gate status
-        if: always()
+        if: always() && (github.event.pull_request || github.event.inputs.pr_number)
         run: |
+          PR="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
           if [ "${{ steps.gate.outputs.passed }}" = "true" ]; then
-            gh pr check "Review Gate" --conclusion success --output "All gates passed"
+            BODY="Review Gate: all gates passed."
           else
-            gh pr check "Review Gate" --conclusion failure --output "Gate failed: ${{ steps.gate.outputs.summary }}"
+            BODY="Review Gate failed: ${{ steps.gate.outputs.summary }}"
           fi
+          gh pr comment "$PR" --body "$BODY"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -94,6 +104,12 @@ jobs:
     if: needs.gate-check.outputs.passed == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      verdict: ${{ steps.review.outputs.verdict }}
+      critical: ${{ steps.review.outputs.critical }}
+      high: ${{ steps.review.outputs.high }}
+      medium: ${{ steps.review.outputs.medium }}
+      low: ${{ steps.review.outputs.low }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -110,7 +126,7 @@ jobs:
 
       - name: Run cross-review
         run: |
-          opencode run "/cross-review" > cross-review-result.md
+          bash ci/scripts/review-run.sh "/cross-review" > cross-review-result.md
           cat cross-review-result.md
 
       - name: Parse review results
@@ -144,8 +160,10 @@ jobs:
           retention-days: 30
 
       - name: Post review summary
+        if: github.event.pull_request || github.event.inputs.pr_number
         run: |
-          gh pr comment --body-file cross-review-result.md
+          PR="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
+          gh pr comment "$PR" --body-file cross-review-result.md
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -176,9 +194,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install OpenCode CLI
+        run: |
+          curl -fsSL https://opencode.ai/v2/install | bash
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
       - name: Re-run gate-check (regression prevention)
         run: |
-          opencode run "/review-flow gate-check ${{ github.event.pull_request.number }}" --json > merge-gate-result.json
+          PR="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
+          bash ci/scripts/review-run.sh "/review-flow gate-check $PR" --json > merge-gate-result.json
           PASSED=$(jq -r '.passed' merge-gate-result.json)
           if [ "$PASSED" != "true" ]; then
             echo "::error::Merge gate failed - regression detected"
@@ -196,8 +220,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Enable auto-merge
+        if: github.event.pull_request || github.event.inputs.pr_number
         run: |
-          gh pr merge --auto --squash --delete-branch
+          PR="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
+          gh pr merge "$PR" --auto --squash --delete-branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -217,7 +243,7 @@ jobs:
 
       - name: Collect review metrics
         run: |
-          opencode run "/review-flow metrics --days 30 --json" > metrics.json
+          bash ci/scripts/review-run.sh "/review-flow metrics --days 30 --json" > metrics.json
           cat metrics.json
 
       - name: Upload metrics
