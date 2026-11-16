@@ -98,6 +98,9 @@ done
 echo "Config copy OK"
 
 chmod 0700 "$set_dir"
+# Completion marker: only written after every step succeeded. The verifier
+# uses this to reject partially-written sets from a failed run.
+printf 'complete %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$set_dir/COMPLETE"
 echo "Backup complete: $set_dir"
 
 if [ -n "$retain_days" ]; then

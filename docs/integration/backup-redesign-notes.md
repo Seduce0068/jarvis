@@ -243,4 +243,7 @@ restore 手順は [backup-restore-runbook.md](backup-restore-runbook.md) に文�
 フォーマット可読性も検査する（**復元は行わず**、構造のみ確認）。
 PostgreSQL dump は gzip 整合性に加え `pg_dump` 完了フッター
 （`PostgreSQL database dump complete`）の有無も確認し、
-途中で切れたダンプを検出する。
+途中で切れたダンプを検出する。さらに完全なセットには `COMPLETE`
+マーカーを書き、途中失敗で一部だけ書き込まれたセットを検証時に
+検出する（マーカー導入前のレガシーセットは manifest に `created_at`
+が無いことで識別し、後方互換として許容）。

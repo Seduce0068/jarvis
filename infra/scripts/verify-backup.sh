@@ -45,6 +45,20 @@ for set in "${sets[@]}"; do
     fail=$((fail+1))
     continue
   fi
+  # A partially failed run leaves a set whose recorded files are all valid.
+  # Require the marker written only after every step succeeded. Sets created
+  # before the marker existed are identified by a manifest header lacking the
+  # created_at field; those are accepted for backward compatibility.
+  created_at="$(sed -n 's/^# created_at=//p' "$manifest" | head -1)"
+  if [ -f "$set/COMPLETE" ]; then
+    echo "  COMPLETE marker: present"
+    ok=$((ok+1))
+  elif [ -z "$created_at" ]; then
+    echo "  COMPLETE marker: absent (legacy set, accepted)"
+  else
+    echo "  FAIL: COMPLETE marker missing (partial run)"
+    fail=$((fail+1))
+  fi
   while read -r name expected_bytes expected_sha; do
     case "$name" in ''|\#*) continue ;; esac
     path="$set/$name"
