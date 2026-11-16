@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup timer-status
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -51,6 +51,14 @@ secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は�
 safety-test: ## レガシー fail-closed とバックアップ検証ロジックを検証
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-verify-backup.sh
+
+timer-status: ## バックアップ timer の状態を表示（読み取り専用）
+	@echo "== backup timer status =="
+	@systemctl is-active jarvis-backup.timer 2>/dev/null || echo "inactive/not-installed"
+	@systemctl is-enabled jarvis-backup.timer 2>/dev/null || echo "not-enabled"
+	@systemctl list-timers jarvis-backup.timer --no-pager 2>/dev/null || true
+	@echo "== apply command =="
+	@echo "sudo bash infra/scripts/install-backup-timer.sh --apply"
 
 test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
 	@bash ci/scripts/test-verify-backup.sh
