@@ -183,7 +183,7 @@ deploy scripts.
 |-----------|----------------|------------|
 | **OpenCode V2** | Agent runtime, sessions, MCP client, model router, UI | TypeScript/Node |
 | **jarvis-policy** | Authorization (Cedar/Casbin), approval gates, kill switch | Rust |
-| **jarvis-mcp-gw** | MCP tool allowlist, sandboxing (firejail/bwrap/docker) | Rust |
+| **jarvis-mcp-gw** | MCP tool allowlist, native handlers + upstream MCP servers (ADR-0002) | Rust |
 | **jarvis-event** | Event normalization (HA, Android, Gmail, Calendar) | Rust |
 | **jarvis-context** | Memory (PostgreSQL + Qdrant), PII filtering, prompt assembly | Rust |
 | **code-server** | Browser IDE for human development | TypeScript/Node |
