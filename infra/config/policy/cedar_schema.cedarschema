@@ -3,8 +3,8 @@
 // Documents the entity model and request shapes used by the services.
 // This file is still NOT parsed for enforcement at runtime; enforcement
 // comes from policies.cedar (+ optional entities.json) in this directory.
-// A test in `rust/jarvis-policy/src/policy.rs` validates that this schema
-// parses and accepts the request/entity shapes below.
+// Tests in `rust/jarvis-policy/src/policy.rs` verify that this schema parses
+// and that the shipped `policies.cedar` validates against it.
 //
 // 2026-11-15: aligned with the requests actually built by
 // `CedarEngine::is_authorized`:

@@ -233,6 +233,7 @@ fn casbin_rule(principal: &str, action: &str, resource: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cedar_policy::{Schema, ValidationMode, Validator};
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -337,11 +338,36 @@ mod tests {
     #[test]
     fn shipped_cedar_schema_parses() {
         let text = include_str!("../../../infra/config/policy/cedar_schema.cedarschema");
-        let parsed = text.parse::<cedar_policy::Schema>();
+        let parsed = text.parse::<Schema>();
         assert!(
             parsed.is_ok(),
             "shipped cedar_schema.cedarschema must parse: {:?}",
             parsed.err().map(|err| err.to_string())
+        );
+    }
+
+    /// The shipped policies must be well-typed against the shipped schema.
+    /// This is a prerequisite for ever enabling runtime schema validation
+    /// (the TODO in cedar_schema.cedarschema:7).
+    #[test]
+    fn shipped_policies_validate_against_shipped_schema() {
+        let schema_text = include_str!("../../../infra/config/policy/cedar_schema.cedarschema");
+        let schema = schema_text
+            .parse::<Schema>()
+            .expect("schema parses (covered by shipped_cedar_schema_parses)");
+        let policies_text = include_str!("../../../infra/config/policy/policies.cedar");
+        let policies = policies_text
+            .parse::<PolicySet>()
+            .expect("policies parse (covered by shipped_policies_parse)");
+
+        let result = Validator::new(schema).validate(&policies, ValidationMode::Strict);
+        assert!(
+            result.validation_passed(),
+            "shipped policies must validate against the shipped schema: {:?}",
+            result
+                .validation_errors()
+                .map(|err| err.to_string())
+                .collect::<Vec<_>>()
         );
     }
 
