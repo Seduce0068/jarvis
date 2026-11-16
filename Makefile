@@ -39,7 +39,7 @@ ci-local: ## CI と同一の Rust ゲートをローカル実行（CI 停止時�
 	@cd rust && cargo fmt --all -- --check
 	@cd rust && cargo check --all-targets --locked
 	@cd rust && cargo test --all-targets --locked
-	@cd rust && cargo clippy --all-targets --locked -- -D warnings
+	@cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 	@echo "ci-local: all gates passed"
 

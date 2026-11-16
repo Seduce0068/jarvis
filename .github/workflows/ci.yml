@@ -28,6 +28,9 @@ jobs:
         gcc-aarch64-linux-gnu
         pkg-config
       working_directory: rust
+      # Global policy: unsafe blocks/functions are forbidden unless explicitly
+      # justified with a documented SAFETY comment.
+      clippy_args: -D clippy::undocumented_unsafe_blocks
       # aarch64 cross-build (matches rust/scripts/deploy.rs) and the
       # Docker-backed testcontainers integration test.
       extra_gates: |
