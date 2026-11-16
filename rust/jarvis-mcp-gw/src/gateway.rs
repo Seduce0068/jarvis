@@ -88,7 +88,7 @@ impl Gateway {
             return call_registered_tool(&server, tool, args, &tool_config).await;
         }
 
-        // Execute in the sandbox (opencode CLI fallback)
+        // Fall back to the native Rust handler (runtime-agnostic, ADR-0002).
         self.sandbox.execute(tool, args, &tool_config).await
     }
 
