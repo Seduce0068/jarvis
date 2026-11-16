@@ -143,8 +143,12 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 
 ## 残リスク（要検討）
 
-- 基準ディレクトリが `/home/koppe` 全体のため、読み取りツールは SSH 鍵や `.env` 等の機微ファイルにも到達し得る（localhost 限定・policy/allowlist 前提）。基準ディレクトリの絞り込み（例: 作業ディレクトリのみ）や機微パスの拒否リストを次段で検討する。
-- 承認フローは未実装。`web.fetch` 等は「承認必須・非表示」のまま実用不可。
+- **解消済み（2026-11-15/16）**: 承認フローは実装済み（MCP-1 + GPUI コンソール）。
+  基準ディレクトリも `/home/koppe` から repo ルートへ絞り込み済み（MCP-4）。
+  ただし両者とも repo 側の変更であり、**実機 `/etc` への反映は次回デプロイ適用時**。
+- 未実装ツールは承認を通過しても `no native handler` で fail-closed となる
+  （MCP-2）。外部サービス接続・資格情報・`ReadWritePaths` の判断待ち。
+- `web.fetch` の宛先ドメイン制限（egress allowlist）は未実装。
 
 ## 全体タスク一覧
 
