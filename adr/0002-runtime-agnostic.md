@@ -3,8 +3,9 @@ type: Architecture-Decision
 title: "ADR-0002: Runtime-agnostic JARVIS (ACP/MCP contracts)"
 description: OpenCode固定をやめ、エージェントランタイムとIDEをACP/MCPの契約で交換可能にする
 tags: [adr, jarvis, architecture, acp, mcp, dsh]
-status: proposed
+status: accepted
 date: "2026-11-09"
+accepted_at: "2026-11-17"
 ---
 
 ## Context
@@ -49,3 +50,16 @@ JARVIS を「ランタイム非依存のポリシー・記憶・イベント基�
 3. code-serverのオプション化、Zed(ACP)対応
 4. sandbox fallbackの汎用化（2026-11-15 完了: opencode CLI 依存の撤去）
 5. 契約テスト（MCP tools/call、ACP session、doctor）
+
+## Status rationale (2026-11-17)
+
+ユーザーが GPUI 採用を明示的に決定し（ADR-0005）、ランタイム非依存化の
+主要項目が実装・検証済みになったため `accepted` へ変更した。
+
+- MCP 契約: `tools/list` / `tools/call` を smoke (12 checks) と drift で検証。
+- 承認契約: gateway → policy HTTP → オペレータ決定 → fail-closed を E2E 検証。
+- 実行バックエンド: `opencode` CLI fallback を撤去し、ネイティブハンドラと
+  上流 MCP サーバ登録に統一。
+- レビュー実行: `ci/scripts/review-run.sh` で `JARVIS_REVIEW_RUNNER` による
+  バックエンド切替を契約テスト済み。
+- 残課題: ACP session / doctor の自動契約テストは未実装（段階移行の範囲外）。
