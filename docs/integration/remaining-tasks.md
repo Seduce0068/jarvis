@@ -36,6 +36,7 @@
 - **BK-1/BK-2 のローカル実装完了**: `backup-local.sh` + 現行 unit + `install-backup-timer.sh`
   を追加。実バックアップ1回成功（PG dump/Qdrant snapshot/非 secret 設定/
   SHA-256 manifest、secret 不在・0700 を確認）。`systemd-analyze verify` 成功。
+- **復旧 runbook を追加**: [backup-restore-runbook.md](backup-restore-runbook.md)（隔離先での非破壊検証手順）。
 - **timer の実機有効化は未完了**: このセッションで sudo が対話認証を要求し
   特権適用不可。ユーザーが `sudo bash infra/scripts/install-backup-timer.sh --apply`
   を実行する必要がある（[backup-redesign-notes.md](backup-redesign-notes.md) 参照）。

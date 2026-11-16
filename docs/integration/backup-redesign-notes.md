@@ -228,7 +228,8 @@ sudo bash infra/scripts/install-backup-timer.sh --apply
 systemctl list-timers jarvis-backup.timer --no-pager
 ```
 
-restore 手順の隔離検証は未実施（bk-1 の残課題）。
+restore 手順は [backup-restore-runbook.md](backup-restore-runbook.md) に文書化済み。
+隔離先での実復元検証は未実施（BK-1 の残課題）。
 
 ### 整合性検証ツール（2026-11-17 追加）
 
