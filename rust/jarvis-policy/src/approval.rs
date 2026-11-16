@@ -89,6 +89,14 @@ impl ApprovalStore {
         {
             let mut entries = self.inner.entries.write().await;
             Self::prune(&mut entries, self.inner.timeout, now);
+            // A caller-supplied id must not overwrite an existing pending
+            // request: doing so would drop the original waiter's channel and
+            // let a second caller hijack the operator's decision target.
+            if entries.contains_key(&id) {
+                return ApprovalDecision::Denied {
+                    reason: "duplicate approval id".into(),
+                };
+            }
             // Fail closed when the queue is saturated: an attacker on
             // loopback must not be able to grow pending state without limit.
             let pending = entries
@@ -357,6 +365,38 @@ mod tests {
         );
 
         store.decide(first_id, approved()).await.expect("decide");
+        let _ = waiter.await.expect("waiter task");
+    }
+
+    #[tokio::test]
+    async fn duplicate_id_does_not_hijack_a_pending_request() {
+        let store = ApprovalStore::new(Duration::from_secs(5));
+        let first = make_request();
+        let id = first.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(first).await });
+
+        loop {
+            if matches!(store.status(id).await, Ok(ApprovalDecision::Pending)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // A second caller reusing the id must not overwrite the pending entry.
+        let mut duplicate = make_request();
+        duplicate.id = id;
+        let decision = store.request(duplicate).await;
+        assert!(
+            matches!(&decision, ApprovalDecision::Denied { reason } if reason == "duplicate approval id"),
+            "unexpected: {decision:?}"
+        );
+        // The original request is still pending and the operator can decide it.
+        assert!(matches!(
+            store.status(id).await.expect("status"),
+            ApprovalDecision::Pending
+        ));
+        store.decide(id, approved()).await.expect("decide");
         let _ = waiter.await.expect("waiter task");
     }
 }
