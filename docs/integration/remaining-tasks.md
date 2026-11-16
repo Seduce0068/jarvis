@@ -3,6 +3,25 @@
 本ドキュメントは、リポジトリ内容・設定・実装・ローカル systemd 実態・ドキュメント記載を点検して整理した「現時点で残っている/判断待ちのタスク」の一覧です。
 **安全第一**の観点で、破壊的操作や未確認の前提に依存する作業は「要判断」として分離しています。
 
+## 最新状態（2026-11-17 確認・下記の確認前提より新しい）
+
+- 作業ツリー: クリーン、`origin/master` と同期（unpushed 0）。
+- コア4サービス: すべて `active`、health 200（8081〜8084）。
+- GitHub Issues / PR: オープン 0 件。
+- **CI**: 全 run が約3秒で failure。原因は Checks API の annotation で
+  「account payments have failed / spending limit」= **GitHub Billing 問題**。
+  コード・workflow 設定の不具合ではない（[ci.yml](../../.github/workflows/ci.yml) は
+  fmt/check/test/clippy + 追加 gate をローカル `make ci-local` と同等に実行）。
+  ローカルゲート `make ci-local` は全成功。
+- **バックアップ**: ローカル実装が完了し実バックアップ検証済み
+  （[backup-redesign-notes.md](backup-redesign-notes.md)）。ただし timer は
+  **未導入 / inactive**。sudo が対話認証を要求し、このセッションからは
+  特権適用不可（non-interactive sudo / pkexec ともに不可を確認）。
+  ユーザーが `sudo bash infra/scripts/install-backup-timer.sh --apply` を実行すると
+  配置・有効化・手動実行・整合性検証まで自動実施される。
+- **承認 API**: オプションのトークン認証を追加（既定は無効で後方互換）。
+  4コンポーネント横断の契約テスト済み。
+
 ## 確認前提（この洗い出し時点）
 
 - ブランチ/作業ツリー: `master...origin/master`、未コミット変更なし
