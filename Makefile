@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -48,8 +48,12 @@ ci-local: ## CI と同一の Rust ゲートをローカル実行（CI 停止時�
 secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は出力しない）
 	@python3 ci/scripts/secret_scan.py
 
-safety-test: ## レガシー backup/restore/deploy が fail-closed であることを検証
+safety-test: ## レガシー fail-closed とバックアップ検証ロジックを検証
 	@bash ci/scripts/test-legacy-guards.sh
+	@bash ci/scripts/test-verify-backup.sh
+
+test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
+	@bash ci/scripts/test-verify-backup.sh
 
 install-backup-timer: ## ローカルバックアップ timer を導入（既定は dry-run）
 	@bash infra/scripts/install-backup-timer.sh
