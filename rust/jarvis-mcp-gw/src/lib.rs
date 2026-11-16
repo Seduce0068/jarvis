@@ -150,6 +150,22 @@ impl McpGateway {
             }
         }
 
+        // Re-check policy after the human decision. The kill switch may have
+        // been activated while the operator was deciding, and an approval
+        // must never override the emergency stop (fail-closed).
+        if tool_config.requires_approval
+            && !self
+                .policy_client
+                .is_allowed(principal, "execute", &resource, &args)
+                .await
+        {
+            return Err(error::McpGatewayError::PolicyDenied {
+                tool: tool.to_owned(),
+                principal: principal.to_owned(),
+            }
+            .into());
+        }
+
         // Route to a registered MCP server or the sandbox fallback.
         self.gateway.execute(tool, args).await
     }
@@ -178,5 +194,147 @@ impl McpGateway {
         E: std::error::Error + Send + Sync + 'static,
     {
         self.gateway.register_transport(name, transport).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::McpGatewayConfig;
+    use crate::testing::{
+        run_mock_mcp_server, shipped_policy_client_with_engine, start_policy_http,
+    };
+    use serde_json::json;
+
+    const APPROVAL_ALLOWLIST: &str = r#"
+principals = ["opencode"]
+
+[[tools]]
+name = "shell.execute"
+description = "Execute a shell command"
+allowed_principals = ["opencode"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = true
+"#;
+
+    async fn gateway_with(
+        label: &str,
+    ) -> (Arc<McpGateway>, Arc<jarvis_policy::PolicyEngine>, String) {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-lib-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist, APPROVAL_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+        let policy_http = start_policy_http(label).await;
+        let (policy, engine) = shipped_policy_client_with_engine(label).await;
+        let config = McpGatewayConfig {
+            allowlist_path: allowlist.to_string_lossy().into_owned(),
+            policy_http_addr: policy_http.clone(),
+            ..Default::default()
+        };
+        let gateway = Arc::new(
+            McpGateway::new(config, Arc::new(policy))
+                .await
+                .expect("gateway starts"),
+        );
+        (gateway, engine, policy_http)
+    }
+
+    #[tokio::test]
+    async fn approved_tool_still_executes_when_policy_allows() {
+        let (gateway, _engine, policy_http) = gateway_with("approved-ok").await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "shell.execute", false));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock registers");
+
+        let http = reqwest::Client::new();
+        let call = tokio::spawn({
+            let gateway = gateway.clone();
+            async move {
+                gateway
+                    .execute_tool("shell.execute", json!({}), "opencode")
+                    .await
+            }
+        });
+        let id = loop {
+            let pending: serde_json::Value = http
+                .get(format!("{policy_http}/v1/approvals"))
+                .send()
+                .await
+                .expect("list")
+                .json()
+                .await
+                .expect("json");
+            if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
+                break entry["id"].as_str().expect("id").to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        http.post(format!("{policy_http}/v1/approval/{id}/approve"))
+            .json(&json!({ "approved_by": "koppe" }))
+            .send()
+            .await
+            .expect("approve");
+
+        let result = call.await.expect("call task").expect("tool executes");
+        assert_eq!(result["content"][0]["text"], "pong");
+    }
+
+    #[tokio::test]
+    async fn kill_switch_after_approval_denies_execution() {
+        let (gateway, engine, policy_http) = gateway_with("kill-after-approval").await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "shell.execute", false));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock registers");
+
+        let http = reqwest::Client::new();
+        let call = tokio::spawn({
+            let gateway = gateway.clone();
+            async move {
+                gateway
+                    .execute_tool("shell.execute", json!({}), "opencode")
+                    .await
+            }
+        });
+        let id = loop {
+            let pending: serde_json::Value = http
+                .get(format!("{policy_http}/v1/approvals"))
+                .send()
+                .await
+                .expect("list")
+                .json()
+                .await
+                .expect("json");
+            if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
+                break entry["id"].as_str().expect("id").to_owned();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        // Emergency stop engages while the operator is still deciding.
+        engine
+            .activate_kill_switch("test".into(), "test-admin-token")
+            .expect("kill switch activates");
+        http.post(format!("{policy_http}/v1/approval/{id}/approve"))
+            .json(&json!({ "approved_by": "koppe" }))
+            .send()
+            .await
+            .expect("approve");
+
+        let error = call.await.expect("call task").expect_err("must be denied");
+        assert!(
+            error.to_string().contains("Policy denied"),
+            "unexpected: {error}"
+        );
     }
 }

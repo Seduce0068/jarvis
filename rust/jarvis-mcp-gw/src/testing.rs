@@ -76,17 +76,29 @@ pub(crate) async fn run_mock_mcp_server(
 /// The gateway is policy-agnostic at compile time now; tests exercise the
 /// same wire path as production instead of an in-process engine.
 pub(crate) async fn shipped_policy_client(label: &str) -> PolicyClient {
+    shipped_policy_client_with_engine(label).await.0
+}
+
+/// Same as [`shipped_policy_client`] but also returns the engine handle so
+/// tests can drive state changes (e.g. the kill switch).
+pub(crate) async fn shipped_policy_client_with_engine(
+    label: &str,
+) -> (PolicyClient, Arc<PolicyEngine>) {
     let engine = Arc::new(shipped_policy_engine(label).await);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind policy test server");
     let addr = listener.local_addr().expect("policy test server address");
+    let serving = engine.clone();
     tokio::spawn(async move {
-        jarvis_policy::grpc::serve_with_listener(engine, listener)
+        jarvis_policy::grpc::serve_with_listener(serving, listener)
             .await
             .expect("policy test server runs");
     });
-    PolicyClient::new(format!("http://{addr}")).expect("policy client")
+    (
+        PolicyClient::new(format!("http://{addr}")).expect("policy client"),
+        engine,
+    )
 }
 
 /// Policy engine over the shipped policy files, with throwaway copies of
