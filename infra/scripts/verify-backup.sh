@@ -70,6 +70,15 @@ for set in "${sets[@]}"; do
     if gzip -t "$set/postgres-jarvis.sql.gz" 2>/dev/null; then
       echo "  FORMAT OK: postgres dump (gzip readable)"
       ok=$((ok+1))
+      # A truncated dump can still pass gzip -t. Check the SQL footer marker
+      # that pg_dump writes on a clean completion (no data values are read).
+      if gzip -cd "$set/postgres-jarvis.sql.gz" 2>/dev/null | tail -5 | grep -q "PostgreSQL database dump complete"; then
+        echo "  COMPLETE OK: postgres dump has pg_dump footer"
+        ok=$((ok+1))
+      else
+        echo "  COMPLETE MISMATCH: postgres dump missing footer (truncated?)"
+        fail=$((fail+1))
+      fi
     else
       echo "  FORMAT MISMATCH: postgres dump gzip corrupt"
       fail=$((fail+1))

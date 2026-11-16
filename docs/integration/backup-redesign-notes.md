@@ -241,3 +241,6 @@ restore 手順は [backup-restore-runbook.md](backup-restore-runbook.md) に文�
 ディレクトリ hash 修正前に作られたため config-policy.tar が manifest に無いが、
 記録済みファイルはすべて整合）。SHA-256 照合に加え、gzip/tar の
 フォーマット可読性も検査する（**復元は行わず**、構造のみ確認）。
+PostgreSQL dump は gzip 整合性に加え `pg_dump` 完了フッター
+（`PostgreSQL database dump complete`）の有無も確認し、
+途中で切れたダンプを検出する。
