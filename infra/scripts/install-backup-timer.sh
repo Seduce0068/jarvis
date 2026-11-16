@@ -25,6 +25,7 @@ if [ "$apply" -ne 1 ]; then
   echo "  DRY: mkdir -p $backup_dir (owner postgres:postgres, mode 0700)"
   echo "  DRY: systemctl daemon-reload; systemctl enable --now jarvis-backup.timer"
   echo "  DRY: verify timer active + next elapse"
+  echo "  DRY: run service once and verify backup integrity (read-only)"
   exit 0
 fi
 
@@ -54,7 +55,50 @@ systemctl daemon-reload
 systemctl enable --now jarvis-backup.timer
 
 sleep 2
-systemctl is-active --quiet jarvis-backup.timer || { echo "ERROR: timer not active" >&2; exit 1; }
+
+# Post-install verification: an enabled-but-never-firing timer is not useful.
+# Check the timer is active, that it has a next elapse, and that one manual
+# run succeeds (non-destructive payloads only; no retention pruning).
+echo "== post-install verification =="
+systemctl is-active --quiet jarvis-backup.timer \
+  || { echo "ERROR: timer not active" >&2; exit 1; }
+echo "  timer: active"
+
+next_elapse="$(systemctl list-timers jarvis-backup.timer --no-pager 2>/dev/null \
+  | awk 'NR==2 {print $1, $2, $3}')"
+if [ -z "$next_elapse" ]; then
+  echo "ERROR: timer has no next elapse" >&2
+  exit 1
+fi
+echo "  next elapse: $next_elapse"
+
+# Run the service once now to prove it works. This is a real backup, but
+# writes only to the dedicated backup dir and never prunes (no --retain-days).
+echo "  running service once (manual trigger) ..."
+if ! systemctl start jarvis-backup.service; then
+  echo "ERROR: backup service failed on manual run" >&2
+  systemctl status jarvis-backup.service --no-pager -l >&2 || true
+  exit 1
+fi
+if ! systemctl is-active --quiet jarvis-backup.service \
+   && [ "$(systemctl show -p ExecMainStatus --value jarvis-backup.service)" != "0" ]; then
+  echo "ERROR: backup service exited non-zero" >&2
+  exit 1
+fi
+echo "  manual run: OK"
+
+# Verify the newly produced backup set integrity (read-only).
+if command -v jq >/dev/null 2>&1 && [ -f "$repo/infra/scripts/verify-backup.sh" ]; then
+  verify_src="$repo/infra/scripts/verify-backup.sh"
+  verify_dst="/opt/jarvis/scripts/verify-backup.sh"
+  install -o root -g root -m 0755 "$verify_src" "$verify_dst"
+  echo "  verifying backup integrity ..."
+  if ! sudo -u postgres bash "$verify_dst" --backup-dir "$backup_dir" | tail -20; then
+    echo "ERROR: backup integrity verification failed" >&2
+    exit 1
+  fi
+fi
+
 trap - ERR
 systemctl list-timers jarvis-backup.timer --no-pager | head -3
-echo "== DONE: backup timer installed and enabled =="
+echo "== DONE: backup timer installed, enabled and verified =="
