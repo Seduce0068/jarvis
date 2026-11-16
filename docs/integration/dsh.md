@@ -127,3 +127,17 @@ DSH 側の設定箇所（2026-11-15 確認）:
 ## 関連
 
 - プロジェクト全体の残タスク/判断待ち事項: [remaining-tasks.md](remaining-tasks.md)
+
+### 自動再接続の実機確認（OPS-1、2026-11-17）
+
+DSH に同梱の `@deepseek-ai/dsh-mcp-client` は `reconnect` 設定をサポートしており、
+未指定でも既定で自動再接続する（`src/connection.ts` の `RECONNECT_DEFAULTS`）:
+
+- `enabled: true`
+- `initialDelayMs: 500`, `maxDelayMs: 30000`（指数バックオフ）
+- `maxAttempts: 10`（連続失敗10回で放弃）
+
+したがって gateway 再起動後の `Unauthorized: Session not found` は、
+再接続＋再 `initialize` で自動復旧する想定であり、**設定変更は不要**。
+`cordis.patch.yml` の `failOnStartupError: false` は起動時の一時障害を
+許容するためのもので、そのまま維持する。

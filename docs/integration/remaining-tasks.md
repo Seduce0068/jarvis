@@ -142,7 +142,7 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| OPS-1 | MCP クライアント再接続の運用明文化 | gateway 再起動後に MCP セッションが失効し再初期化が必要（前ゴールで `tools/call` 等が `Unauthorized: Session not found` となる事象を確認）。2026-11-15: [dsh.md](dsh.md) / [tool-matrix.md](tool-matrix.md) に再接続手順の注記を追記。 | クライアント実装側の自動再接続/再初期化（失敗時リトライ含む）の要否を検討し、必要なら実装タスク化。**検討観点（実装は別判断）**: (1) 検知条件は `Unauthorized: Session not found` 等のセッション失効エラーや接続断を明示的に扱い、恒久的な認可/設定エラーと混同しない。(2) 復旧は transport 再接続 + `initialize` の再実行を基本とし、endpoint/設定が同一なら再利用可能とする（[dsh.md](dsh.md) / [tool-matrix.md](tool-matrix.md) の運用メモと整合）。(3) リトライは回数・間隔・上限時間を設け、無限再試行や過負荷を避ける。(4) 冪等性: 現状の read-only ツールは再試行しやすいが、将来の書き込み/承認待ち/副作用ありツールでは自動再試行条件を厳格化する（失敗位置の不明確さをユーザーに提示）。(5) 再接続中/失敗時のユーザー通知、ログ、進行中操作の扱い（再実行要否）を定義し、必要なら DSH/Cordis 側のクライアント設定・実装箇所を特定してタスク化する。 |
+| OPS-1 | MCP クライアント再接続の運用明文化 | **2026-11-17 解消（調査）**: 実機の DSH `@deepseek-ai/dsh-mcp-client` は `reconnect` 設定をサポートし、未指定でも既定で `enabled=true` / `maxAttempts=10` / 500ms〜30s の exponential backoff で自動再接続する（`connection.ts` の `RECONNECT_DEFAULTS` を実機確認）。gateway 再起動後の `Unauthorized: Session not found` は一時的な接続断として扱われ、再 `initialize` 込みで復旧する想定。設定変更は不要。 | 現状の `cordis.patch.yml` の `failOnStartupError: false` を維持。再接続を明示したい場合のみ `reconnect: { enabled: true, maxAttempts: 10 }` を追加可能だが既定と同一。 |
 
 ## メモ
 
