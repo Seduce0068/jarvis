@@ -77,10 +77,32 @@ sudo -u postgres dropdb jarvis_restore_test
 Qdrant の snapshot は tar 形式なので、`snapshot_name` を指定して
 `PUT /collections/{new}/snapshots/{name}` で復元できる。
 
+Qdrant 公式ドキュメント（<https://qdrant.tech/documentation/snapshots/>）で
+確認した手順。**新規コレクションへ復元する場合は `priority=snapshot` が必須**
+（既定の `replica` だと既存データが優先され空コレクションになる）。
+
 ```bash
-# 手順: 隔離コレクションを作成 → snapshot をアップロード → 復元
-# 実コマンドは Qdrant のバージョン/APIに依存するため、実行前に
-# http://127.0.0.1:6333/dashboard で API を確認すること。
+# 隔離コレクション名を明示して、アップロードした snapshot から復元
+COLLECTION="jarvis_memories_restore_test"
+SNAPSHOT="$SET/qdrant-snapshot.bin"
+
+curl -fsS -X POST \
+  "http://127.0.0.1:6333/collections/${COLLECTION}" \
+  "/snapshots/upload?priority=snapshot" \
+  -H 'Content-Type:multipart/form-data' \
+  -F "snapshot=@${SNAPSHOT}"
+
+# 復元結果を確認（点数は値を出さず件数のみ）
+curl -fsS \
+  "http://127.0.0.1:6333/collections/${COLLECTION}" \
+  | jq '.result.points_count'
+```
+
+**注意**: snapshot は作成元と同一 minor 以降の Qdrant でのみ復元可能
+（現行 v1.14.1）。検証後は隔離コレクションを削除する。
+
+```bash
+curl -fsS -X DELETE "http://127.0.0.1:6333/collections/${COLLECTION}"
 ```
 
 **現状**: 隔離復元の自動スクリプトは未実装。手動検証が必要
