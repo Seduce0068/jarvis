@@ -36,9 +36,12 @@
      `mcp_allowlist.toml` から per-tool `sandbox_type` キーを削除（MCP-3、option A）。
      gateway 全体設定 `JARVIS_MCP_GW_SANDBOX_TYPE` は互換性のため解析のみに残存し、
      実行経路には影響しない。`/etc/jarvis/mcp_allowlist.toml` への同期は次回デプロイ時。
-2. **未実装ツールのallowlistエントリ**
-   - 2026-11-15 に対応済み: ネイティブ未実装ツールは `requires_approval = true` とし、`tools/list` から非表示にした。
-   - 実装/upstream登録後に承認要否を再設計する。
+2. **未実装ツールのallowlistエントリ** → **挙動変更（2026-11-16）**
+   - 旧状態: ネイティブ未実装ツールは `requires_approval = true` で `tools/list` から非表示だった。
+   - MCP-1 承認フロー実装後は承認必須ツールも `tools/list` に表示され、
+     呼び出し時に人間承認を待つ。未実装ツールは承認後に
+     `no native handler ... register an upstream MCP server` で fail-closed となる
+     （安全だが UX 上のデッドエンド）。
 3. **`web.fetch`の承認**
    - 2026-11-10 に `requires_approval = true` を配備済み。承認フロー実装後に扱いを再検討。
    - 2026-11-15: 承認フロー実装済み（MCP-1）。`requires_approval = true` のままでも
@@ -47,7 +50,7 @@
 ## デプロイ前チェックリスト
 
 - [x] `web.fetch` の `requires_approval = true` 適用（2026-11-10 配備）
-- [x] 未実装ツールの扱いを決定（2026-11-15: 承認必須化・非表示）
+- [x] 未実装ツールの扱いを決定（2026-11-16: 承認フロー経由・fail-closed）
 - [x] `sandbox_type`キーの整理方針を決定（2026-11-15: per-tool キー削除・ADR-0002 fallback 撤去）
 - [ ] `jarvis-mcp-gw`リリースバイナリのSHA256記録
 - [ ] デプロイ後に `/mcp` の `tools/list` で意図したツールだけ出ることを確認（systemd 実行時E2Eは `check-deploy-drift.sh` に追加済み）
