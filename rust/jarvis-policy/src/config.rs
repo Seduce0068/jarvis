@@ -95,6 +95,24 @@ default_deny = true
         assert_eq!(config.approval_max_pending, 100);
     }
 
+    /// `default_deny` is kept for config compatibility; authorization is
+    /// always deny-by-default regardless of this value.
+    #[test]
+    fn default_deny_is_kept_for_compatibility() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "changeme"
+approval_timeout_secs = 300
+default_deny = false
+"#;
+        let config: PolicyConfig = Figment::from(Toml::string(toml)).extract().expect("parses");
+        assert!(!config.default_deny); // parsed, but ignored by the engine
+    }
+
     #[test]
     fn explicit_cap_is_honoured() {
         let toml = r#"

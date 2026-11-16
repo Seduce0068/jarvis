@@ -48,6 +48,14 @@ impl PolicyEngine {
                  set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN"
             );
         }
+        // Policy evaluation is always deny-by-default (Cedar/Casbin or the
+        // kill switch). Reject an explicit opt-out so operators cannot be
+        // misled into believing `default_deny = false` weakens the check.
+        if !config.default_deny {
+            tracing::warn!(
+                "default_deny = false is ignored: authorization is always deny-by-default"
+            );
+        }
         let approvals = approval::ApprovalStore::with_max_pending(
             std::time::Duration::from_secs(config.approval_timeout_secs),
             config.approval_max_pending,
