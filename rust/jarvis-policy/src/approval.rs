@@ -37,6 +37,7 @@ struct Entry {
 
 struct Inner {
     timeout: Duration,
+    max_pending: usize,
     entries: RwLock<HashMap<Uuid, Entry>>,
 }
 
@@ -45,11 +46,24 @@ pub struct ApprovalStore {
     inner: Arc<Inner>,
 }
 
+/// Default cap on simultaneously pending approval requests.
+///
+/// The HTTP approval endpoint is loopback-only but unauthenticated; without
+/// a cap, repeated requests could grow the in-memory queue without bound.
+pub const DEFAULT_MAX_PENDING: usize = 100;
+
 impl ApprovalStore {
     pub fn new(timeout: Duration) -> Self {
+        Self::with_max_pending(timeout, DEFAULT_MAX_PENDING)
+    }
+
+    /// Constructor with an explicit pending-request cap (used by tests and
+    /// operators that need a different bound).
+    pub fn with_max_pending(timeout: Duration, max_pending: usize) -> Self {
         Self {
             inner: Arc::new(Inner {
                 timeout,
+                max_pending,
                 entries: RwLock::new(HashMap::new()),
             }),
         }
@@ -75,6 +89,17 @@ impl ApprovalStore {
         {
             let mut entries = self.inner.entries.write().await;
             Self::prune(&mut entries, self.inner.timeout, now);
+            // Fail closed when the queue is saturated: an attacker on
+            // loopback must not be able to grow pending state without limit.
+            let pending = entries
+                .values()
+                .filter(|entry| entry.decision.is_none())
+                .count();
+            if pending >= self.inner.max_pending {
+                return ApprovalDecision::Denied {
+                    reason: "approval queue full".into(),
+                };
+            }
             entries.insert(
                 id,
                 Entry {
@@ -304,6 +329,34 @@ mod tests {
             Err(ApprovalError::NotFound(_))
         ));
 
+        let _ = waiter.await.expect("waiter task");
+    }
+
+    #[tokio::test]
+    async fn saturated_queue_denies_new_requests() {
+        // One slot only: the first request waits, the second must fail closed
+        // instead of growing the in-memory queue without bound.
+        let store = ApprovalStore::with_max_pending(Duration::from_secs(5), 1);
+        let first = make_request();
+        let first_id = first.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(first).await });
+        // Wait until the first request is registered as pending. `status`
+        // returns NotFound until the spawned task inserts the entry.
+        loop {
+            if matches!(store.status(first_id).await, Ok(ApprovalDecision::Pending)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let second = store.request(make_request()).await;
+        assert!(
+            matches!(&second, ApprovalDecision::Denied { reason } if reason == "approval queue full"),
+            "unexpected: {second:?}"
+        );
+
+        store.decide(first_id, approved()).await.expect("decide");
         let _ = waiter.await.expect("waiter task");
     }
 }
