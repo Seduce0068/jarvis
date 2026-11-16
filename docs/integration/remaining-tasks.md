@@ -21,6 +21,9 @@
   配置・有効化・手動実行・整合性検証まで自動実施される。
 - **承認 API**: オプションのトークン認証を追加（既定は無効で後方互換）。
   4コンポーネント横断の契約テスト済み。
+- **手動 review gate の健全性**: クリーンな clone（`/tmp` に HEAD を clone）で
+  `make ci-local` が成功（8 safety checks）。GitHub Actions の
+  ubuntu-latest でも同じく Rust Toolchain + Python3 で動作する根拠。
 - **デプロイ経路の整合性確認**: `deploy-mcp-gw-safe.sh` は unit / allowlist を
   同期し、`check-deploy-drift.sh` は新しい `tools/list`（承認ツールも表示）を
   部分集合で検証するよう更新済み。トークン関連 env はテンプレートで
