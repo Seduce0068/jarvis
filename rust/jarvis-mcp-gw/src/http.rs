@@ -125,6 +125,9 @@ fn http_error(error: anyhow::Error) -> (axum::http::StatusCode, Json<Value>) {
 
 fn http_status_for(error: &anyhow::Error, message: &str) -> axum::http::StatusCode {
     match error.downcast_ref::<crate::error::McpGatewayError>() {
+        Some(crate::error::McpGatewayError::ArgsTooLarge { .. }) => {
+            axum::http::StatusCode::BAD_REQUEST
+        }
         Some(
             crate::error::McpGatewayError::NotAllowed(_)
             | crate::error::McpGatewayError::PolicyDenied { .. }
@@ -394,6 +397,18 @@ requires_approval = true
         assert_eq!(body["result"]["isError"], false);
         assert_eq!(body["result"]["content"][0]["text"], "pong");
     }
+    #[test]
+    fn oversized_arguments_map_to_400() {
+        let error = anyhow::Error::from(crate::error::McpGatewayError::ArgsTooLarge {
+            tool: "shell.execute".into(),
+            max: 10,
+            actual: 20,
+        });
+        let (status, body) = http_error(error);
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(body.0["error"].as_str().unwrap().contains("exceed"));
+    }
+
     #[test]
     fn client_errors_map_to_400_with_json_body() {
         let (status, body) = http_error(anyhow::anyhow!("missing 'url' argument"));

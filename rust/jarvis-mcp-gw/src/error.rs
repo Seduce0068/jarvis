@@ -7,6 +7,13 @@ pub enum McpGatewayError {
     #[error("Tool not in allowlist: {0}")]
     NotAllowed(String),
 
+    #[error("Arguments for tool '{tool}' exceed {max} bytes ({actual} bytes)")]
+    ArgsTooLarge {
+        tool: String,
+        max: usize,
+        actual: usize,
+    },
+
     #[error("Policy denied tool '{tool}' for principal '{principal}'")]
     PolicyDenied { tool: String, principal: String },
 

@@ -101,6 +101,22 @@ impl McpGateway {
             }
             .into());
         }
+        // Enforce the per-tool argument cap declared in the allowlist.
+        // Without this, `max_args_size` was dead config and a caller could
+        // push an arbitrarily large payload into a tool handler or an
+        // approval request.
+        let args_size = serde_json::to_string(&args)
+            .map(|text| text.len())
+            .unwrap_or(usize::MAX);
+        if args_size > tool_config.max_args_size {
+            return Err(error::McpGatewayError::ArgsTooLarge {
+                tool: tool.to_owned(),
+                max: tool_config.max_args_size,
+                actual: args_size,
+            }
+            .into());
+        }
+
         if tool_config.requires_approval {
             // Human-in-the-loop (MCP-1): the call blocks on the policy
             // approval workflow until an operator decides or the approval
@@ -243,6 +259,53 @@ requires_approval = true
                 .expect("gateway starts"),
         );
         (gateway, engine, policy_http)
+    }
+
+    #[tokio::test]
+    async fn oversized_arguments_are_rejected_before_execution() {
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-lib-argcap");
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist = dir.join("mcp_allowlist.toml");
+        // `shell.execute` is granted by the shipped policy to `opencode`,
+        // so the size gate is the layer under test here.
+        tokio::fs::write(
+            &allowlist,
+            r#"
+principals = ["opencode"]
+[[tools]]
+name = "shell.execute"
+description = "Execute a shell command"
+allowed_principals = ["opencode"]
+max_args_size = 16
+timeout_ms = 5000
+requires_approval = false
+"#,
+        )
+        .await
+        .expect("write allowlist");
+        let (policy, _engine) = shipped_policy_client_with_engine("argcap").await;
+        let gateway = McpGateway::new(
+            McpGatewayConfig {
+                allowlist_path: allowlist.to_string_lossy().into_owned(),
+                ..Default::default()
+            },
+            Arc::new(policy),
+        )
+        .await
+        .expect("gateway starts");
+
+        let error = gateway
+            .execute_tool(
+                "shell.execute",
+                json!({ "cmd": "a".repeat(100) }),
+                "opencode",
+            )
+            .await
+            .expect_err("oversized args must be rejected");
+        assert!(error.to_string().contains("exceed"), "unexpected: {error}");
     }
 
     #[tokio::test]
