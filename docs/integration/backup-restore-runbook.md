@@ -86,9 +86,9 @@ Qdrant 公式ドキュメント（<https://qdrant.tech/documentation/snapshots/>
 COLLECTION="jarvis_memories_restore_test"
 SNAPSHOT="$SET/qdrant-snapshot.bin"
 
+base="http://127.0.0.1:6333/collections/${COLLECTION}"
 curl -fsS -X POST \
-  "http://127.0.0.1:6333/collections/${COLLECTION}" \
-  "/snapshots/upload?priority=snapshot" \
+  "${base}/snapshots/upload?priority=snapshot" \
   -H 'Content-Type:multipart/form-data' \
   -F "snapshot=@${SNAPSHOT}"
 
