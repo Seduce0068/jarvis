@@ -15,6 +15,7 @@
 use anyhow::{Context, Result};
 use chrono::{Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use uuid::Uuid;
 
 /// How long the approval request stays actionable, in seconds.
@@ -23,6 +24,15 @@ use uuid::Uuid;
 /// effective deadline is the earlier of this window and the policy-side
 /// timeout.
 const APPROVAL_WINDOW_SECS: i64 = 300;
+
+/// Overall HTTP deadline: the approval window plus slack for transport and
+/// serialization. Without this, a wedged policy service could hang a tool
+/// call forever (a denial-by-hang is not fail-closed in a useful time).
+const APPROVAL_HTTP_TIMEOUT_SECS: u64 = APPROVAL_WINDOW_SECS as u64 + 30;
+
+/// Connect deadline. Loopback connects are immediate; a slow connect means
+/// something is wrong and should fail fast rather than consume the window.
+const CONNECT_TIMEOUT_SECS: u64 = 2;
 
 /// Request body for `POST /v1/approval` on `jarvis-policy`.
 #[derive(Serialize, Debug)]
@@ -63,9 +73,27 @@ pub struct ApprovalClient {
 
 impl ApprovalClient {
     pub fn new(endpoint: impl Into<String>) -> Self {
+        Self::with_timeouts(
+            endpoint,
+            Duration::from_secs(APPROVAL_HTTP_TIMEOUT_SECS),
+            Duration::from_secs(CONNECT_TIMEOUT_SECS),
+        )
+    }
+
+    /// Constructor with explicit deadlines (used by tests to keep them fast).
+    fn with_timeouts(
+        endpoint: impl Into<String>,
+        request_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(request_timeout)
+            .connect_timeout(connect_timeout)
+            .build()
+            .expect("approval HTTP client must build");
         Self {
             endpoint: endpoint.into(),
-            http: reqwest::Client::new(),
+            http,
         }
     }
 
@@ -268,6 +296,41 @@ mod tests {
         assert!(
             outcome.is_err(),
             "unreachable policy must error: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hung_policy_endpoint_times_out_and_denies() {
+        // A policy service that accepts the connection but never answers must
+        // not hang the tool call forever; the HTTP deadline makes it fail
+        // closed within a bounded time.
+        let app = axum::Router::new().route(
+            "/v1/approval",
+            axum::routing::post(|| async {
+                std::future::pending::<()>().await;
+                ""
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hung test server");
+        let base = format!("http://{}", listener.local_addr().expect("test address"));
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("hung test server runs");
+        });
+
+        let client =
+            ApprovalClient::with_timeouts(base, Duration::from_millis(200), Duration::from_secs(1));
+        let started = tokio::time::Instant::now();
+        let outcome = client
+            .request_approval("opencode", "execute", "tool:shell.execute", &json!({}))
+            .await;
+        assert!(outcome.is_err(), "hung endpoint must error: {outcome:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "must fail within the configured deadline, not hang"
         );
     }
 }
