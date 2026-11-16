@@ -163,3 +163,21 @@ jarvis-backup.service: Command /usr/local/bin/rust-script is not executable
 ExecStart パスだけ直しても導入可能にならない。**BK-1 の保存先・認証設計が
 確定するまで unit 自体を再設計し、verify を通してから導入する**（現状は
 未導入を維持）。
+
+### レガシー・ランチャーを fail-closed 化（2026-11-16）
+
+[infra/scripts/backup.sh](../../infra/scripts/backup.sh) と
+[infra/scripts/restore.sh](../../infra/scripts/restore.sh) は、従来
+`rust/scripts/backup.rs` / `restore.rs` へそのまま委譲していたが、
+以下を確認したため **両方とも実行を拒否（exit 2）し、理由と代替手段を
+表示する** ガードへ変更した:
+
+- `backup.rs`: 既定 `--remote oci`（rclone）/`op inject`。さらに
+  `--dry-run` でも `cleanup_local()` が 7 日超のローカルファイルを
+  **削除する**（dry-run は remote の upload/cleanup のみをスキップ）。
+- `restore.rs`: `--confirm` 指定で設定/PostgreSQL/Qdrant/リポジトリを
+  上書きしサービスを再起動する。restore 手順は未検証。
+- 両者とも ADR-0004（OCI 非使用）と BK-1 の未決定状態に反する。
+
+参照・調査は `rust-script <script> --help` で直接可能（実装自体は残置）。
+`make lint` の `--help` 起動確認も引き続き成功する。

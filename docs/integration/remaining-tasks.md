@@ -31,6 +31,12 @@
 
 ### BK/SEC 進捗（2026-11-16 追記）
 
+- **レガシー backup.sh / restore.sh は fail-closed 化済み**: `--dry-run` でも
+  ローカル削除が走る backup.rs / 破壊的な restore.rs への委譲を止め、
+  実行時に理由と `backup-preflight.sh` への導線を表示（exit 2）。
+  実装自体は `rust-script ... --help` で参照可能、`make lint` も成功。
+
+
 - **BK-1/BK-2/SEC-2 の安全ゲート実装済み**: [backup-preflight.sh](../../infra/scripts/backup-preflight.sh)
   （`make backup-preflight`）で、サービス状態・ツール有無・設定ファイル列挙（secret 値は読まない）・
   `op://` テンプレート数・timer 状態を読み取り専用で検査。実機 run は fail=0 / warn=2。
