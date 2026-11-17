@@ -225,3 +225,33 @@ generated:
   drift=P3-2/3、event=R4-TEST-002）で概ねカバー。
   **未カバー**: 環境適合（R3-ops-env、Kubuntu / GPU / ポート競合）のみ。
   次回レビューで補うこと。
+
+## 追加調査（unknown-tasks-survey との重複吸収、2026-11-17）
+
+[docs/integration/unknown-tasks-survey.md](docs/integration/unknown-tasks-survey.md) の5観点並列調査（49件入力→35件採用）と本 TODO を照合し、重複15件＋部分重複10件を吸収した。以下は本 TODO に未掲載だった10件で、親エージェントが Runtime Proof で確認した高優先度3件を先頭に置く。
+
+### 高優先度（新規）
+
+- [ ] **P0-9** drift 検査の allowlist 欠落 fail-open（A-H2）
+  - `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist が無いと allowlist 検査と `web.fetch` danger 判定ごとスキップされ、`drift`/`danger` が立たない。欠落時に `MISSING` + `danger=1` を設定し回帰テストを追加。
+- [ ] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
+  - `rust/jarvis-policy/src/config.rs:57` が既定値、`lib.rs:45-50` は warn のみで起動継続。本番起動時は fail-closed で拒否する（P0-4 と同じ方針）。
+- [ ] **P0-11** `store_memory` に PII フィルタ未適用（A-H4）
+  - `rust/jarvis-context/src/builder.rs:72` は `build_context` でフィルタ適用、`:80-102` の `store_memory` は生の `content`/`metadata` を DB・Qdrant へ保存。「LLM 送信時のみ」なら保存時は対象外と明文化するか、保存前にも適用（A-M19 / P2-1 と同時判断）。
+
+### 中・低優先度（新規）
+
+- [ ] **P1-11** jarvis-event の unbounded channel（A-M2）
+  - `normalizer.rs:31` の `mpsc::unbounded_channel()`、`:61` の send 失敗握り潰し、`:118-128` の4 webhook が無制限 `emit`。`mpsc::channel(N)` + `try_send` とドロップ metric を導入。
+- [ ] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
+  - `normalizer.rs:118-127` に `/webhook/{ha,android,gmail,calendar}` を登録するのみ。loopback 前提を明記した上で共有トークン／HMAC 署名とレート制限を追加するか、受け入れリスクを ADR 化（R4-TEST-002 と別軸）。
+- [ ] **P2-12** drift 検査対象が Cedar 系3ファイルに及ばない（A-M8）
+  - `check-deploy-drift.sh:19-47` は binary/allowlist/`casbin_policy.csv`/unit のみ。`policies.cedar`・`cedar_schema.cedarschema`・`pii_patterns.toml` を `cmp` 対象へ追加（P0-9 と同じ枠組み）。
+- [ ] **P3-8** 承認ボタンのキーボード操作・アクセシビリティ属性（A-M15）
+  - `ui/src/approvals.rs:172-196` が `div` + `on_click` のみ。`role`／Tab フォーカス／Enter・Space 決定を追加（P0-8 の状態管理と同じ箇所）。
+- [ ] **P3-9** policy 保留承認を ntfy へ橋渡し（A-M17）
+  - `cordis.patch.yml:75-89` は DSH permission prompt 用で jarvis-policy キューとは別系統。`failOnStartupError: false`（OPS-1）と整合させ、ペイロードに機微引数を含めない設計で追加。
+- [ ] **P3-10** `#[allow(dead_code)]` の未使用クライアント（A-L4）
+  - `normalizer.rs:11` struct 全体に属性、`:13-17` の `ha_client`/`android_client` 等は参照なし。削除するか `sources.rs:70,265` の WebSocket 取得へ配線。
+- [ ] **P3-11** ADR-0002 残課題を ID 化（A-L8）
+  - `adr/0002-runtime-agnostic.md:65`「ACP session / doctor の自動契約テストは未実装」。範囲外固定とするか残タスク登録して判断を記録。
