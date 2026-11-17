@@ -1,6 +1,6 @@
 {
   "spec_hash": "sha256:da02ce4447c3c20b00e47735ac9895cd55c85b8191ea1446d985030b633a51cf",
-  "timestamp": "2026-11-18T05:16:00+09:00",
+  "timestamp": "2026-11-18T05:40:00+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-mcp-gw --lib --offline",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 40,
+    "passed": 45,
     "failed": 0,
     "skipped": 1,
     "duration_ms": 200,
@@ -152,5 +152,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-mcp-gw lib テスト 40 件の実測結果（TC-S1 max_args_size 境界 3 点を追加）。TC-S1 カバー済み。カバレッジ・ミューテーションは未測定。"
+  "notes": "jarvis-mcp-gw lib テスト 45 件の実測結果（P0-3 opt-in server-side principal ガード5件を含む）。TC-S1 境界カバー済み。wire 形式は不変。カバレッジ・ミューテーションは未測定。"
 }
