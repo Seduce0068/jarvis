@@ -48,6 +48,7 @@ status: draft
 | REQ-11 | Approved のみ実行し、Denied/Expired/Pending は実行しない |
 | REQ-12 | 承認後の policy 再検査で kill switch 発動を検出する |
 | REQ-13 | HTTP は 400/403/500 を正しく使い分ける |
+| REQ-14 | opt-in で caller principal を `mcp_principal` に上書きする |
 
 ## Risk & tier
 
@@ -60,6 +61,7 @@ status: draft
 | R-5 | 承認トークン未送信で fail-closed になる/素通しする | T1 | int >= 0.80 |
 | R-6 | 承認後に kill switch が発動しても実行される | T1 | unit >= 0.90, int >= 0.80 |
 | R-7 | allowlist 破損時に空許可で起動する | T2 | unit >= 0.80 |
+| R-8 | opt-in 既定 false の残存リスクと監査粒度の低下 | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -141,6 +143,16 @@ Scenario: TC-A3 設定ファイル破損時の起動失敗
   Given allowlist が不正 TOML
   When gateway を起動する
   Then 起動は失敗する
+```
+
+```gherkin
+Scenario: TC-A4 opt-in の server-side principal
+  Given require_server_side_principal=true と mcp_principal=opencode
+  When 呼び出し側が principal=jarvis を申告する
+  Then 実効 principal は opencode で policy/allowlist/承認/ログに使う
+  Given ガードが false (既定)
+  When 同じ申告で呼ぶ
+  Then 従来どおり caller principal を使う
 ```
 
 ### 引数上限 (REQ-7, REQ-8)
@@ -225,6 +237,7 @@ Scenario: TC-H1 入口ごとのエラー表現
 | TC-A1 | REQ-4 | v5.0.0-V8.3.1 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.9 | T1 |
 | TC-A2 | REQ-5 | v5.0.0-V8.3.3 | SP800-53r5.2/AC-6 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-A3 | REQ-6 | v5.0.0-V16.5.3 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.4.1 | T2 |
+| TC-A4 | REQ-14 | v5.0.0-V8.3.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-S1 | REQ-7 | v5.0.0-V2.2.1 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.3 | T1 |
 | TC-S1 | REQ-8 | v5.0.0-V2.3.2 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.3 | T1 |
 | TC-S2 | REQ-8 | v5.0.0-V16.5.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.9 | T2 |

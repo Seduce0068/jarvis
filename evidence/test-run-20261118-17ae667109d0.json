@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:da02ce4447c3c20b00e47735ac9895cd55c85b8191ea1446d985030b633a51cf",
-  "timestamp": "2026-11-18T05:40:00+09:00",
+  "spec_hash": "sha256:17ae667109d0b6c925781c729fff5fa5a1161160f5e7070952867a23478545f2",
+  "timestamp": "2026-11-18T05:42:57+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-mcp-gw --lib --offline",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-mcp-gateway.md",
-    "spec_hash": "sha256:da02ce4447c3c20b00e47735ac9895cd55c85b8191ea1446d985030b633a51cf",
+    "spec_hash": "sha256:17ae667109d0b6c925781c729fff5fa5a1161160f5e7070952867a23478545f2",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -36,7 +36,8 @@
       "REQ-10",
       "REQ-11",
       "REQ-12",
-      "REQ-13"
+      "REQ-13",
+      "REQ-14"
     ]
   },
   "techniques": [
@@ -142,6 +143,17 @@
       "controls": [
         "SP800-53r5.2/CM-7"
       ]
+    },
+    {
+      "id": "R-8",
+      "tier": "T1",
+      "description": "opt-in 既定 false の残存リスクと監査粒度の低下",
+      "asvs": [
+        "v5.0.0-V8.3.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/AC-3"
+      ]
     }
   ],
   "assurance": {
@@ -152,5 +164,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-mcp-gw lib テスト 45 件の実測結果（P0-3 opt-in server-side principal ガード5件を含む）。TC-S1 境界カバー済み。wire 形式は不変。カバレッジ・ミューテーションは未測定。"
+  "notes": "jarvis-mcp-gw lib テスト 45 件の実測結果（45 passed / 0 failed / 1 ignored）。P0-3 opt-in server-side principal ガード (TC-A4: 既定 false、true で caller principal を mcp_principal に上書き、/mcp は固定) を含む。wire 形式は不変。TC-S1 境界カバー済み。カバレッジ・ミューテーションは未測定。"
 }
