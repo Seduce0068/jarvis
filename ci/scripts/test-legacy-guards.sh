@@ -265,5 +265,37 @@ else
   fail=$((fail+1))
 fi
 
+# A spec whose Document map lost one of the six information items must fail.
+docmap_tmp="$tmp/docmap_negative"
+mkdir -p "$docmap_tmp/ci/scripts" "$docmap_tmp/evidence" "$docmap_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$docmap_tmp/ci/scripts/check-evidence.sh"
+cp "$repo"/specs/test-*.md "$docmap_tmp/specs/"
+cp "$repo/specs/index.md" "$docmap_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$docmap_tmp/evidence/index.md"
+cp "$repo"/evidence/test-run-*.json "$docmap_tmp/evidence/"
+cp "$repo/todo.md" "$docmap_tmp/todo.md"
+python3 - "$docmap_tmp/specs/$(basename "${spec_files[0]}")" <<'PY'
+import re, sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as fh:
+    text = fh.read()
+text, removed = re.subn(
+    r'^\|[ \t]*test case specification[ \t]*\|.*\r?\n', '', text, count=1, flags=re.MULTILINE)
+if removed != 1:
+    raise SystemExit('test case specification row not found')
+with open(path, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+out=$(bash "$docmap_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'MISSING_INFO_ITEM'; then
+  echo "  PASS: check-evidence.sh rejects spec with missing Document map info item"
+  ok=$((ok+1))
+else
+  echo "  FAIL: check-evidence.sh accepted spec with missing info item (exit $code)"
+  printf '%s\n' "$out" | head -3 >&2
+  fail=$((fail+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

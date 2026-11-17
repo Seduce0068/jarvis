@@ -6,8 +6,10 @@
 # Also verify specs/index.md and evidence/index.md link every artifact and
 # contain no broken local links (cross-review arch #3). Reference-style link
 # definitions such as "[run-ui]: test-run-*.json" are parsed as well.
-# Every spec must also contain the four required test-spec sections and the
-# seven-column Traceability header (test-spec skill). No secret values are read.
+# Every spec must also contain the four required test-spec sections, the
+# seven-column Traceability header, the six 29119-3 information items in
+# Document map, and a tailored conformance statement (test-spec skill).
+# No secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -74,6 +76,25 @@ TRACEABILITY_HEADER = re.compile(
     r'^\|\s*Scenario\s*\|\s*Req\s*\|\s*ASVS\s*\|\s*800-53\s*\|\s*CC\s*\|'
     r'\s*Technique\s*\|\s*Tier\s*\|', re.MULTILINE)
 
+# Document map must declare the six 29119-3:2021 information items and state
+# tailored conformance (with no full-conformance claim).
+INFO_ITEMS = (
+    "test design specification",
+    "test case specification",
+    "test procedure specification",
+    "test environment requirements",
+    "test result / execution log",
+    "test completion report",
+)
+
+def section_body(text, name):
+    match = re.search(r'^#{1,6}\s+' + re.escape(name) + r'\s*$', text, re.MULTILINE)
+    if not match:
+        return ""
+    rest = text[match.end():]
+    following = re.search(r'^#{1,6}\s+', rest, re.MULTILINE)
+    return rest[:following.start()] if following else rest
+
 for spec in spec_files:
     try:
         with open(spec, encoding="utf-8") as fh:
@@ -87,6 +108,14 @@ for spec in spec_files:
             errors.append(f"MISSING_SECTION:{spec}:{section}")
     if not TRACEABILITY_HEADER.search(spec_text):
         errors.append(f"MISSING_TRACEABILITY:{spec}")
+    doc_map = section_body(spec_text, "Document map")
+    for item in INFO_ITEMS:
+        if item not in doc_map:
+            errors.append(f"MISSING_INFO_ITEM:{spec}:{item}")
+    if not re.search(r'\btailored\b', doc_map, re.IGNORECASE):
+        errors.append(f"MISSING_CONFORMANCE:{spec}:tailored")
+    if not re.search(r'full conformance\s+は主張しない', doc_map):
+        errors.append(f"MISSING_CONFORMANCE:{spec}:no-full-claim")
 
 # Index validation (cross-review arch #3). Both inline links
 # "[text](target)" and reference-style definitions "[label]: target" are
