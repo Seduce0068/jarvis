@@ -169,6 +169,10 @@ generated:
     R3-DR-015, R5-RULES-002）
   - `op://` テンプレート 4 ファイル、OpenTofu state（BK-3）、破壊的
     `restore.rs`、rust workspace のライセンス（MIT/Apache vs AGPL）。
+  - **2026-11-18 確認**: repo の `LICENSE` と `ui/Cargo.toml` は AGPL-3.0-or-later
+    だが、`rust/Cargo.toml` の workspace license は `MIT OR Apache-2.0`（5 crate が
+    workspace 継承）。共通指示では個人 repo の既定は AGPL だが、ライセンス変更は
+    法的判断のため自動変更せず、ユーザー判断待ちとして記録する。
 - [ ] **P3-6** UI の監査性と細部（R2-UI-003, R2-UI-004, R2-UI-006〜009）
   - リダイレクトでトークン送信、ポーラー競合、`approved_by` ハードコード、
     期限切れ強調、テスト数表記（7 が正）、トークン注入経路の定義。
