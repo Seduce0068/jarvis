@@ -27,6 +27,11 @@ pub struct PolicyConfig {
     /// listener beyond loopback.
     #[serde(default)]
     pub approval_api_token: Option<String>,
+    /// Opt-in P0-10 guard: when true, startup fails if the kill-switch admin
+    /// token is still the `changeme` placeholder. Default false keeps the
+    /// legacy warn-only behavior.
+    #[serde(default)]
+    pub require_kill_switch_admin_token: bool,
     pub default_deny: bool,
 }
 
@@ -59,6 +64,7 @@ impl Default for PolicyConfig {
             approval_timeout_secs: 300,
             approval_max_pending: default_approval_max_pending(),
             approval_api_token: None,
+            require_kill_switch_admin_token: false,
             default_deny: true,
         }
     }
@@ -130,5 +136,46 @@ default_deny = true
             .extract()
             .expect("config parses");
         assert_eq!(config.approval_max_pending, 7);
+    }
+
+    /// The strict startup guard is opt-in: configs written before P0-10 must
+    /// keep the legacy warn-only behavior without any config change.
+    #[test]
+    fn strict_kill_switch_guard_defaults_to_false() {
+        assert!(!PolicyConfig::default().require_kill_switch_admin_token);
+
+        let toml = r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "changeme"
+approval_timeout_secs = 300
+default_deny = true
+"#;
+        let config: PolicyConfig = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("legacy config parses");
+        assert!(!config.require_kill_switch_admin_token);
+    }
+
+    #[test]
+    fn strict_kill_switch_guard_can_be_enabled() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "changeme"
+require_kill_switch_admin_token = true
+approval_timeout_secs = 300
+default_deny = true
+"#;
+        let config: PolicyConfig = Figment::from(Toml::string(toml))
+            .extract()
+            .expect("config parses");
+        assert!(config.require_kill_switch_admin_token);
     }
 }

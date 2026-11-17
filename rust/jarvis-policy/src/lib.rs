@@ -27,6 +27,24 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub async fn new(config: config::PolicyConfig) -> Result<Self> {
+        // P0-10 staged rollout: the kill-switch admin token must not be the
+        // placeholder in production. Default stays warn-only to avoid an
+        // unplanned outage; operators can opt into a hard startup failure by
+        // setting `require_kill_switch_admin_token = true` once the deployed
+        // unit injects a real token via Secret Manager.
+        if config.kill_switch_admin_token() == "changeme" {
+            if config.require_kill_switch_admin_token {
+                anyhow::bail!(
+                    "kill switch admin token is still 'changeme' but \
+                     require_kill_switch_admin_token = true; set \
+                     JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN"
+                );
+            }
+            tracing::warn!(
+                "Kill switch admin token is still the default 'changeme'; \
+                 set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN"
+            );
+        }
         let cedar_engine = Arc::new(policy::CedarEngine::new(&config).await?);
         let casbin_enforcer = Arc::new(
             policy::CasbinEnforcer::new(
@@ -42,16 +60,6 @@ impl PolicyEngine {
                 .as_ref()
                 .map(std::path::PathBuf::from),
         ));
-        // P0-10: the kill-switch admin token must not be the placeholder in
-        // production. We keep starting (warn) to avoid an unplanned outage;
-        // making this a hard startup failure requires confirming that the
-        // deployed unit injects a real token via Secret Manager first.
-        if config.kill_switch_admin_token() == "changeme" {
-            tracing::warn!(
-                "Kill switch admin token is still the default 'changeme'; \
-                 set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN"
-            );
-        }
         // Policy evaluation is always deny-by-default (Cedar/Casbin or the
         // kill switch). Reject an explicit opt-out so operators cannot be
         // misled into believing `default_deny = false` weakens the check.
@@ -345,5 +353,56 @@ mod tests {
             .expect("deactivate");
         assert!(engine.approve(id, "koppe").await.is_ok());
         let _ = waiter.await.expect("waiter task");
+    }
+
+    /// Opt-in strict guard: a placeholder admin token must abort startup
+    /// before any policy engine is initialized.
+    #[tokio::test]
+    async fn strict_token_guard_rejects_placeholder() {
+        let label = "strict-token-reject";
+        let (casbin_model_path, casbin_policy_path) = shipped_casbin(label);
+        let config = config::PolicyConfig {
+            cedar_policy_dir: temp_dir(label).join("cedar").to_string_lossy().into_owned(),
+            casbin_model_path,
+            casbin_policy_path,
+            kill_switch_admin_token: "changeme".into(),
+            require_kill_switch_admin_token: true,
+            ..Default::default()
+        };
+
+        let err = PolicyEngine::new(config)
+            .await
+            .err()
+            .expect("strict guard rejects the placeholder token");
+        let message = err.to_string();
+        assert!(message.contains("changeme"), "error names the placeholder");
+        assert!(
+            message.contains("require_kill_switch_admin_token"),
+            "error names the opt-in flag"
+        );
+
+        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+    }
+
+    /// With the guard off (the default), the placeholder token still starts
+    /// and only logs a warning, so existing deployments are unaffected.
+    #[tokio::test]
+    async fn strict_token_guard_off_keeps_warn_only_startup() {
+        let label = "strict-token-off";
+        let (casbin_model_path, casbin_policy_path) = shipped_casbin(label);
+        let config = config::PolicyConfig {
+            cedar_policy_dir: temp_dir(label).join("cedar").to_string_lossy().into_owned(),
+            casbin_model_path,
+            casbin_policy_path,
+            kill_switch_admin_token: "changeme".into(),
+            require_kill_switch_admin_token: false,
+            ..Default::default()
+        };
+
+        PolicyEngine::new(config)
+            .await
+            .expect("placeholder token is allowed when the strict guard is off");
+
+        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
     }
 }
