@@ -118,7 +118,7 @@ generated:
 - [x] **P2-3** UI を CI へ組み込み（2026-11-17 対応済み: ci.yml extra_gates に `make ui-test` を追加、7 tests 成功。UI clippy の undocumented_unsafe_blocks は既に付与済み）（R2-UI-005, R5-RULES-001）
   - `ui/` は独立 workspace で CI 対象外。amd64 ジョブで `make ui-test`。
     UI clippy にも `-D clippy::undocumented_unsafe_blocks` を付与。
-- [ ] **P2-4** `ci-local` と CI の差分を解消（R4-GATE-006, R4-SPEC-010）
+- [x] **P2-4** `ci-local` と CI の差分を解消（2026-11-18 対応済み: `ci-local` の説明を「主要ゲートのローカル代替（aarch64 クロス/Docker 依存ゲートは除外）」へ訂正。実機に aarch64-linux-gnu-gcc / Docker が無いため組み込まず、除外理由を明文化）（R4-GATE-006, R4-SPEC-010）
   - `extra_gates`（aarch64 check, `--ignored` test）が `ci-local` に無い。
     組み込むか「主要ゲートのローカル代替」へ説明を訂正。
 - [x] **P2-5** シェル静的検証をゲート化（2026-11-17 対応済み: `ci/scripts/check-shell.sh` で全26スクリプトに bash -n / shellcheck。shfmt は既存ドリフト16件のため警告のみ。ci-local に組込み）（R4-SCRIPT-003）

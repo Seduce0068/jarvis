@@ -35,7 +35,7 @@ deploy: ## (レガシー) リモートホストへデプロイ (HOST=jarvis-host
 deploy-dry: ## (レガシー) リモートデプロイ内容の確認 (dry-run, HOST=jarvis-host)
 	@rust-script rust/scripts/deploy.rs --rust-dir rust $(HOST) deploy --dry-run
 
-ci-local: ## CI と同一の Rust ゲートをローカル実行（CI 停止時の代替）
+ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Docker 依存ゲートは除外）
 	@cd rust && cargo fmt --all -- --check
 	@cd rust && cargo check --all-targets --locked
 	@cd rust && cargo test --all-targets --locked
