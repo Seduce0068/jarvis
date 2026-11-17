@@ -92,5 +92,76 @@ else
 fi
 rm -rf "$tmp_drift"
 
+# P1-9: the evidence gate must reject both a stale spec_hash and a failed test
+# count. Run a copy of the gate from a temporary repo layout so the real
+# specs/ and evidence/ files are never modified. The temp tree is removed by
+# the EXIT trap on $tmp.
+evidence_tmp="$tmp/evidence_negative"
+mkdir -p "$evidence_tmp/ci/scripts" "$evidence_tmp/evidence" "$evidence_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$evidence_tmp/ci/scripts/check-evidence.sh"
+for spec in "$repo"/specs/test-*.md; do
+  ln -s "$spec" "$evidence_tmp/specs/$(basename "$spec")"
+done
+
+tamper_evidence() { # src dst mode
+  python3 - "$1" "$2" "$3" <<'PY'
+import json, sys
+
+src, dst, mode = sys.argv[1:4]
+with open(src, encoding='utf-8') as fh:
+    data = json.load(fh)
+if mode == 'hash':
+    data['spec_hash'] = 'sha256:' + '0' * 64
+elif mode == 'failed':
+    data['results']['failed'] = 1
+else:
+    raise SystemExit('unknown tamper mode: ' + mode)
+with open(dst, 'w', encoding='utf-8') as fh:
+    json.dump(data, fh)
+PY
+}
+
+evidence_files=( "$repo"/evidence/test-run-*.json )
+if [ "${#evidence_files[@]}" -eq 0 ]; then
+  echo "  FAIL: no source evidence JSON available for negative test"
+  fail=$((fail+1))
+else
+  source_json="${evidence_files[0]}"
+  evidence_copy="$evidence_tmp/evidence/$(basename "$source_json")"
+  gate="$evidence_tmp/ci/scripts/check-evidence.sh"
+
+  # Copy every evidence file so the gate's bidirectional spec-coverage check
+  # passes in the temporary layout; only the selected copy is tampered below.
+  cp "$repo"/evidence/test-run-*.json "$evidence_tmp/evidence/"
+  if bash "$gate" >/dev/null 2>&1; then
+    echo "  PASS: untampered evidence copy accepted"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: untampered evidence copy rejected"
+    fail=$((fail+1))
+  fi
+
+  for mode in hash failed; do
+    if ! tamper_evidence "$source_json" "$evidence_copy" "$mode"; then
+      echo "  FAIL: could not prepare tampered evidence ($mode)"
+      fail=$((fail+1))
+      continue
+    fi
+    out=$(bash "$gate" 2>&1); code=$?
+    case "$mode" in
+      hash) pattern='SPEC_HASH_MISMATCH' ;;
+      failed) pattern='FAILED_TESTS' ;;
+    esac
+    if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
+      echo "  PASS: check-evidence.sh rejects tampered $mode"
+      ok=$((ok+1))
+    else
+      echo "  FAIL: check-evidence.sh accepted tampered $mode (exit $code)"
+      printf '%s\n' "$out" | head -3 >&2
+      fail=$((fail+1))
+    fi
+  done
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
