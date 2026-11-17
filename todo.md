@@ -257,5 +257,8 @@ generated:
   - `cordis.patch.yml:75-89` は DSH permission prompt 用で jarvis-policy キューとは別系統。`failOnStartupError: false`（OPS-1）と整合させ、ペイロードに機微引数を含めない設計で追加。
 - [x] **P3-10** `#[allow(dead_code)]` の未使用クライアント（2026-11-18 対応済み: Normalizer 構造体から未使用の ha/android/policy/opencode/context フィールドを削除し `#[allow(dead_code)]` も除去。クライアントは spawn タスクへ引数で渡す形に維持）（A-L4）
   - `normalizer.rs:11` struct 全体に属性、`:13-17` の `ha_client`/`android_client` 等は参照なし。削除するか `sources.rs:70,265` の WebSocket 取得へ配線。
-- [ ] **P3-11** ADR-0002 残課題を ID 化（A-L8）
+- [x] **P3-11** ADR-0002 残課題を ID 化（A-L8）
+  - **2026-11-18 判断**: ADR-0002 §Status rationale に「ACP session / doctor の
+    自動契約テストは未実装（段階移行の範囲外）」と明記済み。範囲外固定として
+    判断を記録し、新規タスク化はしない（必要になった時点で起票）。
   - `adr/0002-runtime-agnostic.md:65`「ACP session / doctor の自動契約テストは未実装」。範囲外固定とするか残タスク登録して判断を記録。
