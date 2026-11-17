@@ -232,5 +232,38 @@ else
   fi
 fi
 
+# The gate must reject a spec that lost one required test-spec section. Reuse
+# the spec list from the index-negative case above; all temp trees use $tmp.
+section_tmp="$tmp/section_negative"
+mkdir -p "$section_tmp/ci/scripts" "$section_tmp/evidence" "$section_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$section_tmp/ci/scripts/check-evidence.sh"
+cp "$repo"/specs/test-*.md "$section_tmp/specs/"
+cp "$repo/specs/index.md" "$section_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$section_tmp/evidence/index.md"
+cp "$repo"/evidence/test-run-*.json "$section_tmp/evidence/"
+cp "$repo/todo.md" "$section_tmp/todo.md"
+# Remove only the "Risk & tier" heading line; the rest of the spec stays intact.
+python3 - "$section_tmp/specs/$(basename "${spec_files[0]}")" <<'PY'
+import re, sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as fh:
+    text = fh.read()
+text, removed = re.subn(r'^##[ \t]+Risk & tier[ \t]*\r?\n', '', text, count=1, flags=re.MULTILINE)
+if removed != 1:
+    raise SystemExit('Risk & tier heading not found')
+with open(path, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+out=$(bash "$section_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'MISSING_SECTION'; then
+  echo "  PASS: check-evidence.sh rejects spec with missing required section"
+  ok=$((ok+1))
+else
+  echo "  FAIL: check-evidence.sh accepted spec with missing section (exit $code)"
+  printf '%s\n' "$out" | head -3 >&2
+  fail=$((fail+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

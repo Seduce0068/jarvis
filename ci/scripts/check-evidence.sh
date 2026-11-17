@@ -6,7 +6,8 @@
 # Also verify specs/index.md and evidence/index.md link every artifact and
 # contain no broken local links (cross-review arch #3). Reference-style link
 # definitions such as "[run-ui]: test-run-*.json" are parsed as well.
-# No secret values are read.
+# Every spec must also contain the four required test-spec sections and the
+# seven-column Traceability header (test-spec skill). No secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -65,6 +66,27 @@ spec_files = sorted(glob.glob("specs/test-*.md"))
 for spec in spec_files:
     if os.path.normpath(spec) not in covered:
         errors.append(f"MISSING_EVIDENCE:{spec}")
+
+# Required test-spec structure (test-spec skill). Headings may use any level,
+# but the exact section names and the seven Traceability columns are fixed.
+REQUIRED_SECTIONS = ("Test basis", "Risk & tier", "Design technique", "Document map")
+TRACEABILITY_HEADER = re.compile(
+    r'^\|\s*Scenario\s*\|\s*Req\s*\|\s*ASVS\s*\|\s*800-53\s*\|\s*CC\s*\|'
+    r'\s*Technique\s*\|\s*Tier\s*\|', re.MULTILINE)
+
+for spec in spec_files:
+    try:
+        with open(spec, encoding="utf-8") as fh:
+            spec_text = fh.read()
+    except OSError:
+        errors.append(f"SPEC_UNREADABLE:{spec}")
+        continue
+    for section in REQUIRED_SECTIONS:
+        heading = re.compile(r'^#{1,6}\s+' + re.escape(section) + r'\s*$', re.MULTILINE)
+        if not heading.search(spec_text):
+            errors.append(f"MISSING_SECTION:{spec}:{section}")
+    if not TRACEABILITY_HEADER.search(spec_text):
+        errors.append(f"MISSING_TRACEABILITY:{spec}")
 
 # Index validation (cross-review arch #3). Both inline links
 # "[text](target)" and reference-style definitions "[label]: target" are
