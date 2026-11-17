@@ -90,6 +90,13 @@ impl PolicyEngine {
         self.config.approval_api_token.as_deref()
     }
 
+    /// Opt-in P0-1 guard: when no approval token is configured, the HTTP
+    /// approval endpoints fail closed with 503 instead of staying open for
+    /// loopback-only deployments.
+    pub fn require_approval_api_token(&self) -> bool {
+        self.config.require_approval_api_token
+    }
+
     /// Check if action is allowed (async, with Casbin fast path)
     pub async fn is_allowed(
         &self,

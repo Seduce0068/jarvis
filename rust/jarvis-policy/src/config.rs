@@ -31,6 +31,11 @@ pub struct PolicyConfig {
     /// listener beyond loopback.
     #[serde(default)]
     pub approval_api_token: Option<String>,
+    /// Opt-in P0-1 guard: when true, approval endpoints fail closed with 503
+    /// while `approval_api_token` is unset. Default false keeps the legacy
+    /// loopback-only, unauthenticated behavior.
+    #[serde(default)]
+    pub require_approval_api_token: bool,
     /// Opt-in P0-10 guard: when true, startup fails if the kill-switch admin
     /// token is still `PLACEHOLDER_KILL_SWITCH_TOKEN`. Default false keeps the
     /// legacy warn-only behavior.
@@ -68,6 +73,7 @@ impl Default for PolicyConfig {
             approval_timeout_secs: 300,
             approval_max_pending: default_approval_max_pending(),
             approval_api_token: None,
+            require_approval_api_token: false,
             require_kill_switch_admin_token: false,
             default_deny: true,
         }
@@ -243,5 +249,52 @@ default_deny = true
             .extract()
             .expect("env-style key merges into the strict guard field");
         assert!(config.require_kill_switch_admin_token);
+    }
+
+    /// The P0-1 approval-token guard is opt-in: configs written before it was
+    /// introduced keep the loopback-only, unauthenticated behavior.
+    #[test]
+    fn approval_token_guard_defaults_to_false() {
+        assert!(!PolicyConfig::default().require_approval_api_token);
+
+        let toml = format!(
+            r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "{token}"
+approval_timeout_secs = 300
+default_deny = true
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("legacy config parses");
+        assert!(!config.require_approval_api_token);
+    }
+
+    #[test]
+    fn approval_token_guard_can_be_enabled() {
+        let toml = format!(
+            r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "{token}"
+require_approval_api_token = true
+approval_timeout_secs = 300
+default_deny = true
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("config parses");
+        assert!(config.require_approval_api_token);
     }
 }

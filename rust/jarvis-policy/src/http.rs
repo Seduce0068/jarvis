@@ -75,6 +75,8 @@ fn default_deny_reason() -> String {
 // `JARVIS_POLICY_APPROVAL_TOKEN` to require the X-Jarvis-Approval-Token header
 // before exposing the listener beyond loopback. The MCP gateway and UI read
 // the same value from their own configuration and send it on every call.
+// P0-1 staged rollout: set `JARVIS_POLICY_REQUIRE_APPROVAL_API_TOKEN` to fail
+// closed (503) when no token is configured, instead of silently staying open.
 
 pub fn router(engine: Arc<PolicyEngine>) -> Router {
     // Approval routes are grouped so optional token auth can be applied to
@@ -112,15 +114,23 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
 /// Optional token gate for approval endpoints.
 ///
 /// When `approval_api_token` is unset the endpoint keeps its historical
-/// loopback-only behavior. When set, callers must send the exact value in
-/// the `X-Jarvis-Approval-Token` header. This lets the same HTTP contract be
-/// used safely if the listener is ever exposed beyond loopback.
+/// loopback-only behavior, unless the opt-in `require_approval_api_token`
+/// guard is enabled: then it fails closed with 503. When a token is set,
+/// callers must send the exact value in the `X-Jarvis-Approval-Token` header.
+/// This lets the same HTTP contract be used safely if the listener is ever
+/// exposed beyond loopback.
 async fn require_approval_token(
     State(engine): State<Arc<PolicyEngine>>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
     let Some(expected) = engine.approval_api_token() else {
+        if engine.require_approval_api_token() {
+            tracing::warn!(
+                "Approval endpoints are disabled: approval token is required but not configured"
+            );
+            return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
+        }
         return Ok(next.run(request).await);
     };
     let provided = request
@@ -169,6 +179,7 @@ fn status_label(status: axum::http::StatusCode) -> &'static str {
         404 => "404",
         409 => "409",
         500 => "500",
+        503 => "503",
         _ => "other",
     }
 }
@@ -332,10 +343,11 @@ mod tests {
         dir
     }
 
-    async fn test_engine_with_cap_and_token(
+    async fn test_engine_with_approval_config(
         label: &str,
         max_pending: usize,
         token: Option<String>,
+        require_token: bool,
     ) -> (Arc<PolicyEngine>, PathBuf) {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
         let dir = temp_dir(label);
@@ -352,6 +364,7 @@ mod tests {
             approval_timeout_secs: 5,
             approval_max_pending: max_pending,
             approval_api_token: token,
+            require_approval_api_token: require_token,
             ..Default::default()
         };
         let engine = Arc::new(
@@ -360,6 +373,14 @@ mod tests {
                 .expect("policy engine starts"),
         );
         (engine, dir)
+    }
+
+    async fn test_engine_with_cap_and_token(
+        label: &str,
+        max_pending: usize,
+        token: Option<String>,
+    ) -> (Arc<PolicyEngine>, PathBuf) {
+        test_engine_with_approval_config(label, max_pending, token, false).await
     }
 
     async fn test_engine_with_cap(label: &str, max_pending: usize) -> (Arc<PolicyEngine>, PathBuf) {
@@ -727,5 +748,120 @@ mod tests {
             .expect("request")
             .status();
         assert_eq!(check, reqwest::StatusCode::OK);
+    }
+
+    /// P0-1 opt-in guard: with no token configured, approval endpoints fail
+    /// closed with 503 while public endpoints keep working.
+    #[tokio::test]
+    async fn approval_endpoints_fail_closed_when_required_token_is_unset() {
+        let (engine, _dir) =
+            test_engine_with_approval_config("http-token-required-unset", 10, None, true).await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        for status in [
+            client
+                .get(format!("{base}/v1/approvals"))
+                .send()
+                .await
+                .expect("list request")
+                .status(),
+            client
+                .get(format!("{base}/v1/approval/{}", uuid::Uuid::new_v4()))
+                .send()
+                .await
+                .expect("status request")
+                .status(),
+            client
+                .post(format!("{base}/v1/approval"))
+                .json(&pending_request(chrono::Utc::now().timestamp() + 60))
+                .send()
+                .await
+                .expect("request request")
+                .status(),
+        ] {
+            assert_eq!(status, reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        }
+
+        // The guard only affects approval routes.
+        let health = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request")
+            .status();
+        assert_eq!(health, reqwest::StatusCode::OK);
+        let check = client
+            .post(format!("{base}/v1/check"))
+            .json(&json!({
+                "principal": "jarvis",
+                "action": "execute",
+                "resource": "tool:filesystem.read",
+                "context": {}
+            }))
+            .send()
+            .await
+            .expect("check request")
+            .status();
+        assert_eq!(check, reqwest::StatusCode::OK);
+    }
+
+    /// With the guard on and a token configured, the normal token gate
+    /// applies as before.
+    #[tokio::test]
+    async fn approval_endpoints_enforce_token_when_guard_is_enabled() {
+        let (engine, _dir) = test_engine_with_approval_config(
+            "http-token-required-set",
+            10,
+            Some("test-token".into()),
+            true,
+        )
+        .await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let missing = client
+            .get(format!("{base}/v1/approvals"))
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(missing, reqwest::StatusCode::UNAUTHORIZED);
+
+        let wrong = client
+            .get(format!("{base}/v1/approvals"))
+            .header("x-jarvis-approval-token", "wrong")
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(wrong, reqwest::StatusCode::UNAUTHORIZED);
+
+        let correct = client
+            .get(format!("{base}/v1/approvals"))
+            .header("x-jarvis-approval-token", "test-token")
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(correct, reqwest::StatusCode::OK);
+    }
+
+    /// Default stays loopback-only: no token and no guard means the routes
+    /// remain reachable, so existing deployments are unaffected.
+    #[tokio::test]
+    async fn approval_endpoints_stay_open_by_default_without_token() {
+        let (engine, _dir) =
+            test_engine_with_approval_config("http-token-default-open", 10, None, false).await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let list = client
+            .get(format!("{base}/v1/approvals"))
+            .send()
+            .await
+            .expect("request")
+            .status();
+        assert_eq!(list, reqwest::StatusCode::OK);
     }
 }
