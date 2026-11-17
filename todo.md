@@ -131,9 +131,24 @@ generated:
     dispatch 抑制を検証。設定読込失敗の fail-closed 化も。
 - [ ] **P2-2** review-gate の permissions と依存を修正（R4-GATE-001,
     R4-GATE-002, R4-GATE-004, R4-GATE-005）
-  - `pull-requests: read` 欠落、apt 依存未導入、OpenCode 認証未配線、
-    `--delete-branch` に `contents: write` 欠落。`ci/review-gate.yml` は
-    未配線の参照実装である旨を明記。
+  - **2026-11-18 監査**（[CI-1 監査節](docs/integration/remaining-tasks.md)）:
+    監査対象は未配線の参照実装 `ci/review-gate.yml` のみ。安全版
+    `.github/workflows/review-gate.yml` は手動 dispatch 限定で
+    `make ci-local` のみを実行し、merge / comment / 状態変更を行わない。
+    安全版は現状維持とし、参照実装と混同しない。
+  - 監査で判明した修正点: `checks: write` は未使用で削除検討、
+    `gh pr comment` は `pull-requests: write` を要求（旧「read 欠落」は
+    監査で否定）、fork PR では既定トークンが読み取り専用、
+    `gh pr merge --auto --squash --delete-branch` は `contents: write`
+    不足。OpenCode CLI は未固定スクリプトのパイプ実行、runner 切替時も
+    導入 step が無条件。セッション権限の自動受け付けと認証情報の
+    供給経路は未決定。auto-merge は人間の承認なしに任意 PR を対象に
+    しうるうえ branch protection 未確認、`concurrency` も未設定
+    （安全版は PR 単位 group を設定済み）。
+  - **判断は確定させない**: 権限・認証情報・自動承認・auto-merge の
+    方針が確定するまで参照実装は未配線のままとし、安全版を配線経路
+    とする。完全配線（PR トリガー / cross-review / auto-merge）は
+    方針次第で、P0-3 と同じく「一部実装済み（安全版のみ）」扱い。
 - [x] **P2-3** UI を CI へ組み込み（2026-11-17 対応済み: ci.yml extra_gates に `make ui-test` を追加、7 tests 成功。UI clippy の undocumented_unsafe_blocks は既に付与済み）（R2-UI-005, R5-RULES-001）
   - `ui/` は独立 workspace で CI 対象外。amd64 ジョブで `make ui-test`。
     UI clippy にも `-D clippy::undocumented_unsafe_blocks` を付与。
