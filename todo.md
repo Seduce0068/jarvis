@@ -69,8 +69,13 @@ generated:
   - **実機対応は残る**: 実機は `/etc/jarvis/otelcol-config.yaml` を読み込む
     ため、repo テンプレートの同期と `ss -lnt` による確認は未実施。
 - [ ] **P0-7** Grafana 認証情報の供給経路を確定（R1-SEC-003）
-  - `otelcol-config.yaml:128` が `GRAFANA_CLOUD_AUTH` を要求するが unit は
+  - `otelcol-config.yaml` が `GRAFANA_CLOUD_AUTH` を要求するが unit は
     直接起動で未注入。実値を config / journal に残さない経路を統一。
+  - **2026-11-18 判断材料**: [3案の比較](docs/integration/remaining-tasks.md)
+    （bws run / root 管理 EnvironmentFile / ファイルベース secret）を記録済み。
+    `otel.env` の `GRAFANA_CLOUD_TOKEN` / `INSTANCE` と config 要求の
+    `GRAFANA_CLOUD_AUTH` は名前が不一致で、単なる env ファイル渡しでは解消しない。
+    実機の公開範囲・認証方式は未確認で、判断は確定させていない。
 - [x] **P0-8** UI の承認エラーが直後の refresh で消える（2026-11-17 対応済み: `action_status` フラグで poll と決定結果の表示を分離）（R2-UI-002）
   - `decide` が `view.error` を設定後 `apply_poll` が `None` で上書き。
     401 / 409 / タイムアウト理由が隠蔽される。順序または世代管理で修正
