@@ -614,9 +614,11 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
 
 #### permissions
 
-- トップレベルの `permissions` は `contents: read`、`pull-requests: write`、
-  `checks: write`。Checks API を操作する step はなく `checks: write` は未使用
-  のため、配線前に削除を検討する。
+- トップレベルの `permissions` は `contents: read`、`pull-requests: write`。
+  Checks API を操作する step はなく `checks: write` は未使用だったため、
+  2026-11-18 に参照実装から削除済み（判断を伴わない修正）。
+- `concurrency` は 2026-11-18 に PR 単位へ追加済み（安全版と同じ/
+  `cancel-in-progress: true`）。未配線の参照実装のため実機への影響はない。
 - `gh pr comment` を行う gate-check / cross-review は `pull-requests: write`
   を要求する。コメントを残すかどうかを方針決定し、残さない場合は
   `contents: read` のみへ戻す（安全版と同じ最小権限）。

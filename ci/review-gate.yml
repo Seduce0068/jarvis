@@ -2,6 +2,9 @@
 # CI-2: runtime-agnostic adapter in ci/scripts/review-run.sh (JARVIS_REVIEW_RUNNER,
 #       default `opencode`). Credentials/runner provisioning remains a decision.
 # 2026-11-16: fixed invalid gh commands, missing job outputs/install, npm cache.
+# 2026-11-18 (reference pipeline audit): removed unused `checks: write` and
+# added PR-scoped concurrency. The remaining findings (auto-merge permissions,
+# unpinned OpenCode install, auth/credential path) still require a decision.
 # See docs/integration/remaining-tasks.md for current status and decisions.
 name: JARVIS Review Flow
 
@@ -18,7 +21,13 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  checks: write
+  # `checks: write` was never used by any step; removed per CI-1 audit.
+
+# Cancel superseded runs for the same PR (the wired safe workflow already
+# does this). workflow_dispatch uses the run id as a stable fallback key.
+concurrency:
+  group: review-gate-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
 
 env:
   # CI-2: swap the agent runtime without editing job definitions.
