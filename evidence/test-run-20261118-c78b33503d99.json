@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-context.md",
-    "spec_hash": "sha256:92e8bf424052d4d2ad98787ea5bc936ff65e9919495c2c061cb9ea08502d2370",
+    "spec_hash": "sha256:c78b33503d998310e9a738877150c1710d1bbe5077fbe6d70caa8dc9e905c732",
     "requirements": [
       "REQ-1",
       "REQ-2",
