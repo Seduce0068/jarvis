@@ -129,7 +129,7 @@ generated:
   - `prost-build 0.13`（他は 0.14）、`config`（figment と併用）、
     `postgres` / `sqlx` / `secrecy` / `clap` / `thiserror` が未使用。
     Runtime Proof の cargo check 警告 6 件と一致。
-- [ ] **P2-7** `deploy.rs` を fail-closed 化（R2-DEBT-004）
+- [x] **P2-7** `deploy.rs` を fail-closed 化（2026-11-18 対応済み: `make deploy` を無効化し ADR-0004 準拠の `make deploy-mcp-gw` を案内。`deploy.sh` は既に fail-closed 済み。`make deploy-dry` は参照用として維持）（R2-DEBT-004）
   - `make deploy` が ADR-0004 否定のリモート aarch64 配送を実行可能。
     `deploy.sh` と同じ fail-closed へ。
 - [x] **P2-8** デプロイスクリプトへ `-e` と HTTP ステータス検証（2026-11-17 一部対応: health check を `%{http_code}=200` 判定へ強化、dry-run 成功。`-e` は rollback ロジックへの影響があるため未適用）（R1-SEC-008,

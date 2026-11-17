@@ -29,10 +29,12 @@ doctor: ## 環境診断実行 (サーバー)
 phone-status: ## 端末ステータス取得 (Termux)
 	@rust-script scripts/utils/phone-status-json.rs
 
-deploy: ## (レガシー) リモートホストへデプロイ (HOST=jarvis-host)
-	@rust-script rust/scripts/deploy.rs --rust-dir rust $(HOST) deploy
+deploy: ## 無効化（ADR-0004: OCI/リモートデプロイは使用しない）
+	@echo "ERROR: 'make deploy' is disabled (ADR-0004: no OCI/remote deploy)." >&2
+	@echo "Use 'make deploy-mcp-gw' (local, dry-run by default) instead." >&2
+	@exit 1
 
-deploy-dry: ## (レガシー) リモートデプロイ内容の確認 (dry-run, HOST=jarvis-host)
+deploy-dry: ## (レガシー参照) リモートデプロイ内容の dry-run 確認
 	@rust-script rust/scripts/deploy.rs --rust-dir rust $(HOST) deploy --dry-run
 
 ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Docker 依存ゲートは除外）
