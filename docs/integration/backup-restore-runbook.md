@@ -134,19 +134,26 @@ rm -rf "$TMP"
 本番 `jarvis` DB への上書きは、`jarvis_restore_test` での検証が成功した
 場合のみ、明示的に `psql -d jarvis` を実行して行う。
 
-## 補足: make verify-backup の副作用（2026-11-18）
+## 補足: make verify-backup の扱い（2026-11-18 更新）
 
-上記「安全原則」の `make verify-backup` はヘルプ上「読み取り専用」と
-記載されているが、実際は `Makefile` の `install` で
+### 経緯（旧矛盾、2026-11-18 に解消済み）
+
+上記「安全原則」の `make verify-backup` は、当時ヘルプ上「読み取り専用」と
+記載されていたが、実際は `Makefile` の `install` で
 [verify-backup.sh](../../infra/scripts/verify-backup.sh) を
-`/opt/jarvis/scripts/verify-backup.sh` へ同期してから実行する。
-つまり **スクリプト同期（書き込み）を含み、読み取り専用ではない**。
+`/opt/jarvis/scripts/verify-backup.sh` へ同期してから実行していた。
+つまりスクリプト同期（書き込み）を含み、読み取り専用ではなかった。
+スクリプト本体はバックアップデータを変更しない読み取り専用実装
+（SHA-256 と gzip/tar フォーマットの検査のみ）で、書き込みは Makefile 側の
+同期処理に起因していた。
 
-- スクリプト本体はバックアップデータを変更しない読み取り専用実装
-  （SHA-256 と gzip/tar フォーマットの検査のみ）。
-- 書き込みは Makefile 側の同期処理に起因する。
-- 真に読み取り専用で検証する場合は、作業コピーから
-  `sudo -u postgres bash infra/scripts/verify-backup.sh --latest` を実行する。
+### 現行手順（2026-11-18 更新）
+
+- `make verify-backup` は**真に読み取り専用**。作業コピーの
+  `infra/scripts/verify-backup.sh` を `sudo -u postgres` で実行し、
+  `/opt` への書き込みは行わない。
+- `/opt/jarvis/scripts/verify-backup.sh` の同期が必要な場合は、root で
+  `sudo make install-verify-backup` を明示的に呼び出す。
 - 運用方針の詳細は
   [local-operations-runbook.md](local-operations-runbook.md) を参照。
 
