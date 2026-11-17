@@ -108,6 +108,8 @@ generated:
 | SEC-1 | otelcol unit の repo/実機差分の整合 | **2026-11-16 解消（repo側）**: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) を実機の稼働 unit と機能一致させた（`User/Group=koppe`、`op run`/`EnvironmentFile` 撤去、直接 `otelcol-contrib --config`）。functional diff で一致を確認。資格情報の供給元は未特定（secret 値は未確認）。 | 実機適用は不要（repo が実機に追従）。Grafana 認証の供給経路が判明した場合に unit 注記を更新する。 **0.0.0.0 バインドの監査記録は後述「SEC-1 関連: otelcol の 0.0.0.0 バインド監査」を参照。** |
 | SEC-2 | バックアップ系の 1Password 依存解消 | **2026-11-17 実質解消**: 現行バックアップは [backup-local.sh](../../infra/scripts/backup-local.sh) で OCI/rclone/op 非依存、実バックアップ検証済み。レガシー [backup.rs](../../rust/scripts/backup.rs) / [restore.rs](../../rust/scripts/restore.rs) の `op inject` は残存するが、[backup.sh](../../infra/scripts/backup.sh) / [restore.sh](../../infra/scripts/restore.sh) は fail-closed 化され実機では呼ばれない（`make safety-test` が担保）。unit も `op.env` 参照を撤去済み。 | レガシー実装の `op inject` コード自体は参照用として残置。実機 secret 変更は不要（新バックアップは secret を読まない）。 |
 
+| P2-10 | `.gitignore` 拡張の判断 | **採用しない**（詳細は後述）。 | 判断記録を追加。 |
+
 ### SEC-1 関連: otelcol の 0.0.0.0 バインド監査（P0-6、2026-11-18）
 
 [infra/config/otelcol-config.yaml](../../infra/config/otelcol-config.yaml) と
@@ -147,6 +149,67 @@ generated:
 - Tailscale 経由を前提に 0.0.0.0 を維持するなら、外部からの到達性を
   どこで制限するか（firewall / Tailscale 側）を明示する必要がある。
 - 現時点では repo 側 config・unit とも変更せず、記録のみとする。
+
+| P1-12 | Webhook 4ルートの認証設計 | **未対応・要判断**。 | 詳細は後述の設計記録。 |
+
+### P2-10 .gitignore と infra/config/*.env の判断記録（2026-11-18）
+
+[todo.md](../../todo.md) の P2-10（R1-SEC-005）「`.gitignore` を
+`infra/config/*.env` へ拡張」について、**採用しない**と判断した記録。
+[.gitignore](../../.gitignore) およびテンプレートファイルは変更していない。
+
+#### 確認した事実
+
+- [.gitignore](../../.gitignore):10-11 の `config/*.env` / `config/*.env.*` は
+  リポジトリ直下の `config/` にしか一致せず、`infra/config/*.env` は対象外。
+  `git ls-files` で6個の `infra/config/*.env` が tracked であることを確認。
+- 同ファイル:48 は `infra/config/bws.env` を明示的に ignore。
+  `git check-ignore -v` で一致を確認（実機ファイルの値は未確認）。
+- [infra/config/bws.env.example](../../infra/config/bws.env.example) は ignore
+  されず tracked（テンプレートとして残す）。
+- 6個のテンプレートは接続先・パス・`op://` 参照プレースホルダ等のみで、
+  秘密情報の値そのものは含まない。
+- 実機の秘密情報は repo 外の root 管理ファイルに置かれる
+  （[AGENTS.md](../../AGENTS.md)）。
+
+#### 判断と理由
+
+- **採用しない**: ignore すると参照テンプレートの更新が git で追えなくなり、
+  構成ドリフト（BK-4 参照）を招く。値を含まないテンプレートを ignore する
+  利点はない。
+- 実機の秘密情報は別経路で既に ignore 対象にあり、repo 内テンプレートを
+  ignore する必要性はない。
+- 将来テンプレートへ秘密値が混入した場合は、そのファイルを個別に
+  ignore 対象へ移す等の対応を判断する（全体への blanket ignore は避ける）。
+
+### P1-12 Webhook 認証の設計記録（2026-11-18）
+
+[todo.md](../../todo.md) の P1-12（A-M3）について、現状確認と方針を記録する。
+実装・設定変更は行っていない。秘密情報の値は記載しない。
+
+#### 現状（repo 側の読み取り確認）
+
+- [normalizer.rs](../../rust/jarvis-event/src/normalizer.rs):141-147 で
+  `/webhook/ha` / `/webhook/android` / `/webhook/gmail` /
+  `/webhook/calendar` の4ルートを登録。各ハンドラは JSON ペイロードを
+  `UnifiedEvent` へ変換して `emit` するのみで、認証ミドルウェアや
+  署名検証はない。
+- [config.rs](../../rust/jarvis-event/src/config.rs):50 の webhook 待ち受け先は
+  `127.0.0.1:8085`（既定）。[AGENTS.md](../../AGENTS.md) の方針どおり
+  loopback bind + Tailscale 経由の信頼境界を前提としている。
+- `ha_token` は Home Assistant 側への WebSocket 接続の認証に使われ、
+  webhook 受信側の認証には使われていない
+  （[sources.rs](../../rust/jarvis-event/src/sources.rs):41）。
+
+#### 設計方針（未実装・要判断）
+
+- 現状の信頼境界（loopback bind + Tailscale）を前提に、当面は
+  共有トークン / HMAC 署名の導入は行わない。
+- 導入の要否は**実機の公開範囲が決定した後**に判断する。Tailscale 外へ
+  公開する、リバースプロキシ経由で外部サービスから受け取る等の変更が
+  発生した場合は、認証・署名検証とレート制限を再評価する。
+- 実機のリスニング状態・公開範囲はこの記録では確認していない
+  （repo 側の既定値とコードからの確認）。
 
 ### Cedar schema の整備状況（2026-11-16、ユーザー指定項目）
 
