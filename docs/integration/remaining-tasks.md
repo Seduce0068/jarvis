@@ -171,8 +171,62 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| CI-1 | review-gate の Actions 配線方針決定 | **2026-11-17 追記（安全な部分配線）**: [手動 dispatch 限定の review-gate workflow](../../.github/workflows/review-gate.yml) を追加。完全な3ステージ定義（`ci/review-gate.yml`）は auto-merge と PR 自動実行を含むため、認証・権限方針が確定するまで未配線のまま参照用とする。新 workflow は `make ci-local`（Rust/UI/secret scan/safety guards）のみを実行し、merge / comment / 状態変更は一切行わない。 | 完全自動化（PR トリガー・cross-review・auto-merge）は OpenCode 認証情報とレビュー方針の決定後に別途対応。 |
+| CI-1 | review-gate の Actions 配線方針決定 | **2026-11-17 追記（安全な部分配線）**: [手動 dispatch 限定の review-gate workflow](../../.github/workflows/review-gate.yml) を追加。完全な3ステージ定義（`ci/review-gate.yml`）は auto-merge と PR 自動実行を含むため、認証・権限方針が確定するまで未配線のまま参照用とする。新 workflow は `make ci-local`（Rust/UI/secret scan/safety guards）のみを実行し、merge / comment / 状態変更は一切行わない。 | 完全自動化（PR トリガー・cross-review・auto-merge）は OpenCode 認証情報とレビュー方針の決定後に別途対応。 **配線前に必要な修正一覧は後述「CI-1 配線前に必要な修正一覧」を参照。** |
 | CI-2 | `opencode run` 依存の置換検討 | [adr/0002-runtime-agnostic.md](../../adr/0002-runtime-agnostic.md) はランタイム非依存化を規定（2026-11-17: accepted）。2026-11-15 確認: `opencode run` 依存は [ci/review-gate.yml](../../ci/review-gate.yml)（gate-check/cross-review/merge-gate/metrics の4箇所）と [AGENTS.md](../../AGENTS.md) の手動実行手順、[adr/0001-unified-architecture.md](../../adr/0001-unified-architecture.md) の非対話実行記述に残る（review-gate は CI 未配線）。 | **2026-11-16 実装済み（repo側）**: 4箇所の `opencode run` を [ci/scripts/review-run.sh](../../ci/scripts/review-run.sh) へ集約。`JARVIS_REVIEW_RUNNER`（既定 `opencode`）でバックエンド切替可能、runner 契約は `run <prompt> [--json]`。スタブによる4契約テスト（`bash ci/scripts/test-review-run.sh`）成功。代替ランタイムの選定・認証情報設定は残課題（ADR-0002 の段階移行方針と整合）。 |
+
+### CI-1 配線前に必要な修正一覧（2026-11-18 監査）
+
+監査対象は未配線の参照実装 [ci/review-gate.yml](../../ci/review-gate.yml) のみ。
+[安全版 workflow](../../.github/workflows/review-gate.yml) は手動 dispatch 限定で
+`make ci-local` のみを実行し、merge / comment / 状態変更を行わない。
+安全版は現状のまま維持し、参照実装と混同しないこと。設定値・認証情報の値は
+この一覧には記載しない。
+
+#### permissions
+
+- トップレベルの `permissions` は `contents: read`、`pull-requests: write`、
+  `checks: write`。Checks API を操作する step はなく `checks: write` は未使用
+  のため、配線前に削除を検討する。
+- `gh pr comment` を行う gate-check / cross-review は `pull-requests: write`
+  を要求する。コメントを残すかどうかを方針決定し、残さない場合は
+  `contents: read` のみへ戻す（安全版と同じ最小権限）。
+- auto-merge ジョブの `gh pr merge --auto --squash --delete-branch` は
+  `contents: write` を要求するが、現状は `contents: read` のみで権限不足。
+  昇格が必要なら対象ジョブに限定して付与する。
+- fork からの `pull_request` では既定トークンが読み取り専用になり、
+  comment / merge が失敗する。トリガー対象（同一リポジトリのみ等）を決定する。
+
+#### OpenCode 依存
+
+- gate-check / cross-review / merge-gate / metrics の4ジョブが、
+  バージョン固定・チェックサム検証なしのリモートインストールスクリプトを
+  パイプ実行して OpenCode CLI を導入している（supply chain リスク）。
+- [ci/scripts/review-run.sh](../../ci/scripts/review-run.sh) の
+  `JARVIS_REVIEW_RUNNER` で runner を切替できるが、CLI 導入 step は無条件。
+  runner が OpenCode 以外のときは導入をスキップするか、
+  [ADR-0002](../../adr/0002-runtime-agnostic.md) に沿って依存を撤去する。
+- OpenCode のセッション権限を人手の承認なしで自動受け付けする設定が
+  環境変数に定義されている。配線前に承認方針を決定し、自動受け付けを
+  無効化するか jarvis-policy の承認ゲートへ委譲する。
+- モデルプロバイダ等の認証情報の供給経路が workflow にない。
+  CI 上でエージェントを動かす場合の秘密情報の扱いを決定する（CI-2 と同一）。
+- secret scan / 依存グラフ等の追加ツールも `latest` の URL や
+  グローバル npm インストールで取得しており、バージョン固定が必要。
+
+#### auto-merge
+
+- `auto-merge` ジョブは全ステージ成功時にマージを自動有効化し、
+  人間の承認を経ずにマージしうる。review-flow の承認ゲート方針との
+  整合性判断が先で、決定までジョブを配線しない。
+- `workflow_dispatch` では入力 PR 番号を指定できるため、任意の PR を
+  auto-merge 対象にしうる。実行者と対象 PR の制限を追加する。
+- branch protection / 必須レビュー / 承認済みであることの明示的な確認が
+  マージ前にない。有効化するなら検証 step を追加する。
+- `concurrency` が未設定で、同一 PR の再実行や複数 trigger が競合しうる。
+  安全版は PR 単位の group を設定済みなので、配線時に同等の設定を入れる。
+
+**判定**: 上記の権限・認証情報・自動承認・auto-merge の方針が確定するまで、
+参照実装は未配線の参照用として維持し、安全版を配線経路とする。
 
 ## 5. アーキテクチャ/ドキュメント整合性（優先度: 中）
 
