@@ -20,6 +20,8 @@ JARVIS の連携・残タスク・バックアップに関する文書の索引�
 - [local-operations-runbook.md](local-operations-runbook.md)
   — ローカル systemd サービスの起動・検証・停止、手動変更のロールバック、
     `make verify-backup` の扱い方針、clippy 表記の統一。
+- [evidence-regeneration.md](evidence-regeneration.md)
+  — テスト仕様変更時のエビデンス再生成手順（7ステップ・ハッシュのみ書き換え禁止）。
 
 ## 関連
 
