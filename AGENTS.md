@@ -14,7 +14,8 @@ generated:
 
 ## Global Settings
 
-- Common rules are inherited from the global `~/.config/opencode/AGENTS.md`.
+- Common rules are inherited from the shared canonical
+  `~/.agents/AGENTS.md`.
 - This file records only project-specific deltas. Do not duplicate global
   rules; override them only where this project differs.
 - The project TODO source of truth is [todo.md](todo.md) (cross-review
