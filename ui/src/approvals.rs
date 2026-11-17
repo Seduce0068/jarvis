@@ -2,11 +2,16 @@
 //! lets the operator approve or deny each one.
 
 use gpui::{
-    ClickEvent, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window, div,
-    prelude::*, rgb,
+    ClickEvent, Context, IntoElement, KeyBinding, ParentElement, Render, Role, SharedString,
+    Styled, Window, actions, div, prelude::*, rgb,
 };
 
 use crate::policy_client::{ApprovalRequest, PolicyClient};
+
+// Tab navigation for the focusable approval buttons. GPUI has no default Tab
+// binding, so these are registered here to keep the console's keyboard support
+// self-contained (the app entry point does not bind any keys).
+actions!(approvals, [Tab, TabPrev]);
 
 /// Background refresh cadence for the pending queue.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
@@ -26,6 +31,13 @@ pub struct ApprovalsView {
 
 impl ApprovalsView {
     pub fn new(base_url: String, token: Option<String>, cx: &mut Context<Self>) -> Self {
+        // Without a Tab binding the focusable buttons below are unreachable by
+        // keyboard, which would make Enter/Space activation useless in practice.
+        cx.bind_keys([
+            KeyBinding::new("tab", Tab, None),
+            KeyBinding::new("shift-tab", TabPrev, None),
+        ]);
+
         let view = Self {
             client: PolicyClient::new_with_token(base_url, token),
             pending: Vec::new(),
@@ -190,6 +202,16 @@ impl ApprovalsView {
                     .child(
                         div()
                             .id(SharedString::from(format!("approve-{}", request.id)))
+                            // GPUI synthesizes a click from Enter/Space while a
+                            // focusable element with click listeners is focused,
+                            // so the existing on_click handler covers keyboard
+                            // activation too. Adding on_key_down here would
+                            // submit the decision twice.
+                            .focusable()
+                            .tab_stop(true)
+                            .role(Role::Button)
+                            .aria_label(SharedString::from(format!("承認: {}", request.id)))
+                            .focus_visible(|style| style.bg(rgb(0x1b5e20)))
                             .px_3()
                             .py_1()
                             .bg(rgb(0x2e7d32))
@@ -203,6 +225,11 @@ impl ApprovalsView {
                     .child(
                         div()
                             .id(SharedString::from(format!("deny-{}", request.id)))
+                            .focusable()
+                            .tab_stop(true)
+                            .role(Role::Button)
+                            .aria_label(SharedString::from(format!("却下: {}", request.id)))
+                            .focus_visible(|style| style.bg(rgb(0xa52626)))
                             .px_3()
                             .py_1()
                             .bg(rgb(0x8b2f2f))
@@ -239,6 +266,8 @@ impl Render for ApprovalsView {
         }
 
         div()
+            .on_action(cx.listener(|_, _: &Tab, window, cx| window.focus_next(cx)))
+            .on_action(cx.listener(|_, _: &TabPrev, window, cx| window.focus_prev(cx)))
             .flex()
             .flex_col()
             .size_full()
