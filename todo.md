@@ -124,7 +124,7 @@ generated:
 - [x] **P2-5** シェル静的検証をゲート化（2026-11-17 対応済み: `ci/scripts/check-shell.sh` で全26スクリプトに bash -n / shellcheck。shfmt は既存ドリフト16件のため警告のみ。ci-local に組込み）（R4-SCRIPT-003）
   - `bash -n` / `shellcheck` / `shfmt -d` がリポジトリ内のどの自動ゲート
     にも無い。`extra_gates` に追加。
-- [ ] **P2-6** 未使用依存・矛盾バージョンを整理（R2-DEBT-001〜003,
+- [x] **P2-6** 未使用依存・矛盾バージョンを整理（2026-11-17 対応済み: cargo 警告の未使用依存 workspace 8件 + per-crate 6件を削除し Cargo.lock 更新。`cargo check --locked` / clippy / 全テスト / smoke 12/12 成功。警告0）（R2-DEBT-001〜003,
     R2-DEBT-008, R1-SUPPLY-002)
   - `prost-build 0.13`（他は 0.14）、`config`（figment と併用）、
     `postgres` / `sqlx` / `secrecy` / `clap` / `thiserror` が未使用。

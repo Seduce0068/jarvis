@@ -21,7 +21,6 @@ opentelemetry-otlp = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 metrics = { workspace = true }
-config = { workspace = true }
 figment = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -55,7 +54,6 @@ tokio-tungstenite = { version = "0.21", features = ["rustls-tls-native-roots"] }
 futures-util = { workspace = true }
 
 # Secrets
-secrecy = { workspace = true }
 
 # Metrics
 metrics-exporter-prometheus = { workspace = true }

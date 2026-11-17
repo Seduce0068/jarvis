@@ -21,7 +21,6 @@ opentelemetry-otlp = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 tracing-opentelemetry = { workspace = true }
 metrics = { workspace = true }
-config = { workspace = true }
 figment = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
@@ -42,7 +41,6 @@ regex = "1.10"
 toml = "0.8"
 
 # Secrets
-secrecy = { workspace = true }
 
 # gRPC
 tonic = { workspace = true }
