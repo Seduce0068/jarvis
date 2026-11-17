@@ -1,4 +1,16 @@
-# JARVIS Architecture Resource Analysis
+---
+type: Report
+title: "JARVIS Architecture Resource Analysis"
+description: "OCI Always Free 前提のリソース試算（参照資料）"
+tags:
+  - jarvis
+  - architecture
+  - report
+  - oci
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-17T23:33:40+09:00"
+---
 
 *Document source: `report.md` | Calculations: `calc.rs` | Generated: `dist/`*
 

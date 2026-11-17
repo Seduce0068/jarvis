@@ -1,4 +1,15 @@
-# JARVIS Architecture Documentation
+---
+type: Reference
+title: "JARVIS Architecture Documentation"
+description: "アーキテクチャ文書・計算のディレクトリ案内"
+tags:
+  - jarvis
+  - architecture
+  - index
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-17T23:33:40+09:00"
+---
 
 This directory contains architecture decision records and resource calculations for the JARVIS Personal AI system.
 

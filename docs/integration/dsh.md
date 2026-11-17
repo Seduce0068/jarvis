@@ -1,4 +1,15 @@
-# DSH 連携メモ（2026-11-09 実測）
+---
+type: Reference
+title: "DSH 連携メモ"
+description: "DSH 側の MCP 接続・承認フロー運用メモ"
+tags:
+  - jarvis
+  - dsh
+  - mcp
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-17T23:33:40+09:00"
+---
 
 > **2026-11-15 追記（最新確認）**: 本ドキュメント冒頭の 2026-11-09 実測・結論は当時の状態です。2026-11-15 11:36 の安全デプロイ適用後は、systemd 配下の `jarvis-mcp-gw` で read-only native ツール 4 件（`filesystem.list/read`, `git.diff/status`）の `tools/list` 公開と `tools/call` 成功を確認済みです（詳細は末尾「2026-11-15 現状確認」「運用メモ: 再起動後の再接続（OPS-1）」参照）。再起動後は MCP セッション失効のためクライアント再接続/再 `initialize` が必要です。公開ツール・挙動は実機の `tools/list` / allowlist / unit 設定を正としてください。
 

@@ -1,4 +1,15 @@
-# JARVIS 残タスク / 他タスク洗い出し（2026-11-15 確認）
+---
+type: Reference
+title: "JARVIS 残タスク一覧"
+description: "残タスク・判断待ち事項の洗い出し"
+tags:
+  - jarvis
+  - tasks
+  - integration
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-17T23:33:40+09:00"
+---
 
 本ドキュメントは、リポジトリ内容・設定・実装・ローカル systemd 実態・ドキュメント記載を点検して整理した「現時点で残っている/判断待ちのタスク」の一覧です。
 **安全第一**の観点で、破壊的操作や未確認の前提に依存する作業は「要判断」として分離しています。

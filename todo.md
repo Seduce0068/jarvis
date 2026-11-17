@@ -97,7 +97,7 @@ generated:
   - `specs/test-*.md` / `evidence/` が 0 件。必須 4 セクション、
     Traceability、基準 ID、tier、29119 Annex A がすべて同根で未充足。
     優先: policy → mcp-gw → context(PII) → backup → その他。
-- [ ] **P1-10** 成果物 7 ファイルへ OKF frontmatter 付与（R5-FMT-001,
+- [x] **P1-10** 成果物 7 ファイルへ OKF frontmatter 付与（2026-11-17 対応済み: 全7ファイルに type/title/description/tags/generated を付与、H1 を削除し本文を H2 開始へ。okf_validate 全成功、MD025/MD041/MD001 なし。既存 MD013 等は未解消）（R5-FMT-001,
     R5-ADR-001）
   - `adr/0003`, `adr/0004`, `docs/architecture/README.md`, `report.md`,
     `remaining-tasks.md`, `tool-matrix.md`, `dsh.md` が H1 開始。

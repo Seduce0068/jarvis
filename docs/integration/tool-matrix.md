@@ -1,4 +1,15 @@
-# jarvis MCP ツール有効性マトリクス
+---
+type: Reference
+title: "jarvis MCP ツール有効性マトリクス"
+description: "MCP ツールの allowlist・承認・実装状況"
+tags:
+  - jarvis
+  - mcp
+  - tools
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-17T23:33:40+09:00"
+---
 
 `infra/config/mcp_allowlist.toml`・`policy/casbin_policy.csv`・`jarvis-mcp-gw`実装の突き合わせ。
 **デプロイ後に実際に動作するのは「ネイティブ実装済み」かつ「policy/allowlistで許可」かつ「systemd hardening 下で実行可能」なものだけ**。

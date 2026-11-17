@@ -1,4 +1,15 @@
-# ADR-0003: web.fetch ネイティブ実装（SSRF対策付き）
+---
+type: ADR
+title: "ADR-0003: web.fetch ネイティブ実装"
+description: "web.fetch の SSRF 対策付きネイティブ実装決定"
+tags:
+  - adr
+  - jarvis
+  - web-fetch
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-17T23:33:40+09:00"
+---
 
 - Status: Accepted
 - Date: 2026-11-09

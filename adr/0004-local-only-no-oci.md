@@ -1,4 +1,15 @@
-# ADR-0004: OCI 非使用・ローカルPC運用
+---
+type: ADR
+title: "ADR-0004: OCI 非使用・ローカルPC運用"
+description: "OCI を使わずローカル systemd で運用する決定"
+tags:
+  - adr
+  - jarvis
+  - local-only
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-17T23:33:40+09:00"
+---
 
 - Status: Accepted
 - Date: 2026-11-15
