@@ -203,6 +203,6 @@ SP 800-53 を Release 5.2、CC を ISO/IEC 15408-3:2022 の構成要素 ID と�
 [builder.rs](../rust/jarvis-context/src/builder.rs) を参照。
 実行結果は `evidence/` の test-run JSON に記録する。
 
-TC-P4 (設定 fallback) は 2026-11-18 に `pii.rs` へ回帰テストを追加し
-カバー済み（12 テスト）。TC-C (build_context のフィルタ適用) と実機
-DB/Qdrant を用いる結合試験は本スライスの対象外とし、未検証として明示する。
+TC-P4 (設定 fallback) と TC-C (build_context のフィルタ適用・filter→truncate
+の順序) は 2026-11-18 に回帰テストを追加しカバー済み（15 テスト）。
+実機 DB/Qdrant を用いる結合試験は対象外として未検証のままとする。
