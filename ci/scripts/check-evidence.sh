@@ -26,6 +26,7 @@ fi
 
 result=$(python3 - "${evidence[@]}" <<'PY'
 import glob, hashlib, json, os, re, sys
+from datetime import datetime
 from urllib.parse import unquote
 
 evidence_files = sys.argv[1:]
@@ -55,6 +56,13 @@ for f in evidence_files:
     ts = d["timestamp"]
     if not isinstance(ts, str) or not RFC3339.match(ts):
         errors.append(f"{f}: BAD_TIMESTAMP"); continue
+    # The regex checks the shape only; parsing rejects impossible dates such
+    # as 9999-99-99T99:99:99Z. "Z" is normalised for older Python versions.
+    iso_ts = ts[:-1] + "+00:00" if ts.endswith(("Z", "z")) else ts
+    try:
+        datetime.fromisoformat(iso_ts)
+    except ValueError:
+        errors.append(f"{f}: BAD_TIMESTAMP"); continue
     if d["signature"] != "self-attested":
         errors.append(f"{f}: BAD_SIGNATURE"); continue
     doc_type = d.get("document_type")
@@ -64,9 +72,11 @@ for f in evidence_files:
     if not isinstance(top, str) or not top.startswith("sha256:"):
         errors.append(f"{f}: BAD_HASH_FORMAT"); continue
     r = d["results"]
-    if not isinstance(r, dict) or r.get("failed", 1) != 0:
+    # bool is a subclass of int in Python: False == 0 and True == 1 would
+    # otherwise bypass these checks. Require the exact int type.
+    if not isinstance(r, dict) or type(r.get("failed", 1)) is not int or r.get("failed", 1) != 0:
         errors.append(f"{f}: FAILED_TESTS"); continue
-    if not isinstance(r.get("passed", 0), int) or r.get("passed", 0) <= 0:
+    if type(r.get("passed", 0)) is not int or r.get("passed", 0) <= 0:
         errors.append(f"{f}: NO_PASSING_TESTS"); continue
     ref = d.get("test_basis_ref")
     if not isinstance(ref, dict) or not ref.get("spec_path"):
