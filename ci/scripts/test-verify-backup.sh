@@ -22,6 +22,61 @@ check() { # label expected_exit extra_args...
   fi
 }
 
+assert_true() { # label command args...
+  local label="$1"; shift
+  if "$@"; then
+    echo "  PASS: $label"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: $label"
+    fail=$((fail+1))
+  fi
+}
+
+check_includes() { # label expected_exit pattern args...
+  local label="$1" expected="$2" pattern="$3"; shift 3
+  local out code
+  out=$(bash "$script" "$@" 2>&1); code=$?
+  if [ "$code" -eq "$expected" ] && printf '%s' "$out" | grep -q -- "$pattern"; then
+    echo "  PASS: $label (exit $code, output matches)"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: $label expected=$expected actual=$code pattern=$pattern"
+    printf '%s\n' "$out" | head -5 >&2
+    fail=$((fail+1))
+  fi
+}
+
+# Synthetic sentinel only; no real secret value is ever written or read.
+sentinel='DUMMY_SENTINEL_DO_NOT_USE'
+
+sentinel_absent() { # dir
+  ! grep -R -a -q -- "$sentinel" "$1"
+}
+
+no_secret_files() { # dir
+  [ -z "$(find "$1" -type f \( -name '*.env' -o -name '*token*' \) )" ]
+}
+
+manifest_matches() { # dir name
+  local dir="$1" name="$2" actual_bytes actual_sha recorded
+  actual_bytes="$(wc -c < "$dir/$name" | tr -d ' ')"
+  actual_sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+  recorded="$(awk -v n="$name" '$1 == n { print $2, $3; exit }' "$dir/manifest.txt")"
+  [ "$recorded" = "$actual_bytes $actual_sha" ]
+}
+
+record_manifest_entries() { # dir name...
+  local dir="$1"; shift
+  printf '# created_at=2026-11-18T00:00:00Z\n'
+  local name bytes sha
+  for name in "$@"; do
+    bytes="$(wc -c < "$dir/$name" | tr -d ' ')"
+    sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+    printf '%s %s %s\n' "$name" "$bytes" "$sha"
+  done
+}
+
 base="$tmp/backups"
 mkdir -p "$base/good" "$base/corrupt" "$base/partial" "$base/legacy"
 
@@ -51,6 +106,66 @@ check "partial set fails" 1 "$base/partial"
 check "legacy set accepted" 0 "$base/legacy"
 check "all sets: corrupt detected" 1 --backup-dir "$base"
 check "latest set detects partial" 1 --latest --backup-dir "$base"
+
+# TC-B3: model the backup allowlist with synthetic files. The staging dir holds
+# a dummy secret marker that must never appear in a backup artifact. This does
+# not execute backup-local.sh or touch /etc/jarvis.
+extra="$tmp/extra"
+mkdir -p "$extra" "$tmp/staging"
+printf '%s\n' "$sentinel" > "$tmp/staging/bws.env"
+printf '%s\n' "$sentinel" > "$tmp/staging/token.txt"
+printf 'allow = ["tool.read"]\n' > "$tmp/staging/mcp_allowlist.toml"
+
+no_secrets="$extra/no_secrets"
+mkdir -p "$no_secrets"
+cp "$tmp/staging/mcp_allowlist.toml" "$no_secrets/config-mcp_allowlist.toml"
+record_manifest_entries "$no_secrets" config-mcp_allowlist.toml > "$no_secrets/manifest.txt"
+printf 'complete 2026-11-18T00:00:00Z\n' > "$no_secrets/COMPLETE"
+
+check "TC-B3: secret-free set verifies" 0 "$no_secrets"
+assert_true "TC-B3: sentinel absent from artifacts" sentinel_absent "$no_secrets"
+assert_true "TC-B3: no .env/token files copied" no_secret_files "$no_secrets"
+assert_true "TC-B3: manifest matches copied allowlist" manifest_matches "$no_secrets" config-mcp_allowlist.toml
+
+# TC-V4: format-level checks plus manifest size/hash integrity. A valid gzip
+# dump (with the pg_dump footer) and valid tar archives must pass; corrupt
+# streams and a dump missing the footer must be rejected.
+format_ok="$extra/format_ok"
+mkdir -p "$format_ok" "$tmp/qdrant-src" "$tmp/policy-src"
+printf '%s\n' '-- PostgreSQL database dump' 'CREATE TABLE t (id int);' \
+  '-- PostgreSQL database dump complete' | gzip > "$format_ok/postgres-jarvis.sql.gz"
+printf '%s\n' 'snapshot payload' > "$tmp/qdrant-src/snapshot.json"
+tar -cf "$format_ok/qdrant-snapshot.bin" -C "$tmp/qdrant-src" snapshot.json
+printf '%s\n' 'p, agent, tool.read, allow' > "$tmp/policy-src/policy.csv"
+tar -cf "$format_ok/config-policy.tar" -C "$tmp/policy-src" policy.csv
+record_manifest_entries "$format_ok" postgres-jarvis.sql.gz qdrant-snapshot.bin \
+  config-policy.tar > "$format_ok/manifest.txt"
+printf 'complete 2026-11-18T00:00:00Z\n' > "$format_ok/COMPLETE"
+
+check "TC-V4: valid gzip/tar set verifies" 0 "$format_ok"
+check_includes "TC-V4: postgres gzip format checked" 0 "FORMAT OK: postgres dump" "$format_ok"
+check_includes "TC-V4: qdrant tar format checked" 0 "FORMAT OK: qdrant snapshot" "$format_ok"
+check_includes "TC-V4: config tar format checked" 0 "FORMAT OK: config-policy.tar" "$format_ok"
+for name in postgres-jarvis.sql.gz qdrant-snapshot.bin config-policy.tar; do
+  assert_true "TC-V4: manifest size/hash matches $name" manifest_matches "$format_ok" "$name"
+done
+
+format_bad="$extra/format_bad"
+mkdir -p "$format_bad"
+printf '%s\n' 'not a gzip stream' > "$format_bad/postgres-jarvis.sql.gz"
+printf '%s\n' 'not a tar archive' > "$format_bad/qdrant-snapshot.bin"
+record_manifest_entries "$format_bad" postgres-jarvis.sql.gz qdrant-snapshot.bin \
+  > "$format_bad/manifest.txt"
+printf 'complete 2026-11-18T00:00:00Z\n' > "$format_bad/COMPLETE"
+check "TC-V4: corrupt gzip/tar rejected" 1 "$format_bad"
+
+format_truncated="$extra/format_truncated"
+mkdir -p "$format_truncated"
+printf '%s\n' '-- PostgreSQL database dump' | gzip > "$format_truncated/postgres-jarvis.sql.gz"
+record_manifest_entries "$format_truncated" postgres-jarvis.sql.gz \
+  > "$format_truncated/manifest.txt"
+printf 'complete 2026-11-18T00:00:00Z\n' > "$format_truncated/COMPLETE"
+check "TC-V4: dump without pg_dump footer rejected" 1 "$format_truncated"
 
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
