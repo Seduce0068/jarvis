@@ -18,6 +18,9 @@ JARVIS のテスト仕様の索引です。
   backup-local.sh / verify-backup.sh / install-backup-timer.sh。
 - [test-event.md](test-event.md)
   — jarvis-event Webhook・Backpressure テスト仕様。webhook ペイロード変換と bounded channel の動的試験設計。
+- [test-ui.md](test-ui.md)
+  — 承認コンソール UI テスト仕様。エラー保持 / 期限切れ強調 /
+  トークンリダイレクト防止 / キーボード a11y / full args / タイムアウト。
 
 ## 関連
 
