@@ -105,8 +105,48 @@ generated:
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| SEC-1 | otelcol unit の repo/実機差分の整合 | **2026-11-16 解消（repo側）**: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) を実機の稼働 unit と機能一致させた（`User/Group=koppe`、`op run`/`EnvironmentFile` 撤去、直接 `otelcol-contrib --config`）。functional diff で一致を確認。資格情報の供給元は未特定（secret 値は未確認）。 | 実機適用は不要（repo が実機に追従）。Grafana 認証の供給経路が判明した場合に unit 注記を更新する。 |
+| SEC-1 | otelcol unit の repo/実機差分の整合 | **2026-11-16 解消（repo側）**: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) を実機の稼働 unit と機能一致させた（`User/Group=koppe`、`op run`/`EnvironmentFile` 撤去、直接 `otelcol-contrib --config`）。functional diff で一致を確認。資格情報の供給元は未特定（secret 値は未確認）。 | 実機適用は不要（repo が実機に追従）。Grafana 認証の供給経路が判明した場合に unit 注記を更新する。 **0.0.0.0 バインドの監査記録は後述「SEC-1 関連: otelcol の 0.0.0.0 バインド監査」を参照。** |
 | SEC-2 | バックアップ系の 1Password 依存解消 | **2026-11-17 実質解消**: 現行バックアップは [backup-local.sh](../../infra/scripts/backup-local.sh) で OCI/rclone/op 非依存、実バックアップ検証済み。レガシー [backup.rs](../../rust/scripts/backup.rs) / [restore.rs](../../rust/scripts/restore.rs) の `op inject` は残存するが、[backup.sh](../../infra/scripts/backup.sh) / [restore.sh](../../infra/scripts/restore.sh) は fail-closed 化され実機では呼ばれない（`make safety-test` が担保）。unit も `op.env` 参照を撤去済み。 | レガシー実装の `op inject` コード自体は参照用として残置。実機 secret 変更は不要（新バックアップは secret を読まない）。 |
+
+### SEC-1 関連: otelcol の 0.0.0.0 バインド監査（P0-6、2026-11-18）
+
+[infra/config/otelcol-config.yaml](../../infra/config/otelcol-config.yaml) と
+[infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) を読み取り専用で
+監査した結果を記録する。実機の設定・リスニング状態は変更・確認していない。
+秘密情報の値は記載せず、repo 側の config / unit も変更しない。
+
+#### 現状（repo 側の設定）
+
+- extensions: `health_check` が 13133、`pprof` が 1777、`zpages` が 55679 を
+  いずれも 0.0.0.0 で待ち受け、3つとも `service.extensions` で有効。
+- OTLP receiver: gRPC が 4317、HTTP が 4318 を 0.0.0.0 で待ち受ける。
+  `service.extensions` に auth 拡張はなく、受信側の認証設定は見当たらない。
+- 内部テレメトリ: `service.telemetry.metrics` の pull exporter が
+  host 0.0.0.0 / port 8888 を使用（記載の4系統に加えて発見）。
+- systemd unit: `User/Group=koppe`、`UMask=0077`、`NoNewPrivileges`、
+  `ProtectSystem=strict`、`ProtectHome=yes`、`PrivateTmp=yes`、
+  `ReadWritePaths=/etc/jarvis /var/log/jarvis` などのハードニングはある。
+  一方 `IPAddressDeny=` / `IPAddressAllow=` / `RestrictAddressFamilies=` /
+  `PrivateNetwork=` のようなネットワーク露出の制限指定はない。
+- ExecStart は repo 内 config ではなく実機側の設定ファイルを参照するため、
+  実機の実際のリスニング状態はこの記録からは確定できない。
+
+#### 方針との矛盾
+
+- [AGENTS.md](../../AGENTS.md) の Security Notes は、全サービスを `127.0.0.1`
+  にバインドし外部アクセスは Tailscale 経由とする方針を規定している。
+  上記の 0.0.0.0 バインドはこの方針と矛盾する。
+- 同ファイルの Service Ports 表には OTLP 4317 / 4318 が載る一方、
+  health / pprof / zpages / 内部テレメトリ 8888 は掲載がない。
+  health 欄も「—」で、実際の公開範囲との乖離がある。
+
+#### 対応方針（未実施・要判断）
+
+- config のバインド先を loopback へ変更するか、unit 側でネットワーク制限を
+  追加するかは判断が先。pprof / zpages を常時有効にするかも要判断。
+- Tailscale 経由を前提に 0.0.0.0 を維持するなら、外部からの到達性を
+  どこで制限するか（firewall / Tailscale 側）を明示する必要がある。
+- 現時点では repo 側 config・unit とも変更せず、記録のみとする。
 
 ### Cedar schema の整備状況（2026-11-16、ユーザー指定項目）
 
