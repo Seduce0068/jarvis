@@ -59,9 +59,13 @@ jobs:
 
         # P1-8 / P2-3: repo-local regression scripts and the standalone GPUI
         # crate are not covered by the shared rust-gates workspace job.
+        # The shared workflow runs extra_gates with working_directory: rust,
+        # so step back to the repository root before using the Makefile and
+        # repo-relative script paths.
+        cd ..
         make check-shell
         make check-evidence
+        make secret-scan
         make safety-test
-        make test-verify-backup
         bash ci/scripts/test-review-run.sh
         make ui-test
