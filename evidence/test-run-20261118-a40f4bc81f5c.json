@@ -1,6 +1,6 @@
 {
   "spec_hash": "sha256:a40f4bc81f5c0c5298094dfbb6e83e986464887921c6a5bf03e20486c3d5982c",
-  "timestamp": "2026-11-18T02:08:39+09:00",
+  "timestamp": "2026-11-18T03:21:00+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "GNU make + bash (make test-verify-backup + make safety-test)",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 16,
+    "passed": 19,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 699,
@@ -44,69 +44,115 @@
     ]
   },
   "techniques": [
-    { "id": "equivalence-partitioning", "ref": "29119-4 5.2.1" },
-    { "id": "boundary-value-analysis", "ref": "29119-4 5.2.3" },
-    { "id": "decision-table-testing", "ref": "29119-4 5.2.6" },
-    { "id": "state-transition-testing", "ref": "29119-4 5.2.8" },
-    { "id": "scenario-testing", "ref": "29119-4 5.2.9" },
-    { "id": "error-guessing", "ref": "29119-4 5.4.1" }
+    {
+      "id": "equivalence-partitioning",
+      "ref": "29119-4 5.2.1"
+    },
+    {
+      "id": "boundary-value-analysis",
+      "ref": "29119-4 5.2.3"
+    },
+    {
+      "id": "decision-table-testing",
+      "ref": "29119-4 5.2.6"
+    },
+    {
+      "id": "state-transition-testing",
+      "ref": "29119-4 5.2.8"
+    },
+    {
+      "id": "scenario-testing",
+      "ref": "29119-4 5.2.9"
+    },
+    {
+      "id": "error-guessing",
+      "ref": "29119-4 5.4.1"
+    }
   ],
   "risk_items": [
     {
       "id": "R-1",
       "tier": "T1",
       "description": "改ざんバックアップが正常と判定される",
-      "asvs": ["v5.0.0-V14.2.4"],
-      "controls": ["SP800-53r5.2/SI-7"]
+      "asvs": [
+        "v5.0.0-V14.2.4"
+      ],
+      "controls": [
+        "SP800-53r5.2/SI-7"
+      ]
     },
     {
       "id": "R-2",
       "tier": "T1",
       "description": "部分書き込み set が完全と誤認される",
-      "asvs": ["v5.0.0-V16.5.3"],
-      "controls": ["SP800-53r5.2/SI-7"]
+      "asvs": [
+        "v5.0.0-V16.5.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/SI-7"
+      ]
     },
     {
       "id": "R-3",
       "tier": "T1",
       "description": "秘密情報がバックアップへ混入する",
-      "asvs": ["v5.0.0-V13.3.2"],
-      "controls": ["SP800-53r5.2/AC-6"]
+      "asvs": [
+        "v5.0.0-V13.3.2"
+      ],
+      "controls": [
+        "SP800-53r5.2/AC-6"
+      ]
     },
     {
       "id": "R-4",
       "tier": "T2",
       "description": "dry-run のつもりで実書き込みが起きる",
       "asvs": [],
-      "controls": ["SP800-53r5.2/CM-7"]
+      "controls": [
+        "SP800-53r5.2/CM-7"
+      ]
     },
     {
       "id": "R-5",
       "tier": "T3",
       "description": "既定の retention で世代が削除される",
-      "asvs": ["v5.0.0-V14.2.7"],
-      "controls": ["SP800-53r5.2/CP-9"]
+      "asvs": [
+        "v5.0.0-V14.2.7"
+      ],
+      "controls": [
+        "SP800-53r5.2/CP-9"
+      ]
     },
     {
       "id": "R-6",
       "tier": "T2",
       "description": "timer 導入失敗時に旧 unit が戻らない",
-      "asvs": ["v5.0.0-V16.5.3"],
-      "controls": ["SP800-53r5.2/CM-3"]
+      "asvs": [
+        "v5.0.0-V16.5.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/CM-3"
+      ]
     },
     {
       "id": "R-7",
       "tier": "T1",
       "description": "旧ランチャー復活でデータ消失/OCI 転送が起きる",
-      "asvs": ["v5.0.0-V16.5.3"],
-      "controls": ["SP800-53r5.2/CM-7"]
+      "asvs": [
+        "v5.0.0-V16.5.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/CM-7"
+      ]
     }
   ],
   "assurance": {
     "level": "A1",
-    "cc_components": ["ATE_FUN.1"],
+    "cc_components": [
+      "ATE_FUN.1"
+    ],
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "記録している 16 checks (test-verify-backup 6 + safety-test 10) は 2026-11-18T02:08:39+09:00 の実測結果。task-24 で回帰テストが拡張され、現行の test-verify-backup は 19 checks、safety-test は 10 legacy + 19 verify checks となっているが、本エビデンスは指示どおり元の 16 checks を維持する。spec_hash のみ仕様改訂に合わせて更新。仕様には未記載ファイル非検出 / 署名無しによる改ざん耐性不足 / アーカイブ内部の秘密走査不可を既知制約として記録済み。TC-B3/TC-V4 は task-24 でカバー済み、TC-B4/TC-I3 は未カバー。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
+  "notes": "現行の make test-verify-backup は 19 checks すべて成功。make safety-test も 19 checks（legacy 10 + verify 19、verify は重複カウント）。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
 }
