@@ -150,7 +150,7 @@ generated:
 
 ## P3: ドキュメント・レガシー整理（低）
 
-- [ ] **P3-1** ADR-0001 を現行方針へ整合（R2-ARCH-004, R2-DEBT-005,
+- [x] **P3-1** ADR-0001 を現行方針へ整合（2026-11-18 対応済み: 比較テーブルの IaC/秘密情報/バックアップ/Audit Log の旧前提に ADR-0004 による置換を注記。status: accepted と決定本文は維持）（R2-ARCH-004, R2-DEBT-005,
     R5-ADR-003, R5-ADR-004）
   - OCI / 1Password / Object Storage 前提が `status: accepted` のまま。
     ADR-0004（インフラ）と ADR-0002（ランタイム）で置換された旨を明記。

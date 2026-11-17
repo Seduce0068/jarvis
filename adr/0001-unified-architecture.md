@@ -60,10 +60,10 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 | 領域 | 統一方針 |
 | ---- | -------- |
-| **IaC** | OpenTofu 単一リポジトリ (`infra/opentofu/`) |
+| **IaC** | ~~OpenTofu (`infra/opentofu/`)~~ → **非適用**（ADR-0004） |
 | **プロセス管理** | systemd 全サービス (`infra/systemd/`) |
-| **秘密情報** | **1Password CLI (`op`)** で注入、Git/state排除 |
-| **バックアップ/DR** | OCI Object Storage + rclone (cron/systemd timer) |
+| **秘密情報** | ~~1Password CLI~~ → **bws run**（ADR-0004 / SEC-1） |
+| **バックアップ/DR** | ~~OCI + rclone~~ → **ローカル保存**（BK-1） |
 | **監視** | OpenTelemetry Collector → Grafana Cloud Free |
 | **ネットワーク** | Tailscale のみ公開、code-server/OpenCode Web は 127.0.0.1 バインド |
 | **コンテナ** | 初期は **なし** (systemd ネイティブ)。将来 Podman/Docker Compose 移行パスのみ確保 |
@@ -77,7 +77,7 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 | MCP Host | OpenCode MCP | **MCP Gateway (jarvis-mcp-gw)** |
 | Policy Engine | (なし) | **Policy Engine (jarvis-policy)** |
 | Long-term Memory | (OpenCode Session) | **Memory Store (PG + Qdrant)** |
-| Audit Log | (なし) | **Audit Log (JSON → Object Storage)** |
+| Audit Log | (なし) | **Audit Log (JSON → PostgreSQL)** |
 
 ---
 
