@@ -309,6 +309,75 @@ requires_approval = false
         assert!(error.to_string().contains("exceed"), "unexpected: {error}");
     }
 
+    /// Gateway with a 16-byte per-tool argument cap and no approval step, so
+    /// the size gate is the only layer under test.
+    async fn gateway_with_arg_cap(label: &str) -> Arc<McpGateway> {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-lib-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(
+            &allowlist,
+            r#"
+principals = ["opencode"]
+[[tools]]
+name = "shell.execute"
+description = "Execute a shell command"
+allowed_principals = ["opencode"]
+max_args_size = 16
+timeout_ms = 5000
+requires_approval = false
+"#,
+        )
+        .await
+        .expect("write allowlist");
+        let (policy, _engine) = shipped_policy_client_with_engine(label).await;
+        Arc::new(
+            McpGateway::new(
+                McpGatewayConfig {
+                    allowlist_path: allowlist.to_string_lossy().into_owned(),
+                    ..Default::default()
+                },
+                Arc::new(policy),
+            )
+            .await
+            .expect("gateway starts"),
+        )
+    }
+
+    #[tokio::test]
+    async fn tc_s1_max_args_size_boundary() {
+        let gateway = gateway_with_arg_cap("argcap-boundary").await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "shell.execute", false));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock registers");
+
+        // `{"a":""}` is 8 bytes; 7/8/9 padding chars give 15/16/17 bytes.
+        for (padding, expected_len, allowed) in [(7, 15, true), (8, 16, true), (9, 17, false)] {
+            let args = json!({ "a": "x".repeat(padding) });
+            assert_eq!(
+                serde_json::to_string(&args).expect("serialize").len(),
+                expected_len,
+                "fixture must be exactly {expected_len} bytes"
+            );
+
+            let result = gateway
+                .execute_tool("shell.execute", args, "opencode")
+                .await;
+            if allowed {
+                result.unwrap_or_else(|error| panic!("{expected_len} bytes must pass: {error}"));
+            } else {
+                let error = result.expect_err("17 bytes must be rejected");
+                assert!(error.to_string().contains("exceed"), "unexpected: {error}");
+            }
+        }
+    }
+
     #[tokio::test]
     async fn approved_tool_still_executes_when_policy_allows() {
         let (gateway, _engine, policy_http) = gateway_with("approved-ok").await;
