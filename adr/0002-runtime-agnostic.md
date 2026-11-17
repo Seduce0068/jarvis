@@ -63,3 +63,19 @@ JARVIS を「ランタイム非依存のポリシー・記憶・イベント基�
 - レビュー実行: `ci/scripts/review-run.sh` で `JARVIS_REVIEW_RUNNER` による
   バックエンド切替を契約テスト済み。
 - 残課題: ACP session / doctor の自動契約テストは未実装（段階移行の範囲外）。
+
+## 記録（未決定）: PII の保存時扱い（2026-11-18）
+
+本節は現行実装の挙動を記録するもので、新たな設計決定ではない。
+Decision / Consequences および frontmatter の `status` は変更しない。
+
+- PII フィルタは LLM 送信前の `build_context` にのみ適用する。
+- `store_memory` は `content` / `metadata` を生のまま
+  PostgreSQL / Qdrant へ保存する。
+- 根拠: 保存時にマスキングすると復元不能になり、
+  検索品質も落ちるため。
+- リスク: DB / Qdrant への直接アクセスで生 PII が読めること。
+- 将来判断条件: 保存時暗号化・フィールド単位マスキング・
+  保持期限を導入する場合に再評価する。
+
+根拠コード: [`builder.rs`](../rust/jarvis-context/src/builder.rs)
