@@ -172,7 +172,11 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 | jarvis-context | 50054 (gRPC), 8084 (HTTP) | http://localhost:8084/health |
 | OpenCode V2 | 49374 (Web) | http://localhost:49374 |
 | code-server | 8080 | http://localhost:8080 |
-| OpenTelemetry | 4317 (gRPC), 4318 (HTTP) | — |
+| OpenTelemetry | 4317 (gRPC), 4318 (HTTP), 13133 (health), 1777 (pprof), 55679 (zpages), 8888 (internal metrics) | [health](http://localhost:13133) |
+
+All OTLP/extension listeners bind to `127.0.0.1` in the repo template
+(`infra/config/otelcol-config.yaml`); the live unit reads its own config at
+`/etc/jarvis/otelcol-config.yaml`.
 
 ## Configuration
 
