@@ -75,7 +75,7 @@ status: active
 | A-M16 | 決定済み要求の履歴表示・CSV/JSON エクスポートなし | 中 | `ui/src/approvals.rs:14-22` は状態が `pending` のみ。`docs/integration/dsh.md:125` の監査永続化は今後の拡張 | 決定履歴をローカル保持し CSV/JSON エクスポートを追加（DB 監査＝A-R7 とは分離） | UX / UI-4 |
 | A-M17 | ntfy 通知が DSH の permission prompt のみで承認キューと未連携 | 中 | `cordis.patch.yml:75-89` は permission prompt 用、`ui/src/approvals.rs:11-12` は別系統のポーリング。`dsh.md:125` も「通知は今後の拡張」 | policy の pending を ntfy へ橋渡しする薄い連携を追加（CFG-2 の公開トピック問題を同時に解消する設計にする） | UX / CFG-1 |
 | A-M18 | kill switch の poison／永続化失敗時に fail-closed へ回復しない | 中 | `rust/jarvis-policy/src/kill_switch.rs:82-83,92-93,124-125,146-147,182-183` の `read()/write().unwrap()`（poison 時 panic）、`:162-167` は `std::fs::write` 失敗を warn のみで復帰 | poison 時はキルスイッチ有効側へ回復するヘルパーへ置換し、永続化失敗時は arm（fail-closed）へ切り替えて監査ログ・alert に飛ばす | RC + SE / RUST-7 + SEC-KS-02 |
-| A-M19 | PII フィルタが文字列以外と Object キーを走査しない | 中 | `rust/jarvis-context/src/pii.rs:82-100` は `Value::String` のみ置換、数値型・キー名は対象外 | 数値・キー名も正規化して走査するか、非対象を明文化したテストを追加（A-H4 と同時に方針確定） | SE / PII-02 |
+| A-M19 | PII フィルタが文字列以外と Object キーを走査しない | 中 | `rust/jarvis-context/src/pii.rs:86-105` は `Value::String` のみ置換、数値型・キー名は対象外 | **2026-11-18: 値のみ走査・キー/数値/bool/null は非対象としてテストで明文化。キー redact は JSON 構造を壊すため判断待ち**（A-H4 と同時に方針確定） | SE / PII-02 |
 | A-M20 | `web.fetch` の宛先ドメイン制限（egress allowlist）未実装 | 中 | `docs/integration/tool-matrix.md:151` が未実装と明記、`rust/jarvis-mcp-gw/src/sandbox.rs:348-375` は公開 IP 判定のみでドメ固有の許可リストなし | 許可ドメイン一覧を config 化し、リダイレクト先にも同一リストを適用。A-R4 の接続時 IP 再検証も同じ経路で検討 | SE / SEC-SSRF-02 |
 
 ### 低優先度

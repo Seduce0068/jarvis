@@ -200,4 +200,60 @@ mod tests {
 
         std::fs::remove_dir_all(&dir).expect("clean temp dir");
     }
+
+    /// A-M19 scope boundary: only string values are scanned. Object keys stay
+    /// untouched so the JSON structure is preserved; redacting keys would
+    /// change field names and is a separate, still-open design decision.
+    #[test]
+    fn object_keys_are_preserved_and_only_values_are_redacted() {
+        let value = json!({
+            "user@example.com": "contact user@example.com",
+            "nested": { "owner@corp.example": "a@b.co" }
+        });
+        let out = filter(true).filter(value).expect("filter runs");
+
+        let obj = out.as_object().expect("top-level object");
+        assert!(obj.contains_key("user@example.com"), "key is not redacted");
+        assert!(!obj.contains_key("[REDACTED]"), "no key was renamed");
+        assert_eq!(out["user@example.com"], "contact [REDACTED]");
+
+        let nested = out["nested"].as_object().expect("nested object");
+        assert!(nested.contains_key("owner@corp.example"));
+        assert_eq!(out["nested"]["owner@corp.example"], "[REDACTED]");
+    }
+
+    /// A-M19 scope boundary: non-string scalars (numbers, booleans, null)
+    /// and their array forms are passed through unchanged.
+    #[test]
+    fn non_string_scalars_are_left_untouched() {
+        let value = json!({
+            "int": 7,
+            "float": 1.5,
+            "bool_true": true,
+            "bool_false": false,
+            "null": null,
+            "array": [1, false, null, 2.5, "a@b.co"],
+            "email": "a@b.co"
+        });
+        let original = value.clone();
+        let out = filter(true).filter(value).expect("filter runs");
+
+        assert_eq!(out["int"], json!(7));
+        assert_eq!(out["float"], json!(1.5));
+        assert_eq!(out["bool_true"], json!(true));
+        assert_eq!(out["bool_false"], json!(false));
+        assert_eq!(out["null"], Value::Null);
+        assert!(
+            out.as_object().expect("object").contains_key("null"),
+            "null field is preserved"
+        );
+        assert_eq!(out["array"], json!([1, false, null, 2.5, "[REDACTED]"]));
+        assert_eq!(out["email"], "[REDACTED]");
+
+        // Only string values changed; the surrounding structure is intact.
+        let mut expected = original;
+        expected["email"] = json!("[REDACTED]");
+        expected["array"][4] = json!("[REDACTED]");
+        assert_eq!(out, expected);
+    }
 }
