@@ -150,6 +150,45 @@ impl PolicyClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::thread::JoinHandle;
+
+    /// Bind a loopback server, accept `requests` connections and let `handle`
+    /// decide what to answer. Used by every mock policy endpoint below so the
+    /// socket setup is written only once.
+    fn spawn_test_server(
+        mut handle: impl FnMut(&mut TcpStream, String) + Send + 'static,
+        requests: usize,
+    ) -> (SocketAddr, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let addr = listener.local_addr().expect("test address");
+        let server = std::thread::spawn(move || {
+            for _ in 0..requests {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 4096];
+                let n = stream.read(&mut buf).expect("read");
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                handle(&mut stream, request);
+            }
+        });
+        (addr, server)
+    }
+
+    fn respond(stream: &mut TcpStream, response: &str) {
+        stream.write_all(response.as_bytes()).expect("write");
+    }
+
+    fn approval_token(request: &str) -> Option<String> {
+        request
+            .lines()
+            .find(|line| {
+                line.to_ascii_lowercase()
+                    .starts_with("x-jarvis-approval-token:")
+            })
+            .and_then(|line| line.split_once(':'))
+            .map(|(_, value)| value.trim().to_string())
+    }
 
     #[test]
     fn parses_pending_list_and_tolerates_extra_fields() {
@@ -186,19 +225,15 @@ mod tests {
 
     #[test]
     fn hung_policy_endpoint_times_out() {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
-        let addr = listener.local_addr().expect("test address");
-        let handle = std::thread::spawn(move || {
-            // Accept the connection and keep it open without answering.
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 1024];
-            let _ = stream.read(&mut buf);
-            std::thread::sleep(Duration::from_millis(600));
-            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
-        });
+        // Keep the connection open without answering until the client's
+        // 150 ms deadline elapses (the delay here is 600 ms).
+        let (addr, handle) = spawn_test_server(
+            |stream, _request| {
+                std::thread::sleep(Duration::from_millis(600));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            },
+            1,
+        );
 
         let client = PolicyClient::with_timeouts(
             format!("http://{addr}"),
@@ -219,32 +254,20 @@ mod tests {
     /// The UI must send the configured token to jarvis-policy as well.
     #[test]
     fn approval_token_is_sent_as_header() {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
         use std::sync::{Arc, Mutex};
 
         let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
         let seen_for_thread = seen.clone();
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 4096];
-            let n = stream.read(&mut buf).expect("read");
-            let request = String::from_utf8_lossy(&buf[..n]).to_string();
-            let token = request
-                .lines()
-                .find(|line| {
-                    line.to_ascii_lowercase()
-                        .starts_with("x-jarvis-approval-token:")
-                })
-                .and_then(|line| line.split_once(':'))
-                .map(|(_, value)| value.trim().to_string());
-            *seen_for_thread.lock().expect("lock") = token;
-            stream
-                .write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"pending\":[]}")
-                .expect("write");
-        });
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                *seen_for_thread.lock().expect("lock") = approval_token(&request);
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"pending\":[]}",
+                );
+            },
+            1,
+        );
 
         let client =
             PolicyClient::new_with_token(format!("http://{addr}"), Some("ui-token".to_string()));
@@ -261,10 +284,8 @@ mod tests {
     /// to the redirect target (potentially a different host).
     #[test]
     fn approval_token_is_not_replayed_on_redirect() {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
         use std::sync::mpsc;
-        use std::time::{Duration, Instant};
+        use std::time::Instant;
 
         // Redirect target. If ureq follows the 3xx, this server sees the
         // replayed X-Jarvis-Approval-Token header.
@@ -282,10 +303,7 @@ mod tests {
                         let mut buf = [0u8; 4096];
                         let n = stream.read(&mut buf).unwrap_or(0);
                         let request = String::from_utf8_lossy(&buf[..n]).to_string();
-                        let leaked = request.lines().any(|line| {
-                            line.to_ascii_lowercase()
-                                .starts_with("x-jarvis-approval-token:")
-                        });
+                        let leaked = approval_token(&request).is_some();
                         let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
                         let _ = seen_tx.send(Some(leaked));
                         return;
@@ -299,19 +317,17 @@ mod tests {
             let _ = seen_tx.send(None);
         });
 
-        // Policy-side endpoint answering every request with a redirect to
-        // the other listener (a different port, hence a different target).
-        let origin = TcpListener::bind("127.0.0.1:0").expect("bind origin");
-        let origin_addr = origin.local_addr().expect("origin addr");
-        let origin_thread = std::thread::spawn(move || {
-            let (mut stream, _) = origin.accept().expect("origin accept");
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
-            let response = format!(
-                "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/leak\r\nContent-Length: 0\r\n\r\n"
-            );
-            let _ = stream.write_all(response.as_bytes());
-        });
+        // Policy-side endpoint answering with a redirect to the other
+        // listener (a different port, hence a different target).
+        let (origin_addr, origin_thread) = spawn_test_server(
+            move |stream, _request| {
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/leak\r\nContent-Length: 0\r\n\r\n"
+                );
+                let _ = stream.write_all(response.as_bytes());
+            },
+            1,
+        );
 
         let client = PolicyClient::new_with_token(
             format!("http://{origin_addr}"),
@@ -342,19 +358,15 @@ mod tests {
     /// policy service would show up as an empty approval queue.
     #[test]
     fn non_2xx_pending_status_is_an_error() {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept");
-            let mut buf = [0u8; 2048];
-            let _ = stream.read(&mut buf);
-            stream
-                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"pending\":[]}")
-                .expect("write");
-        });
+        let (addr, server) = spawn_test_server(
+            |stream, _request| {
+                respond(
+                    stream,
+                    "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"pending\":[]}",
+                );
+            },
+            1,
+        );
 
         let client = PolicyClient::new(format!("http://{addr}"));
         let result = client.pending();
@@ -374,22 +386,18 @@ mod tests {
     /// checked before reporting an approve/deny outcome to the operator.
     #[test]
     fn non_2xx_decide_status_is_an_error() {
-        use std::io::{Read as _, Write as _};
-        use std::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-        let addr = listener.local_addr().expect("addr");
-        let server = std::thread::spawn(move || {
-            for response in [
-                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            ] {
-                let (mut stream, _) = listener.accept().expect("accept");
-                let mut buf = [0u8; 2048];
-                let _ = stream.read(&mut buf);
-                stream.write_all(response.as_bytes()).expect("write");
-            }
-        });
+        let mut responses = [
+            "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ]
+        .into_iter();
+        let (addr, server) = spawn_test_server(
+            move |stream, _request| {
+                let response = responses.next().expect("queued response");
+                respond(stream, response);
+            },
+            2,
+        );
 
         let client = PolicyClient::new(format!("http://{addr}"));
         let approved = client.approve("req-1", "koppe");
