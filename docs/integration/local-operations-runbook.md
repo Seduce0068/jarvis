@@ -285,33 +285,34 @@ PostgreSQL の DB、Qdrant のコレクション、`/etc/jarvis` の設定を上
 
 ## make verify-backup の扱い方針
 
-### 矛盾の現状
+### 経緯（旧矛盾、2026-11-18 に解消済み）
 
-`Makefile` の `verify-backup` ターゲットのヘルプ文は「読み取り専用」だが、
-実際は `infra/scripts/verify-backup.sh` を `/opt/jarvis/scripts/` へ
-`install` してから実行する。つまり **スクリプト同期（書き込み）が
-含まれており、読み取り専用ではない**。
+従来の `verify-backup` ターゲットはヘルプ文で「読み取り専用」としながら、
+`infra/scripts/verify-backup.sh` を `/opt/jarvis/scripts/` へ `install`
+してから実行していた（スクリプト同期 = 書き込み）。スクリプト本体
+[verify-backup.sh](../../infra/scripts/verify-backup.sh) はバックアップ
+データを変更しない読み取り専用実装だったため、書き込みは Makefile 側の
+同期処理に起因していた。
 
-スクリプト本体 [verify-backup.sh](../../infra/scripts/verify-backup.sh) は
-バックアップデータを変更しない（SHA-256 と gzip/tar のフォーマットを検査
-するだけ）。書き込みは Makefile 側の同期処理に起因する。
+### 現行手順（2026-11-18 更新）
 
-### 運用方針
+- `make verify-backup` は**真に読み取り専用**。作業コピーの
+  `infra/scripts/verify-backup.sh` を `sudo -u postgres` で実行し、
+  `/opt` への書き込みは行わない。
 
-1. `make verify-backup` は「最新スクリプトの同期 + 整合性検証」として扱う。
-   `/opt/jarvis/scripts/` への書き込みが発生するため、権限と所有権を確認
-   してから実行する。
-2. 真に読み取り専用の検証は、作業コピーのスクリプトを直接実行する。
+  ```bash
+  make verify-backup
+  ```
 
-   ```bash
-   sudo -u postgres bash infra/scripts/verify-backup.sh --latest
-   ```
+- `/opt/jarvis/scripts/verify-backup.sh` の同期が必要な場合は、root で
+  `make install-verify-backup` を明示的に呼び出す。
 
-3. Makefile の改善案（このランブックでは実装しない。lead の判断事項）:
-   - `verify-backup`（同期込み）と `verify-backup-readonly`（同期なし）を
-     分離する。
-   - 同期を残す場合はヘルプ文を「読み取り専用ではない」と訂正し、
-     同期を `sudo install` と明示する。
+  ```bash
+  sudo make install-verify-backup
+  ```
+
+- 同期と検証が分離されたため、日常的確認は `make verify-backup` のみで
+  安全に実施できる（バックアップの読み取りとハッシュ検証のみ）。
 
 ## clippy 表記の統一
 

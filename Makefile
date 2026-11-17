@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup timer-status check-shell check-evidence
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup timer-status check-shell check-evidence
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -76,9 +76,11 @@ test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
 install-backup-timer: ## ローカルバックアップ timer を導入（既定は dry-run）
 	@bash infra/scripts/install-backup-timer.sh
 
-verify-backup: ## バックアップの整合性を検証（読み取り専用・最新スクリプトを同期）
-	@install -m 0755 infra/scripts/verify-backup.sh /opt/jarvis/scripts/verify-backup.sh
-	@sudo -u postgres bash /opt/jarvis/scripts/verify-backup.sh
+install-verify-backup: ## /opt の verify-backup.sh を更新（root 必須・明示呼び出し）
+	@install -o root -g root -m 0755 infra/scripts/verify-backup.sh /opt/jarvis/scripts/verify-backup.sh
+
+verify-backup: ## バックアップの整合性を検証（読み取り専用・作業コピーを使用）
+	@sudo -u postgres bash infra/scripts/verify-backup.sh
 
 backup-preflight: ## バックアップ前提の読み取り専用チェック（BK-1 安全ゲート）
 	@bash infra/scripts/backup-preflight.sh
