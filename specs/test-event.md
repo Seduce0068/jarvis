@@ -172,4 +172,32 @@ Scenario: TC-B4 クローズ済み channel
 ### 異常系・入口 (REQ-13〜REQ-15)
 
 ```gherkin
-Scenario: TC-E1（policy 到達不可 fail-closed）と TC-E2（/v1/events の source 正規化・correlation 生成）は 2026-11-18 に回帰テストを追加しカバー済み（24 テスト）。実機 policy サービスを用いた結合試験は対象外。
+Scenario: TC-E1（policy 到達不可 fail-closed）と TC-E2
+（/v1/events の source 正規化・correlation 生成）は 2026-11-18 に
+回帰テストを追加しカバー済み（24 テスト）。
+実機 policy サービスを用いた結合試験は対象外。
+
+## Traceability
+
+| Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
+| --- | --- | --- | --- | --- | --- | --- |
+| TC-W1 | REQ-1 | v5.0.0-V2.2.1 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T2 |
+| TC-W2 | REQ-1 | v5.0.0-V2.2.1 | SP800-53r5.2/AU-3 | ATE_COV.2 | 5.2.1 | T2 |
+| TC-W2 | REQ-2 | v5.0.0-V2.2.1 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.6 | T2 |
+| TC-W3 | REQ-2 | v5.0.0-V2.2.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T2 |
+| TC-W4 | REQ-3 | v5.0.0-V2.2.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.6 | T2 |
+| TC-W4 | REQ-4 | v5.0.0-V2.2.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.6 | T2 |
+| TC-W1 | REQ-5 | - | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.9 | T2 |
+| TC-W1 | REQ-6 | - | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.9 | T2 |
+| TC-W1 | REQ-7 | - | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.9 | T2 |
+| TC-B1 | REQ-8 | v5.0.0-V15.2.2 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.3 | T1 |
+| TC-B1 | REQ-9 | - | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.3 | T1 |
+| TC-B2 | REQ-10 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.3 | T1 |
+| TC-B3 | REQ-11 | - | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.8 | T1 |
+| TC-B4 | REQ-12 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.4.1 | T2 |
+| TC-E1 | REQ-13 | v5.0.0-V8.3.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-E2 | REQ-14 | v5.0.0-V16.2.4 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T3 |
+| TC-E3 | REQ-15 | - | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.9 | T2 |
+
+ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではない)。
+REQ-1〜REQ-15 と TC-W1〜W4 / TC-B1〜B4 / TC-E1〜E3 を網羅する。

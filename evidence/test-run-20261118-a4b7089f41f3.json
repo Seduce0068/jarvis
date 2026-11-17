@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:eb320d3613d04baa3e536f1de9d3d4fd0f90137d44f004deb4decd6f757d4b76",
-  "timestamp": "2026-11-18T03:56:00+09:00",
+  "spec_hash": "sha256:a4b7089f41f3f459d994243cfade609667d7d9c98046253b0513208181dd5805",
+  "timestamp": "2026-11-18T04:10:35+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-event --lib --offline",
@@ -13,7 +13,7 @@
     "passed": 24,
     "failed": 0,
     "skipped": 0,
-    "duration_ms": 0,
+    "duration_ms": 10,
     "coverage": {},
     "mutation_score": 0
   },
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-event.md",
-    "spec_hash": "sha256:eb320d3613d04baa3e536f1de9d3d4fd0f90137d44f004deb4decd6f757d4b76",
+    "spec_hash": "sha256:a4b7089f41f3f459d994243cfade609667d7d9c98046253b0513208181dd5805",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -163,5 +163,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-event の 24 テスト実測結果（TC-E1/E2 の 4 件追加を含む）。実機 policy サービス結合試験は対象外。カバレッジ・ミューテーションは未測定。"
+  "notes": "jarvis-event の 24 テスト再実行結果。Traceability 表追加後の仕様ハッシュに同期。TC-E1/E2 の回帰テスト 4 件を含む。実機 policy サービス結合試験は対象外。カバレッジ・ミューテーションは未測定。"
 }
