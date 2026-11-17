@@ -290,8 +290,11 @@ fn web_max_bytes(args: &Value) -> usize {
     let requested = args
         .get("max_bytes")
         .and_then(Value::as_u64)
-        .unwrap_or(WEB_FETCH_DEFAULT_MAX_BYTES as u64) as usize;
-    requested.clamp(1024, WEB_FETCH_HARD_MAX_BYTES)
+        .unwrap_or(WEB_FETCH_DEFAULT_MAX_BYTES as u64);
+    // Clamp in u64 space first so a huge value cannot wrap when cast to
+    // usize on narrower targets, then convert to the typed constant.
+    let clamped = requested.clamp(1024, WEB_FETCH_HARD_MAX_BYTES as u64);
+    usize::try_from(clamped).unwrap_or(WEB_FETCH_HARD_MAX_BYTES)
 }
 
 fn validate_http_url(raw: &str) -> Result<reqwest::Url> {
@@ -502,6 +505,11 @@ mod tests {
         assert_eq!(web_max_bytes(&json!({"max_bytes": 1})), 1024);
         assert_eq!(
             web_max_bytes(&json!({"max_bytes": 10 * 1024 * 1024})),
+            WEB_FETCH_HARD_MAX_BYTES
+        );
+        // u64::MAX must clamp, not wrap around on a narrower usize.
+        assert_eq!(
+            web_max_bytes(&json!({"max_bytes": u64::MAX})),
             WEB_FETCH_HARD_MAX_BYTES
         );
     }
