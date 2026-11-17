@@ -44,7 +44,7 @@ generated:
     通る。ガード追加（409/403）と UI への状態表示・ボタン無効化。
     発動／解除の curl 手順ランブックも未整備。
   - 根拠: `policy/src/lib.rs:120-144`, `ui/src/approvals.rs:88-129`。
-- [ ] **P0-5** 子プロセスへの全シークレット継承を遮断（R1-MCP-001,
+- [x] **P0-5** 子プロセスへの全シークレット継承を遮断（2026-11-17 対応済み: `subprocess.rs` の `apply_minimal_env` で env_clear + 最小限の変数のみ。upstream MCP / git spawn に適用。smoke 12/12）（R1-MCP-001,
     R1-SEC-001）
   - upstream MCP / git spawn に `env_clear()` が無く、`bws run` の
     `BWS_ACCESS_TOKEN` 等が継承される。spawn 前に `env_clear()` し

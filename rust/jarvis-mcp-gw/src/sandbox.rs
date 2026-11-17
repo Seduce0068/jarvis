@@ -220,16 +220,13 @@ impl Sandbox {
     ) -> Result<Value> {
         let path = self.resolve_path(args)?;
         let timeout = Duration::from_millis(tool_config.timeout_ms);
-        let output = tokio::time::timeout(
-            timeout,
-            Command::new("git")
-                .arg("-C")
-                .arg(&path)
-                .args(git_args)
-                .output(),
-        )
-        .await
-        .context("git timed out")??;
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&path).args(git_args);
+        // P0-5: do not leak service secrets (BWS_ACCESS_TOKEN) to children.
+        crate::subprocess::apply_minimal_env(&mut cmd);
+        let output = tokio::time::timeout(timeout, cmd.output())
+            .await
+            .context("git timed out")??;
         if !output.status.success() {
             bail!(
                 "git {:?} failed: {}",

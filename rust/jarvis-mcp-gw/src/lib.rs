@@ -9,6 +9,7 @@ pub mod grpc;
 pub mod http;
 pub mod mcp_server;
 pub mod sandbox;
+pub mod subprocess;
 
 #[cfg(test)]
 mod testing;

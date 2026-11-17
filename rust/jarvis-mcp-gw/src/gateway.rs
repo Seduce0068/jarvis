@@ -109,6 +109,10 @@ impl Gateway {
 
         let mut cmd = Command::new(program);
         cmd.args(args);
+        // P0-5: never hand the service's full environment (including
+        // BWS_ACCESS_TOKEN from `bws run`) to an upstream MCP child. Keep
+        // only the variables required to locate/run a normal subprocess.
+        crate::subprocess::apply_minimal_env(&mut cmd);
         let transport = TokioChildProcess::new(cmd)
             .with_context(|| format!("Failed to spawn MCP server '{name}' ({program})"))?;
 
