@@ -100,10 +100,16 @@ status: active
 | RUST-8 | 保留 | 新規性が「推測」。gRPC 経由のみ principal をクライアントが選択できるが、50052 が実際に loopback 限定かは未確認 | `ss -lntp \| grep 50052` で確認後、必要なら gRPC もサーバ側 principal 固定へ |
 | DOC-10 | 保留 | OKF 索引規約の ADR ディレクトリへの適用範囲が未定義で、設計判断が必要 | ADR を索引規約対象外と明文化するか、`adr/index.md` 追加を方針決定後に判断 |
 | CFG-2 | 保留 | `ntfy.sh` + 固定 topic は確認できるが通知ペイロードに機微な引数が含まれるか未確認で、漏洩リスクの根拠が不足 | A-M17 の実装時にペイロードを確認し、非公開トピック化を決定 |
+| CFG-2 | 保留継続・実装見送り | - | 後述の補足を参照 |
 | SEC-SSRF-01 | 保留 | DNS rebinding による TOCTOU はコード構造から可能性はあるが再現根拠なし。推測を機能バグ扱いしない基準に該当 | A-M20 実装時に接続時 IP 再検証を同時検討 |
 | OBS-01 | 保留（既知の再掲） | `adr/0001-unified-architecture.md:164` と正本 DOC-1「Grafana Cloud アラート」に既出 | 正本 DOC-1 更新時に「kill switch 発動・承認タイムアウト・バックアップ失敗」を通知対象として追記 |
 | INF-9 | 保留（既知の再掲・証跡として吸収） | BK-3 の既知判断に、`decommission-oci.sh:30,49-50,55` の dry-run でも state pull / plan 生成が走るという証跡を追加したもの | BK-3 の判断材料中に記録 |
 | AUD-01 | 保留（既知の再掲） | `rust/jarvis-policy/src/approval.rs:1-6` の監査永続化 TODO は正本 MCP-1 と同一内容 | A-M13 / A-M16 で要件を分離した上で MCP-1 更新時に最小監査テーブル設計を位置づける |
+
+**CFG-2 補足（2026-11-18）**: ntfy は DSH の permission prompt 用で、
+jarvis-policy の承認キューとは別系統。公開トピックで機微な `context` を
+流すリスクがあるため橋渡しは実装しない。非公開トピック／セルフホストと、
+id・resource のみの通知契約を先に確定する（判断待ち）。
 
 ## 既知タスクとの境界
 
