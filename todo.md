@@ -26,14 +26,16 @@ generated:
 
 ## P0: 認証・承認・シークレット（至急）
 
-- [ ] **P0-1** 承認 API の既定無認証を解消（R1-AUTH-001）
-  - **2026-11-18 判断保留**: `approval_api_token` は optional で、未設定時は
-    loopback-only の従来動作。既定を必須化すると UI / 既存フローが壊れるため、
-    実機の `/etc/jarvis/policy.env` にトークン設定を注入した上で
-    fail-closed 化する段階移行が必要（値は確認・記録しない）。
-  - `approval_api_token: None` 既定で全承認ルートを素通し。必須化し、
-    未設定時は起動失敗または 503。`approved_by` をボディから受け取らず
-    認証 Identity に紐付ける（`config.rs:61`, `http.rs:73-108`）。
+- [x] **P0-1** 承認 API の既定無認証を解消（R1-AUTH-001）
+  - **2026-11-18 一部対応**: opt-in strict ガード実装済み。本番有効化は残る。
+    `require_approval_api_token`（既定 `false`）が `true` のとき、トークン
+    未設定なら承認 endpoints は 503 で fail-closed
+    （`config.rs:38`, `http.rs:122-136`）。既定は loopback-only の従来動作を
+    維持し、トークン設定時は `X-Jarvis-Approval-Token` ヘッダを要求する。
+  - **残る対応**: 実機の `/etc/jarvis/policy.env` へのトークン注入と
+    `require_approval_api_token=true` 化は、UI / 既存フローへの影響を確認
+    した上で判断する（値は確認・記録しない）。`approved_by` の認証 Identity
+    紐付けは未対応。
 - [x] **P0-2** MCP Gateway が承認トークンを送信していない（2026-11-17 対応済み: `new_with_token` + ヘッダ送信、4コンポーネント契約テスト済み。NOTE: 可用性障害は policy 側にも同じトークン設定が必要）（R1-AUTH-002）
   - `ApprovalClient::new(endpoint, None)` が既定。`new_with_token` を使い、
     設定時／未設定時の往復テストを追加（`lib.rs:40-42`,
@@ -60,9 +62,12 @@ generated:
     `BWS_ACCESS_TOKEN` 等が継承される。spawn 前に `env_clear()` し
     `PATH` / `HOME` 等最小限を明示（`gateway.rs:110-113`,
     `sandbox.rs:225-229`）。サービス間でも bws プロジェクト分离が必要。
-- [ ] **P0-6** otelcol の `0.0.0.0` バインドを `127.0.0.1` へ（R1-SEC-002）
-  - pprof 1777 / zpages 55679 / OTLP 4317,4318 / health 13133 が全公開。
-    AGENTS.md の「127.0.0.1 only」と矛盾。Runtime Proof で設定確認済み。
+- [x] **P0-6** otelcol の `0.0.0.0` バインドを `127.0.0.1` へ（R1-SEC-002）
+  - **2026-11-18 現状**: repo 側 `infra/config/otelcol-config.yaml` の
+    6リスナー（health 13133 / pprof 1777 / zpages 55679 / OTLP 4317,4318 /
+    internal 8888）を `127.0.0.1` へ変更済み（`:8,10,12,18,20,165`）。
+  - **実機対応は残る**: 実機は `/etc/jarvis/otelcol-config.yaml` を読み込む
+    ため、repo テンプレートの同期と `ss -lnt` による確認は未実施。
 - [ ] **P0-7** Grafana 認証情報の供給経路を確定（R1-SEC-003）
   - `otelcol-config.yaml:128` が `GRAFANA_CLOUD_AUTH` を要求するが unit は
     直接起動で未注入。実値を config / journal に残さない経路を統一。
@@ -175,9 +180,13 @@ generated:
   - otelcol / opencode / code-server / qdrant / backup で
     `SystemCallFilter` 等が欠落。全 unit に `UMask=0077` も追加。
     `/etc/jarvis` の `ReadWritePaths` も個別ファイルへ絞る。
-- [ ] **P2-10** `.gitignore` を `infra/config/*.env` へ拡張（R1-SEC-005）
-  - 現状 `config/*.env` はリポジトリ直下にしか一致しない。Runtime Proof
-    で `.gitignore:10-11,48` を確認済み。`bws.env.example` のみ例外化。
+- [x] **P2-10** `.gitignore` を `infra/config/*.env` へ拡張（R1-SEC-005）
+  - **2026-11-18 判断記録済み（「採用しない」）**:
+    [判断記録](docs/integration/remaining-tasks.md) に、値なし参照テンプレート
+    を ignore すると更新履歴が失われ構成ドリフト（BK-4）を招くため tracked
+    維持とする記録を追加。`.gitignore` とテンプレートは未変更。
+  - **残る対応**: 将来テンプレートへ秘密値が混入した場合は、そのファイルを
+    個別に ignore 対象へ移す判断が必要（全体への blanket ignore は避ける）。
 - [x] **P2-11** setup スクリプトの固定 DB パスワードを除去（2026-11-17 対応済み: `JARVIS_DB_PASSWORD` 環境変数必須化、code-server 生成パスワードの標準出力を廃止、infra/README に手順追記）（R1-SEC-007）
   - 固定文字列をハードコード、生成パスワードを標準出力へ表示。
     `secret_scan.py` が SQL の `WITH PASSWORD` を検出できない問題も。
@@ -281,20 +290,25 @@ generated:
 
 - [x] **P0-9** drift 検査の allowlist 欠落 fail-open（2026-11-17 対応済み: 配備版 allowlist 欠落時に `MISSING (deployed)` + danger=1。回帰テスト追加）（A-H2）
   - `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist が無いと allowlist 検査と `web.fetch` danger 判定ごとスキップされ、`drift`/`danger` が立たない。欠落時に `MISSING` + `danger=1` を設定し回帰テストを追加。
-- [ ] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
-  - **2026-11-18 現状**: opt-in strict ガードは実装済み。
+- [x] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
+  - **2026-11-18 現状**: opt-in strict ガードは実装済み（一部対応）。
     `require_kill_switch_admin_token`（既定 `false`）が `true` のときだけ
     既定トークンで起動を拒否し、既定のままなら従来どおり warn のみで継続する。
-    本番で `true` にするかは、トークン注入を値を見ずに確認した後に判断する。
-    運用手順は
+    **本番有効化は残る**: `true` 化はトークン注入を値を見ずに確認した後に
+    判断する。運用手順は
     [local-operations-runbook.md](docs/integration/local-operations-runbook.md)
     の P0-10 節を参照。
   - 根拠: `rust/jarvis-policy/src/config.rs:38`（opt-in フィールド）、
     `config.rs:66`（既定値 `PLACEHOLDER_KILL_SWITCH_TOKEN` = `"changeme"`）、
     `rust/jarvis-policy/src/lib.rs:35-48`（true のときのみ拒否、既定は warn）。
     ガードの既定値は `false` なので既存デプロイの起動動作は変わらない。
-- [ ] **P0-11** `store_memory` に PII フィルタ未適用（A-H4）
-  - `rust/jarvis-context/src/builder.rs:72` は `build_context` でフィルタ適用、`:80-102` の `store_memory` は生の `content`/`metadata` を DB・Qdrant へ保存。「LLM 送信時のみ」なら保存時は対象外と明文化するか、保存前にも適用（A-M19 / P2-1 と同時判断）。
+- [x] **P0-11** `store_memory` に PII フィルタ未適用（A-H4）
+  - **2026-11-18 判断記録済み（未実装）**: [ADR-0002](adr/0002-runtime-agnostic.md)
+    の「記録（未決定）: PII の保存時扱い」に、PII フィルタは LLM 送信前の
+    `build_context` にのみ適用し、`store_memory` は生の `content`/`metadata`
+    を保存する旨を明記。保存時マスキングは復元不能・検索品質低下の根拠。
+  - **残る判断**: 保存時暗号化・フィールド単位マスキング・保持期限の要否は
+    未決定（A-M19 / P2-1 と同時判断）。判断を確定させない。
 
 ### 中・低優先度（新規）
 
@@ -302,8 +316,13 @@ generated:
   - **2026-11-18 完了**: bounded(1024) + try_send + warn&drop に統一。
     sources.rs の型変更で unbounded ブリッジも除去済み（grep 0件）。
   - （解消済み）旧状態: `normalizer.rs` の unbounded channel と send 失敗握り潰し。bounded(1024) + try_send + warn&drop を導入。
-- [ ] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
-  - `normalizer.rs:118-127` に `/webhook/{ha,android,gmail,calendar}` を登録するのみ。loopback 前提を明記した上で共有トークン／HMAC 署名とレート制限を追加するか、受け入れリスクを ADR 化（R4-TEST-002 と別軸）。
+- [x] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
+  - **2026-11-18 判断記録済み（未実装）**: [設計記録](docs/integration/remaining-tasks.md)
+    に、loopback bind + Tailscale の信頼境界を前提に当面共有トークン /
+    HMAC 署名は導入しない旨を明記。実装・設定変更は行っていない。
+  - **残る判断**: 導入要否は実機の公開範囲決定後。Tailscale 外への公開や
+    リバースプロキシ経由の外部受取が発生した場合は、認証・署名検証と
+    レート制限を再評価する（実機の公開範囲は未確認）。
 - [x] **P2-12** drift 検査対象が Cedar 系3ファイルに及ばない（2026-11-18 対応済み: policies.cedar / cedar_schema.cedarschema / pii_patterns.toml を cmp 対象へ追加。配備版パスは env で上書き可能、回帰テストで stale schema 検出を確認）（A-M8）
   - `check-deploy-drift.sh:19-47` は binary/allowlist/`casbin_policy.csv`/unit のみ。`policies.cedar`・`cedar_schema.cedarschema`・`pii_patterns.toml` を `cmp` 対象へ追加（P0-9 と同じ枠組み）。
 - [x] **P3-8** 承認ボタンのキーボード操作・アクセシビリティ属性（A-M15）
