@@ -53,8 +53,20 @@ impl EventNormalizer {
         } else {
             let ha_client = ha_client.clone();
             let event_tx = normalizer.event_sender();
+
+            // `HomeAssistantClient::listen_events` still accepts an unbounded
+            // sender. Bridge it into the bounded channel using the same
+            // non-blocking, warn-and-drop policy as `Normalizer::emit` until
+            // that client can take `mpsc::Sender` directly.
+            let (source_tx, mut source_rx) =
+                tokio::sync::mpsc::unbounded_channel::<jarvis_core::UnifiedEvent>();
             tokio::spawn(async move {
-                if let Err(error) = ha_client.listen_events(event_tx).await {
+                while let Some(event) = source_rx.recv().await {
+                    normalizer::try_emit_event(&event_tx, event);
+                }
+            });
+            tokio::spawn(async move {
+                if let Err(error) = ha_client.listen_events(source_tx).await {
                     tracing::error!("Home Assistant WebSocket listener stopped: {error:#}");
                 }
             });

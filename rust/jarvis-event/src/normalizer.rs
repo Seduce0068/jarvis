@@ -8,9 +8,38 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, instrument};
 
+/// Capacity of the bounded event channel. Producers never block: when the
+/// queue is full the event is logged and dropped (see [`try_emit_event`]).
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
+
+/// Non-blocking submission to the bounded event channel.
+///
+/// A full channel sheds load instead of growing memory without limit or
+/// blocking webhook handlers: the event is logged at WARN level and dropped.
+/// This is shared by webhook `emit` calls and the Home Assistant listener
+/// bridge in `lib.rs` so both paths obey the same backpressure policy.
+pub(crate) fn try_emit_event(sender: &mpsc::Sender<UnifiedEvent>, event: UnifiedEvent) {
+    match sender.try_send(event) {
+        Ok(()) => {}
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            tracing::warn!(
+                event_type = %event.event_type,
+                source = %event.source,
+                capacity = EVENT_CHANNEL_CAPACITY,
+                "event channel full; dropping event"
+            );
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            // Receiver gone (shutdown): keep the previous silent-drop
+            // behaviour without adding noise to the shutdown path.
+            tracing::debug!("event channel closed; dropping event");
+        }
+    }
+}
+
 pub struct Normalizer {
     config: crate::config::EventConfig,
-    event_tx: mpsc::UnboundedSender<UnifiedEvent>,
+    event_tx: mpsc::Sender<UnifiedEvent>,
 }
 
 impl Normalizer {
@@ -20,7 +49,7 @@ impl Normalizer {
         opencode: Arc<crate::opencode::OpenCodeClient>,
         context_client: Arc<jarvis_context::ContextBuilder>,
     ) -> Result<Self> {
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
         let normalizer = Self {
             config: config.clone(),
@@ -41,12 +70,23 @@ impl Normalizer {
     }
 
     pub fn emit(&self, event: UnifiedEvent) {
-        let _ = self.event_tx.send(event);
+        try_emit_event(&self.event_tx, event);
     }
 
-    /// Clone of the channel sender used to submit events for processing.
-    pub fn event_sender(&self) -> mpsc::UnboundedSender<UnifiedEvent> {
+    /// Clone of the bounded channel sender used to submit events for
+    /// processing. Submission is non-blocking; see [`try_emit_event`].
+    pub fn event_sender(&self) -> mpsc::Sender<UnifiedEvent> {
         self.event_tx.clone()
+    }
+
+    /// Test-only constructor that avoids the client dependencies required by
+    /// [`Normalizer::new`] while exercising the real `emit` path.
+    #[cfg(test)]
+    fn with_event_tx(event_tx: mpsc::Sender<UnifiedEvent>) -> Self {
+        Self {
+            config: crate::config::EventConfig::default(),
+            event_tx,
+        }
     }
 
     /// Policy-gated hand-off of a normalized event to the OpenCode agent.
@@ -395,5 +435,80 @@ mod tests {
         );
         assert_eq!(calendar.event_type, "event_update");
         assert_eq!(calendar.payload, json!({}));
+    }
+
+    fn test_event(seq: u128, event_type: &str) -> UnifiedEvent {
+        UnifiedEvent {
+            id: uuid::Uuid::from_u128(seq),
+            source: EventSource::Manual,
+            event_type: event_type.into(),
+            payload: json!({"seq": seq}),
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+            correlation_id: format!("corr-{seq}"),
+        }
+    }
+
+    #[test]
+    fn emit_enqueues_event_when_channel_has_capacity() {
+        assert_eq!(EVENT_CHANNEL_CAPACITY, 1024);
+        let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let normalizer = Normalizer::with_event_tx(tx);
+
+        normalizer.emit(test_event(1, "state_changed"));
+
+        let queued = rx.try_recv().expect("event accepted");
+        assert_eq!(queued.id, uuid::Uuid::from_u128(1));
+        assert_eq!(queued.source, EventSource::Manual);
+        assert_eq!(queued.event_type, "state_changed");
+        assert_eq!(queued.payload, json!({"seq": 1}));
+    }
+
+    #[test]
+    fn emit_drops_overflow_event_instead_of_blocking() {
+        let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let normalizer = Normalizer::with_event_tx(tx);
+
+        for seq in 0..EVENT_CHANNEL_CAPACITY {
+            normalizer.emit(test_event(seq as u128, "probe"));
+        }
+        normalizer.emit(test_event(EVENT_CHANNEL_CAPACITY as u128, "overflow"));
+
+        let mut received = 0;
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.event_type, "overflow");
+            received += 1;
+        }
+        assert_eq!(received, EVENT_CHANNEL_CAPACITY);
+    }
+
+    #[test]
+    fn event_sender_shares_the_same_bounded_capacity() {
+        let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let normalizer = Normalizer::with_event_tx(tx.clone());
+        let cloned = normalizer.event_sender();
+
+        for seq in 0..EVENT_CHANNEL_CAPACITY {
+            normalizer.emit(test_event(seq as u128, "probe"));
+        }
+        try_emit_event(
+            &cloned,
+            test_event(EVENT_CHANNEL_CAPACITY as u128, "overflow"),
+        );
+
+        let mut received = 0;
+        while let Ok(event) = rx.try_recv() {
+            assert_ne!(event.event_type, "overflow");
+            received += 1;
+        }
+        assert_eq!(received, EVENT_CHANNEL_CAPACITY);
+    }
+
+    #[test]
+    fn try_emit_event_tolerates_a_closed_channel() {
+        let (tx, rx) = mpsc::channel::<UnifiedEvent>(1);
+        drop(rx);
+        assert!(tx.is_closed());
+
+        try_emit_event(&tx, test_event(1, "state_changed"));
     }
 }
