@@ -66,6 +66,16 @@ impl McpGateway {
         args: serde_json::Value,
         principal: &str,
     ) -> Result<serde_json::Value> {
+        // P0-3 staged rollout: when enabled, the caller-supplied wire
+        // principal (REST/gRPC) cannot influence any decision below. The
+        // configured MCP principal becomes the effective identity. Shadowing
+        // here keeps every later check, approval request and log consistent.
+        let principal = if self.config.require_server_side_principal {
+            self.config.mcp_principal.as_str()
+        } else {
+            principal
+        };
+
         // Policy first. Gateway capabilities use the canonical resource
         // form `tool:<name>` (see infra/config/policy/casbin_policy.csv).
         let resource = format!("tool:{tool}");
@@ -468,6 +478,126 @@ requires_approval = false
         assert!(
             error.to_string().contains("Policy denied"),
             "unexpected: {error}"
+        );
+    }
+
+    const GUARD_ALLOWLIST: &str = r#"
+principals = ["opencode", "jarvis"]
+
+[[tools]]
+name = "filesystem.read"
+description = "Read a file"
+allowed_principals = ["opencode"]
+max_args_size = 1048576
+timeout_ms = 5000
+requires_approval = false
+"#;
+
+    async fn gateway_with_principal_guard(label: &str, require: bool) -> Arc<McpGateway> {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-lib-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist, GUARD_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+        let (policy, _engine) = shipped_policy_client_with_engine(label).await;
+        Arc::new(
+            McpGateway::new(
+                McpGatewayConfig {
+                    allowlist_path: allowlist.to_string_lossy().into_owned(),
+                    require_server_side_principal: require,
+                    ..Default::default()
+                },
+                Arc::new(policy),
+            )
+            .await
+            .expect("gateway starts"),
+        )
+    }
+
+    async fn register_read_mock(gateway: &Arc<McpGateway>) {
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "filesystem.read", false));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock registers");
+    }
+
+    #[tokio::test]
+    async fn caller_principal_is_honoured_when_guard_is_off() {
+        let gateway = gateway_with_principal_guard("guard-off", false).await;
+        register_read_mock(&gateway).await;
+
+        let error = gateway
+            .execute_tool(
+                "filesystem.read",
+                json!({ "path": "/tmp/example" }),
+                "jarvis",
+            )
+            .await
+            .expect_err("the caller principal is still used when the guard is off");
+        assert!(
+            error.to_string().contains("Principal 'jarvis'"),
+            "unexpected: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_side_principal_guard_overrides_caller_principal() {
+        let gateway = gateway_with_principal_guard("guard-on", true).await;
+        register_read_mock(&gateway).await;
+
+        // `jarvis` is in the allowlist's principals but is not granted this
+        // tool; the guard must use the configured `opencode` identity instead.
+        let result = gateway
+            .execute_tool(
+                "filesystem.read",
+                json!({ "path": "/tmp/example" }),
+                "jarvis",
+            )
+            .await
+            .expect("configured MCP principal is enforced");
+        assert_eq!(result["content"][0]["text"], "pong");
+    }
+
+    /// `/mcp` must keep attributing calls to the configured principal; the
+    /// guard only overrides the wire-level field on execute_tool.
+    #[tokio::test]
+    async fn mcp_principal_stays_fixed_when_guard_is_enabled() {
+        let gateway = gateway_with_principal_guard("guard-mcp", true).await;
+        assert_eq!(gateway.mcp_principal(), "opencode");
+
+        let app = crate::http::router(gateway);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("test server address");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("http server runs");
+        });
+
+        use rmcp::ServiceExt;
+        use rmcp::transport::StreamableHttpClientTransport;
+        use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+        let transport = StreamableHttpClientTransport::with_client(
+            reqwest::Client::new(),
+            StreamableHttpClientTransportConfig::with_uri(format!("http://{addr}/mcp")),
+        );
+        let client = ().serve(transport).await.expect("MCP client connects");
+        let tools = client
+            .peer()
+            .list_all_tools()
+            .await
+            .expect("tools/list succeeds");
+        let names: Vec<&str> = tools.iter().map(|tool| tool.name.as_ref()).collect();
+        assert_eq!(
+            names,
+            vec!["filesystem.read"],
+            "/mcp keeps using the configured principal even with the guard on"
         );
     }
 }

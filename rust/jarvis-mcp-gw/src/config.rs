@@ -28,6 +28,11 @@ pub struct McpGatewayConfig {
     /// server endpoint (`/mcp`). Calls still pass policy and allowlist
     /// checks; the client never chooses the principal.
     pub mcp_principal: String,
+    /// Opt-in P0-3 guard: `execute_tool` ignores the caller-supplied wire
+    /// principal and uses `mcp_principal` for every policy, allowlist,
+    /// approval and log decision. Default false keeps the current behavior.
+    #[serde(default)]
+    pub require_server_side_principal: bool,
 }
 
 impl McpGatewayConfig {
@@ -58,6 +63,7 @@ impl Default for McpGatewayConfig {
             policy_http_addr: default_policy_http_addr(),
             approval_api_token: None,
             mcp_principal: "opencode".into(),
+            require_server_side_principal: false,
         }
     }
 }
@@ -149,5 +155,42 @@ mcp_principal = "opencode"
 "#;
         let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
         assert_eq!(config.policy_http_addr, "http://127.0.0.1:18081");
+    }
+
+    /// Pre-P0-3 configs have no guard field; the legacy wire behavior must
+    /// stay intact without any config change.
+    #[test]
+    fn server_side_principal_guard_defaults_to_false() {
+        assert!(!McpGatewayConfig::default().require_server_side_principal);
+
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+mcp_principal = "opencode"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
+        assert!(!config.require_server_side_principal);
+    }
+
+    #[test]
+    fn explicit_server_side_principal_guard_is_honoured() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+mcp_principal = "opencode"
+require_server_side_principal = true
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
+        assert!(config.require_server_side_principal);
     }
 }
