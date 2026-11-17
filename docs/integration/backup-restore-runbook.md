@@ -19,7 +19,7 @@ status: draft
 | --- | --- | --- |
 | `postgres-jarvis.sql.gz` | PostgreSQL `jarvis` DB | 高（上書き） |
 | `qdrant-snapshot.bin` | Qdrant `jarvis_memories` | 高（上書き） |
-| `config-*` / `config-policy.tar` | `/etc/jarvis` | 中（上書き） |
+| `config-*`（個別ファイル） | `/etc/jarvis` | 中（上書き） |
 | `manifest.txt` | — | なし（検証用） |
 
 ## 安全原則
@@ -110,14 +110,24 @@ curl -fsS -X DELETE "http://127.0.0.1:6333/collections/${COLLECTION}"
 
 ## 手順3: 設定ファイルを一時ディレクトリへ展開（非破壊）
 
+現行の [backup-local.sh](../../infra/scripts/backup-local.sh) は設定を
+`config-<basename>` の個別ファイルとして保存する（例:
+`config-casbin_model.conf`）。`config-policy.tar` は生成されない。
+
 ```bash
 TMP="$(mktemp -d)"
-tar -xf "$SET/config-policy.tar" -C "$TMP"
-cp "$SET"/config-*.toml "$TMP"/ 2>/dev/null || true
-cp "$SET"/config-*.yaml "$TMP"/ 2>/dev/null || true
+cp "$SET"/config-* "$TMP"/
 
-# 内容差分を確認（上書きしない）
-diff -rq /etc/jarvis/policy "$TMP/policy" || true
+# 元の配置のファイル名へ対応させて内容差分を確認（上書きしない）
+for name in casbin_model.conf casbin_policy.csv \
+            cedar_schema.cedarschema policies.cedar; do
+  [ -f "$TMP/config-$name" ] || continue
+  diff -u "/etc/jarvis/policy/$name" "$TMP/config-$name" || true
+done
+for name in mcp_allowlist.toml pii_patterns.toml; do
+  [ -f "$TMP/config-$name" ] || continue
+  diff -u "/etc/jarvis/$name" "$TMP/config-$name" || true
+done
 rm -rf "$TMP"
 ```
 
