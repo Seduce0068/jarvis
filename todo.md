@@ -83,7 +83,7 @@ generated:
 
 ## P1: データ整合性・アーキテクチャ・DR（高）
 
-- [x] **P1-1** ベクトル検索の順序を保持（2026-11-18 対応済み: PG の `WHERE id = ANY` が順序を保たないため、Qdrant の relevance 順に再組み立てる reorder_by_ids を追加。純粋関数テスト2件。スコア自体の保持は MemoryEntry 共有型変更が必要で保留）（R2-DATA-001）
+- [ ] **P1-1** ベクトル検索の順序を保持（2026-11-18 一部対応: 順序保持は実装済み、スコア保持は残。PG の `WHERE id = ANY` が順序を保たないため、Qdrant の relevance 順に再組み立てる reorder_by_ids を追加。純粋関数テスト2件。スコア自体の保持は MemoryEntry 共有型変更が必要で保留）（R2-DATA-001）
   - `ScoredPoint.score` を破棄し `WHERE id = ANY($1)`（ORDER BY なし）で
     再取得 → ランキングが失われハイブリッド検索が ID 突き合わせに退化。
 - [ ] **P1-2** PG / Qdrant 二段書き込みに補償を追加（R2-DATA-002）
@@ -134,7 +134,7 @@ generated:
 
 ## P2: ゲート・テスト・CI（中）
 
-- [x] **P2-1** PII フィルタと normalizer にテスト追加（2026-11-17 一部対応: pii.rs に from_config を追加し再帰 redact / enabled=false パススルー / 不正パターンスキップの3テスト。normalizer 側は未対応）（R4-TEST-001,
+- [ ] **P2-1** PII フィルタと normalizer にテスト追加（2026-11-17 一部対応: pii.rs に from_config を追加し再帰 redact / enabled=false パススルー / 不正パターンスキップの3テスト。normalizer 側は未対応）（R4-TEST-001,
     R4-TEST-002, R2-DATA-008)
   - `pii.rs` / `normalizer.rs` に `#[cfg(test)]` が皆無。無効パターンの
     サイレントスキップ、`enabled=false` バイパス、policy deny 時の
@@ -176,11 +176,11 @@ generated:
 - [x] **P2-7** `deploy.rs` を fail-closed 化（2026-11-18 対応済み: `make deploy` を無効化し ADR-0004 準拠の `make deploy-mcp-gw` を案内。`deploy.sh` は既に fail-closed 済み。`make deploy-dry` は参照用として維持）（R2-DEBT-004）
   - `make deploy` が ADR-0004 否定のリモート aarch64 配送を実行可能。
     `deploy.sh` と同じ fail-closed へ。
-- [x] **P2-8** デプロイスクリプトへ `-e` と HTTP ステータス検証（2026-11-17 一部対応: health check を `%{http_code}=200` 判定へ強化、dry-run 成功。`-e` は rollback ロジックへの影響があるため未適用）（R1-SEC-008,
+- [ ] **P2-8** デプロイスクリプトへ `-e` と HTTP ステータス検証（2026-11-17 一部対応: health check を `%{http_code}=200` 判定へ強化、dry-run 成功。`-e` は rollback ロジックへの影響があるため未適用）（R1-SEC-008,
     R1-SUPPLY-001)
   - `set -uo pipefail` で配置失敗が fail-open。ヘルス確認も `curl -f` /
     `200` 判定が無い。Runtime Proof で `set -uo pipefail` 確認済み。
-- [x] **P2-9** systemd hardening を全 unit へ底上げ（2026-11-18 一部対応: 全9 service に `UMask=0077`、欠落 unit に `ProtectControlGroups` / `RestrictSUIDSGID` を追加、自社スクリプトの backup に `SystemCallFilter=@system-service`。`systemd-analyze verify` 全 unit 成功。**SystemCallFilter を code-server / opencode / otelcol / qdrant のサードパーティバイナリへ追加するのは実機起動確認が必要なため保留**。`/etc/jarvis` の ReadWritePaths 個別ファイル化も書き込み先の把握が必要で保留）（R1-SEC-004,
+- [ ] **P2-9** systemd hardening を全 unit へ底上げ（2026-11-18 一部対応: 全9 service に `UMask=0077`、欠落 unit に `ProtectControlGroups` / `RestrictSUIDSGID` を追加、自社スクリプトの backup に `SystemCallFilter=@system-service`。`systemd-analyze verify` 全 unit 成功。**SystemCallFilter を code-server / opencode / otelcol / qdrant のサードパーティバイナリへ追加するのは実機起動確認が必要なため保留**。`/etc/jarvis` の ReadWritePaths 個別ファイル化も書き込み先の把握が必要で保留）（R1-SEC-004,
     R1-SEC-009）
   - otelcol / opencode / code-server / qdrant / backup で
     `SystemCallFilter` 等が欠落。全 unit に `UMask=0077` も追加。
@@ -210,7 +210,7 @@ generated:
     R3-RUN-005, R3-RUN-006）
   - （解消済み）旧状態: 起動→検証→停止（停止手順は 0 件）、手動変更のロールバック、
     `make verify-backup` が `/opt` へ書き込む矛盾、clippy 表記の不統一。
-- [x] **P3-4** markdownlint / 索引を整備（2026-11-17 一部対応: `adr/index.md` と `adr/log.md` を追加。markdownlint クリーン、リンク切れ0。既存 MD013 の全解消は未実施）（R5-FMT-003〜006）
+- [ ] **P3-4** markdownlint / 索引を整備（2026-11-17 一部対応: `adr/index.md` と `adr/log.md` を追加。**2026-11-18 監査: 新規 lint 0・baseline 456 issues 残存**、リンク切れ0。既存 MD013 の全解消は未実施）（R5-FMT-003〜006）
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
     `adr/index.md` と `log.md` の未配置。
 - [ ] **P3-5** レガシー資産の最終判断（R2-DEBT-006, R2-DEBT-011,
@@ -233,7 +233,7 @@ generated:
   - **2026-11-18 一部対応**: 期限切れ強調、テスト数表記（7）、
     `approved_by` 固定値とトークン注入経路を README に記録。
     （解消済み）旧状態: リダイレクトでトークン送信、ポーラー競合。
-- [x] **P3-7** マイナーな設定・静的ガード（2026-11-18 一部対応: `web_max_bytes` の u64→usize キャストを clamp-then-try_from に修正し巨大値で wrap しないようにした。回帰テスト追加。その他の項目は未対応）（R1-MCP-004〜006, R4-SCRIPT-005〜009,
+- [ ] **P3-7** マイナーな設定・静的ガード（2026-11-18 一部対応: `web_max_bytes` の u64→usize キャストを clamp-then-try_from に修正し巨大値で wrap しないようにした。回帰テスト追加。その他の項目は未対応）（R1-MCP-004〜006, R4-SCRIPT-005〜009,
     R2-DATA-009〜011, R1-SUPPLY-003）
   - 機微パス判定、タイムアウト clamp、テストの辞書順依存、エラー型丸め、
     arm64 apt ミラーの HTTP など。
