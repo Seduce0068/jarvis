@@ -5,9 +5,16 @@ use hex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
+
+/// Reason recorded when either metadata lock is poisoned. A panic while the
+/// switch was being updated leaves its state untrustworthy, so we arm it.
+const POISONED_LOCK_REASON: &str = "kill switch state lock poisoned; failing closed";
+/// Reason recorded when the state file cannot be written.
+const PERSIST_FAILURE_REASON: &str = "failed to persist kill switch state; failing closed";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KillSwitchStatus {
@@ -29,8 +36,8 @@ struct PersistedState {
 pub struct KillSwitch {
     activated: AtomicBool,
     activated_at: AtomicU64,
-    reason: std::sync::RwLock<Option<String>>,
-    activated_by: std::sync::RwLock<Option<String>>,
+    reason: RwLock<Option<String>>,
+    activated_by: RwLock<Option<String>>,
     admin_token_hash: String,
     /// Optional path used to survive process restarts. Without it the switch
     /// remains in-memory (tests and ephemeral runs).
@@ -42,8 +49,8 @@ impl KillSwitch {
         let switch = Self {
             activated: AtomicBool::new(false),
             activated_at: AtomicU64::new(0),
-            reason: std::sync::RwLock::new(None),
-            activated_by: std::sync::RwLock::new(None),
+            reason: RwLock::new(None),
+            activated_by: RwLock::new(None),
             admin_token_hash: Self::hash_token(admin_token),
             state_path,
         };
@@ -70,6 +77,49 @@ impl KillSwitch {
         Ok(())
     }
 
+    /// Write a metadata slot even when a previous writer panicked while
+    /// holding the lock. The guarded value is untrustworthy, but for a safety
+    /// device completing the write is safer than panicking and leaving stale
+    /// metadata behind.
+    fn write_slot(slot: &RwLock<Option<String>>, value: Option<String>) {
+        let mut guard = match slot.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                warn!("kill switch metadata lock is poisoned; forcing write");
+                poisoned.into_inner()
+            }
+        };
+        *guard = value;
+    }
+
+    /// Read a metadata slot, recovering the guarded value when the lock is
+    /// poisoned. The flag tells callers that the state must be fail-closed.
+    fn read_slot(slot: &RwLock<Option<String>>) -> (Option<String>, bool) {
+        let mut poisoned = false;
+        let value = slot
+            .read()
+            .unwrap_or_else(|error| {
+                poisoned = true;
+                error.into_inner()
+            })
+            .clone();
+        (value, poisoned)
+    }
+
+    /// Read both metadata slots, arming the switch if either lock was
+    /// poisoned so callers never observe a potentially disarmed state.
+    fn read_state_slots(&self) -> (Option<String>, Option<String>) {
+        let (_, reason_poisoned) = Self::read_slot(&self.reason);
+        let (_, actor_poisoned) = Self::read_slot(&self.activated_by);
+        if reason_poisoned || actor_poisoned {
+            self.arm(POISONED_LOCK_REASON.into());
+        }
+        (
+            Self::read_slot(&self.reason).0,
+            Self::read_slot(&self.activated_by).0,
+        )
+    }
+
     /// Set the in-memory state without persisting. Used by [`Self::restore`]
     /// so a corrupt state file is not overwritten during recovery.
     fn arm(&self, reason: String) {
@@ -79,8 +129,8 @@ impl KillSwitch {
             .as_secs();
         self.activated.store(true, Ordering::SeqCst);
         self.activated_at.store(now, Ordering::SeqCst);
-        *self.reason.write().unwrap() = Some(reason);
-        *self.activated_by.write().unwrap() = Some("system".into());
+        Self::write_slot(&self.reason, Some(reason));
+        Self::write_slot(&self.activated_by, Some("system".into()));
     }
 
     pub fn deactivate(&self, admin_token: &str) -> Result<()> {
@@ -89,9 +139,16 @@ impl KillSwitch {
         }
         self.activated.store(false, Ordering::SeqCst);
         self.activated_at.store(0, Ordering::SeqCst);
-        *self.reason.write().unwrap() = None;
-        *self.activated_by.write().unwrap() = None;
+        Self::write_slot(&self.reason, None);
+        Self::write_slot(&self.activated_by, None);
         self.persist();
+        // A persist failure fails closed by re-arming the switch. Never tell
+        // the operator the deactivation succeeded when it did not stick.
+        if self.is_activated() {
+            return Err(anyhow::anyhow!(
+                "kill switch state could not be persisted; switch remains activated"
+            ));
+        }
         warn!("Kill switch deactivated by admin");
         Ok(())
     }
@@ -121,8 +178,8 @@ impl KillSwitch {
                 self.activated.store(true, Ordering::SeqCst);
                 self.activated_at
                     .store(state.activated_at, Ordering::SeqCst);
-                *self.reason.write().unwrap() = state.reason;
-                *self.activated_by.write().unwrap() = state.activated_by;
+                Self::write_slot(&self.reason, state.reason);
+                Self::write_slot(&self.activated_by, state.activated_by);
                 warn!("Kill switch restored as ACTIVE from {}", path.display());
             }
             Ok(_) => {}
@@ -140,16 +197,18 @@ impl KillSwitch {
         let Some(path) = &self.state_path else {
             return;
         };
+        let (reason, activated_by) = self.read_state_slots();
         let state = PersistedState {
             activated: self.activated.load(Ordering::SeqCst),
             activated_at: self.activated_at.load(Ordering::SeqCst),
-            reason: self.reason.read().unwrap().clone(),
-            activated_by: self.activated_by.read().unwrap().clone(),
+            reason,
+            activated_by,
         };
         let bytes = match serde_json::to_vec_pretty(&state) {
             Ok(bytes) => bytes,
             Err(error) => {
                 warn!("Failed to serialize kill switch state: {error}");
+                self.arm(PERSIST_FAILURE_REASON.into());
                 return;
             }
         };
@@ -157,6 +216,7 @@ impl KillSwitch {
             && let Err(error) = std::fs::create_dir_all(parent)
         {
             warn!("Failed to create {}: {error}", parent.display());
+            self.arm(PERSIST_FAILURE_REASON.into());
             return;
         }
         if let Err(error) = std::fs::write(path, bytes) {
@@ -164,6 +224,8 @@ impl KillSwitch {
                 "Failed to persist kill switch state to {}: {error}",
                 path.display()
             );
+            // `arm` never calls `persist`, so this cannot recurse.
+            self.arm(PERSIST_FAILURE_REASON.into());
         }
     }
 
@@ -172,15 +234,17 @@ impl KillSwitch {
     }
 
     pub fn status(&self) -> KillSwitchStatus {
+        let (reason, activated_by) = self.read_state_slots();
+        let activated = self.activated.load(Ordering::SeqCst);
         KillSwitchStatus {
-            activated: self.activated.load(Ordering::SeqCst),
-            activated_at: if self.activated.load(Ordering::SeqCst) {
+            activated,
+            activated_at: if activated {
                 Some(self.activated_at.load(Ordering::SeqCst))
             } else {
                 None
             },
-            reason: self.reason.read().unwrap().clone(),
-            activated_by: self.activated_by.read().unwrap().clone(),
+            reason,
+            activated_by,
         }
     }
 
@@ -247,5 +311,66 @@ mod tests {
         let switch = KillSwitch::new("admin-token", None);
         switch.activate("ephemeral".into());
         assert!(switch.is_activated());
+    }
+
+    /// A panic while holding either metadata lock must not turn into another
+    /// panic (which could take down the whole policy service); the switch
+    /// must instead recover the value and arm itself.
+    #[test]
+    fn poisoned_state_locks_do_not_panic() {
+        let switch = KillSwitch::new("admin-token", None);
+
+        std::thread::scope(|scope| {
+            for slot in [&switch.reason, &switch.activated_by] {
+                let handle = scope.spawn(move || {
+                    let _guard = slot.write().expect("hold the write lock");
+                    panic!("deliberately poison the lock");
+                });
+                assert!(handle.join().is_err(), "poisoning thread panicked");
+            }
+        });
+
+        let status = switch.status();
+        assert!(status.activated);
+        assert_eq!(status.reason.as_deref(), Some(POISONED_LOCK_REASON));
+        assert_eq!(status.activated_by.as_deref(), Some("system"));
+
+        // Writes on poisoned locks use into_inner() instead of panicking.
+        switch.activate("after poison".into());
+        assert!(switch.is_activated());
+        assert!(switch.deactivate("admin-token").is_ok());
+        assert!(!switch.is_activated());
+    }
+
+    /// If the state file cannot be written, the switch must fail closed
+    /// instead of only warning and leaving itself disarmed.
+    #[test]
+    fn persist_failure_fails_closed() {
+        let path = temp_path("persist-fail");
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+        assert!(!switch.is_activated());
+
+        // Replace the parent directory with a regular file: create_dir_all
+        // now fails, so persist() cannot write the state file.
+        let parent = path.parent().expect("state path has a parent");
+        std::fs::remove_dir_all(parent).expect("remove temp dir");
+        std::fs::write(parent, b"blocker").expect("create blocker file");
+
+        switch.activate("maintenance".into());
+
+        assert!(switch.is_activated());
+        let status = switch.status();
+        assert_eq!(status.reason.as_deref(), Some(PERSIST_FAILURE_REASON));
+
+        // Deactivation cannot be reported as successful when persistence
+        // fails and the switch re-arms itself.
+        let error = switch
+            .deactivate("admin-token")
+            .expect_err("failed persist must surface as an error");
+        assert!(error.to_string().contains("remains activated"));
+        assert!(switch.is_activated());
+        assert_eq!(status.activated_by.as_deref(), Some("system"));
+
+        std::fs::remove_file(parent).expect("clean blocker file");
     }
 }
