@@ -167,9 +167,7 @@ impl ApprovalsView {
         // An elapsed deadline is easy to miss in a dense queue; highlight it
         // so the operator does not approve a stale command by accident. This
         // is display-only: decide/on_click/keyboard handling stay unchanged.
-        let expired = request
-            .expires_at
-            .is_some_and(|expires_at| expires_at < chrono::Utc::now());
+        let expired = is_expired(request, chrono::Utc::now());
 
         let approve_id = request.id.clone();
         let deny_id = request.id.clone();
@@ -324,9 +322,18 @@ fn format_args(context: &serde_json::Value) -> String {
     format!("args: {body}")
 }
 
+/// Pure expiry predicate shared by row rendering and regression tests.
+/// A deadline exactly equal to `now` is still considered valid.
+fn is_expired(request: &ApprovalRequest, now: chrono::DateTime<chrono::Utc>) -> bool {
+    request
+        .expires_at
+        .is_some_and(|expires_at| expires_at < now)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_args;
+    use super::{ApprovalsView, format_args, is_expired};
+    use crate::policy_client::{ApprovalRequest, PolicyClient};
     use serde_json::json;
 
     #[test]
@@ -351,5 +358,93 @@ mod tests {
             format_args(&json!({"url": "https://example.com/"})),
             expected
         );
+    }
+
+    fn view_with(status: &str, error: Option<&str>, action_status: bool) -> ApprovalsView {
+        ApprovalsView {
+            client: PolicyClient::new("http://127.0.0.1:1"),
+            pending: Vec::new(),
+            status: status.into(),
+            error: error.map(|text| text.to_string().into()),
+            loaded: true,
+            action_status,
+        }
+    }
+
+    fn request_with_expiry(
+        id: &str,
+        expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> ApprovalRequest {
+        ApprovalRequest {
+            id: id.into(),
+            principal: "jarvis".into(),
+            action: "execute".into(),
+            resource: "tool:git.commit".into(),
+            context: json!({}),
+            requested_at: None,
+            expires_at,
+        }
+    }
+
+    /// TC-U2: the decision message survives one poll; the flag clears there
+    /// and the queue count is reported from the following poll onward.
+    #[test]
+    fn action_status_clears_after_one_poll() {
+        let mut view = view_with("承認しました", None, true);
+        let pending = vec![request_with_expiry("a", None)];
+
+        view.apply_poll(Ok(pending.clone()));
+        assert!(!view.action_status);
+        assert_eq!(view.status.to_string(), "承認しました");
+        assert_eq!(view.pending.len(), 1);
+
+        view.apply_poll(Ok(pending));
+        assert!(!view.action_status);
+        assert_eq!(view.status.to_string(), "保留中: 1 件");
+    }
+
+    /// TC-U3 / P0-8: a decide failure must not be cleared by the next poll.
+    #[test]
+    fn decision_error_survives_next_poll() {
+        let mut view = view_with("却下に失敗しました", Some("POST returned HTTP 409"), true);
+
+        view.apply_poll(Ok(vec![request_with_expiry("b", None)]));
+        assert_eq!(view.status.to_string(), "却下に失敗しました");
+        assert_eq!(
+            view.error.as_ref().map(|value| value.to_string()),
+            Some("POST returned HTTP 409".to_string())
+        );
+        assert_eq!(view.pending.len(), 1);
+    }
+
+    /// TC-U3: a polling error keeps the last known queue but shows the cause.
+    #[test]
+    fn poll_failure_keeps_queue_and_shows_error() {
+        let mut view = view_with("保留中: 1 件", None, false);
+        view.pending.push(request_with_expiry("keep", None));
+
+        view.apply_poll(Err(anyhow::anyhow!("connection refused")));
+        assert_eq!(view.pending.len(), 1);
+        assert_eq!(view.status.to_string(), "jarvis-policy に接続できません");
+        assert!(
+            view.error
+                .as_ref()
+                .is_some_and(|value| value.to_string().contains("connection refused"))
+        );
+    }
+
+    /// TC-U4: expiry is a strict less-than against the injected clock.
+    #[test]
+    fn expiry_predicate_boundaries() {
+        let now = chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        let past = request_with_expiry("past", Some(now - chrono::Duration::seconds(1)));
+        let exact = request_with_expiry("exact", Some(now));
+        let future = request_with_expiry("future", Some(now + chrono::Duration::seconds(1)));
+        let none = request_with_expiry("none", None);
+
+        assert!(is_expired(&past, now));
+        assert!(!is_expired(&exact, now));
+        assert!(!is_expired(&future, now));
+        assert!(!is_expired(&none, now));
     }
 }
