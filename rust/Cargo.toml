@@ -116,5 +116,8 @@ strip = true
 panic = "abort"
 
 [profile.dev]
-debug = true
+debug = "line-tables-only"
 overflow-checks = true
+
+[profile.dev.package."*"]
+debug = false
