@@ -35,7 +35,7 @@ status: active
 |---|---|---|
 | A-H1 | `infra/config/otelcol-config.yaml:6,8,10,16,18` | 5端点すべて `0.0.0.0`。`:163` も含む説明は統合側の報告で、確認した5端点で矛盾なし |
 | A-H2 | `infra/scripts/check-deploy-drift.sh:19-31` | allowlist 欠落時に `if` ブロック全体をスキップし、`:26-30` の `web.fetch` danger 判定も走らない |
-| A-H3 | `rust/jarvis-policy/src/config.rs:57`, `rust/jarvis-policy/src/lib.rs:45-50` | 既定値 `"changeme"` を確認。`lib.rs` は `tracing::warn!` のみで起動を継続 |
+| A-H3 | `rust/jarvis-policy/src/config.rs:38,66`, `rust/jarvis-policy/src/lib.rs:35-48` | 既定値 `PLACEHOLDER_KILL_SWITCH_TOKEN` = `"changeme"` と opt-in フィールド（既定 false）を確認。`lib.rs` は flag が true のときのみ拒否し、既定では `tracing::warn!` で起動を継続 |
 | A-H4 | `rust/jarvis-context/src/builder.rs:72,80-102` | `:72` は `build_context` 内で `pii_filter.filter(context)` を適用。`:80` の `store_memory` は `content`/`metadata` を生のまま INSERT し、`:98-99` の Qdrant 登録にもフィルタ呼び出しなし |
 | A-H5 | `ui/src/approvals.rs:111-125`, `:70-85` | `:117-121` で `error` を設定した直後の `:124` が `apply_poll(refresh)` を呼び、成功時に `:75` が `error = None` に上書き。`:78-83` はエラー時も `pending` を保持 |
 
@@ -49,7 +49,7 @@ status: active
 |---|---|---|---|---|---|
 | A-H1 | otelcol が `0.0.0.0` にリッスンし「localhost only」方針と矛盾 | 高 | `infra/config/otelcol-config.yaml:6,8,10,16,18` が `0.0.0.0`。`infra/systemd/otelcol.service:9,18` は `User=koppe`・直接実行で境界なし | 全端点を `127.0.0.1` へ変更し、実機 unit と合わせて `ss -lnt` で確認。方針文書との整合も明記 | IN / INF-1 |
 | A-H2 | drift 検査が allowlist 欠落を見逃し fail-open | 高 | `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist 不在だと allowlist 検査と `web.fetch` の danger 判定ごとスキップされ `drift`/`danger` が立たない | 欠落時に `say "allowlist" "MISSING"; danger=1` を設定し、事後ゲートが失敗する回帰テストを追加 | IN / INF-2 |
-| A-H3 | kill switch 既定トークン `changeme` で起動継続 | 高 | `rust/jarvis-policy/src/config.rs:57` が既定値、`rust/jarvis-policy/src/lib.rs:45-47` は warn のみで起動を止めない | 本番起動時に既定値を拒否する fail-closed ゲートを追加（明示オプトアウト必須化）。既存の承認 API トークンと方針を揃える | SE / SEC-KS-01 |
+| A-H3 | kill switch 既定トークン `changeme` は opt-in strict ガードで拒否可能 | 高 | `rust/jarvis-policy/src/config.rs:38` が opt-in フィールド（既定 false）、`:66` が既定値 `PLACEHOLDER_KILL_SWITCH_TOKEN` = `"changeme"`。`rust/jarvis-policy/src/lib.rs:35-48` は flag=true のときだけ bail し、既定は warn で起動継続 | ガードは実装済み。本番有効化はトークン注入を値を見ずに確認した後に判断（[local-operations-runbook.md](local-operations-runbook.md) の P0-10 節） | SE / SEC-KS-01 |
 | A-H4 | `store_memory` に PII フィルタ未適用 | 高 | `rust/jarvis-context/src/builder.rs:72` は組み立て時に `pii_filter.filter(context)` を通すが `:80` の `store_memory` は生の `content`/`metadata` を DB・Qdrant へ保存。※設計意図が「LLM 送信時のみ」なら保存時は対象外の可能性あり、要方針確認 | 保存前にも `pii_filter.filter()` を通すか、「保存データは対象外」と明文化するテストを追加。既存保存データの再スキャン方針も決定 | SE / PII-01 |
 | A-H5 | 承認エラーが直後の再ポールで上書きされ消える＋接続障害時にボタンが有効なまま | 高 | `ui/src/approvals.rs:117-121` で `error` を設定した直後の `:124` が `apply_poll(refresh)` を呼び、成功時に `:75` が `error = None` に戻す。`:78-83` はエラー時も `pending` を保持し、`:180-195` のボタンは常に有効 | `error` をポール結果と独立保持し次回操作まで表示。エラー中は決定ボタンを無効化し最終成功時刻を表示（UI-2 と UI-5 を同一箇所の状態管理として統合） | UX / UI-2 + UI-5 |
 

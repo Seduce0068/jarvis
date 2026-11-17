@@ -252,11 +252,17 @@ generated:
 - [x] **P0-9** drift 検査の allowlist 欠落 fail-open（2026-11-17 対応済み: 配備版 allowlist 欠落時に `MISSING (deployed)` + danger=1。回帰テスト追加）（A-H2）
   - `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist が無いと allowlist 検査と `web.fetch` danger 判定ごとスキップされ、`drift`/`danger` が立たない。欠落時に `MISSING` + `danger=1` を設定し回帰テストを追加。
 - [ ] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
-  - **2026-11-17 判断**: 本番 unit は `bws run` 経由でトークンを注入する想定だが、
-    実際の注入有無は secret 値を見ずに確認できない（値は確認しない方針）。
-    起動時 fail-closed にすると設定未注入の場合にサービス停止リスクがあるため、
-    まず warn を維持。デプロイ側でトークン注入を確認した上で fail-closed 化する。
-  - `rust/jarvis-policy/src/config.rs:57` が既定値、`lib.rs:45-50` は warn のみで起動継続。本番起動時は fail-closed で拒否する（P0-4 と同じ方針）。
+  - **2026-11-18 現状**: opt-in strict ガードは実装済み。
+    `require_kill_switch_admin_token`（既定 `false`）が `true` のときだけ
+    既定トークンで起動を拒否し、既定のままなら従来どおり warn のみで継続する。
+    本番で `true` にするかは、トークン注入を値を見ずに確認した後に判断する。
+    運用手順は
+    [local-operations-runbook.md](docs/integration/local-operations-runbook.md)
+    の P0-10 節を参照。
+  - 根拠: `rust/jarvis-policy/src/config.rs:38`（opt-in フィールド）、
+    `config.rs:66`（既定値 `PLACEHOLDER_KILL_SWITCH_TOKEN` = `"changeme"`）、
+    `rust/jarvis-policy/src/lib.rs:35-48`（true のときのみ拒否、既定は warn）。
+    ガードの既定値は `false` なので既存デプロイの起動動作は変わらない。
 - [ ] **P0-11** `store_memory` に PII フィルタ未適用（A-H4）
   - `rust/jarvis-context/src/builder.rs:72` は `build_context` でフィルタ適用、`:80-102` の `store_memory` は生の `content`/`metadata` を DB・Qdrant へ保存。「LLM 送信時のみ」なら保存時は対象外と明文化するか、保存前にも適用（A-M19 / P2-1 と同時判断）。
 
