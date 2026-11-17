@@ -361,6 +361,25 @@ generated:
   どこで制限するか（firewall / Tailscale 側）を明示する必要がある。
 - 現時点では repo 側 config・unit とも変更せず、記録のみとする。
 
+#### 対応結果（2026-11-18 追記・repo 側のみ）
+
+上記は監査時点の記録。その後、repo 側テンプレートのみ次の対応を行った。
+
+- [infra/config/otelcol-config.yaml](../../infra/config/otelcol-config.yaml) の
+  待ち受け6箇所を `127.0.0.1` へ変更した: health_check 13133、pprof 1777、
+  zpages 55679、OTLP gRPC 4317、OTLP HTTP 4318、内部テレメトリ
+  `service.telemetry.metrics` の prometheus host 8888。
+  [AGENTS.md](../../AGENTS.md) の loopback 方針に整合する。
+- `prometheusremotewrite` の Grafana Cloud 向け endpoint と認証参照は
+  **変更していない**（送信先であり待ち受けではない）。秘密情報の値は
+  記録していない。
+- **実機は未変更**: 稼働 unit の ExecStart は
+  `/etc/jarvis/otelcol-config.yaml`（別パス）を参照するため、この repo 側
+  変更は動作中の collector に直接影響しない。実機反映は別途、設定同期と
+  再起動・リスニング確認が必要（要判断・要操作）。
+- unit 側のネットワーク制限（`IPAddressDeny` 等）や pprof / zpages の
+  常時有効化の要否は、上記「対応方針」のとおり引き続き要判断。
+
 | P1-12 | Webhook 4ルートの認証設計 | **未対応・要判断**。 | 詳細は後述の設計記録。 |
 
 ### P2-10 .gitignore と infra/config/*.env の判断記録（2026-11-18）
