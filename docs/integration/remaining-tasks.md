@@ -380,6 +380,56 @@ generated:
 - unit 側のネットワーク制限（`IPAddressDeny` 等）や pprof / zpages の
   常時有効化の要否は、上記「対応方針」のとおり引き続き要判断。
 
+### P0-7 Grafana 認証情報の供給経路（判断材料、2026-11-18）
+
+[todo.md](../../todo.md) の P0-7 について、秘密情報の値を一切見ずに
+repo 側の参照関係を調査した結果を記録する。**結論: 要判断**。
+実装・実機変更・再起動は行っていない。
+
+#### 現状（repo 側の参照関係 / P0-7）
+
+- [otelcol-config.yaml](../../infra/config/otelcol-config.yaml):130 の
+  `prometheusremotewrite` が Basic 認証ヘッダで
+  `${env:GRAFANA_CLOUD_AUTH}` を参照（送信先 URL と値は記録しない）。
+- [otelcol.service](../../infra/systemd/otelcol.service):12-18 は
+  `EnvironmentFile` も `bws run` も `/usr/bin/op run` もなし。
+  `ExecStart` は `otelcol-contrib --config` の直接起動のみ。
+- 他の4サービス（policy / mcp-gw / event / context）は root 管理の
+  `bws.env` を `EnvironmentFile` で読み込み `bws run` 経由で起動。
+  otelcol だけがこの経路に参加していない。
+- [otel.env](../../infra/config/otel.env) は値なしの `op://` テンプレートで、
+  参照名は `GRAFANA_CLOUD_TOKEN` / `GRAFANA_CLOUD_INSTANCE`。
+  設定が要求する `GRAFANA_CLOUD_AUTH` とは名前が一致しない。
+- [build-selfhost.sh](../../infra/scripts/build-selfhost.sh):47 は旧
+  `op run --env-file=otel.env` 起動接頭辞を除去して unit を生成する。
+  `op run` 経路は既に意図的に外されている。
+- [AGENTS.md](../../AGENTS.md) の Configuration にも、otelcol は直接起動で
+  Grafana 認証の供給経路は未特定、との記載がある。
+
+#### 3案の比較（P0-7）
+
+- **A. bws run 経由で注入**: 値を見ない確認は bws 側に secret を置き、
+  環境変数の存在のみを終了コード等で検証する（値は出力しない）。
+  再起動は unit 編集 → daemon-reload → restart → 送信成功をログ確認。
+  リスク: bws トークン依存が1プロセス増えるが、他4サービスと同じ
+  既知経路。secret 名と Basic 形式の整合を先に決める必要がある。
+- **B. root 管理の EnvironmentFile**: 0600 の root 所有ファイルを unit の
+  `EnvironmentFile` で読み込む。値は repo へ置かず、バックアップ対象外に
+  する。再起動は同様。リスク: 平文がディスクに残り、
+  `systemctl show` 等で値が露出しうる（確認時は値を出さない操作が必要）。
+- **C. ファイルベース secret**: confmap の file provider で参照先ファイルを
+  指定し、config / env のどちらにも値を置かない。再起動には config と
+  起動オプションの変更が必要。リスク: 対応バージョンと有効化手順の確認、
+  ローテーション時の再読込挙動、otelcol 実行ユーザーへの読取権限付与。
+
+#### 判断（P0-7）
+
+- 現状は `GRAFANA_CLOUD_AUTH` がどの経路からも注入されておらず、
+  exporter が参照する env が未設定（実機の値・ログは未確認）。
+- A / B / C の採否は、既存の bws 運用を踏襲するか、平文ファイルを
+  許容するか、collector 側の機能に依存するかという方針次第。
+  **判断は確定させず要判断とする**。決定後に unit 注記と手順を更新する。
+
 | P1-12 | Webhook 4ルートの認証設計 | **未対応・要判断**。 | 詳細は後述の設計記録。 |
 
 ### P2-10 .gitignore と infra/config/*.env の判断記録（2026-11-18）
