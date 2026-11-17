@@ -71,6 +71,11 @@ for f in evidence_files:
     top = d["spec_hash"]
     if not isinstance(top, str) or not top.startswith("sha256:"):
         errors.append(f"{f}: BAD_HASH_FORMAT"); continue
+    # The filename suffix must match the declared hash prefix; this keeps
+    # evidence files traceable even though the value itself is never printed.
+    prefix = os.path.basename(f).rsplit("-", 1)[-1].removesuffix(".json")
+    if prefix and prefix != top[len("sha256:"):][:12]:
+        errors.append(f"{f}: HASH_FILENAME_MISMATCH"); continue
     r = d["results"]
     # bool is a subclass of int in Python: False == 0 and True == 1 would
     # otherwise bypass these checks. Require the exact int type.

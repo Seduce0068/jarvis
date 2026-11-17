@@ -164,7 +164,9 @@ else
     fi
     out=$(bash "$gate" 2>&1); code=$?
     case "$mode" in
-      hash) pattern='SPEC_HASH_MISMATCH' ;;
+      # Changing spec_hash without renaming the file is rejected either by
+      # the filename-prefix check (first) or the spec-content hash check.
+      hash) pattern='HASH_FILENAME_MISMATCH\|SPEC_HASH_MISMATCH' ;;
       failed) pattern='FAILED_TESTS' ;;
       empty_passed) pattern='NO_PASSING_TESTS' ;;
       timestamp) pattern='BAD_TIMESTAMP' ;;
