@@ -63,7 +63,7 @@ impl Builder {
         let recent = self.get_recent_memories(20).await?;
 
         // 3. Build context object
-        let mut context = serde_json::json!({
+        let context = serde_json::json!({
             "event": {
                 "id": event.id,
                 "source": event.source,
@@ -77,13 +77,12 @@ impl Builder {
             "timestamp": Utc::now(),
         });
 
-        // 4. Apply PII filtering
-        context = self.pii_filter.filter(context)?;
-
-        // 5. Truncate to token limit
-        context = self.truncate_context(context)?;
-
-        Ok(context)
+        // 4/5. Redact PII, then truncate to the token budget.
+        prepare_context(
+            self.pii_filter.as_ref(),
+            context,
+            self.config.max_context_tokens,
+        )
     }
 
     pub async fn store_memory(&self, memory: MemoryEntry) -> Result<()> {
@@ -179,10 +178,18 @@ impl Builder {
             })
             .collect())
     }
+}
 
-    fn truncate_context(&self, context: Value) -> Result<Value> {
-        truncate_context_to_tokens(context, self.config.max_context_tokens)
-    }
+/// Pure composition of the two post-assembly steps in `build_context`:
+/// redact PII first, then apply the token budget. Kept separate from DB and
+/// Qdrant access so the ordering and its effect are directly testable.
+fn prepare_context(
+    pii_filter: &crate::pii::PiiFilter,
+    context: Value,
+    max_tokens: usize,
+) -> Result<Value> {
+    let context = pii_filter.filter(context)?;
+    truncate_context_to_tokens(context, max_tokens)
 }
 
 /// Drop the memory arrays when the serialized context exceeds the configured
@@ -337,6 +344,68 @@ mod tests {
         assert_eq!(output["memories"], json!([]));
         assert_eq!(output["recent"], json!([]));
         assert_eq!(output["event"], "state_changed");
+    }
+
+    fn email_filter() -> crate::pii::PiiFilter {
+        let mut patterns = std::collections::HashMap::new();
+        patterns.insert(
+            "email".into(),
+            r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}".into(),
+        );
+        crate::pii::PiiFilter::from_config(crate::pii::PiiConfig {
+            patterns,
+            redact_replacement: "[REDACTED]".into(),
+            enabled: true,
+        })
+    }
+
+    fn pii_context(email: &str) -> Value {
+        json!({
+            "event": {"type": "new_email", "payload": {"from": email}},
+            "memories": [{"content": format!("contact {email}")}],
+            "recent": [{"content": format!("sender {email}")}],
+            "timestamp": "2026-11-18T00:00:00Z",
+        })
+    }
+
+    #[test]
+    fn tc_c_pii_is_redacted_across_all_context_fields() {
+        let email = "alice@example.com";
+        let output = prepare_context(&email_filter(), pii_context(email), 1000).expect("prepare");
+        let serialized = serde_json::to_string(&output).expect("serialize");
+        assert!(!serialized.contains(email));
+        assert_eq!(output["event"]["payload"]["from"], "[REDACTED]");
+        assert_eq!(output["memories"][0]["content"], "contact [REDACTED]");
+        assert_eq!(output["recent"][0]["content"], "sender [REDACTED]");
+    }
+
+    #[test]
+    fn tc_c_filter_runs_before_truncation() {
+        let email = "very.long.email.address@example-domain.example";
+        let context = pii_context(email);
+        let before = serde_json::to_string(&context).expect("serialize").len();
+        let filtered = email_filter().filter(context.clone()).expect("filter");
+        let after = serde_json::to_string(&filtered).expect("serialize").len();
+        assert!(after < before);
+
+        // A budget the filtered context fits but the raw one does not:
+        // only filter-then-truncate preserves the memory arrays.
+        let max_tokens = after / 4 + 1;
+        assert!(after <= max_tokens * 4 && max_tokens * 4 < before);
+
+        let output = prepare_context(&email_filter(), context, max_tokens).expect("prepare");
+        assert_eq!(output["event"]["payload"]["from"], "[REDACTED]");
+        assert_ne!(output["memories"], json!([]));
+        assert_ne!(output["recent"], json!([]));
+    }
+
+    #[test]
+    fn tc_c_truncation_still_applies_after_filtering() {
+        let output =
+            prepare_context(&email_filter(), pii_context("alice@example.com"), 1).expect("prepare");
+        assert_eq!(output["memories"], json!([]));
+        assert_eq!(output["recent"], json!([]));
+        assert_eq!(output["event"]["payload"]["from"], "[REDACTED]");
     }
 }
 
