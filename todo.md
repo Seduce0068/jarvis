@@ -43,6 +43,12 @@ generated:
   - 呼び出し側が `opencode` 等を名乗れり、承認も自分で通せば実質任意操作。
     `/mcp` と同様にサーバ側固定または認証済み Identity から導出
     (`http.rs:28-33`, `grpc.rs:19-32`, `lib.rs:62-103`)。
+  - **2026-11-18 実コード確認**: `/mcp` は `http.rs:42-45` → `mcp_server.rs`
+    で `gateway.mcp_principal()` のサーバ側固定値を使用（対応済み）。
+    一方 `/v1/execute`（`http.rs:28-33, 105-113`）と gRPC
+    （`grpc.rs:19-32` + `mcp_gateway.proto:10-14`）はリクエストの
+    `principal` をそのまま使用しており未対応。P0-3 は残る2経路を対象に
+    継続（詳細は [remaining-tasks.md](docs/integration/remaining-tasks.md)）。
 - [x] **P0-4** kill switch を承認経路へ貫通（2026-11-17 対応済み: approve/deny が `KillSwitchActivated` を返し HTTP 409 にマップ、回帰テスト追加）（R2-UI-001, R3-RUN-002）
   - `approve` / `deny` が `is_activated()` をチェックせず、発動中も決定が
     通る。ガード追加（409/403）と UI への状態表示・ボタン無効化。

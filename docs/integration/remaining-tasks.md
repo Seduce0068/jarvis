@@ -61,6 +61,38 @@ generated:
 | MCP-3 | allowlist `sandbox_type`（ツール単位）の整理 | **2026-11-15 解消（repo側）**: ADR-0002 の `opencode` CLI sandbox fallback 撤去に伴い、option A（dead config 削除）を採用。[infra/config/mcp_allowlist.toml](../../infra/config/mcp_allowlist.toml) から per-tool `sandbox_type` キーを削除（TOML parse 検証済み）。gateway 全体設定 `JARVIS_MCP_GW_SANDBOX_TYPE` は既存 unit/env 互換のため解析のみ残存し、実行経路には影響しない（[adr/0002-runtime-agnostic.md](../../adr/0002-runtime-agnostic.md) 更新済み）。 | `/etc/jarvis/mcp_allowlist.toml` への同期は次回 `deploy-mcp-gw-safe.sh --apply` 時（適用まで `check-deploy-drift.sh` は PENDING を表示する）。将来ツール単位の隔離が必要になった場合は、上流 MCP サーバ側の sandbox 設定（`register_mcp_server` のコマンド）で実装する。 |
 | MCP-4 | 読み取り基準ディレクトリの絞り込み | **2026-11-15 解消（repo側）**: [infra/systemd/jarvis-mcp-gw.service](../../infra/systemd/jarvis-mcp-gw.service) の `JARVIS_MCP_GW_BASE_DIR` を `/home/koppe` から repo ルート（`/home/koppe/ドキュメント/作業用/jarvis/jarvis`）へ絞り込み。`ProtectHome=read-only` は `/home` 読取に必要なため維持。smoke にも `JARVIS_MCP_GW_BASE_DIR="$repo"` を追加し、狭い基準での `filesystem.list`/`git.status` を検証する。 | `/etc` への同期は次回 `deploy-mcp-gw-safe.sh --apply` 時。適用後は repo 外の読み取りが拒否されることを代表的 `tools/call` で確認する（実機変更は別判断）。 |
 
+### P0-3 principal 自己申告の現状確認（2026-11-18）
+
+[todo.md](../../todo.md) の P0-3 について、実コードを読み取り専用で追った
+結果を記録する。**結論: 一部実装済み（`/mcp` のみ）。全体としては要対応**。
+
+#### 経路ごとの事実（Runtime Proof）
+
+- `/mcp` エンドポイントはサーバ側固定。
+  [http.rs](../../rust/jarvis-mcp-gw/src/http.rs):42-45 が
+  `gateway.mcp_principal()` を `JarvisMcpServer::new` へ渡し、
+  [mcp_server.rs](../../rust/jarvis-mcp-gw/src/mcp_server.rs):28-40 / 137 が
+  固定 principal でツール一覧と `execute_tool` を実行する。
+- `/v1/execute` は自己申告のまま。
+  [http.rs](../../rust/jarvis-mcp-gw/src/http.rs):28-33 の
+  `ExecuteToolRequest.principal` を JSON ボディから受け取り、:105-113 で
+  `gateway.execute_tool(..., &req.principal)` へ渡す。
+- gRPC も自己申告のまま。[grpc.rs](../../rust/jarvis-mcp-gw/src/grpc.rs):19-32 が
+  [proto](../../rust/jarvis-mcp-gw/proto/mcp_gateway.proto):10-14 の
+  `principal`（field 3）をそのまま `execute_tool` へ渡す。
+- 渡された principal は [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):63-104 で
+  policy の `is_allowed` と allowlist の principal チェックに使われる。
+  呼び出し側が許可済み principal を名乗る余地がある。
+- 承認決定側も自己申告。[ui/README.md](../../ui/README.md):80-90 が
+  `approved_by` の固定値送信を P0-1 / P0-3 関連の未移行事項として明記
+  （[approvals.rs](../../ui/src/approvals.rs):127、値は記録しない）。
+
+#### 判断（P0-3）
+
+- P0-3 を「実装済み」とはしない（`/v1/execute` と gRPC が未対応）。
+- `todo.md` の P0-3 に証跡を追記し、対応範囲を残る2経路へ絞って管理する。
+  認証済み Identity からの導出等、設計判断は確定させない。
+
 ## 2. バックアップ / DR・OCI レガシー整理（優先度: 高）
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
