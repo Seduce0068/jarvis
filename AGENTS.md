@@ -17,8 +17,9 @@ generated:
 - Common rules are inherited from the global `~/.config/opencode/AGENTS.md`.
 - This file records only project-specific deltas. Do not duplicate global
   rules; override them only where this project differs.
-- The global TODO list is `~/.config/opencode/todo.md`. Keep cross-project
-  tasks there and track project-specific tasks in this repository.
+- The project TODO source of truth is [todo.md](todo.md) (cross-review
+  consolidated). The global TODO `~/.config/opencode/todo.md` is only for
+  cross-project tasks.
 - If this file conflicts with the global rules, the project-specific
   statement here takes precedence.
 
@@ -52,9 +53,11 @@ jarvis/
 │   └── src/                      # approvals.rs, policy_client.rs, main.rs
 ├── ci/                           # Review-flow pipeline definitions
 │   ├── review-gate.yml           # review-flow pipeline (not wired to Actions yet)
-│   └── scripts/                  # review-run.sh (runtime adapter), secret_scan.py
-├── jarvis_personal_ai_architecture.md
-└── opencode-v2-oci-code-server-architecture-report.md
+│   └── scripts/                  # review-run.sh, secret_scan.py, check-shell.sh
+├── docs/                         # Architecture reports and integration docs
+│   ├── architecture/             # report.md (authoritative), calc.rs, index.md
+│   └── integration/              # remaining-tasks.md, tool-matrix.md, index.md
+└── todo.md                       # Cross-review consolidated TODO (project source of truth)
 ```
 
 ## Development Workflows
@@ -103,15 +106,15 @@ Pushes to `master` and pull requests run `.github/workflows/ci.yml`, which
 delegates to the shared `Seduce0068/workflows` `rust-gates.yml@v1` workflow
 (fmt, check, test, clippy) with `working_directory: rust`.
 
-`ci/review-gate.yml` defines a 3-stage review pipeline (automated gates, cross
-review, merge gate), but it is not wired into `.github/workflows/` yet because
-it requires OpenCode credentials and a runner with the JARVIS toolchain
-(tracked as CI-1/CI-2 in [docs/integration/remaining-tasks.md](docs/integration/remaining-tasks.md)). Run it
-manually:
-
-1. **Stage 1 - Automated Gates** (lint, typecheck, test, build, vuln scan, secret scan)
-2. **Stage 2 - Cross Review** (security, arch, ops subagents in parallel)
-3. **Stage 3 - Merge Gate** (re-run Stage 1, then auto-merge)
+`ci/review-gate.yml` is the (unwired) 3-stage reference pipeline: it includes
+auto-merge and OpenCode credentials, so it stays unwired until those policies
+are decided. The safe part is wired as
+`.github/workflows/review-gate.yml` (manual dispatch only, read-only gates;
+see CI-1/CI-2 in [docs/integration/remaining-tasks.md](docs/integration/remaining-tasks.md)).
+The unwired reference pipeline has 3 stages: Stage 1 automated gates,
+Stage 2 cross review, Stage 3 merge gate (auto-merge). The wired manual
+workflow runs only the read-only gate stage (`make ci-local`); it never
+comments, merges, or changes repository state.
 
 ```bash
 # Runtime-agnostic adapter (JARVIS_REVIEW_RUNNER, default: opencode)

@@ -154,7 +154,7 @@ generated:
     R5-ADR-003, R5-ADR-004）
   - OCI / 1Password / Object Storage 前提が `status: accepted` のまま。
     ADR-0004（インフラ）と ADR-0002（ランタイム）で置換された旨を明記。
-- [ ] **P3-2** 切れた参照と陳腐な記述を更新（R5-ADR-006, R5-ADR-009,
+- [x] **P3-2** 切れた参照と陳腐な記述を更新（2026-11-17 対応済み: AGENTS.md の存在しないルート文書2件を削除し実在ディレクトリ構成へ更新、TODO 正本と手動 review-gate の記述を実態に合わせ。MD013 等は既存のまま）（R5-ADR-006, R5-ADR-009,
     R5-ADR-010, R3-RUN-004）
   - ルートの旧アーキテクチャ文書 2 件が不在。`docs/architecture/` の実在
     パスへ。設定置き場所（`/etc` / `/opt` / `$HOME/jarvis`）の対応表も作成。
