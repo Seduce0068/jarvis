@@ -45,12 +45,14 @@ status: draft
 | REQ-8 | 承認引数は切り詰めず完全な pretty JSON を表示する |
 | REQ-9 | 承認/却下は focusable・tab_stop・Role::Button・aria_label を持つ |
 | REQ-10 | Tab / Shift-Tab でフォーカス移動し、Enter/Space は1回だけ決定する |
-| REQ-11 | トークン設定時は全リクエストに X-Jarvis-Approval-Token を付ける |
+| REQ-11 | 全リクエストに X-Jarvis-Approval-Token を付け、3xx で再送しない |
 | REQ-12 | リダイレクトは追従せず、トークンは元ホスト外へ漏れない |
 | REQ-13 | 応答の無い policy はタイムアウトし UI を固めない |
 | REQ-14 | pending の JSON は追加フィールドを許容し、空配列も受け付ける |
 | REQ-15 | base URL の末尾スラッシュは正規化される |
 | REQ-16 | ウィンドウ閉鎖時は poller が停止する |
+| REQ-17 | pending の非2xx (401/500/3xx) はエラーとし空キューと誤らない |
+| REQ-18 | decide の非2xx (401/500/3xx) はエラーとし成功と誤らない |
 
 ## Risk & tier
 
@@ -64,6 +66,7 @@ status: draft
 | R-6 | policy 無応答で UI スレッドが停止する | T2 | unit >= 0.80 |
 | R-7 | poller が停止せずリソースをリークする | T3 | unit >= 0.60 |
 | R-8 | JSON 形状違いでキューが読めない | T3 | unit >= 0.60 |
+| R-9 | 非2xx が空キュー/成功と誤認される | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -174,6 +177,7 @@ Scenario: TC-U8 リダイレクト不追従
   When token 付きで pending を呼ぶ
   Then リダイレクト先へ要求が送られない
   Then トークンは漏洩しない
+  Then 3xx はステータス付きエラーとして返る
 ```
 
 ```gherkin
@@ -194,6 +198,22 @@ Scenario: TC-U10 JSON 形状と URL
   Then 空リストを受け付け URL は正規化される
 ```
 
+```gherkin
+Scenario: TC-U11 pending の非2xx
+  Given 401 / 500 / 3xx のレスポンス
+  When pending を呼ぶ
+  Then HTTP ステータスを含むエラーを返す
+  Then 空のキューとして扱わない
+```
+
+```gherkin
+Scenario: TC-U12 decide の非2xx
+  Given approve / deny が 401 / 500 / 3xx を返す
+  When それぞれを呼ぶ
+  Then HTTP ステータスを含むエラーを返す
+  Then 成功として表示しない
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -208,11 +228,15 @@ Scenario: TC-U10 JSON 形状と URL
 | TC-U6 | REQ-9 | - | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.1 | T2 |
 | TC-U6 | REQ-10 | - | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T2 |
 | TC-U7 | REQ-11 | v5.0.0-V14.2.1 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-U8 | REQ-11 | v5.0.0-V15.3.2 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-U8 | REQ-12 | v5.0.0-V15.3.2 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-U8 | REQ-17 | v5.0.0-V16.5.2 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-U9 | REQ-13 | v5.0.0-V13.1.3 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-U10 | REQ-14 | v5.0.0-V2.2.1 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T3 |
 | TC-U10 | REQ-15 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.3 | T3 |
 | TC-U10 | REQ-16 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T3 |
+| TC-U11 | REQ-17 | - | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-U12 | REQ-18 | - | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 
 ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではない)。
 それ以外は ASVS を v5.0.0、SP 800-53 を Release 5.2、CC を
@@ -225,6 +249,7 @@ ISO/IEC 15408-3:2022 の構成要素 ID とする。
 [policy_client.rs](../ui/src/policy_client.rs) を参照。
 実行結果は `evidence/` の test-run JSON に記録する。
 
-TC-U5 / TC-U7〜U10 は既存8テストでカバーされている。
+TC-U5 / TC-U7〜U12 は既存10テストでカバーされている。
+TC-U8 の 3xx 非追従・明示エラー、TC-U11/12 の非2xx エラー化を含む。
 TC-U1〜U4 / TC-U6 は GPUI の状態遷移・描画に依存し、
 既存テストでは直接カバーされていないため未検証として明示する。
