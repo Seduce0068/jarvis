@@ -1,5 +1,5 @@
 {
-  "spec_hash": "sha256:92e8bf424052d4d2ad98787ea5bc936ff65e9919495c2c061cb9ea08502d2370",
+  "spec_hash": "sha256:c78b33503d998310e9a738877150c1710d1bbe5077fbe6d70caa8dc9e905c732",
   "timestamp": "2026-11-18T01:51:53+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 11,
+    "passed": 12,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 50,
@@ -38,41 +38,75 @@
     ]
   },
   "techniques": [
-    { "id": "equivalence-partitioning", "ref": "29119-4 5.2.1" },
-    { "id": "boundary-value-analysis", "ref": "29119-4 5.2.3" },
-    { "id": "decision-table-testing", "ref": "29119-4 5.2.6" },
-    { "id": "metamorphic-testing", "ref": "29119-4 5.2.11" },
-    { "id": "scenario-testing", "ref": "29119-4 5.2.9" },
-    { "id": "error-guessing", "ref": "29119-4 5.4.1" }
+    {
+      "id": "equivalence-partitioning",
+      "ref": "29119-4 5.2.1"
+    },
+    {
+      "id": "boundary-value-analysis",
+      "ref": "29119-4 5.2.3"
+    },
+    {
+      "id": "decision-table-testing",
+      "ref": "29119-4 5.2.6"
+    },
+    {
+      "id": "metamorphic-testing",
+      "ref": "29119-4 5.2.11"
+    },
+    {
+      "id": "scenario-testing",
+      "ref": "29119-4 5.2.9"
+    },
+    {
+      "id": "error-guessing",
+      "ref": "29119-4 5.4.1"
+    }
   ],
   "risk_items": [
     {
       "id": "R-1",
       "tier": "T1",
       "description": "PII を含む文脈が LLM へ送信される",
-      "asvs": ["v5.0.0-V14.2.4"],
-      "controls": ["SP800-53r5.2/SC-28"]
+      "asvs": [
+        "v5.0.0-V14.2.4"
+      ],
+      "controls": [
+        "SP800-53r5.2/SC-28"
+      ]
     },
     {
       "id": "R-2",
       "tier": "T1",
       "description": "設定ミスでフィルタが素通しになる",
-      "asvs": ["v5.0.0-V13.1.2"],
-      "controls": ["SP800-53r5.2/CM-7"]
+      "asvs": [
+        "v5.0.0-V13.1.2"
+      ],
+      "controls": [
+        "SP800-53r5.2/CM-7"
+      ]
     },
     {
       "id": "R-3",
       "tier": "T2",
       "description": "不正パターンで redact 全体が停止する",
-      "asvs": ["v5.0.0-V16.5.2"],
-      "controls": ["SP800-53r5.2/CM-7"]
+      "asvs": [
+        "v5.0.0-V16.5.2"
+      ],
+      "controls": [
+        "SP800-53r5.2/CM-7"
+      ]
     },
     {
       "id": "R-4",
       "tier": "T1",
       "description": "設定ファイル不正で既定保護が効かない",
-      "asvs": ["v5.0.0-V16.5.2"],
-      "controls": ["SP800-53r5.2/CM-7"]
+      "asvs": [
+        "v5.0.0-V16.5.2"
+      ],
+      "controls": [
+        "SP800-53r5.2/CM-7"
+      ]
     },
     {
       "id": "R-5",
@@ -98,9 +132,11 @@
   ],
   "assurance": {
     "level": "A1",
-    "cc_components": ["ATE_FUN.1"],
+    "cc_components": [
+      "ATE_FUN.1"
+    ],
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "既存 jarvis-context lib テスト 11 件の実測結果。新規テストコード追加なし。TC-P4 (設定 fallback) と TC-C (build_context のフィルタ適用) は既存テストで未カバー。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
+  "notes": "jarvis-context lib テスト 12 件の実測結果。TC-P4 (設定 fallback) は回帰テスト追加でカバー済み。TC-C (build_context のフィルタ適用) は未カバー。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
 }
