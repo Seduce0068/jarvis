@@ -36,7 +36,7 @@ generated:
   `bws.env`, `*token*`, `*secret*`, `*.pem`, `*.key` を拒否する defensive
   check を追加（MCP-4 の残リスク低減）。回帰テスト・smoke 12/12 成功。
 - **手動 review gate の健全性**: クリーンな clone（`/tmp` に HEAD を clone）で
-  `make ci-local` が成功（8 safety checks）。GitHub Actions の
+  `make ci-local` が成功（legacy guards 22 + backup 23 checks）。GitHub Actions の
   ubuntu-latest でも同じく Rust Toolchain + Python3 で動作する根拠。
 - **デプロイ経路の整合性確認**: `deploy-mcp-gw-safe.sh` は unit / allowlist を
   同期し、`check-deploy-drift.sh` は新しい `tools/list`（承認ツールも表示）を

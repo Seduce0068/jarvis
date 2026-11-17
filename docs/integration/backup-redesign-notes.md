@@ -193,8 +193,10 @@ ExecStart パスだけ直しても導入可能にならない。**BK-1 の保存
 - **実行主体**: `postgres` OS ユーザー。`pg_dump -d jarvis` が peer 認証で動く。
   レガシー unit の `User=jarvis` は実機にユーザーが存在しないため使用不可。
 - **対象**: PostgreSQL `jarvis` DB dump / Qdrant `jarvis_memories` snapshot /
-  非 secret 設定 allowlist（mcp_allowlist, pii_patterns, otelcol-config, policy/）。
+  非 secret 設定 allowlist（mcp_allowlist, pii_patterns, policy/ の明示ファイル）。
   **secret（`*.env`, `bws.env`, token）は一切読まない**。
+  `otelcol-config.yaml` は Grafana Cloud 認証情報を含む可能性があるため
+  2026-11-18 に allowlist から除外済み（実装を正とする）。
 - **完全性**: `manifest.txt` に各ファイルのサイズと SHA-256 を記録。
 - **安全装置**: 既定は dry-run、`--apply` で実書き込み、保持削除は `--retain-days` opt-in。
 

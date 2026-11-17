@@ -16,7 +16,7 @@ JSON はテキスト形式のため、リンク先として記載しています
 - [context の実行ログ][run-context]
   — [test-context.md](../specs/test-context.md) の実測結果。17 passed / 0 failed。
 - [backup の実行ログ][run-backup]
-  — [test-backup.md](../specs/test-backup.md) の実測結果。19 passed / 0 failed。
+  — [test-backup.md](../specs/test-backup.md) の実測結果。23 passed / 0 failed。
 - [event の実行ログ][run-event]
   — [test-event.md](../specs/test-event.md) の実測結果。24 passed / 0 failed。
 - [ui の実行ログ][run-ui]

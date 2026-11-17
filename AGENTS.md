@@ -74,7 +74,7 @@ cargo build --release --workspace
 cargo test --workspace
 
 # Lint
-cargo clippy --workspace -- -D warnings
+cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
 
 # Format
 cargo fmt --all --check
@@ -146,7 +146,7 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 |------|---------|
 | Build all Rust services | `cd rust && cargo build --release --workspace` |
 | Run tests | `cd rust && cargo test --workspace` |
-| Lint | `cd rust && cargo clippy --workspace -- -D warnings` |
+| Lint | `cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks` |
 | Format check | `cd rust && cargo fmt --all --check` |
 | Deploy jarvis-mcp-gw | `bash infra/scripts/deploy-mcp-gw-safe.sh`（適用は `sudo ... --apply`） |
 | Deploy drift check | `bash infra/scripts/check-deploy-drift.sh` |
