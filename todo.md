@@ -27,6 +27,10 @@ generated:
 ## P0: 認証・承認・シークレット（至急）
 
 - [ ] **P0-1** 承認 API の既定無認証を解消（R1-AUTH-001）
+  - **2026-11-18 判断保留**: `approval_api_token` は optional で、未設定時は
+    loopback-only の従来動作。既定を必須化すると UI / 既存フローが壊れるため、
+    実機の `/etc/jarvis/policy.env` にトークン設定を注入した上で
+    fail-closed 化する段階移行が必要（値は確認・記録しない）。
   - `approval_api_token: None` 既定で全承認ルートを素通し。必須化し、
     未設定時は起動失敗または 503。`approved_by` をボディから受け取らず
     認証 Identity に紐付ける（`config.rs:61`, `http.rs:73-108`）。
