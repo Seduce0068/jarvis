@@ -206,5 +206,31 @@ else
   fail=$((fail+1))
 fi
 
+# secret_scan.py must fail closed on a value-like credential and must never
+# echo the value itself. Build a throwaway git repo with a synthetic token
+# (no real secret); the tree is removed by the existing EXIT trap on $tmp.
+scan_tmp="$tmp/secret_scan_negative"
+mkdir -p "$scan_tmp"
+dummy_value='AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+if ! (cd "$scan_tmp" \
+      && git init -q >/dev/null 2>&1 \
+      && printf 'BWS_ACCESS_TOKEN = %s\n' "$dummy_value" > leaky.env \
+      && git add -f leaky.env >/dev/null 2>&1); then
+  echo "  FAIL: could not prepare temporary git repo for secret scanner test"
+  fail=$((fail+1))
+else
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_tmp/secret_scan.py"
+  out=$(cd "$scan_tmp" && python3 secret_scan.py 2>&1); code=$?
+  if [ "$code" -eq 1 ] \
+     && printf '%s' "$out" | grep -q 'VALUE-LIKE' \
+     && ! printf '%s' "$out" | grep -q -- "$dummy_value"; then
+    echo "  PASS: secret_scan.py rejects value-like credential without echoing the value"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: secret_scan.py exit=$code output=$(printf '%s' "$out" | head -3)"
+    fail=$((fail+1))
+  fi
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
