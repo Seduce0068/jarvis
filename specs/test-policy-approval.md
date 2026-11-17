@@ -45,6 +45,7 @@ status: draft
 | REQ-8 | 上限境界は cap-1 受付、cap 受付、cap+1 拒否 |
 | REQ-9 | 同一 ID の再登録は元の保留を守り Denied する |
 | REQ-10 | 二重決定 409、未知名 404、不正 UUID 400、競合は決定優先 |
+| REQ-11 | RwLock poison / persist 失敗で arm し、解除失敗を返す |
 
 ## Risk & tier
 
@@ -57,6 +58,7 @@ status: draft
 | R-5 | キュー無制限成長と ID 上書きによる決定奪取 | T1 | unit >= 0.90 |
 | R-6 | 上限境界の off-by-one で fail-open する | T2 | unit >= 0.80 |
 | R-7 | 決定競合で誤応答・副作用が残る | T2 | unit >= 0.80 |
+| R-8 | A-M18: poison/永続化失敗が見えず解除扱いになる | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -129,6 +131,18 @@ Scenario: TC-K3 状態復元と破損時 fail-closed
   Given state file が不正 JSON または読取不能
   When プロセスを起動する
   Then activated=true となり state file は上書きされない
+```
+
+```gherkin
+Scenario: TC-K4 poison と persist 失敗の fail-closed (A-M18)
+  Given reason / activated_by の RwLock が poison している
+  When status() を呼ぶ
+  Then poison 理由で arm され activated=true を返す
+  Given state file への書き込みが失敗する
+  When activate() を呼ぶ
+  Then arm されたまま activated=true を維持する
+  When 正当トークンで deactivate() を呼ぶ
+  Then "remains activated" エラーを返す
 ```
 
 ### トークン認証 (REQ-5, REQ-6)
@@ -208,6 +222,7 @@ Scenario: TC-D2 決定の排他とエラー応答
 | TC-K1 | REQ-2 | v5.0.0-V16.5.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-K2 | REQ-3 | v5.0.0-V8.3.2 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-K3 | REQ-4 | v5.0.0-V16.5.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-K4 | REQ-11 | v5.0.0-V16.5.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-A1 | REQ-5 | v5.0.0-V8.3.1 | SP800-53r5.2/IA-5 | ATE_FUN.1 | 5.2.1 | T1 |
 | TC-A2 | REQ-6 | v5.0.0-V8.1.1 | SP800-53r5.2/AC-6 | ATE_FUN.1 | 5.2.1 | T2 |
 | TC-Q1 | REQ-7 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.9 | T1 |
@@ -221,9 +236,11 @@ ASVS は v5.0.0、SP 800-53 は Release 5.2、CC は ISO/IEC 15408-3:2022
 
 ## 既存テストとの対応
 
-本仕様は既存 Rust テストを変更しない。既存テストとの主な対応は
+既存テストは保持しつつ回帰テストを追加した。主な対応は
 [approval.rs](../rust/jarvis-policy/src/approval.rs),
 [kill_switch.rs](../rust/jarvis-policy/src/kill_switch.rs),
 [http.rs](../rust/jarvis-policy/src/http.rs),
 [lib.rs](../rust/jarvis-policy/src/lib.rs) を参照。
+A-M18 (TC-K4) は poison 検知 / persist 失敗 / deactivate エラー伝播の
+回帰テストでカバー済み（49 テスト）。
 実行結果は `evidence/` の test-run JSON に記録する。

@@ -198,11 +198,11 @@ SP 800-53 を Release 5.2、CC を ISO/IEC 15408-3:2022 の構成要素 ID と�
 
 ## 既存テストとの対応
 
-本仕様は既存 Rust テストを変更しない。既存テストとの主な対応は
+既存テストは保持しつつ回帰テストを追加した。主な対応は
 [pii.rs](../rust/jarvis-context/src/pii.rs),
 [builder.rs](../rust/jarvis-context/src/builder.rs) を参照。
 実行結果は `evidence/` の test-run JSON に記録する。
 
-TC-P4 (設定 fallback) と TC-C (build_context のフィルタ適用・filter→truncate
-の順序) は 2026-11-18 に回帰テストを追加しカバー済み（15 テスト）。
+TC-P4 (設定 fallback)、TC-C (filter→truncate 順序)、PII 境界
+(object key を保持し値のみ redact) は回帰テスト追加でカバー済み（17 テスト）。
 実機 DB/Qdrant を用いる結合試験は対象外として未検証のままとする。
