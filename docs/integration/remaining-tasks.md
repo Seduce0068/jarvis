@@ -380,6 +380,78 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
 |---|---|---|---|
 | OPS-1 | MCP クライアント再接続の運用明文化 | **2026-11-17 解消（調査）**: 実機の DSH `@deepseek-ai/dsh-mcp-client` は `reconnect` 設定をサポートし、未指定でも既定で `enabled=true` / `maxAttempts=10` / 500ms〜30s の exponential backoff で自動再接続する（`connection.ts` の `RECONNECT_DEFAULTS` を実機確認）。gateway 再起動後の `Unauthorized: Session not found` は一時的な接続断として扱われ、再 `initialize` 込みで復旧する想定。設定変更は不要。 | 現状の `cordis.patch.yml` の `failOnStartupError: false` を維持。再接続を明示したい場合のみ `reconnect: { enabled: true, maxAttempts: 10 }` を追加可能だが既定と同一。 |
 
+## 7. データ整合性・マイグレーション（P1-2 / P1-3、2026-11-18）
+
+[todo.md](../../todo.md) の P1-2 / P1-3 について、実装を読み取り専用で確認した
+判断材料を記録する。**判断は未確定（要判断）**で、実装変更・実機操作は
+行っていない。秘密情報の値は記載しない。
+
+### P1-2 PG / Qdrant 二段書き込みの補償（要判断）
+
+#### 現状（Runtime Proof / P1-2）
+
+- [builder.rs](../../rust/jarvis-context/src/builder.rs):89-111
+  の `store_memory` は PostgreSQL へ
+  `INSERT ... ON CONFLICT (id) DO UPDATE` の後に Qdrant へ `upsert_vector`
+  を実行する（PG 先行・Qdrant 後続）。
+- [builder.rs](../../rust/jarvis-context/src/builder.rs):255-272
+  の `upsert_vector` は `upsert_points` の失敗を `ContextError::Qdrant`
+  へ変換して返すだけで、リトライ・永続キュー・補償トランザクションはない。
+- PG は同じ id の再送なら `ON CONFLICT` で content / metadata / updated_at が
+  更新される。ただし Qdrant 失敗を検知して再投下する仕組みはなく、
+  再送が来なければ埋め込みだけが欠落したままになる。
+- [builder.rs](../../rust/jarvis-context/src/builder.rs):57-87 / 113-156 の
+  `build_context` は `search_memory` で Qdrant を検索し、得た id で PG を
+  取得して relevance 順に再構成する（P1-1）。埋め込みが欠けた memory は
+  ベクトル検索から漏れ、直近履歴（`get_recent_memories`）には残る。
+- [001_initial.sql](../../rust/migrations/001_initial.sql) に outbox / 失敗キュー
+  相当のテーブルはなく、PG 側に embedding カラムもない。再埋め込みには
+  埋め込みエンドポイントが必要（未設定時はベクトル検索をスキップする動作）。
+
+#### 選択肢の比較（P1-2 / 要判断）
+
+- **A. outbox テーブル + ワーカー**: 実装コスト高（新規テーブル・状態遷移・
+  リトライ・ワーカーが必要）。データ喪失リスク低（PG と同じ tx で
+  未送信を残せる）。既存データ互換は中（既存行のバックフィルが必要）。
+- **B. 起動時整合性チェック + 再埋め込み**: コスト中（PG と Qdrant の id を
+  突き合わせ、欠落分を再埋め込み）。喪失リスク低〜中（起動時のみの検出で
+  埋め込みエンドポイント必須）。互換性高（スキーマ変更なし）。
+- **C. 現状維持の明文化**: コスト低。喪失リスク中（Qdrant 失敗分は再送が
+  無い限り欠落）。互換性高（変更なし）。受容するなら ADR 化と監視が要る。
+
+**判断**: 保留（要判断）。許容する喪失ウィンドウと埋め込みエンドポイントの
+有無を確定してから選択する。実機データの整合状態は未確認。
+
+### P1-3 マイグレーション版管理（要判断）
+
+#### 現状（Runtime Proof / P1-3）
+
+- [builder.rs](../../rust/jarvis-context/src/builder.rs):207-224 の
+  `create_pg_pool` が起動ごとに `batch_execute` で `001_initial.sql` を実行。
+  DDL は全て `CREATE TABLE / INDEX IF NOT EXISTS`。
+- [001_initial.sql](../../rust/migrations/001_initial.sql):67 の kill switch
+  初期行のみ `INSERT ... ON CONFLICT DO NOTH`。
+- sqlx は workspace に存在し `migrate` feature も有効
+  （[Cargo.toml](../../rust/Cargo.toml):73）。ただし `sqlx::migrate!` の
+  呼び出しや `_sqlx_migrations` を触るコードはなく、適用履歴は未管理。
+- `rust/migrations/` は `001_initial.sql` のみ（追加版なし）。
+
+#### 選択肢の比較（P1-3 / 要判断）
+
+- **A. sqlx migrate へ移行**: コスト中（既存 DB に履歴テーブルが無いため
+  001 を baseline 登録する初回手順が必要）。喪失リスク低（順序と適用履歴が
+  管理される）。既存データ互換は要検証（baseline 登録を誤ると未適用／
+  二重適用の乖離がありうる）。
+- **B. デプロイ時 CLI へ分離**: コスト中（migrate サブコマンドと手順を追加し
+  起動時 DDL を廃止）。喪失リスク低（適用タイミングを明示制御）。互換性高
+  （SQL は流用可能）。ただし適用忘れの運用リスクがある。
+- **C. 現状維持の明文化**: コスト低。`IF NOT EXISTS` のため再実行は安全だが、
+  既存テーブルへの `ALTER` が入った時点で適用済み判定が不能になる。
+  喪失リスク低〜中、互換性高（変更なし）。
+
+**判断**: 保留（要判断）。既存 DB の有無と baseline 登録方針、および
+デプロイ手順の実行主体を確定してから選択する。実機 DB は未確認。
+
 ## メモ
 
 - 本一覧は「実装タスク」だけでなく「方針決定が先に必要な項目」を含みます（特に BK-1, MCP-1, SEC-1, CI-1）。
