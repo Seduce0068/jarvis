@@ -47,6 +47,8 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@bash ci/scripts/check-shell.sh
 	@bash ci/scripts/check-evidence.sh
 	@bash ci/scripts/test-legacy-guards.sh
+	@bash ci/scripts/test-review-run.sh
+	@bash ci/scripts/test-verify-backup.sh
 	@echo "ci-local: all gates passed"
 
 secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は出力しない）
