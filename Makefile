@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup timer-status check-shell
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup timer-status check-shell check-evidence
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -45,6 +45,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 	@python3 ci/scripts/secret_scan.py
 	@bash ci/scripts/check-shell.sh
+	@bash ci/scripts/check-evidence.sh
 	@bash ci/scripts/test-legacy-guards.sh
 	@echo "ci-local: all gates passed"
 
@@ -62,6 +63,9 @@ timer-status: ## バックアップ timer の状態を表示（読み取り専�
 	@systemctl list-timers jarvis-backup.timer --no-pager 2>/dev/null || true
 	@echo "== apply command =="
 	@echo "sudo bash infra/scripts/install-backup-timer.sh --apply"
+
+check-evidence: ## テスト仕様とエビデンスのハッシュ一致を検証
+	@bash ci/scripts/check-evidence.sh
 
 check-shell: ## 全 tracked *.sh の静的解析（bash -n / shellcheck）
 	@bash ci/scripts/check-shell.sh

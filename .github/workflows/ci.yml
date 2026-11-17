@@ -60,6 +60,7 @@ jobs:
         # P1-8 / P2-3: repo-local regression scripts and the standalone GPUI
         # crate are not covered by the shared rust-gates workspace job.
         make check-shell
+        bash ci/scripts/check-evidence.sh
         make safety-test
         make test-verify-backup
         bash ci/scripts/test-review-run.sh
