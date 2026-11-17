@@ -26,7 +26,7 @@ generated:
 
 ## P0: 認証・承認・シークレット（至急）
 
-- [x] **P0-1** 承認 API の既定無認証を解消（R1-AUTH-001）
+- [ ] **P0-1** 承認 API の既定無認証を解消（R1-AUTH-001）
   - **2026-11-18 一部対応**: opt-in strict ガード実装済み。本番有効化は残る。
     `require_approval_api_token`（既定 `false`）が `true` のとき、トークン
     未設定なら承認 endpoints は 503 で fail-closed
@@ -62,7 +62,7 @@ generated:
     `BWS_ACCESS_TOKEN` 等が継承される。spawn 前に `env_clear()` し
     `PATH` / `HOME` 等最小限を明示（`gateway.rs:110-113`,
     `sandbox.rs:225-229`）。サービス間でも bws プロジェクト分离が必要。
-- [x] **P0-6** otelcol の `0.0.0.0` バインドを `127.0.0.1` へ（R1-SEC-002）
+- [ ] **P0-6** otelcol の `0.0.0.0` バインドを `127.0.0.1` へ（R1-SEC-002）
   - **2026-11-18 現状**: repo 側 `infra/config/otelcol-config.yaml` の
     6リスナー（health 13133 / pprof 1777 / zpages 55679 / OTLP 4317,4318 /
     internal 8888）を `127.0.0.1` へ変更済み（`:8,10,12,18,20,165`）。
@@ -295,7 +295,7 @@ generated:
 
 - [x] **P0-9** drift 検査の allowlist 欠落 fail-open（2026-11-17 対応済み: 配備版 allowlist 欠落時に `MISSING (deployed)` + danger=1。回帰テスト追加）（A-H2）
   - `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist が無いと allowlist 検査と `web.fetch` danger 判定ごとスキップされ、`drift`/`danger` が立たない。欠落時に `MISSING` + `danger=1` を設定し回帰テストを追加。
-- [x] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
+- [ ] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
   - **2026-11-18 現状**: opt-in strict ガードは実装済み（一部対応）。
     `require_kill_switch_admin_token`（既定 `false`）が `true` のときだけ
     既定トークンで起動を拒否し、既定のままなら従来どおり warn のみで継続する。
@@ -307,7 +307,7 @@ generated:
     `config.rs:66`（既定値 `PLACEHOLDER_KILL_SWITCH_TOKEN` = `"changeme"`）、
     `rust/jarvis-policy/src/lib.rs:35-48`（true のときのみ拒否、既定は warn）。
     ガードの既定値は `false` なので既存デプロイの起動動作は変わらない。
-- [x] **P0-11** `store_memory` に PII フィルタ未適用（A-H4）
+- [ ] **P0-11** `store_memory` に PII フィルタ未適用（A-H4）
   - **2026-11-18 判断記録済み（未実装）**: [ADR-0002](adr/0002-runtime-agnostic.md)
     の「記録（未決定）: PII の保存時扱い」に、PII フィルタは LLM 送信前の
     `build_context` にのみ適用し、`store_memory` は生の `content`/`metadata`
@@ -321,7 +321,7 @@ generated:
   - **2026-11-18 完了**: bounded(1024) + try_send + warn&drop に統一。
     sources.rs の型変更で unbounded ブリッジも除去済み（grep 0件）。
   - （解消済み）旧状態: `normalizer.rs` の unbounded channel と send 失敗握り潰し。bounded(1024) + try_send + warn&drop を導入。
-- [x] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
+- [ ] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
   - **2026-11-18 判断記録済み（未実装）**: [設計記録](docs/integration/remaining-tasks.md)
     に、loopback bind + Tailscale の信頼境界を前提に当面共有トークン /
     HMAC 署名は導入しない旨を明記。実装・設定変更は行っていない。
