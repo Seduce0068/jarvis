@@ -164,3 +164,32 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 ## 全体タスク一覧
 
 MCP 以外を含むプロジェクト全体の残タスク・判断待ち事項は [remaining-tasks.md](remaining-tasks.md) を参照。
+
+## 現状（2026-11-18・repo 側 allowlist）
+
+上記の 2026-11-15 実測ログは当時の記録として一切変更せず保持する。
+以下は [repo 側 allowlist](../../infra/config/mcp_allowlist.toml) の定義を
+読み取り専用で確認した現在の状態であり、**実機の実測値ではない**。
+設定値・資格情報・秘密情報の値は記載しない。
+
+### repo allowlist のツール名（14件・名前のみ）
+
+- `filesystem.read` / `filesystem.write` / `filesystem.list`
+- `shell.execute`
+- `git.status` / `git.diff` / `git.commit`
+- `github.create_pr`
+- `homeassistant.get_state` / `homeassistant.call_service`
+- `android.get_device_info` / `android.send_notification`
+- `web.search` / `web.fetch`
+
+### 差分判定の方針
+
+- **実機の `/mcp` `tools/list` が正**。repo allowlist は管理上の定義であり、
+  実機の状態を上書きする根拠にはしない。
+- repo と実機の差分は
+  [check-deploy-drift.sh](../../infra/scripts/check-deploy-drift.sh) で検出する。
+  allowlist ファイルの `cmp` と、稼働サービスへの `tools/list`
+  （読み取り系4ツールの部分集合）／`tools/call` 実測を実施。
+- 2026-11-15 の「4ツールのみ」「6ツール」は実測時点の記録であり、
+  現在の allowlist 定義（14件）と混同しない。実機の一覧は
+  デプロイ適用と事後 E2E の結果で確認する。
