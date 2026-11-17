@@ -17,6 +17,9 @@ JARVIS の連携・残タスク・バックアップに関する文書の索引�
   — OCI 非使用前提のバックアップ再設計メモ（前提棚卸し・安全ゲート・実装状況）。
 - [backup-restore-runbook.md](backup-restore-runbook.md)
   — ローカルバックアップの復旧手順（隔離先での非破壊検証を前提）。
+- [local-operations-runbook.md](local-operations-runbook.md)
+  — ローカル systemd サービスの起動・検証・停止、手動変更のロールバック、
+    `make verify-backup` の扱い方針、clippy 表記の統一。
 
 ## 関連
 
