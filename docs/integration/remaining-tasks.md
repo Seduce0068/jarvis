@@ -93,6 +93,149 @@ generated:
 - `todo.md` の P0-3 に証跡を追記し、対応範囲を残る2経路へ絞って管理する。
   認証済み Identity からの導出等、設計判断は確定させない。
 
+### P0-3 安全な修正方針の調査（2026-11-18・要判断）
+
+前節の現状確認を踏まえ、`require_server_side_principal`（既定 `false`）を
+軸にした後方互換な修正方針を読み取り専用で調査した。
+**結論: 要判断**。実装・設定変更・実機操作は行っていない。
+秘密情報の値は記載しない。
+
+#### principal の流れ（3経路の比較）
+
+- 共通の落とし所: 3経路とも最終的に
+  `McpGateway::execute_tool(tool, args, principal)`
+  （[lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):63-188）へ収束する。
+  ここで principal は policy の `is_allowed`（:73-76, :173-177）、
+  allowlist の `is_principal_allowed` / tool 単位
+  `allowed_principals`（:93-104）、承認リクエスト（:128）に使われる。
+  実処理の `gateway.execute`（:187）は principal を見ない。
+- `/mcp`（サーバ側固定）: [http.rs](../../rust/jarvis-mcp-gw/src/http.rs):42-46
+  が `gateway.mcp_principal().to_string()` を
+  `JarvisMcpServer::new` へ渡し、
+  [mcp_server.rs](../../rust/jarvis-mcp-gw/src/mcp_server.rs):26-35 / 137
+  が保持値で `tools/list` と `call_tool` を実行する。値は
+  [config.rs](../../rust/jarvis-mcp-gw/src/config.rs):27-30 / 60 の
+  `mcp_principal`（既定 `opencode`、
+  `JARVIS_MCP_GW_MCP_PRINCIPAL` で上書き可）。クライアントは選べない。
+- `/v1/execute`（リクエスト由来）:
+  [http.rs](../../rust/jarvis-mcp-gw/src/http.rs):28-33 の
+  `ExecuteToolRequest.principal` を JSON ボディから受け取り、
+  :105-113 でそのまま `execute_tool` へ渡す。
+- gRPC（リクエスト由来）:
+  [grpc.rs](../../rust/jarvis-mcp-gw/src/grpc.rs):19-32 が
+  [proto](../../rust/jarvis-mcp-gw/proto/mcp_gateway.proto):10-14 の
+  `principal`（field 3）をそのまま渡す。
+- policy 側は principal を文字列として受け取るだけ
+  （[client.rs](../../rust/jarvis-policy/src/client.rs):48-95 →
+  [casbin_policy.csv](../../infra/config/policy/casbin_policy.csv)）。
+  「誰が送ったか」は認証せず、名乗りを検証しない。
+  よって `/v1/execute` / gRPC は許可済み principal を名乗れる。
+
+#### /mcp と同じ固定値を他2経路へ適用できるか
+
+- 技術的には可能。`execute_tool` が単一の choke point なので、
+  `principal` 引数の解決をここへ集約すれば3経路を同時に覆える。
+  `/mcp` は既に同じ値を渡すためフラグ ON でも挙動は不変（冪等）。
+  wire 形式（JSON の `principal` / proto field 3）は維持できる。
+- ただし「principal の認証」は解決しない。ON 時は全呼び出しが
+  同一 identity になり、監査ログの呼び出し者粒度が失われる。
+  loopback + Tailscale の信頼境界を前提とした defense-in-depth であり、
+  認証 Identity からの導出（P0-1 と同じ設計判断）は別途必要。
+- 承認側の `approved_by` は依然としてボディ由来
+  （[ui/README.md](../../ui/README.md):80-90）で、本フラグの範囲外。
+
+#### opt-in フラグ案（require_server_side_principal / 既定 false）
+
+実装箇所（提案・未実装）:
+
+- [config.rs](../../rust/jarvis-mcp-gw/src/config.rs):10-31 に
+  `#[serde(default)] pub require_server_side_principal: bool` を追加。
+  `Default`（:49-62）で `false`。Figment の
+  `Env::prefixed("JARVIS_MCP_GW_")`（:39）により
+  `JARVIS_MCP_GW_REQUIRE_SERVER_SIDE_PRINCIPAL=true` で有効化できる。
+  既存 config にキーが無くても parse 成功する（後方互換）。
+- [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):63-76 の
+  `execute_tool` 先頭で実効 principal を解決する（擬似コード）:
+
+  ```rust
+  let effective = if self.config.require_server_side_principal {
+      self.config.mcp_principal.as_str()
+  } else {
+      principal
+  };
+  ```
+
+  以降の `is_allowed` / `PolicyDenied` / `is_principal_allowed` /
+  `allowed_principals` / `PrincipalNotAllowed` / `request_approval` /
+  再 `is_allowed` / ログ（:73-184）をすべて `effective` へ差し替える。
+  `/mcp` は同一値を渡すので変化しない。
+- `http.rs` / `grpc.rs` / `mcp_gateway.proto` は変更しない。
+  リクエストの `principal` は OFF で従来どおり有効、
+  ON では無視される（wire 互換を維持するための選択）。
+- 設定テンプレート
+  [mcp_gateway.env](../../infra/config/mcp_gateway.env):14-19 に
+  コメント行として既定 `false` と切替手順を追記（値は書かない）。
+  実機は `bws run` + figment env 経由なので unit 更新は別判断。
+- 運用ドキュメント（[infra/README.md](../../infra/README.md):195,
+  [todo.md](../../todo.md):42-51, 本ファイル）に
+  「ON 時は全経路が `mcp_principal` に統一され、名乗りは無視される」
+  旨を明記。`mcp_principal` が allowlist の `principals` と
+  各 tool の `allowed_principals` に無い場合は全ツールが
+  fail-closed になる点も注記する。
+
+採用しない案（代替として検討・記録のみ）:
+
+- 各 entry point（[http.rs](../../rust/jarvis-mcp-gw/src/http.rs):109-112 /
+  [grpc.rs](../../rust/jarvis-mcp-gw/src/grpc.rs):24-30）で
+  `req.principal` を `gateway.mcp_principal()` へ差し替える方式は、
+  変更量は小さいが入口が増えるたびに修正が必要で漏れやすい。
+  集約側（`execute_tool`）を採用する。
+- proto の `principal` field を削除する方式は wire 破壊のため、
+  opt-in 段階では採用しない（将来の段階移行で判断）。
+
+#### テスト追加箇所（提案・未実装）
+
+- [config.rs](../../rust/jarvis-mcp-gw/src/config.rs):81-153 に
+  `legacy_config_without_require_server_side_principal_still_loads`
+  （キー無し TOML が parse され `false`）と
+  `explicit_require_server_side_principal_is_honoured`（`true`）を追加。
+  既存の `legacy_config_without_*` 系と同じ型で書ける。
+- [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):217-404 に ON の
+  回帰テスト。`mcp_principal = "opencode"` の gateway へ
+  `execute_tool(..., "jarvis")` を渡し、ON なら成功・OFF なら
+  `PrincipalNotAllowed` になることを対で確認する。fixture は
+  `APPROVAL_ALLOWLIST` を参考に、`allowed_principals = ["opencode"]`
+  の非承認ツールを使う。
+- [http.rs](../../rust/jarvis-mcp-gw/src/http.rs):177-424 に
+  `execute_endpoint_ignores_request_principal_when_flag_enabled` を追加。
+  既存 `EXECUTE_ALLOWLIST`（`principals = ["opencode", "jarvis"]`、
+  `filesystem.read` は `opencode` のみ）を流用し、body の
+  `principal = "jarvis"` が ON で 200 / OFF で 403 になることを
+  確認する（mock MCP 登録は既存例どおり）。
+- `grpc.rs` には現状テストが無い。新規 `#[cfg(test)] mod tests` で
+  一時ポートの gRPC サーバ + 生成 client を使い、
+  `ExecuteToolRequest.principal = "jarvis"` で ON 成功 / OFF 失敗を
+  確認する（`testing::shipped_policy_client` を再利用）。
+- [mcp_server.rs](../../rust/jarvis-mcp-gw/src/mcp_server.rs):158-366
+  の既存 endpoint テストは固定 principal の回帰として維持し、
+  フラグ ON/OFF で `/mcp` の結果が不変なことを1件追加で担保する。
+- 実装時の検証コマンド: `cd rust && cargo fmt --all --check`,
+  `cargo test -p jarvis-mcp-gw -p jarvis-policy`,
+  `cargo clippy --workspace -- -D warnings`, `make ci-local`。
+  今回は未実装のため実行していない。
+
+#### 判断が必要な点（要判断）
+
+- フラグを入れて段階移行するか、認証 Identity 導出を待って
+  一括対応するか（P0-1 と方針を揃える必要がある）。
+- ON 時の固定値を `mcp_principal`（既定 `opencode`）のままとするか、
+  専用キー（例 `execute_principal`）を新設するか。
+- 監査ログの呼び出し者粒度を諦めるか、リクエスト値を
+  `claimed_principal` として別途記録するか。
+- 実機への env 注入（unit 更新・`bws run` 経路）と
+  `deploy-mcp-gw-safe.sh --apply` のタイミング。
+- **結論: 要判断**。上記方針が確定するまで実装しない。
+
 ## 2. バックアップ / DR・OCI レガシー整理（優先度: 高）
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
