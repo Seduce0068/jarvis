@@ -1,6 +1,6 @@
 {
   "spec_hash": "sha256:a40f4bc81f5c0c5298094dfbb6e83e986464887921c6a5bf03e20486c3d5982c",
-  "timestamp": "2026-11-18T03:21:00+09:00",
+  "timestamp": "2026-11-18T03:31:00+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "GNU make + bash (make test-verify-backup + make safety-test)",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 19,
+    "passed": 23,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 699,
@@ -154,5 +154,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "現行の make test-verify-backup は 19 checks すべて成功。make safety-test も 19 checks（legacy 10 + verify 19、verify は重複カウント）。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
+  "notes": "現行の make test-verify-backup は 23 checks（既存19 + アーカイブ展開走査4）すべて成功。make safety-test も 23 checks（legacy 14 + verify 23、verify は重複カウント）。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
 }
