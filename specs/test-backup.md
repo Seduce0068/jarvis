@@ -267,7 +267,7 @@ L-3: [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh) の
 
 回帰テストは [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh)
 と [test-legacy-guards.sh](../ci/scripts/test-legacy-guards.sh) にあり、
-`make test-verify-backup` (6 checks) と `make safety-test` (10 checks) で実行する。
+`make test-verify-backup` (23 checks) と `make safety-test` (22 checks) で実行する。
 実行結果は `evidence/` の test-run JSON に記録する。
 
 TC-B3 (秘密情報の非包含) と TC-V4 (形式検査) は task-24 の

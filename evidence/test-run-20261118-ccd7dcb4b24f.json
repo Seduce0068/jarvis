@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:a40f4bc81f5c0c5298094dfbb6e83e986464887921c6a5bf03e20486c3d5982c",
-  "timestamp": "2026-11-18T03:31:00+09:00",
+  "spec_hash": "sha256:ccd7dcb4b24f4ed07b34a7751b13735cf4c6f1e9770df80dc3c8350195b07bb1",
+  "timestamp": "2026-11-18T06:20:00+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "GNU make + bash (make test-verify-backup + make safety-test)",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-backup.md",
-    "spec_hash": "sha256:a40f4bc81f5c0c5298094dfbb6e83e986464887921c6a5bf03e20486c3d5982c",
+    "spec_hash": "sha256:ccd7dcb4b24f4ed07b34a7751b13735cf4c6f1e9770df80dc3c8350195b07bb1",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -154,5 +154,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "現行の make test-verify-backup は 23 checks（既存19 + アーカイブ展開走査4）すべて成功。make safety-test も 23 checks（legacy 14 + verify 23、verify は重複カウント）。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
+  "notes": "現行の make test-verify-backup は 23 checks、make safety-test は 22 checks（legacy guards）。仕様の件数表記を実測へ同期。カバレッジ・ミューテーションは未測定。"
 }
