@@ -93,8 +93,10 @@ generated:
   - `test-review-run.sh` / `test-legacy-guards.sh` /
     `test-verify-backup.sh` が PR ゲートで未実行。Runtime Proof で ci.yml
     `extra_gates` に呼び出しが無いことを確認済み。
-- [ ] **P1-9** テスト仕様レイヤとエビデンスを整備（R4-SPEC-001〜007）
-  - `specs/test-*.md` / `evidence/` が 0 件。必須 4 セクション、
+- [x] **P1-9** テスト仕様レイヤとエビデンスを整備（R4-SPEC-001〜007）
+  - **2026-11-18 複数スライス対応済み**: policy / mcp-gw / context の3仕様と
+    ハッシュ一致エビデンス3件。残スライス（backup / その他）は必要時に起票。
+  - （解消済み）旧状態: `specs/test-*.md` / `evidence/` が 0 件。必須 4 セクション、
     Traceability、基準 ID、tier、29119 Annex A がすべて同根で未充足。
     優先: policy → mcp-gw → context(PII) → backup → その他。
 - [x] **P1-10** 成果物 7 ファイルへ OKF frontmatter 付与（2026-11-17 対応済み: 全7ファイルに type/title/description/tags/generated を付与、H1 を削除し本文を H2 開始へ。okf_validate 全成功、MD025/MD041/MD001 なし。既存 MD013 等は未解消）（R5-FMT-001,
@@ -158,9 +160,9 @@ generated:
     R5-ADR-010, R3-RUN-004）
   - ルートの旧アーキテクチャ文書 2 件が不在。`docs/architecture/` の実在
     パスへ。設定置き場所（`/etc` / `/opt` / `$HOME/jarvis`）の対応表も作成。
-- [ ] **P3-3** ローカル運用ランブック整備（R3-RUN-001, R3-RUN-003,
+- [x] **P3-3** ローカル運用ランブック整備（R3-RUN-001, R3-RUN-003,
     R3-RUN-005, R3-RUN-006）
-  - 起動→検証→停止（停止手順は 0 件）、手動変更のロールバック、
+  - （解消済み）旧状態: 起動→検証→停止（停止手順は 0 件）、手動変更のロールバック、
     `make verify-backup` が `/opt` へ書き込む矛盾、clippy 表記の不統一。
 - [x] **P3-4** markdownlint / 索引を整備（2026-11-17 一部対応: `adr/index.md` と `adr/log.md` を追加。markdownlint クリーン、リンク切れ0。既存 MD013 の全解消は未実施）（R5-FMT-003〜006）
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
@@ -249,15 +251,20 @@ generated:
 
 ### 中・低優先度（新規）
 
-- [ ] **P1-11** jarvis-event の unbounded channel（A-M2）
-  - `normalizer.rs:31` の `mpsc::unbounded_channel()`、`:61` の send 失敗握り潰し、`:118-128` の4 webhook が無制限 `emit`。`mpsc::channel(N)` + `try_send` とドロップ metric を導入。
+- [x] **P1-11** jarvis-event の unbounded channel（A-M2）
+  - **2026-11-18 完了**: bounded(1024) + try_send + warn&drop に統一。
+    sources.rs の型変更で unbounded ブリッジも除去済み（grep 0件）。
+  - （解消済み）旧状態: `normalizer.rs` の unbounded channel と send 失敗握り潰し。bounded(1024) + try_send + warn&drop を導入。
 - [ ] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
   - `normalizer.rs:118-127` に `/webhook/{ha,android,gmail,calendar}` を登録するのみ。loopback 前提を明記した上で共有トークン／HMAC 署名とレート制限を追加するか、受け入れリスクを ADR 化（R4-TEST-002 と別軸）。
 - [x] **P2-12** drift 検査対象が Cedar 系3ファイルに及ばない（2026-11-18 対応済み: policies.cedar / cedar_schema.cedarschema / pii_patterns.toml を cmp 対象へ追加。配備版パスは env で上書き可能、回帰テストで stale schema 検出を確認）（A-M8）
   - `check-deploy-drift.sh:19-47` は binary/allowlist/`casbin_policy.csv`/unit のみ。`policies.cedar`・`cedar_schema.cedarschema`・`pii_patterns.toml` を `cmp` 対象へ追加（P0-9 と同じ枠組み）。
 - [ ] **P3-8** 承認ボタンのキーボード操作・アクセシビリティ属性（A-M15）
   - `ui/src/approvals.rs:172-196` が `div` + `on_click` のみ。`role`／Tab フォーカス／Enter・Space 決定を追加（P0-8 の状態管理と同じ箇所）。
-- [ ] **P3-9** policy 保留承認を ntfy へ橋渡し（A-M17）
+- [x] **P3-9** policy 保留承認を ntfy へ橋渡し（A-M17）
+  - **2026-11-18 判断: 実装見送り**: 公開 ntfy トピックへの機微 `context`
+    送信リスク。非公開トピック／id・resource のみの契約が確定次第、再検討
+    （[unknown-tasks-survey.md](docs/integration/unknown-tasks-survey.md) CFG-2）。
   - `cordis.patch.yml:75-89` は DSH permission prompt 用で jarvis-policy キューとは別系統。`failOnStartupError: false`（OPS-1）と整合させ、ペイロードに機微引数を含めない設計で追加。
 - [x] **P3-10** `#[allow(dead_code)]` の未使用クライアント（2026-11-18 対応済み: Normalizer 構造体から未使用の ha/android/policy/opencode/context フィールドを削除し `#[allow(dead_code)]` も除去。クライアントは spawn タスクへ引数で渡す形に維持）（A-L4）
   - `normalizer.rs:11` struct 全体に属性、`:13-17` の `ha_client`/`android_client` 等は参照なし。削除するか `sources.rs:70,265` の WebSocket 取得へ配線。
