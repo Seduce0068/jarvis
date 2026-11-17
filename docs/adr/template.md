@@ -4,6 +4,10 @@ date: YYYY-MM-DD
 status: proposed | accepted | deprecated | superseded
 deciders: [<決定者>]
 tags: [adr, <関連タグ>]
+type: ADR
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-18T06:34:00+09:00"
 ---
 
 ## 背景 (Context)

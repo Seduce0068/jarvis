@@ -8,6 +8,9 @@ tags:
   - restore
   - runbook
 status: draft
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-18T06:34:00+09:00"
 ---
 
 ## 概要

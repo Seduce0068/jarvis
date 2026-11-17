@@ -6,6 +6,9 @@ tags: [adr, jarvis, architecture, acp, mcp, dsh]
 status: accepted
 date: "2026-11-09"
 accepted_at: "2026-11-17"
+generated:
+  by: "DeepSeek Harness (lead agent)"
+  at: "2026-11-18T06:34:00+09:00"
 ---
 
 ## Context
