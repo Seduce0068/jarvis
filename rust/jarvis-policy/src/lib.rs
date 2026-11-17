@@ -42,6 +42,10 @@ impl PolicyEngine {
                 .as_ref()
                 .map(std::path::PathBuf::from),
         ));
+        // P0-10: the kill-switch admin token must not be the placeholder in
+        // production. We keep starting (warn) to avoid an unplanned outage;
+        // making this a hard startup failure requires confirming that the
+        // deployed unit injects a real token via Secret Manager first.
         if config.kill_switch_admin_token() == "changeme" {
             tracing::warn!(
                 "Kill switch admin token is still the default 'changeme'; \
