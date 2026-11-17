@@ -65,9 +65,11 @@ impl HomeAssistantClient {
     /// Listen to `state_changed` events over the Home Assistant WebSocket API.
     ///
     /// Connects, authenticates with the configured token, subscribes, and
-    /// forwards each received event through `event_tx`. Transient failures are
-    /// retried with exponential backoff; an invalid token stops the listener.
-    pub async fn listen_events(&self, event_tx: mpsc::UnboundedSender<UnifiedEvent>) -> Result<()> {
+    /// forwards each received event through `event_tx`. Submission is
+    /// non-blocking: a full queue logs a warning and drops the event (see
+    /// [`crate::normalizer::try_emit_event`]). Transient failures are retried
+    /// with exponential backoff; an invalid token stops the listener.
+    pub async fn listen_events(&self, event_tx: mpsc::Sender<UnifiedEvent>) -> Result<()> {
         let url = websocket_url(&self.base_url)?;
         let mut backoff = INITIAL_RECONNECT_BACKOFF;
         loop {
@@ -93,7 +95,7 @@ impl HomeAssistantClient {
     async fn listen_once(
         &self,
         url: &str,
-        event_tx: &mpsc::UnboundedSender<UnifiedEvent>,
+        event_tx: &mpsc::Sender<UnifiedEvent>,
     ) -> Result<(), ListenFailure> {
         let (mut socket, _) = tokio_tungstenite::connect_async(url)
             .await
@@ -163,7 +165,7 @@ impl HomeAssistantClient {
                         subscribed: true,
                     })?;
             if let Some(event) = parse_event_message(&message) {
-                let _ = event_tx.send(event);
+                crate::normalizer::try_emit_event(event_tx, event);
             }
         }
     }
