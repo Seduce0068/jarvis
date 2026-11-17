@@ -37,6 +37,46 @@ struct EmitEventResponse {
     event_id: String,
 }
 
+/// Map a `/v1/events` source string to a `UnifiedEvent` source. Unknown values
+/// fall back to `Manual`; this is the exact mapping used by the HTTP handler.
+fn normalize_event_source(raw: &str) -> EventSource {
+    match raw {
+        "home_assistant" => EventSource::HomeAssistant,
+        "android" => EventSource::Android,
+        "gmail" => EventSource::Gmail,
+        "calendar" => EventSource::Calendar,
+        "web" => EventSource::Web,
+        "finance" => EventSource::Finance,
+        _ => EventSource::Manual,
+    }
+}
+
+/// Pure request -> event conversion. Generated values are injected by the
+/// caller so source normalization and correlation handling stay testable.
+fn emit_event_from_request(
+    req: EmitEventRequest,
+    id: uuid::Uuid,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    generate_correlation_id: impl FnOnce() -> String,
+) -> UnifiedEvent {
+    UnifiedEvent {
+        id,
+        source: normalize_event_source(&req.source),
+        event_type: req.event_type,
+        payload: req.payload,
+        timestamp,
+        correlation_id: req.correlation_id.unwrap_or_else(generate_correlation_id),
+    }
+}
+
+/// Build the HTTP response from the emitted event (always successful).
+fn emit_response(event: &UnifiedEvent) -> EmitEventResponse {
+    EmitEventResponse {
+        success: true,
+        event_id: event.id.to_string(),
+    }
+}
+
 pub fn router(normalizer: Arc<Normalizer>) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -92,29 +132,11 @@ async fn emit_event(
     State(normalizer): State<Arc<Normalizer>>,
     Json(req): Json<EmitEventRequest>,
 ) -> Json<EmitEventResponse> {
-    let event = UnifiedEvent {
-        id: uuid::Uuid::new_v4(),
-        source: match req.source.as_str() {
-            "home_assistant" => EventSource::HomeAssistant,
-            "android" => EventSource::Android,
-            "gmail" => EventSource::Gmail,
-            "calendar" => EventSource::Calendar,
-            "web" => EventSource::Web,
-            "finance" => EventSource::Finance,
-            _ => EventSource::Manual,
-        },
-        event_type: req.event_type,
-        payload: req.payload,
-        timestamp: chrono::Utc::now(),
-        correlation_id: req
-            .correlation_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-    };
+    let event = emit_event_from_request(req, uuid::Uuid::new_v4(), chrono::Utc::now(), || {
+        uuid::Uuid::new_v4().to_string()
+    });
     normalizer.emit(event.clone());
-    Json(EmitEventResponse {
-        success: true,
-        event_id: event.id.to_string(),
-    })
+    Json(emit_response(&event))
 }
 
 pub async fn serve(normalizer: Arc<Normalizer>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
@@ -122,4 +144,104 @@ pub async fn serve(normalizer: Arc<Normalizer>, addr: std::net::SocketAddr) -> a
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fixed_id() -> uuid::Uuid {
+        uuid::Uuid::from_u128(7)
+    }
+
+    fn fixed_timestamp() -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp")
+    }
+
+    fn request(source: &str, correlation_id: Option<&str>) -> EmitEventRequest {
+        EmitEventRequest {
+            source: source.into(),
+            event_type: "test_event".into(),
+            payload: json!({"key": "value"}),
+            correlation_id: correlation_id.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn tc_e2_known_source_strings_are_normalized() {
+        let cases = [
+            ("home_assistant", EventSource::HomeAssistant),
+            ("android", EventSource::Android),
+            ("gmail", EventSource::Gmail),
+            ("calendar", EventSource::Calendar),
+            ("web", EventSource::Web),
+            ("finance", EventSource::Finance),
+        ];
+        for (raw, expected) in cases {
+            let event =
+                emit_event_from_request(request(raw, None), fixed_id(), fixed_timestamp(), || {
+                    "generated".to_string()
+                });
+            assert_eq!(event.source, expected, "source {raw}");
+        }
+    }
+
+    #[test]
+    fn tc_e2_unknown_source_falls_back_to_manual_with_uuid_correlation() {
+        let event =
+            emit_event_from_request(request("mqtt", None), fixed_id(), fixed_timestamp(), || {
+                uuid::Uuid::new_v4().to_string()
+            });
+
+        assert_eq!(event.id, fixed_id());
+        assert_eq!(event.source, EventSource::Manual);
+        assert_eq!(event.event_type, "test_event");
+        assert_eq!(event.payload, json!({"key": "value"}));
+        assert_eq!(event.timestamp, fixed_timestamp());
+        assert!(
+            event.correlation_id.parse::<uuid::Uuid>().is_ok(),
+            "generated correlation id must be a UUID string"
+        );
+
+        let response = emit_response(&event);
+        assert!(response.success);
+        assert_eq!(response.event_id, fixed_id().to_string());
+    }
+
+    #[test]
+    fn tc_e2_supplied_correlation_id_is_preserved() {
+        let event = emit_event_from_request(
+            request("android", Some("corr-supplied")),
+            fixed_id(),
+            fixed_timestamp(),
+            || panic!("generator must not run when correlation id is supplied"),
+        );
+        assert_eq!(event.source, EventSource::Android);
+        assert_eq!(event.correlation_id, "corr-supplied");
+    }
+
+    #[tokio::test]
+    async fn tc_e1_unreachable_policy_denies_auto_respond() {
+        // Reserve then release a loopback port so no gRPC listener can answer.
+        // No real policy service is contacted and no secret is involved.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let endpoint = format!("http://{}", listener.local_addr().expect("local addr"));
+        drop(listener);
+
+        let client = jarvis_policy::PolicyClient::new(endpoint).expect("lazy client");
+        let allowed = client
+            .is_allowed(
+                "jarvis",
+                "auto_respond",
+                "event:state_changed",
+                &json!({"entity_id": "light.kitchen"}),
+            )
+            .await;
+
+        // Normalizer::process_event consumes this boolean verbatim: a false
+        // result skips opencode.dispatch, so an unreachable policy service is
+        // fail-closed without any event-side fallback.
+        assert!(!allowed, "unreachable policy must deny auto_respond");
+    }
 }
