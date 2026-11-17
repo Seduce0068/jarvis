@@ -56,3 +56,11 @@ jobs:
         # The host build must not inherit the arm64 pkg-config path.
         unset PKG_CONFIG_PATH PKG_CONFIG_ALLOW_CROSS CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
         cargo test -p jarvis-context -- --ignored
+
+        # P1-8 / P2-3: repo-local regression scripts and the standalone GPUI
+        # crate are not covered by the shared rust-gates workspace job.
+        make check-shell
+        make safety-test
+        make test-verify-backup
+        bash ci/scripts/test-review-run.sh
+        make ui-test

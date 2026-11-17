@@ -88,7 +88,7 @@ generated:
   - `jarvis-core` が policy / mcp-gw / UI から未参照で、承認型が
     4 種類（`String+i64` / `Uuid+DateTime` / …）に分裂。core を真の
     共有源にするか、proto を単一情報源として core を削除する設計判断が必要。
-- [ ] **P1-8** テストスクリプト 3 本を CI ゲートへ接続（R4-SCRIPT-001,
+- [x] **P1-8** テストスクリプト 3 本を CI ゲートへ接続（2026-11-17 対応済み: ci.yml extra_gates に check-shell / safety-test / test-verify-backup / test-review-run を追加、ローカル全成功）（R4-SCRIPT-001,
     R3-DR-006, R4-GATE-006）
   - `test-review-run.sh` / `test-legacy-guards.sh` /
     `test-verify-backup.sh` が PR ゲートで未実行。Runtime Proof で ci.yml
@@ -115,7 +115,7 @@ generated:
   - `pull-requests: read` 欠落、apt 依存未導入、OpenCode 認証未配線、
     `--delete-branch` に `contents: write` 欠落。`ci/review-gate.yml` は
     未配線の参照実装である旨を明記。
-- [ ] **P2-3** UI を CI へ組み込み（R2-UI-005, R5-RULES-001）
+- [x] **P2-3** UI を CI へ組み込み（2026-11-17 対応済み: ci.yml extra_gates に `make ui-test` を追加、7 tests 成功。UI clippy の undocumented_unsafe_blocks は既に付与済み）（R2-UI-005, R5-RULES-001）
   - `ui/` は独立 workspace で CI 対象外。amd64 ジョブで `make ui-test`。
     UI clippy にも `-D clippy::undocumented_unsafe_blocks` を付与。
 - [ ] **P2-4** `ci-local` と CI の差分を解消（R4-GATE-006, R4-SPEC-010）
