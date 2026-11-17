@@ -110,8 +110,9 @@ generated:
     `test-verify-backup.sh` が PR ゲートで未実行。Runtime Proof で ci.yml
     `extra_gates` に呼び出しが無いことを確認済み。
 - [x] **P1-9** テスト仕様レイヤとエビデンスを整備（R4-SPEC-001〜007）
-  - **2026-11-18 複数スライス対応済み**: policy / mcp-gw / context の3仕様と
-    ハッシュ一致エビデンス3件。残スライス（backup / その他）は必要時に起票。
+  - **2026-11-18 全6スライス対応済み**: policy / mcp-gw / context / backup /
+    event / ui の6仕様とハッシュ一致エビデンス6件。check-evidence.sh が
+    必須4セクション・Traceability・index 双方向リンクを自動検証。
   - （解消済み）旧状態: `specs/test-*.md` / `evidence/` が 0 件。必須 4 セクション、
     Traceability、基準 ID、tier、29119 Annex A がすべて同根で未充足。
     優先: policy → mcp-gw → context(PII) → backup → その他。
