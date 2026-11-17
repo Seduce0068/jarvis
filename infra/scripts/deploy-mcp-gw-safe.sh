@@ -34,8 +34,12 @@ rollback() {
     systemctl daemon-reload || true
   fi
   systemctl restart jarvis-mcp-gw || true
-  for _ in $(seq 1 20); do curl -q -s -o /dev/null http://127.0.0.1:8082/health && break; sleep 0.5; done
-  echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$(curl -q -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8082/health)" >&2
+  for _ in $(seq 1 20); do
+    code=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || true)
+    [ "$code" = "200" ] && break
+    sleep 0.5
+  done
+  echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || echo 000)" >&2
   exit 1
 }
 
@@ -121,7 +125,11 @@ if [ "$apply" -eq 1 ]; then
   [ -f /opt/jarvis/bin/jarvis-mcp-gw ] && cp -a /opt/jarvis/bin/jarvis-mcp-gw "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts"
   install -o root -g root -m 0755 "$bin" /opt/jarvis/bin/jarvis-mcp-gw
   systemctl restart jarvis-mcp-gw || { echo "再起動に失敗しました" >&2; rollback; }
-  for _ in $(seq 1 20); do curl -q -s -o /dev/null http://127.0.0.1:8082/health && break; sleep 0.5; done
+  for _ in $(seq 1 20); do
+    code=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || true)
+    [ "$code" = "200" ] && break
+    sleep 0.5
+  done
   systemctl is-active --quiet jarvis-mcp-gw || { echo "サービスが起動していません" >&2; rollback; }
   echo "  deployed: $(systemctl is-active jarvis-mcp-gw)"
 else

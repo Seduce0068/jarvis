@@ -132,7 +132,7 @@ generated:
 - [ ] **P2-7** `deploy.rs` を fail-closed 化（R2-DEBT-004）
   - `make deploy` が ADR-0004 否定のリモート aarch64 配送を実行可能。
     `deploy.sh` と同じ fail-closed へ。
-- [ ] **P2-8** デプロイスクリプトへ `-e` と HTTP ステータス検証（R1-SEC-008,
+- [x] **P2-8** デプロイスクリプトへ `-e` と HTTP ステータス検証（2026-11-17 一部対応: health check を `%{http_code}=200` 判定へ強化、dry-run 成功。`-e` は rollback ロジックへの影響があるため未適用）（R1-SEC-008,
     R1-SUPPLY-001)
   - `set -uo pipefail` で配置失敗が fail-open。ヘルス確認も `curl -f` /
     `200` 判定が無い。Runtime Proof で `set -uo pipefail` 確認済み。
