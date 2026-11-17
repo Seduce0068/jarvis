@@ -61,6 +61,53 @@ generated:
 | MCP-3 | allowlist `sandbox_type`（ツール単位）の整理 | **2026-11-15 解消（repo側）**: ADR-0002 の `opencode` CLI sandbox fallback 撤去に伴い、option A（dead config 削除）を採用。[infra/config/mcp_allowlist.toml](../../infra/config/mcp_allowlist.toml) から per-tool `sandbox_type` キーを削除（TOML parse 検証済み）。gateway 全体設定 `JARVIS_MCP_GW_SANDBOX_TYPE` は既存 unit/env 互換のため解析のみ残存し、実行経路には影響しない（[adr/0002-runtime-agnostic.md](../../adr/0002-runtime-agnostic.md) 更新済み）。 | `/etc/jarvis/mcp_allowlist.toml` への同期は次回 `deploy-mcp-gw-safe.sh --apply` 時（適用まで `check-deploy-drift.sh` は PENDING を表示する）。将来ツール単位の隔離が必要になった場合は、上流 MCP サーバ側の sandbox 設定（`register_mcp_server` のコマンド）で実装する。 |
 | MCP-4 | 読み取り基準ディレクトリの絞り込み | **2026-11-15 解消（repo側）**: [infra/systemd/jarvis-mcp-gw.service](../../infra/systemd/jarvis-mcp-gw.service) の `JARVIS_MCP_GW_BASE_DIR` を `/home/koppe` から repo ルート（`/home/koppe/ドキュメント/作業用/jarvis/jarvis`）へ絞り込み。`ProtectHome=read-only` は `/home` 読取に必要なため維持。smoke にも `JARVIS_MCP_GW_BASE_DIR="$repo"` を追加し、狭い基準での `filesystem.list`/`git.status` を検証する。 | `/etc` への同期は次回 `deploy-mcp-gw-safe.sh --apply` 時。適用後は repo 外の読み取りが拒否されることを代表的 `tools/call` で確認する（実機変更は別判断）。 |
 
+### A-M16 監査永続化の要件分離・判断材料（2026-11-18）
+
+以下は A-M16 の判断材料。**結論: 要判断**で、実装・実機変更は行っていない。
+3要件を混同せず、目的・保存場所・保持期間・機微情報の扱い・コストで比較する。
+
+#### 現状（Runtime Proof / A-M16）
+
+- [approval.rs](../../rust/jarvis-policy/src/approval.rs):1-6 は
+  「決定はメモリ保持、PostgreSQL 監査永続化とユーザ通知は後で積む」TODO。
+  実際に永続化するコードはない。
+- [001_initial.sql](../../rust/migrations/001_initial.sql):20-36 に `audit_log`
+  テーブル（event_id / correlation_id / principal / action / resource /
+  decision / context / policy_version / latency_ms）と3インデックスが
+  定義済み。ただし参照は migration 内のみで、書き込みコードはない。
+- [approvals.rs](../../ui/src/approvals.rs):19-29 は `pending` キューと
+  `status` のみを保持。決定済み履歴や CSV / JSON export はない。
+- [ui/README.md](../../ui/README.md):80-90 は `approved_by` 固定値の送信と、
+  P0-1 / P0-3 対応で認証 Identity へ紐付ける方針を記録（値は記載しない）。
+- [dsh.md](dsh.md):138-160 は承認 UI 実装済み・通知と監査永続化は未実装と
+  整理。[todo.md](../../todo.md) の P3-9 は「実装見送り」判断
+  （公開 ntfy への機微 `context` 送信リスク）。
+
+#### 3要件の比較（A-M16）
+
+- **(1) 永続監査（MCP-1 / AUD-01）**: 目的=セキュリティ/コンプライアンスの
+  決定記録。保存場所=PostgreSQL の既存 `audit_log` テーブル。
+  保持期間=未決定（方針次第）。機微情報=`context` JSONB に生の引数を
+  残さない設計が必要（id / resource / decision 程度に限定する案）。
+  コスト=中（policy 側の記録処理と既存スキーマの配線が必要）。
+- **(2) ローカル UI 決定履歴・CSV / JSON export（A-M16）**: 目的=運用者の
+  直近決定の参照と書き出し。保存場所=UI のメモリまたはローカルファイル
+  （DB とは別系統）。保持期間=未決定（例: 直近 N 件）。
+  機微情報=保存対象をメタデータに限定し、引数本文は残さない。
+  コスト=低〜中（UI 状態とファイル I/O のみで DB 変更不要）。
+- **(3) 通知（P3-9）**: 目的=保留承認への気付き。保存場所=保存せず
+  ntfy 等の外部先へ送信するのみ。保持期間=通知先側の設定に依存し
+  repo 側は未決定。機微情報=公開トピックへ `context` を送らない契約が
+  必須（現状は見送り判断）。コスト=低（薄い橋渡し）だが契約設計が先。
+
+#### 判断（A-M16）
+
+- 3つは目的が異なるため一本の実装に統合しない。永続監査は DB、
+  UI 履歴はローカル、通知は外部送信と別系統に扱う。
+- 保持期間・機微情報の許容範囲・通知契約が未確定のため、
+  **判断は確定させず要判断とする**。決定後に最小スキーマと
+  エクスポート形式を設計する。
+
 ### P0-3 principal 自己申告の現状確認（2026-11-18）
 
 [todo.md](../../todo.md) の P0-3 について、実コードを読み取り専用で追った
