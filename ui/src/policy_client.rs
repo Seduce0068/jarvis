@@ -10,7 +10,7 @@
 //! run these methods on GPUI's background executor (see `approvals.rs`).
 //! The console only ever talks to the configured loopback base URL.
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -105,6 +105,12 @@ impl PolicyClient {
         let mut response = request
             .call()
             .with_context(|| format!("GET {url} failed"))?;
+        // A 3xx is returned as-is because redirects are disabled; without this
+        // check its (possibly empty) body could be mistaken for an empty queue.
+        let status = response.status();
+        if !status.is_success() {
+            bail!("GET {url} returned HTTP {}", status.as_u16());
+        }
         let body: PendingResponse = response
             .body_mut()
             .read_json()
@@ -128,9 +134,15 @@ impl PolicyClient {
         if let Some(token) = &self.token {
             request = request.header("X-Jarvis-Approval-Token", token);
         }
-        request
+        let response = request
             .send_json(body)
             .with_context(|| format!("POST {url} failed"))?;
+        // send_json() succeeds for any HTTP response; a 401/500/3xx must not
+        // be reported to the operator as a successful approve/deny.
+        let status = response.status();
+        if !status.is_success() {
+            bail!("POST {url} returned HTTP {}", status.as_u16());
+        }
         Ok(())
     }
 }
@@ -305,9 +317,15 @@ mod tests {
             format!("http://{origin_addr}"),
             Some("redirect-token".to_string()),
         );
-        // A 3xx body is not JSON, so pending() errors; what matters is that
-        // no follow-up request ever reaches the redirect target.
-        let _ = client.pending();
+        // The raw 3xx must surface as an explicit error (not an empty queue),
+        // and no follow-up request may reach the redirect target.
+        let result = client.pending();
+        assert!(result.is_err(), "3xx must be an error: {result:?}");
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains("302"),
+            "error must surface the HTTP status: {message}"
+        );
 
         origin_thread.join().expect("origin thread");
         let target_seen = seen_rx
@@ -317,6 +335,81 @@ mod tests {
         assert_eq!(
             target_seen, None,
             "redirect must not be followed, otherwise the token is replayed"
+        );
+    }
+
+    /// A 500 with a *valid* body must still be an error: otherwise a broken
+    /// policy service would show up as an empty approval queue.
+    #[test]
+    fn non_2xx_pending_status_is_an_error() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 2048];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"pending\":[]}")
+                .expect("write");
+        });
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let result = client.pending();
+        server.join().expect("server thread");
+        assert!(
+            result.is_err(),
+            "500 must not look like an empty queue: {result:?}"
+        );
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains("500"),
+            "error must surface the HTTP status: {message}"
+        );
+    }
+
+    /// send_json() returns Ok for any HTTP response, so the status must be
+    /// checked before reporting an approve/deny outcome to the operator.
+    #[test]
+    fn non_2xx_decide_status_is_an_error() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = std::thread::spawn(move || {
+            for response in [
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            ] {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 2048];
+                let _ = stream.read(&mut buf);
+                stream.write_all(response.as_bytes()).expect("write");
+            }
+        });
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let approved = client.approve("req-1", "koppe");
+        let denied = client.deny("req-2", "because");
+        server.join().expect("server thread");
+        assert!(
+            approved.is_err(),
+            "401 must not look successful: {approved:?}"
+        );
+        assert!(denied.is_err(), "500 must not look successful: {denied:?}");
+
+        let approved_message = format!("{:#}", approved.unwrap_err());
+        let denied_message = format!("{:#}", denied.unwrap_err());
+        assert!(
+            approved_message.contains("401"),
+            "approve error must surface the status: {approved_message}"
+        );
+        assert!(
+            denied_message.contains("500"),
+            "deny error must surface the status: {denied_message}"
         );
     }
 }

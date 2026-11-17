@@ -32,7 +32,7 @@ CI の aarch64 クロスビルドを壊さないための独立クレートで�
 cd ~/ドキュメント/作業用/jarvis/jarvis/ui
 cargo build            # 開発ビルド
 cargo build --release  # リリースビルド
-cargo test             # 8 テスト（cargo test の実測値）
+cargo test             # 10 テスト（cargo test の実測値）
 cargo clippy --all-targets -- -D warnings
 ```
 
