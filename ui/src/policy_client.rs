@@ -82,6 +82,11 @@ impl PolicyClient {
         let config = ureq::config::Config::builder()
             .timeout_global(Some(request_timeout))
             .timeout_connect(Some(connect_timeout))
+            // Never follow redirects: ureq strips only Authorization/Cookie
+            // headers on redirect, so X-Jarvis-Approval-Token would be replayed
+            // to the redirect target (possibly a different host). With 0 the
+            // 3xx response is returned as-is and the token stays on loopback.
+            .max_redirects(0)
             .build();
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -237,5 +242,81 @@ mod tests {
         handle.join().expect("server thread");
         assert!(result.is_ok(), "unexpected: {result:?}");
         assert_eq!(seen.lock().expect("lock").as_deref(), Some("ui-token"));
+    }
+
+    /// A 3xx from jarvis-policy must not be followed: ureq forwards custom
+    /// headers on redirect, so following it would replay the approval token
+    /// to the redirect target (potentially a different host).
+    #[test]
+    fn approval_token_is_not_replayed_on_redirect() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        // Redirect target. If ureq follows the 3xx, this server sees the
+        // replayed X-Jarvis-Approval-Token header.
+        let target = TcpListener::bind("127.0.0.1:0").expect("bind target");
+        let target_addr = target.local_addr().expect("target addr");
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let target_thread = std::thread::spawn(move || {
+            target
+                .set_nonblocking(true)
+                .expect("set nonblocking on target");
+            let deadline = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < deadline {
+                match target.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 4096];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let leaked = request.lines().any(|line| {
+                            line.to_ascii_lowercase()
+                                .starts_with("x-jarvis-approval-token:")
+                        });
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                        let _ = seen_tx.send(Some(leaked));
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return,
+                }
+            }
+            let _ = seen_tx.send(None);
+        });
+
+        // Policy-side endpoint answering every request with a redirect to
+        // the other listener (a different port, hence a different target).
+        let origin = TcpListener::bind("127.0.0.1:0").expect("bind origin");
+        let origin_addr = origin.local_addr().expect("origin addr");
+        let origin_thread = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().expect("origin accept");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/leak\r\nContent-Length: 0\r\n\r\n"
+            );
+            let _ = stream.write_all(response.as_bytes());
+        });
+
+        let client = PolicyClient::new_with_token(
+            format!("http://{origin_addr}"),
+            Some("redirect-token".to_string()),
+        );
+        // A 3xx body is not JSON, so pending() errors; what matters is that
+        // no follow-up request ever reaches the redirect target.
+        let _ = client.pending();
+
+        origin_thread.join().expect("origin thread");
+        let target_seen = seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("target probe result");
+        target_thread.join().expect("target thread");
+        assert_eq!(
+            target_seen, None,
+            "redirect must not be followed, otherwise the token is replayed"
+        );
     }
 }
