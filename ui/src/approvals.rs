@@ -164,6 +164,12 @@ impl ApprovalsView {
             .expires_at
             .map(|t| t.format("%H:%M:%S").to_string())
             .unwrap_or_else(|| "-".to_string());
+        // An elapsed deadline is easy to miss in a dense queue; highlight it
+        // so the operator does not approve a stale command by accident. This
+        // is display-only: decide/on_click/keyboard handling stay unchanged.
+        let expired = request
+            .expires_at
+            .is_some_and(|expires_at| expires_at < chrono::Utc::now());
 
         let approve_id = request.id.clone();
         let deny_id = request.id.clone();
@@ -175,7 +181,11 @@ impl ApprovalsView {
             .justify_between()
             .gap_3()
             .p_3()
-            .bg(rgb(0x2a2a2a))
+            .bg(if expired {
+                rgb(0x3a2020)
+            } else {
+                rgb(0x2a2a2a)
+            })
             .child(
                 div()
                     .flex()
@@ -186,6 +196,17 @@ impl ApprovalsView {
                             .text_lg()
                             .child(format!("{}  ·  {}", request.principal, request.resource)),
                     )
+                    .when(expired, |col| {
+                        col.child(
+                            div()
+                                .px_2()
+                                .py_1()
+                                .bg(rgb(0x8b2f2f))
+                                .text_color(rgb(0xffffff))
+                                .text_sm()
+                                .child("期限切れ"),
+                        )
+                    })
                     .child(muted(format!(
                         "action={}  期限={}  id={}",
                         request.action, expires, request.id

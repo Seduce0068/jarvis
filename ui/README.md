@@ -32,7 +32,7 @@ CI の aarch64 クロスビルドを壊さないための独立クレートで�
 cd ~/ドキュメント/作業用/jarvis/jarvis/ui
 cargo build            # 開発ビルド
 cargo build --release  # リリースビルド
-cargo test             # 5 テスト
+cargo test             # 7 テスト（cargo test の実測値）
 cargo clippy --all-targets -- -D warnings
 ```
 
@@ -56,6 +56,8 @@ JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
 2. 保留中の要求が 3 秒ごとに自動更新されます（件数はヘッダに表示）。
 3. 各行に要求元 (`principal`)、リソース (`tool:<name>`)、期限、
    引数 (`context`) は切り詰めず全量を表示します（承認前にコマンド全体を確認）。
+   期限 (`expires_at`) が現在時刻を過ぎた要求は行の背景が赤系になり、
+   「期限切れ」バッジを表示します（表示のみで操作は従来どおりです）。
 4. **承認** または **却下** ボタンを押すと、jarvis-policy へ決定が送信され、
    直ちに一覧が再読み込みされます。
 5. jarvis-policy に接続できない場合は赤いエラー・バナーを表示し、
@@ -64,11 +66,28 @@ JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
 ## セキュリティ
 
 - 接続先は `JARVIS_POLICY_HTTP_URL` のみ（既定は loopback）。
-- policy 側で `JARVIS_POLICY_APPROVAL_TOKEN` が設定されている場合は、
-  同じ値を `JARVIS_POLICY_APPROVAL_TOKEN` に設定すると全リクエストに
-  `X-Jarvis-Approval-Token` ヘッダを付与する。
+- トークン注入経路は環境変数 `JARVIS_POLICY_APPROVAL_TOKEN` です。
+  `main.rs` が起動時に読み、`ApprovalsView` を経由して `PolicyClient` へ渡し、
+  一覧取得・承認・却下の全リクエストに `X-Jarvis-Approval-Token` ヘッダを
+  付与します（未設定時はヘッダを送信しません）。
+- jarvis-policy 側も同じ環境変数 `JARVIS_POLICY_APPROVAL_TOKEN` で
+  トークンを設定します。**両者には同じ値を設定してください**。値が一致しない
+  場合、policy 側でトークン必須に設定すると 401 になり、
+  一覧取得や決定が失敗します。トークン値はリポジトリへ書き込まず、
+  運用時の環境変数として注入します。
 - 特権操作・外部送信・秘密情報の読み取りは行いません。
-- 決定時の `approved_by` は既定で `koppe`（オペレータ）です。
+
+### 決定者の識別 (`approved_by`) — P0-3 関連の設計判断
+
+- 現状: `approvals.rs` の `decide` が固定値 `"koppe"` を `approved_by` として
+  送信します。本タスクでは設計判断としてコードを変更しません。
+- 背景: 現行の jarvis-policy HTTP API は `approved_by` をリクエスト本文から
+  受け取り、principal の自己申告を前提としています。UI 側で別の値を名乗って
+  も認証上の意味は持たないため、現状は既定オペレータ名を明示しています。
+- 今後の方針: P0-1 / P0-3 対応で、policy 側が `approved_by` を本文から受け
+  取らず認証済み Identity から導出する設計へ移行します。移行後は UI も
+  固定値の送信をやめ、認証コンテキストの Identity へ紐付けます。
+  詳細は [todo.md の P0-1 / P0-3](../todo.md) を参照してください。
 
 ## 実サービスでの動作確認（2026-11-17）
 
