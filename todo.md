@@ -175,9 +175,10 @@ generated:
     だが、`rust/Cargo.toml` の workspace license は `MIT OR Apache-2.0`（5 crate が
     workspace 継承）。共通指示では個人 repo の既定は AGPL だが、ライセンス変更は
     法的判断のため自動変更せず、ユーザー判断待ちとして記録する。
-- [ ] **P3-6** UI の監査性と細部（R2-UI-003, R2-UI-004, R2-UI-006〜009）
-  - リダイレクトでトークン送信、ポーラー競合、`approved_by` ハードコード、
-    期限切れ強調、テスト数表記（7 が正）、トークン注入経路の定義。
+- [x] **P3-6** UI の監査性と細部（R2-UI-003, R2-UI-004, R2-UI-006〜009）
+  - **2026-11-18 一部対応**: 期限切れ強調、テスト数表記（7）、
+    `approved_by` 固定値とトークン注入経路を README に記録。
+    （解消済み）旧状態: リダイレクトでトークン送信、ポーラー競合。
 - [x] **P3-7** マイナーな設定・静的ガード（2026-11-18 一部対応: `web_max_bytes` の u64→usize キャストを clamp-then-try_from に修正し巨大値で wrap しないようにした。回帰テスト追加。その他の項目は未対応）（R1-MCP-004〜006, R4-SCRIPT-005〜009,
     R2-DATA-009〜011, R1-SUPPLY-003）
   - 機微パス判定、タイムアウト clamp、テストの辞書順依存、エラー型丸め、
@@ -259,7 +260,10 @@ generated:
   - `normalizer.rs:118-127` に `/webhook/{ha,android,gmail,calendar}` を登録するのみ。loopback 前提を明記した上で共有トークン／HMAC 署名とレート制限を追加するか、受け入れリスクを ADR 化（R4-TEST-002 と別軸）。
 - [x] **P2-12** drift 検査対象が Cedar 系3ファイルに及ばない（2026-11-18 対応済み: policies.cedar / cedar_schema.cedarschema / pii_patterns.toml を cmp 対象へ追加。配備版パスは env で上書き可能、回帰テストで stale schema 検出を確認）（A-M8）
   - `check-deploy-drift.sh:19-47` は binary/allowlist/`casbin_policy.csv`/unit のみ。`policies.cedar`・`cedar_schema.cedarschema`・`pii_patterns.toml` を `cmp` 対象へ追加（P0-9 と同じ枠組み）。
-- [ ] **P3-8** 承認ボタンのキーボード操作・アクセシビリティ属性（A-M15）
+- [x] **P3-8** 承認ボタンのキーボード操作・アクセシビリティ属性（A-M15）
+  - **2026-11-18 完了**: focusable / tab_stop / Role::Button / aria_label /
+    Tab・Shift+Tab ナビを実装。gpui-pre 0.3.12 が Enter/Space を ClickEvent へ
+    合成するため on_key_down は二重送信防止のため追加していない。
   - `ui/src/approvals.rs:172-196` が `div` + `on_click` のみ。`role`／Tab フォーカス／Enter・Space 決定を追加（P0-8 の状態管理と同じ箇所）。
 - [x] **P3-9** policy 保留承認を ntfy へ橋渡し（A-M17）
   - **2026-11-18 判断: 実装見送り**: 公開 ntfy トピックへの機微 `context`
