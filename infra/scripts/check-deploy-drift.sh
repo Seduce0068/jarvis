@@ -6,6 +6,8 @@ set -uo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # Overridable for regression tests; production uses the fixed paths.
 deployed_allowlist="${JARVIS_DRIFT_ALLOWLIST:-/etc/jarvis/mcp_allowlist.toml}"
+deployed_policy_dir="${JARVIS_DRIFT_POLICY_DIR:-/etc/jarvis/policy}"
+deployed_pii="${JARVIS_DRIFT_PII:-/etc/jarvis/pii_patterns.toml}"
 drift=0; danger=0
 say() { printf '%-32s %s\n' "$1" "$2"; }
 echo "== deploy drift =="
@@ -46,6 +48,18 @@ if [ -f /etc/jarvis/policy/casbin_policy.csv ] && [ -f "$repo/infra/config/polic
     say "policy" "DIFF"; drift=1
   fi
 fi
+# 4b) Cedar policy / schema / PII patterns (P2-12). Same drift semantics as
+# casbin_policy.csv: compare only when the deployed file exists.
+for pair in \
+  "$deployed_policy_dir/policies.cedar|$repo/infra/config/policy/policies.cedar" \
+  "$deployed_policy_dir/cedar_schema.cedarschema|$repo/infra/config/policy/cedar_schema.cedarschema" \
+  "$deployed_pii|$repo/infra/config/pii_patterns.toml"; do
+  deployed="${pair%%|*}"; source="${pair##*|}"
+  label="$(basename "$deployed")"
+  if [ -f "$deployed" ] && [ -f "$source" ]; then
+    if cmp -s "$deployed" "$source"; then say "$label" "OK (same)"; else say "$label" "DIFF"; drift=1; fi
+  fi
+done
 # 5) systemd unit（配備版と repo の一致）
 unit_repo="$repo/infra/systemd/jarvis-mcp-gw.service"
 unit_sys="/etc/systemd/system/jarvis-mcp-gw.service"

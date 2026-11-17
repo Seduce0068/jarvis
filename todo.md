@@ -249,7 +249,7 @@ generated:
   - `normalizer.rs:31` の `mpsc::unbounded_channel()`、`:61` の send 失敗握り潰し、`:118-128` の4 webhook が無制限 `emit`。`mpsc::channel(N)` + `try_send` とドロップ metric を導入。
 - [ ] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
   - `normalizer.rs:118-127` に `/webhook/{ha,android,gmail,calendar}` を登録するのみ。loopback 前提を明記した上で共有トークン／HMAC 署名とレート制限を追加するか、受け入れリスクを ADR 化（R4-TEST-002 と別軸）。
-- [ ] **P2-12** drift 検査対象が Cedar 系3ファイルに及ばない（A-M8）
+- [x] **P2-12** drift 検査対象が Cedar 系3ファイルに及ばない（2026-11-18 対応済み: policies.cedar / cedar_schema.cedarschema / pii_patterns.toml を cmp 対象へ追加。配備版パスは env で上書き可能、回帰テストで stale schema 検出を確認）（A-M8）
   - `check-deploy-drift.sh:19-47` は binary/allowlist/`casbin_policy.csv`/unit のみ。`policies.cedar`・`cedar_schema.cedarschema`・`pii_patterns.toml` を `cmp` 対象へ追加（P0-9 と同じ枠組み）。
 - [ ] **P3-8** 承認ボタンのキーボード操作・アクセシビリティ属性（A-M15）
   - `ui/src/approvals.rs:172-196` が `div` + `on_click` のみ。`role`／Tab フォーカス／Enter・Space 決定を追加（P0-8 の状態管理と同じ箇所）。

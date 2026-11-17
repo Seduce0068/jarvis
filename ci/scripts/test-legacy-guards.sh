@@ -71,5 +71,26 @@ else
   fail=$((fail+1))
 fi
 
+# P2-12: drift check must compare Cedar policy/schema and PII patterns.
+tmp_drift="$(mktemp -d)"
+mkdir -p "$tmp_drift/policy"
+cp "$repo/infra/config/policy/policies.cedar" "$tmp_drift/policy/"
+cp "$repo/infra/config/policy/casbin_policy.csv" "$tmp_drift/policy/"
+cp "$repo/infra/config/pii_patterns.toml" "$tmp_drift/pii_patterns.toml"
+# Deliberately stale cedar schema -> must report DIFF.
+printf '// stale\n' > "$tmp_drift/policy/cedar_schema.cedarschema"
+out=$(JARVIS_DRIFT_POLICY_DIR="$tmp_drift/policy" \
+      JARVIS_DRIFT_PII="$tmp_drift/pii_patterns.toml" \
+      JARVIS_DRIFT_ALLOWLIST=/nonexistent \
+      bash "$repo/infra/scripts/check-deploy-drift.sh" 2>&1)
+if printf '%s' "$out" | grep -q "cedar_schema.cedarschema.*DIFF"; then
+  echo "  PASS: drift detects stale cedar schema"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift missed stale cedar schema"
+  fail=$((fail+1))
+fi
+rm -rf "$tmp_drift"
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
