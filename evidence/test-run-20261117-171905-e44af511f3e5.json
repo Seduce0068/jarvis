@@ -1,0 +1,117 @@
+{
+  "spec_hash": "sha256:e44af511f3e5691a850739006bdd8ac711eb72c39305a05374b370c9816f6e97",
+  "timestamp": "2026-11-18T02:19:05+09:00",
+  "environment": {
+    "os": "Kubuntu 2026.04 LTS (local, x86_64)",
+    "runtime": "cargo test -p jarvis-event --lib --offline",
+    "versions": {
+      "rustc": "1.100.0",
+      "cargo": "1.100.0"
+    }
+  },
+  "results": {
+    "passed": 20,
+    "failed": 0,
+    "skipped": 0,
+    "duration_ms": 0,
+    "coverage": {},
+    "mutation_score": 0
+  },
+  "signature": "self-attested",
+  "document_type": "test-execution-log",
+  "profile": "web-api-l2-moderate",
+  "test_basis_ref": {
+    "spec_path": "specs/test-event.md",
+    "spec_hash": "sha256:e44af511f3e5691a850739006bdd8ac711eb72c39305a05374b370c9816f6e97",
+    "requirements": [
+      "REQ-1",
+      "REQ-2",
+      "REQ-3",
+      "REQ-4",
+      "REQ-5",
+      "REQ-6",
+      "REQ-7",
+      "REQ-8",
+      "REQ-9",
+      "REQ-10",
+      "REQ-11",
+      "REQ-12",
+      "REQ-13",
+      "REQ-14",
+      "REQ-15"
+    ]
+  },
+  "techniques": [
+    { "id": "equivalence-partitioning", "ref": "29119-4 5.2.1" },
+    { "id": "boundary-value-analysis", "ref": "29119-4 5.2.3" },
+    { "id": "decision-table-testing", "ref": "29119-4 5.2.6" },
+    { "id": "state-transition-testing", "ref": "29119-4 5.2.8" },
+    { "id": "scenario-testing", "ref": "29119-4 5.2.9" },
+    { "id": "error-guessing", "ref": "29119-4 5.4.1" }
+  ],
+  "risk_items": [
+    {
+      "id": "R-1",
+      "tier": "T2",
+      "description": "payload 誤解析でイベント種別が誤分類される",
+      "asvs": ["v5.0.0-V2.2.1"],
+      "controls": ["SP800-53r5.2/AU-3"]
+    },
+    {
+      "id": "R-2",
+      "tier": "T2",
+      "description": "固定 type webhook に型指定を偽装される",
+      "asvs": ["v5.0.0-V2.2.2"],
+      "controls": ["SP800-53r5.2/AU-3"]
+    },
+    {
+      "id": "R-3",
+      "tier": "T1",
+      "description": "flood 状態でメモリが無制限に伸びる",
+      "asvs": ["v5.0.0-V15.2.2"],
+      "controls": ["SP800-53r5.2/SC-5"]
+    },
+    {
+      "id": "R-4",
+      "tier": "T1",
+      "description": "満杯時にハンドラがブロックして可用性が落ちる",
+      "asvs": ["v5.0.0-V2.4.1"],
+      "controls": ["SP800-53r5.2/SC-5"]
+    },
+    {
+      "id": "R-5",
+      "tier": "T1",
+      "description": "ドロップ済みイベントが処理される",
+      "asvs": [],
+      "controls": ["SP800-53r5.2/SC-5"]
+    },
+    {
+      "id": "R-6",
+      "tier": "T2",
+      "description": "停止時の closed channel で panic する",
+      "asvs": ["v5.0.0-V16.5.3"],
+      "controls": ["SP800-53r5.2/SI-4"]
+    },
+    {
+      "id": "R-7",
+      "tier": "T1",
+      "description": "policy 到達不能時に自動応答が fail-open する",
+      "asvs": ["v5.0.0-V8.3.1"],
+      "controls": ["SP800-53r5.2/AC-3"]
+    },
+    {
+      "id": "R-8",
+      "tier": "T3",
+      "description": "source/correlation 欠落で追跡性が失われる",
+      "asvs": ["v5.0.0-V16.2.4"],
+      "controls": ["SP800-53r5.2/AU-3"]
+    }
+  ],
+  "assurance": {
+    "level": "A1",
+    "cc_components": ["ATE_FUN.1"],
+    "independent_execution": false
+  },
+  "conformance": "tailored",
+  "notes": "既存 jarvis-event lib テスト 20 件すべて PASS (20 passed / 0 failed / 0 ignored)。cargo が報告した実行時間は 0.00s (サブミリ秒) のため duration_ms=0。新規テストコード追加なし。TC-E1 (policy 到達不能) と TC-E2 (/v1/events) は既存テストで未カバー。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
+}
