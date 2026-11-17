@@ -49,6 +49,8 @@ for f in evidence_files:
     r = d["results"]
     if not isinstance(r, dict) or r.get("failed", 1) != 0:
         errors.append(f"{f}: FAILED_TESTS"); continue
+    if not isinstance(r.get("passed", 0), int) or r.get("passed", 0) <= 0:
+        errors.append(f"{f}: NO_PASSING_TESTS"); continue
     ref = d.get("test_basis_ref")
     if not isinstance(ref, dict) or not ref.get("spec_path"):
         errors.append(f"{f}: NO_SPEC_PATH"); continue
