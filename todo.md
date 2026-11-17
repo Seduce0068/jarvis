@@ -201,12 +201,20 @@ generated:
     `adr/index.md` と `log.md` の未配置。
 - [ ] **P3-5** レガシー資産の最終判断（R2-DEBT-006, R2-DEBT-011,
     R3-DR-015, R5-RULES-002）
-  - `op://` テンプレート 4 ファイル、OpenTofu state（BK-3）、破壊的
-    `restore.rs`、rust workspace のライセンス（MIT/Apache vs AGPL）。
-  - **2026-11-18 確認**: repo の `LICENSE` と `ui/Cargo.toml` は AGPL-3.0-or-later
-    だが、`rust/Cargo.toml` の workspace license は `MIT OR Apache-2.0`（5 crate が
-    workspace 継承）。共通指示では個人 repo の既定は AGPL だが、ライセンス変更は
-    法的判断のため自動変更せず、ユーザー判断待ちとして記録する。
+  - **2026-11-18 現状**: 4下位項目のうち3件は判断・担保済み。
+    - `op://` テンプレート4件（`context.env` / `event.env` / `policy.env` /
+      `otel.env`）は値なし参照テンプレートとして tracked 維持と判断済み
+      （[判断記録](docs/integration/remaining-tasks.md)）。実機起動は
+      `bws.env` + `bws run` で、テンプレートは参照しない。
+    - OpenTofu state（BK-3）は「ociは使わない」方針のもと OCI リソース
+      削除を実行しないと判断済み。後始末スクリプトは参照用に保留。
+    - 破壊的な `rust/scripts/restore.rs` は `infra/scripts/restore.sh` が
+      fail-closed（exit 2）で委譲を止め、`make safety-test` が回帰担保。
+    - ライセンスは `LICENSE` と `ui/Cargo.toml` が AGPL-3.0-or-later、
+      `rust/Cargo.toml` の workspace が `MIT OR Apache-2.0`（5 crate 継承）。
+      法的判断のため自動変更せず、ユーザー判断待ち。
+  - **残る未完了はライセンス方針のみ**。判断は確定させない（ライセンス
+    変更・OCI 実操作・テンプレート削除はいずれも別途判断）。
 - [x] **P3-6** UI の監査性と細部（R2-UI-003, R2-UI-004, R2-UI-006〜009）
   - **2026-11-18 一部対応**: 期限切れ強調、テスト数表記（7）、
     `approved_by` 固定値とトークン注入経路を README に記録。
