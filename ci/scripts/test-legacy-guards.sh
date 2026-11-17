@@ -72,7 +72,7 @@ else
 fi
 
 # P2-12: drift check must compare Cedar policy/schema and PII patterns.
-tmp_drift="$(mktemp -d)"
+tmp_drift="$(mktemp -d "$tmp/drift.XXXXXX")"
 mkdir -p "$tmp_drift/policy"
 cp "$repo/infra/config/policy/policies.cedar" "$tmp_drift/policy/"
 cp "$repo/infra/config/policy/casbin_policy.csv" "$tmp_drift/policy/"
@@ -90,7 +90,6 @@ else
   echo "  FAIL: drift missed stale cedar schema"
   fail=$((fail+1))
 fi
-rm -rf "$tmp_drift"
 
 # P1-9: the evidence gate must reject both a stale spec_hash and a failed test
 # count. Run a copy of the gate from a temporary repo layout so the real
@@ -243,7 +242,10 @@ else
     echo "  PASS: secret_scan.py rejects value-like credential without echoing the value"
     ok=$((ok+1))
   else
-    echo "  FAIL: secret_scan.py exit=$code output=$(printf '%s' "$out" | head -3)"
+    # Never echo raw scanner output on failure: if the scanner regressed to
+    # printing the value, this test must not echo it either. Show only the
+    # exit code and a masked summary.
+    echo "  FAIL: secret_scan.py exit=$code (output withheld; may contain the dummy value)"
     fail=$((fail+1))
   fi
 fi
