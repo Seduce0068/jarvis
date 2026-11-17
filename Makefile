@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup timer-status
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer verify-backup test-verify-backup timer-status check-shell
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -42,6 +42,7 @@ ci-local: ## CI と同一の Rust ゲートをローカル実行（CI 停止時�
 	@cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 	@python3 ci/scripts/secret_scan.py
+	@bash ci/scripts/check-shell.sh
 	@bash ci/scripts/test-legacy-guards.sh
 	@echo "ci-local: all gates passed"
 
@@ -59,6 +60,9 @@ timer-status: ## バックアップ timer の状態を表示（読み取り専�
 	@systemctl list-timers jarvis-backup.timer --no-pager 2>/dev/null || true
 	@echo "== apply command =="
 	@echo "sudo bash infra/scripts/install-backup-timer.sh --apply"
+
+check-shell: ## 全 tracked *.sh の静的解析（bash -n / shellcheck）
+	@bash ci/scripts/check-shell.sh
 
 test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
 	@bash ci/scripts/test-verify-backup.sh
