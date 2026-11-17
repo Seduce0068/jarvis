@@ -33,6 +33,17 @@ assert_true() { # label command args...
   fi
 }
 
+assert_false() { # label command args...
+  local label="$1"; shift
+  if "$@"; then
+    echo "  FAIL: $label (unexpected success)"
+    fail=$((fail+1))
+  else
+    echo "  PASS: $label"
+    ok=$((ok+1))
+  fi
+}
+
 check_includes() { # label expected_exit pattern args...
   local label="$1" expected="$2" pattern="$3"; shift 3
   local out code
@@ -50,8 +61,39 @@ check_includes() { # label expected_exit pattern args...
 # Synthetic sentinel only; no real secret value is ever written or read.
 sentinel='DUMMY_SENTINEL_DO_NOT_USE'
 
+# Inspect the decompressed/decomposed payload of a single archive. The grep
+# deliberately reads to EOF (no -q) so pipefail cannot mask a match when the
+# decompressor exits early on SIGPIPE.
+archive_has_sentinel() { # archive
+  case "$1" in
+    *.gz)
+      gzip -cd "$1" 2>/dev/null | grep -a -- "$sentinel" >/dev/null 2>&1
+      ;;
+    *.tar|*.bin)
+      # Qdrant snapshots are tar streams despite their .bin extension.
+      tar -xOf "$1" 2>/dev/null | grep -a -- "$sentinel" >/dev/null 2>&1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+sentinel_absent_in_archives() { # dir
+  local archive
+  while IFS= read -r archive; do
+    if archive_has_sentinel "$archive"; then
+      return 1
+    fi
+  done < <(find "$1" -type f \( -name '*.gz' -o -name '*.tar' -o -name '*.bin' \))
+  return 0
+}
+
 sentinel_absent() { # dir
-  ! grep -R -a -q -- "$sentinel" "$1"
+  if grep -R -a -q -- "$sentinel" "$1"; then
+    return 1
+  fi
+  sentinel_absent_in_archives "$1"
 }
 
 no_secret_files() { # dir
@@ -166,6 +208,27 @@ record_manifest_entries "$format_truncated" postgres-jarvis.sql.gz \
   > "$format_truncated/manifest.txt"
 printf 'complete 2026-11-18T00:00:00Z\n' > "$format_truncated/COMPLETE"
 check "TC-V4: dump without pg_dump footer rejected" 1 "$format_truncated"
+
+# TC-B3 (archive depth): a raw grep cannot see into compressed payloads. The
+# leak fixtures below use compressed archives so the new decompression-aware
+# branch is the only way to detect the sentinel.
+assert_true "TC-B3: sentinel absent inside valid archives" sentinel_absent "$format_ok"
+
+leak_gz="$extra/leak_gz"
+mkdir -p "$leak_gz"
+printf '%s\n' "$sentinel" | gzip > "$leak_gz/leak.sql.gz"
+assert_false "TC-B3: sentinel in gzip payload detected" sentinel_absent "$leak_gz"
+
+leak_tar="$extra/leak_tar"
+mkdir -p "$leak_tar" "$tmp/leak-src"
+printf '%s\n' "$sentinel" > "$tmp/leak-src/token.txt"
+tar -czf "$leak_tar/leak.tar" -C "$tmp/leak-src" token.txt
+assert_false "TC-B3: sentinel in compressed tar member detected" sentinel_absent "$leak_tar"
+
+leak_bin="$extra/leak_bin"
+mkdir -p "$leak_bin"
+tar -czf "$leak_bin/qdrant-snapshot.bin" -C "$tmp/leak-src" token.txt
+assert_false "TC-B3: sentinel in tar-in-.bin member detected" sentinel_absent "$leak_bin"
 
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
