@@ -7,6 +7,8 @@ JARVIS の連携・残タスク・バックアップに関する文書の索引�
 
 - [remaining-tasks.md](remaining-tasks.md)
   — 全プロジェクトの残タスク・判断待ち事項（MCP / BK / SEC / CI / DOC / OPS）。
+- [unknown-tasks-survey.md](unknown-tasks-survey.md)
+  — 5観点のエージェント並列調査と6回目の吸収で洗い出した未掲載の残タスク・機能追加案（2026-11-17）。
 - [tool-matrix.md](tool-matrix.md)
   — MCP ツールの allowlist・承認・ネイティブ実装の突き合わせ。
 - [dsh.md](dsh.md)
