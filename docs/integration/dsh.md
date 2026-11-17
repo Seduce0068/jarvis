@@ -135,6 +135,30 @@ DSH 側の設定箇所（2026-11-15 確認）:
 - jarvis-policy の HTTP（8081）に到達できない場合の呼び出しは fail-closed で拒否される。
 - 承認UI・通知・監査永続化（PostgreSQL）は今後の拡張（[remaining-tasks.md](remaining-tasks.md) MCP-1）。
 
+### 現状更新（2026-11-18、A-M13）
+
+見出しの「2026-11-15 実装・未適用」および上記の一文は、いずれも
+2026-11-15 時点の記録。既存の実測ログは保持したまま、現状を次に追記する。
+
+- **承認必須ツールの `tools/list` 公開**: repo 側は実装済み。
+  旧「非表示」ワークアラウンドは廃止され、E2E テストも追加済み
+  （[MCP-1](remaining-tasks.md)）。ただし実機への反映は次回
+  `deploy-mcp-gw-safe.sh --apply` 時であり、上記の 2026-11-15 11:36
+  実測（承認必須ツールは非表示）は当時の記録として保持する。
+- **オペレータ承認 UI（GPUI 承認コンソール）**: **実装済み**。
+  `make ui-run` で起動し、保留一覧・承認/却下・期限切れ強調・
+  承認トークンヘッダに対応する（[approvals.rs](../../ui/src/approvals.rs)、
+  [ADR-0005](../../adr/0005-gpui-desktop-adoption.md)、
+  [ui/README.md](../../ui/README.md)）。
+  上記の `curl` による承認手順も、ローカルホストからの代替手段として
+  引き続き有効。
+- **通知（ntfy 橋渡し）**: 未実装・判断待ち（P3-9）。
+- **監査永続化（PostgreSQL 等への保存）**: 未実装・判断待ち。
+  A-M16 / MCP-1 で要件分離待ち（[remaining-tasks.md](remaining-tasks.md)）。
+
+つまり「承認UI・通知・監査永続化は今後の拡張」のうち、**承認 UI のみが
+実装済み**で、通知と監査永続化は未実装のままである。
+
 ## 関連
 
 - プロジェクト全体の残タスク/判断待ち事項: [remaining-tasks.md](remaining-tasks.md)
