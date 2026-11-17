@@ -25,6 +25,9 @@ ProtectHome=yes
 ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/opencode /home/jarvis/.local/share/opencode /home/jarvis/.local/state/opencode /home/jarvis/.cache/opencode /tmp
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+UMask=0077
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 
 # Environment
 Environment=OPENCODE_CONFIG_DIR=/home/jarvis/.config/opencode

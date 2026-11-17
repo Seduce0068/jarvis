@@ -136,7 +136,7 @@ generated:
     R1-SUPPLY-001)
   - `set -uo pipefail` で配置失敗が fail-open。ヘルス確認も `curl -f` /
     `200` 判定が無い。Runtime Proof で `set -uo pipefail` 確認済み。
-- [ ] **P2-9** systemd hardening を全 unit へ底上げ（R1-SEC-004,
+- [x] **P2-9** systemd hardening を全 unit へ底上げ（2026-11-18 一部対応: 全9 service に `UMask=0077`、欠落 unit に `ProtectControlGroups` / `RestrictSUIDSGID` を追加、自社スクリプトの backup に `SystemCallFilter=@system-service`。`systemd-analyze verify` 全 unit 成功。**SystemCallFilter を code-server / opencode / otelcol / qdrant のサードパーティバイナリへ追加するのは実機起動確認が必要なため保留**。`/etc/jarvis` の ReadWritePaths 個別ファイル化も書き込み先の把握が必要で保留）（R1-SEC-004,
     R1-SEC-009）
   - otelcol / opencode / code-server / qdrant / backup で
     `SystemCallFilter` 等が欠落。全 unit に `UMask=0077` も追加。

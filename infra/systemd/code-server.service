@@ -25,6 +25,9 @@ ProtectHome=yes
 ReadWritePaths=/home/jarvis/repos /home/jarvis/.config/code-server /home/jarvis/.local/share/code-server /tmp
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
+UMask=0077
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 
 # Environment
 Environment=PASSWORD_FILE=/etc/jarvis/code-server-password

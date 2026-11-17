@@ -20,6 +20,8 @@ ReadWritePaths=/var/lib/postgresql/jarvis-backups
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
+UMask=0077
+SystemCallFilter=@system-service
 
 # Resource limits
 MemoryMax=1G

@@ -28,6 +28,8 @@ ReadWritePaths=/opt/jarvis/data
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
 RestrictSUIDSGID=yes
+UMask=0077
+ProtectControlGroups=yes
 RemoveIPC=yes
 
 # Resource limits

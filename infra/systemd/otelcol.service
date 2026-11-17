@@ -16,6 +16,9 @@ Group=koppe
 # (otel.env / op.env are absent on the host); do not reintroduce
 # op run here without confirming the secret source.
 ExecStart=/usr/local/bin/otelcol-contrib --config /etc/jarvis/otelcol-config.yaml
+UMask=0077
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=30
