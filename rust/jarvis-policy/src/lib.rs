@@ -122,6 +122,12 @@ impl PolicyEngine {
         id: uuid::Uuid,
         approved_by: &str,
     ) -> std::result::Result<policy::ApprovalDecision, approval::ApprovalError> {
+        // P0-4: the emergency stop must also block human decisions, not just
+        // tool execution. Otherwise an operator could approve work that is
+        // immediately denied, while the UI reports a successful decision.
+        if self.kill_switch.is_activated() {
+            return Err(approval::ApprovalError::KillSwitchActivated);
+        }
         let decision = policy::ApprovalDecision::Approved {
             approved_by: approved_by.into(),
             approved_at: chrono::Utc::now(),
@@ -136,6 +142,9 @@ impl PolicyEngine {
         id: uuid::Uuid,
         reason: &str,
     ) -> std::result::Result<policy::ApprovalDecision, approval::ApprovalError> {
+        if self.kill_switch.is_activated() {
+            return Err(approval::ApprovalError::KillSwitchActivated);
+        }
         let decision = policy::ApprovalDecision::Denied {
             reason: reason.into(),
         };
@@ -293,5 +302,44 @@ mod tests {
         );
 
         std::fs::remove_dir_all(temp_dir("killswitch")).expect("clean temp dir");
+    }
+
+    #[tokio::test]
+    async fn kill_switch_blocks_approval_decisions() {
+        let engine = test_engine("killswitch-approval").await;
+        let request = sample_request();
+        let id = request.id;
+        let engine_for_waiter = engine.clone();
+        let waiter = tokio::spawn(async move { engine_for_waiter.request_approval(request).await });
+        // Wait until the request is registered as pending.
+        loop {
+            if matches!(
+                engine.approval_status(id).await,
+                Ok(policy::ApprovalDecision::Pending)
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        engine
+            .activate_kill_switch("test".into(), "test-admin-token")
+            .expect("activate");
+
+        assert!(matches!(
+            engine.approve(id, "koppe").await,
+            Err(crate::approval::ApprovalError::KillSwitchActivated)
+        ));
+        assert!(matches!(
+            engine.deny(id, "no").await,
+            Err(crate::approval::ApprovalError::KillSwitchActivated)
+        ));
+
+        // The request is still pending and can be decided after deactivation.
+        engine
+            .deactivate_kill_switch("test-admin-token")
+            .expect("deactivate");
+        assert!(engine.approve(id, "koppe").await.is_ok());
+        let _ = waiter.await.expect("waiter task");
     }
 }

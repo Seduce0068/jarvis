@@ -30,7 +30,7 @@ generated:
   - `approval_api_token: None` 既定で全承認ルートを素通し。必須化し、
     未設定時は起動失敗または 503。`approved_by` をボディから受け取らず
     認証 Identity に紐付ける（`config.rs:61`, `http.rs:73-108`）。
-- [ ] **P0-2** MCP Gateway が承認トークンを送信していない（R1-AUTH-002）
+- [x] **P0-2** MCP Gateway が承認トークンを送信していない（2026-11-17 対応済み: `new_with_token` + ヘッダ送信、4コンポーネント契約テスト済み。NOTE: 可用性障害は policy 側にも同じトークン設定が必要）（R1-AUTH-002）
   - `ApprovalClient::new(endpoint, None)` が既定。`new_with_token` を使い、
     設定時／未設定時の往復テストを追加（`lib.rs:40-42`,
     `approval.rs:76-78`）。設定すると全承認ツールが 401 で fail-closed
@@ -39,7 +39,7 @@ generated:
   - 呼び出し側が `opencode` 等を名乗れり、承認も自分で通せば実質任意操作。
     `/mcp` と同様にサーバ側固定または認証済み Identity から導出
     (`http.rs:28-33`, `grpc.rs:19-32`, `lib.rs:62-103`)。
-- [ ] **P0-4** kill switch を承認経路へ貫通（R2-UI-001, R3-RUN-002）
+- [x] **P0-4** kill switch を承認経路へ貫通（2026-11-17 対応済み: approve/deny が `KillSwitchActivated` を返し HTTP 409 にマップ、回帰テスト追加）（R2-UI-001, R3-RUN-002）
   - `approve` / `deny` が `is_activated()` をチェックせず、発動中も決定が
     通る。ガード追加（409/403）と UI への状態表示・ボタン無効化。
     発動／解除の curl 手順ランブックも未整備。
@@ -56,7 +56,7 @@ generated:
 - [ ] **P0-7** Grafana 認証情報の供給経路を確定（R1-SEC-003）
   - `otelcol-config.yaml:128` が `GRAFANA_CLOUD_AUTH` を要求するが unit は
     直接起動で未注入。実値を config / journal に残さない経路を統一。
-- [ ] **P0-8** UI の承認エラーが直後の refresh で消える（R2-UI-002）
+- [x] **P0-8** UI の承認エラーが直後の refresh で消える（2026-11-17 対応済み: `action_status` フラグで poll と決定結果の表示を分離）（R2-UI-002）
   - `decide` が `view.error` を設定後 `apply_poll` が `None` で上書き。
     401 / 409 / タイムアウト理由が隠蔽される。順序または世代管理で修正
     (`approvals.rs:70-84,117-125`)。

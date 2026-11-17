@@ -270,6 +270,7 @@ fn approval_error_status(error: crate::approval::ApprovalError) -> axum::http::S
     match error {
         crate::approval::ApprovalError::NotFound(_) => axum::http::StatusCode::NOT_FOUND,
         crate::approval::ApprovalError::AlreadyDecided(_) => axum::http::StatusCode::CONFLICT,
+        crate::approval::ApprovalError::KillSwitchActivated => axum::http::StatusCode::CONFLICT,
     }
 }
 

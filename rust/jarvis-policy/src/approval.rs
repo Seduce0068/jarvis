@@ -26,6 +26,9 @@ pub enum ApprovalError {
 
     #[error("approval request already decided: {0}")]
     AlreadyDecided(Uuid),
+
+    #[error("kill switch is activated; approval decisions are blocked")]
+    KillSwitchActivated,
 }
 
 struct Entry {

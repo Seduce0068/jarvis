@@ -19,6 +19,9 @@ pub struct ApprovalsView {
     error: Option<SharedString>,
     /// Set once the first poll completes so the first frame shows a hint.
     loaded: bool,
+    /// True while `status` reflects an operator decision (P0-8): the next
+    /// poll must not overwrite it with a queue count.
+    action_status: bool,
 }
 
 impl ApprovalsView {
@@ -29,6 +32,7 @@ impl ApprovalsView {
             status: "承認要求を読み込み中…".into(),
             error: None,
             loaded: false,
+            action_status: false,
         };
         view.spawn_poller(cx);
         view
@@ -67,12 +71,23 @@ impl ApprovalsView {
     }
 
     /// Fold a poll result into the view state.
+    ///
+    /// This only updates the queue; `status` / `error` are owned by the most
+    /// recent operator action. Clearing `error` here would hide an approve/
+    /// deny failure on the very next 3-second refresh (P0-8).
     fn apply_poll(&mut self, result: anyhow::Result<Vec<ApprovalRequest>>) {
         self.loaded = true;
         match result {
             Ok(pending) => {
-                self.status = format!("保留中: {} 件", pending.len()).into();
-                self.error = None;
+                // Preserve a status/error set by `decide`; only report the
+                // count when nothing more important is pending.
+                if !self.action_status {
+                    self.status = format!("保留中: {} 件", pending.len()).into();
+                } else {
+                    // The decision message has been shown for one refresh
+                    // cycle; subsequent polls report the queue count again.
+                    self.action_status = false;
+                }
                 self.pending = pending;
             }
             Err(error) => {
@@ -109,19 +124,23 @@ impl ApprovalsView {
                 .await;
 
             let _ = weak.update(cx, |view, cx| {
+                // Refresh the queue first; then set the decision outcome so
+                // the poll result cannot overwrite it (P0-8).
+                view.apply_poll(refresh);
                 match result {
                     Ok(()) => {
                         view.status = format!("{label}しました").into();
                         view.error = None;
+                        view.action_status = true;
                     }
                     Err(error) => {
                         // The request may already be decided or expired; show
                         // the reason rather than dropping it silently.
                         view.status = format!("{label}に失敗しました").into();
                         view.error = Some(format!("{error:#}").into());
+                        view.action_status = true;
                     }
                 }
-                view.apply_poll(refresh);
                 cx.notify();
             });
         })
