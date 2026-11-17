@@ -160,4 +160,44 @@ mod tests {
         let out = f.filter(json!("a@example.com")).expect("filter runs");
         assert_eq!(out, "[X]");
     }
+
+    /// TC-P4: a missing or malformed pattern file must fall back to the
+    /// shipped defaults instead of disabling redaction (fail-closed).
+    #[tokio::test]
+    async fn missing_and_malformed_config_use_default_patterns() {
+        let dir = std::env::temp_dir().join("jarvis-context-pii-fallback");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+
+        let sample = json!("mail me at user@example.com or 090-1234-5678");
+        let expected = json!("mail me at [REDACTED] or [REDACTED]");
+
+        // Missing file: PiiFilter::new must succeed with default patterns.
+        let missing = dir.join("missing.toml");
+        let config = crate::config::ContextConfig {
+            pii_patterns_path: missing.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let filter = PiiFilter::new(&config)
+            .await
+            .expect("missing file falls back to defaults");
+        assert_eq!(
+            filter.filter(sample.clone()).expect("filter runs"),
+            expected
+        );
+
+        // Malformed TOML: same fallback, no panic and no empty pattern set.
+        let malformed = dir.join("malformed.toml");
+        std::fs::write(&malformed, "not = valid = toml = {").expect("write malformed config");
+        let config = crate::config::ContextConfig {
+            pii_patterns_path: malformed.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let filter = PiiFilter::new(&config)
+            .await
+            .expect("malformed file falls back to defaults");
+        assert_eq!(filter.filter(sample).expect("filter runs"), expected);
+
+        std::fs::remove_dir_all(&dir).expect("clean temp dir");
+    }
 }
