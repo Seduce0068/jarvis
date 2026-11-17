@@ -9,6 +9,15 @@ use std::sync::Arc;
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
+/// Reassemble PostgreSQL rows in the relevance order supplied by Qdrant.
+/// `WHERE id = ANY($1)` does not preserve the input order, so without this
+/// the vector-search ranking is silently discarded (P1-1).
+fn reorder_by_ids(entries: Vec<MemoryEntry>, ids: &[Uuid]) -> Vec<MemoryEntry> {
+    let mut by_id: std::collections::HashMap<Uuid, MemoryEntry> =
+        entries.into_iter().map(|entry| (entry.id, entry)).collect();
+    ids.iter().filter_map(|id| by_id.remove(id)).collect()
+}
+
 pub struct Builder {
     config: crate::config::ContextConfig,
     pg_pool: Arc<deadpool_postgres::Pool>,
@@ -121,7 +130,8 @@ impl Builder {
         )
         .await?;
 
-        // Fetch full entries from PostgreSQL
+        // Fetch full entries from PostgreSQL, then reassemble in Qdrant's
+        // relevance order (P1-1).
         let ids: Vec<Uuid> = results.iter().map(|r| r.id).collect();
         let client = self.pg_pool.get().await?;
         let rows = client.query(
@@ -129,7 +139,7 @@ impl Builder {
             &[&ids],
         ).await?;
 
-        Ok(rows
+        let fetched: Vec<MemoryEntry> = rows
             .into_iter()
             .map(|row| MemoryEntry {
                 id: row.get(0),
@@ -141,7 +151,8 @@ impl Builder {
                 updated_at: row.get(5),
                 expires_at: row.get(6),
             })
-            .collect())
+            .collect();
+        Ok(reorder_by_ids(fetched, &ids))
     }
 
     async fn get_recent_memories(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
@@ -326,5 +337,49 @@ mod tests {
         assert_eq!(output["memories"], json!([]));
         assert_eq!(output["recent"], json!([]));
         assert_eq!(output["event"], "state_changed");
+    }
+}
+
+#[cfg(test)]
+mod ordering_tests {
+    use super::reorder_by_ids;
+    use jarvis_core::MemoryEntry;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn entry(id: Uuid) -> MemoryEntry {
+        MemoryEntry {
+            id,
+            content: String::new(),
+            embedding: vec![],
+            metadata: json!({}),
+            source: String::new(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn reorder_preserves_qdrant_relevance_order() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let fetched = vec![entry(c), entry(a), entry(b)];
+        assert_eq!(
+            reorder_by_ids(fetched, &[b, a, c])
+                .iter()
+                .map(|e| e.id)
+                .collect::<Vec<_>>(),
+            vec![b, a, c]
+        );
+    }
+
+    #[test]
+    fn reorder_skips_missing_and_extra_rows() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let reordered = reorder_by_ids(vec![entry(a), entry(Uuid::new_v4())], &[b, a]);
+        assert_eq!(reordered.iter().map(|e| e.id).collect::<Vec<_>>(), vec![a]);
     }
 }

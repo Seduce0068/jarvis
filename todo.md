@@ -63,7 +63,7 @@ generated:
 
 ## P1: データ整合性・アーキテクチャ・DR（高）
 
-- [ ] **P1-1** ベクトル検索のスコアと順序を保持（R2-DATA-001）
+- [x] **P1-1** ベクトル検索の順序を保持（2026-11-18 対応済み: PG の `WHERE id = ANY` が順序を保たないため、Qdrant の relevance 順に再組み立てる reorder_by_ids を追加。純粋関数テスト2件。スコア自体の保持は MemoryEntry 共有型変更が必要で保留）（R2-DATA-001）
   - `ScoredPoint.score` を破棄し `WHERE id = ANY($1)`（ORDER BY なし）で
     再取得 → ランキングが失われハイブリッド検索が ID 突き合わせに退化。
 - [ ] **P1-2** PG / Qdrant 二段書き込みに補償を追加（R2-DATA-002）
