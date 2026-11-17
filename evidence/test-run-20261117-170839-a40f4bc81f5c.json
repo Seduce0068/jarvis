@@ -1,5 +1,5 @@
 {
-  "spec_hash": "sha256:85d698379bb82a85b6dd30a063109cb7eb5bba55ca01bf2936d841efc53cc6ca",
+  "spec_hash": "sha256:a40f4bc81f5c0c5298094dfbb6e83e986464887921c6a5bf03e20486c3d5982c",
   "timestamp": "2026-11-18T02:08:39+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-backup.md",
-    "spec_hash": "sha256:85d698379bb82a85b6dd30a063109cb7eb5bba55ca01bf2936d841efc53cc6ca",
+    "spec_hash": "sha256:a40f4bc81f5c0c5298094dfbb6e83e986464887921c6a5bf03e20486c3d5982c",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -108,5 +108,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "make test-verify-backup の 6 checks と make safety-test の 10 checks がすべて PASS (合計 16)。safety-test には同一の verify 6 checks が含まれる。duration は両 target の実測。新規テストコード追加なし。TC-B3/TC-B4/TC-V4/TC-I3 は回帰テスト未カバー。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
+  "notes": "記録している 16 checks (test-verify-backup 6 + safety-test 10) は 2026-11-18T02:08:39+09:00 の実測結果。task-24 で回帰テストが拡張され、現行の test-verify-backup は 19 checks、safety-test は 10 legacy + 19 verify checks となっているが、本エビデンスは指示どおり元の 16 checks を維持する。spec_hash のみ仕様改訂に合わせて更新。仕様には未記載ファイル非検出 / 署名無しによる改ざん耐性不足 / アーカイブ内部の秘密走査不可を既知制約として記録済み。TC-B3/TC-V4 は task-24 でカバー済み、TC-B4/TC-I3 は未カバー。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
 }

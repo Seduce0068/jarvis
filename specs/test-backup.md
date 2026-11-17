@@ -247,6 +247,22 @@ ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではな�
 それ以外は ASVS を v5.0.0、SP 800-53 を Release 5.2、CC を
 ISO/IEC 15408-3:2022 の構成要素 ID とする。
 
+## 既知制約 (cross-review Low)
+
+| ID | 制約 | 影響 |
+| --- | --- | --- |
+| L-1 | manifest 記載ファイルのサイズ/SHA-256 と形式のみ検証 | 未記載ファイルは検出しない |
+| L-2 | manifest と COMPLETE に署名が無い | 破損検出はできるが改ざん耐性は無い |
+| L-3 | 秘密走査は gzip/tar 内部を展開しない | allowlist が主制御 |
+
+L-1: 検証対象は manifest に載ったファイルに限られ、バックアップ
+セットに付け加わった未記載ファイルは検出されない。
+L-2: 完全性 (integrity) の確認はできるが、真正性 (authenticity) は
+保証しない。署名は本スライスの対象外 (P1-6 の判断待ち)。
+L-3: [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh) の
+ダミー sentinel 走査はアーカイブ内部まで展開しないため、
+秘密情報の非包含は backup-local.sh の明示 allowlist に依存する。
+
 ## 既存テストとの対応
 
 回帰テストは [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh)
@@ -254,6 +270,7 @@ ISO/IEC 15408-3:2022 の構成要素 ID とする。
 `make test-verify-backup` (6 checks) と `make safety-test` (10 checks) で実行する。
 実行結果は `evidence/` の test-run JSON に記録する。
 
-TC-B3 (秘密情報の非包含)、TC-B4 (retention)、TC-V4 (形式検査)、
-TC-I3 (導入後検証) は回帰テストで直接カバーされていない。
-実機 PG/Qdrant/systemd を伴う検証は対象外とし、未検証として明示する。
+TC-B3 (秘密情報の非包含) と TC-V4 (形式検査) は task-24 の
+回帰テスト追加でカバー済み。TC-B4 (retention) と TC-I3 (導入後検証) は
+回帰テストで直接カバーされていない。実機 PG/Qdrant/systemd を伴う
+検証は対象外とし、未検証として明示する。
