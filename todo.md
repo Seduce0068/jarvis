@@ -92,6 +92,12 @@ generated:
   - `jarvis-core` が policy / mcp-gw / UI から未参照で、承認型が
     4 種類（`String+i64` / `Uuid+DateTime` / …）に分裂。core を真の
     共有源にするか、proto を単一情報源として core を削除する設計判断が必要。
+  - **2026-11-18 調査（判断材料）**: `grep -rl jarvis_core` で core を参照するのは
+    jarvis-event(5ファイル) と jarvis-context(4ファイル) のみ、policy / mcp-gw は
+    0 ファイル。`ApprovalRequest` 系は core / policy(policy.rs) の2定義に加え、
+    HTTP DTO が policy(http.rs) と mcp-gw(approval.rs) の2種類で、合計4系統。
+    -wide な型統一は回帰リスクが高いため、どちらを単一情報源にするかの判断を
+    先に確定し、その後スライス移行する方針を推奨（値・認証情報は未確認）。
 - [x] **P1-8** テストスクリプト 3 本を CI ゲートへ接続（2026-11-17 対応済み: ci.yml extra_gates に check-shell / safety-test / test-verify-backup / test-review-run を追加、ローカル全成功）（R4-SCRIPT-001,
     R3-DR-006, R4-GATE-006）
   - `test-review-run.sh` / `test-legacy-guards.sh` /
