@@ -7,6 +7,10 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Placeholder kill-switch admin token used until a real secret is injected.
+/// The opt-in strict guard rejects this value at startup.
+pub const PLACEHOLDER_KILL_SWITCH_TOKEN: &str = "changeme";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
     pub grpc_addr: String,
@@ -28,7 +32,7 @@ pub struct PolicyConfig {
     #[serde(default)]
     pub approval_api_token: Option<String>,
     /// Opt-in P0-10 guard: when true, startup fails if the kill-switch admin
-    /// token is still the `changeme` placeholder. Default false keeps the
+    /// token is still `PLACEHOLDER_KILL_SWITCH_TOKEN`. Default false keeps the
     /// legacy warn-only behavior.
     #[serde(default)]
     pub require_kill_switch_admin_token: bool,
@@ -59,7 +63,7 @@ impl Default for PolicyConfig {
             cedar_policy_dir: "/etc/jarvis/policy".into(),
             casbin_model_path: "/etc/jarvis/policy/casbin_model.conf".into(),
             casbin_policy_path: "/etc/jarvis/policy/casbin_policy.csv".into(),
-            kill_switch_admin_token: "changeme".into(),
+            kill_switch_admin_token: PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
             kill_switch_state_path: None,
             approval_timeout_secs: 300,
             approval_max_pending: default_approval_max_pending(),
@@ -79,23 +83,26 @@ impl PolicyConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use figment::providers::Format;
+    use figment::providers::{Format, Serialized};
 
     /// Config files written before the pending-approval cap was introduced
     /// must still load (the MCP-1 approval flow depends on this).
     #[test]
     fn legacy_config_without_cap_uses_default() {
-        let toml = r#"
+        let toml = format!(
+            r#"
 grpc_addr = "127.0.0.1:50051"
 http_addr = "127.0.0.1:8081"
 cedar_policy_dir = "/etc/jarvis/policy"
 casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
 casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
-kill_switch_admin_token = "changeme"
+kill_switch_admin_token = "{token}"
 approval_timeout_secs = 300
 default_deny = true
-"#;
-        let config: PolicyConfig = Figment::from(Toml::string(toml))
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
             .extract()
             .expect("legacy config parses");
         assert_eq!(config.approval_max_pending, 100);
@@ -105,34 +112,42 @@ default_deny = true
     /// always deny-by-default regardless of this value.
     #[test]
     fn default_deny_is_kept_for_compatibility() {
-        let toml = r#"
+        let toml = format!(
+            r#"
 grpc_addr = "127.0.0.1:50051"
 http_addr = "127.0.0.1:8081"
 cedar_policy_dir = "/etc/jarvis/policy"
 casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
 casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
-kill_switch_admin_token = "changeme"
+kill_switch_admin_token = "{token}"
 approval_timeout_secs = 300
 default_deny = false
-"#;
-        let config: PolicyConfig = Figment::from(Toml::string(toml)).extract().expect("parses");
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("parses");
         assert!(!config.default_deny); // parsed, but ignored by the engine
     }
 
     #[test]
     fn explicit_cap_is_honoured() {
-        let toml = r#"
+        let toml = format!(
+            r#"
 grpc_addr = "127.0.0.1:50051"
 http_addr = "127.0.0.1:8081"
 cedar_policy_dir = "/etc/jarvis/policy"
 casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
 casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
-kill_switch_admin_token = "changeme"
+kill_switch_admin_token = "{token}"
 approval_timeout_secs = 300
 approval_max_pending = 7
 default_deny = true
-"#;
-        let config: PolicyConfig = Figment::from(Toml::string(toml))
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
             .extract()
             .expect("config parses");
         assert_eq!(config.approval_max_pending, 7);
@@ -144,17 +159,20 @@ default_deny = true
     fn strict_kill_switch_guard_defaults_to_false() {
         assert!(!PolicyConfig::default().require_kill_switch_admin_token);
 
-        let toml = r#"
+        let toml = format!(
+            r#"
 grpc_addr = "127.0.0.1:50051"
 http_addr = "127.0.0.1:8081"
 cedar_policy_dir = "/etc/jarvis/policy"
 casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
 casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
-kill_switch_admin_token = "changeme"
+kill_switch_admin_token = "{token}"
 approval_timeout_secs = 300
 default_deny = true
-"#;
-        let config: PolicyConfig = Figment::from(Toml::string(toml))
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
             .extract()
             .expect("legacy config parses");
         assert!(!config.require_kill_switch_admin_token);
@@ -162,20 +180,68 @@ default_deny = true
 
     #[test]
     fn strict_kill_switch_guard_can_be_enabled() {
-        let toml = r#"
+        let toml = format!(
+            r#"
 grpc_addr = "127.0.0.1:50051"
 http_addr = "127.0.0.1:8081"
 cedar_policy_dir = "/etc/jarvis/policy"
 casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
 casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
-kill_switch_admin_token = "changeme"
+kill_switch_admin_token = "{token}"
 require_kill_switch_admin_token = true
 approval_timeout_secs = 300
 default_deny = true
-"#;
-        let config: PolicyConfig = Figment::from(Toml::string(toml))
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
             .extract()
             .expect("config parses");
+        assert!(config.require_kill_switch_admin_token);
+    }
+
+    /// `PolicyConfig::load()` reads the P0-10 flag via
+    /// `Env::prefixed("JARVIS_POLICY_")`: figment strips the prefix and
+    /// lowercases the remainder, so
+    /// `JARVIS_POLICY_REQUIRE_KILL_SWITCH_ADMIN_TOKEN` becomes
+    /// `require_kill_switch_admin_token`.
+    ///
+    /// Edition 2024 makes `std::env::set_var` unsafe, and mutating the process
+    /// environment would race with other tests. The same provider chain is
+    /// exercised here with the post-conversion key supplied by a `Serialize`
+    /// provider, so no OS env var is read or written by this test.
+    #[test]
+    fn env_flag_name_maps_to_strict_guard_field() {
+        const ENV_PREFIX: &str = "JARVIS_POLICY_";
+        const ENV_FLAG: &str = "JARVIS_POLICY_REQUIRE_KILL_SWITCH_ADMIN_TOKEN";
+
+        let field = ENV_FLAG
+            .strip_prefix(ENV_PREFIX)
+            .expect("flag uses the policy env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "require_kill_switch_admin_token");
+
+        let toml = format!(
+            r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "{token}"
+approval_timeout_secs = 300
+default_deny = true
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        // Mirrors `load()`: the env provider stays in the chain, while the
+        // Serialized value is merged last so the assertion cannot depend on
+        // any value set in the test runner's environment.
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .merge(Env::prefixed(ENV_PREFIX).only(&[field.as_str()]))
+            .merge(Serialized::default(field.as_str(), true))
+            .extract()
+            .expect("env-style key merges into the strict guard field");
         assert!(config.require_kill_switch_admin_token);
     }
 }
