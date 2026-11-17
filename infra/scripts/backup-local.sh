@@ -80,22 +80,25 @@ if [ "$skip_qdrant" -eq 0 ]; then
 fi
 
 # Non-secret config allowlist. Never include .env / bws.env / token files.
+# Explicit files only: a recursive tar of /etc/jarvis/policy could capture
+# unreviewed files. otelcol-config.yaml is intentionally excluded because it
+# may carry credentials (e.g. Grafana Cloud auth). -f (not -e) also skips a
+# same-named directory instead of archiving it.
 for source in /etc/jarvis/mcp_allowlist.toml /etc/jarvis/pii_patterns.toml \
-              /etc/jarvis/otelcol-config.yaml /etc/jarvis/policy; do
-  if [ -e "$source" ]; then
+              /etc/jarvis/policy/casbin_model.conf \
+              /etc/jarvis/policy/casbin_policy.csv \
+              /etc/jarvis/policy/cedar_schema.cedarschema \
+              /etc/jarvis/policy/policies.cedar; do
+  if [ -f "$source" ]; then
     name="config-$(basename "$source")"
-    if [ -d "$source" ]; then
-      # Hash a tar archive rather than the directory itself.
-      archive="$set_dir/$name.tar"
-      tar -cf "$archive" -C "$(dirname "$source")" "$(basename "$source")"
-      record "$name.tar" "$archive"
-    else
-      cp "$source" "$set_dir/$name"
-      record "$name" "$set_dir/$name"
-    fi
+    cp "$source" "$set_dir/$name"
+    record "$name" "$set_dir/$name"
   fi
 done
 echo "Config copy OK"
+# NOTE: the secret scan in test-verify-backup.sh cannot inspect strings inside
+# compressed payloads (gzip dumps / tar snapshots). The explicit allowlist
+# above is the primary control; do not add whole-directory archives here.
 
 chmod 0700 "$set_dir"
 # Completion marker: only written after every step succeeded. The verifier
