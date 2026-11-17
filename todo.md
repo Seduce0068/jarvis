@@ -162,7 +162,7 @@ generated:
     R3-RUN-005, R3-RUN-006）
   - 起動→検証→停止（停止手順は 0 件）、手動変更のロールバック、
     `make verify-backup` が `/opt` へ書き込む矛盾、clippy 表記の不統一。
-- [ ] **P3-4** markdownlint / 索引を整備（R5-FMT-003〜006）
+- [x] **P3-4** markdownlint / 索引を整備（2026-11-17 一部対応: `adr/index.md` と `adr/log.md` を追加。markdownlint クリーン、リンク切れ0。既存 MD013 の全解消は未実施）（R5-FMT-003〜006）
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
     `adr/index.md` と `log.md` の未配置。
 - [ ] **P3-5** レガシー資産の最終判断（R2-DEBT-006, R2-DEBT-011,
