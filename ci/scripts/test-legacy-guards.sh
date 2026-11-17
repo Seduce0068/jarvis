@@ -102,6 +102,11 @@ cp "$repo/ci/scripts/check-evidence.sh" "$evidence_tmp/ci/scripts/check-evidence
 for spec in "$repo"/specs/test-*.md; do
   ln -s "$spec" "$evidence_tmp/specs/$(basename "$spec")"
 done
+# The gate also checks both indexes and their local links (arch #3), so mirror
+# those files plus the linked todo.md into the temporary layout.
+cp "$repo/specs/index.md" "$evidence_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$evidence_tmp/evidence/index.md"
+cp "$repo/todo.md" "$evidence_tmp/todo.md"
 
 tamper_evidence() { # src dst mode
   python3 - "$1" "$2" "$3" <<'PY'
@@ -161,6 +166,44 @@ else
       fail=$((fail+1))
     fi
   done
+fi
+
+# arch #3: removing a link to an existing spec from specs/index.md must be
+# detected. Use a separate temporary tree so the earlier checks stay intact.
+index_tmp="$tmp/index_negative"
+mkdir -p "$index_tmp/ci/scripts" "$index_tmp/evidence" "$index_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$index_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/evidence/index.md" "$index_tmp/evidence/index.md"
+cp "$repo/todo.md" "$index_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$index_tmp/evidence/"
+spec_files=( "$repo"/specs/test-*.md )
+for spec in "${spec_files[@]}"; do
+  ln -s "$spec" "$index_tmp/specs/$(basename "$spec")"
+done
+# Drop one inline link line while leaving the spec file itself in place.
+python3 - "$repo/specs/index.md" "$index_tmp/specs/index.md" "${spec_files[0]}" <<'PY'
+import os, re, sys
+
+src, dst, target_spec = sys.argv[1:4]
+name = os.path.basename(target_spec)
+with open(src, encoding='utf-8') as fh:
+    text = fh.read()
+text, removed = re.subn(
+    r'^- \[[^\]]*\]\(' + re.escape(name) + r'\)\s*$',
+    '', text, count=1, flags=re.MULTILINE)
+if removed != 1:
+    raise SystemExit('index link for ' + name + ' not found')
+with open(dst, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+out=$(bash "$index_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'SPEC_NOT_IN_INDEX'; then
+  echo "  PASS: check-evidence.sh rejects a spec unlinked from specs/index.md"
+  ok=$((ok+1))
+else
+  echo "  FAIL: check-evidence.sh accepted an unlinked spec (exit $code)"
+  printf '%s\n' "$out" | head -3 >&2
+  fail=$((fail+1))
 fi
 
 echo "result: ok=$ok fail=$fail"

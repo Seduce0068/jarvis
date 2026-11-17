@@ -3,6 +3,9 @@
 # to its declared spec (P1-9). Every evidence/test-run-*.json must declare a
 # spec_hash matching the sha256 of its test_basis_ref.spec_path, record zero
 # failed tests, and every tracked specs/test-*.md must have evidence.
+# Also verify specs/index.md and evidence/index.md link every artifact and
+# contain no broken local links (cross-review arch #3). Reference-style link
+# definitions such as "[run-ui]: test-run-*.json" are parsed as well.
 # No secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,7 +20,9 @@ if [ "${#evidence[@]}" -eq 0 ] || [ "${#specs[@]}" -eq 0 ]; then
 fi
 
 result=$(python3 - "${evidence[@]}" <<'PY'
-import hashlib, json, os, sys
+import glob, hashlib, json, os, re, sys
+from urllib.parse import unquote
+
 evidence_files = sys.argv[1:]
 errors = []
 covered = set()
@@ -56,9 +61,45 @@ for f in evidence_files:
     covered.add(os.path.normpath(spec_path))
     ok += 1
 
-for spec in sorted(s for s in __import__('glob').glob("specs/test-*.md")):
+spec_files = sorted(glob.glob("specs/test-*.md"))
+for spec in spec_files:
     if os.path.normpath(spec) not in covered:
         errors.append(f"MISSING_EVIDENCE:{spec}")
+
+# Index validation (cross-review arch #3). Both inline links
+# "[text](target)" and reference-style definitions "[label]: target" are
+# collected; external URLs, protocol-relative paths and pure anchors are
+# ignored. Every remaining target must exist relative to the index directory.
+INLINE_LINK = re.compile(r'\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+REF_DEF = re.compile(r'^\s*\[([^\]]+)\]:\s*<?([^\s>]+)>?', re.MULTILINE)
+NON_LOCAL = ('http://', 'https://', 'ftp://', 'mailto:', 'data:', '//', '#')
+
+def index_targets(index_path):
+    with open(index_path, encoding="utf-8") as fh:
+        text = fh.read()
+    raw = [m.group(1) for m in INLINE_LINK.finditer(text)]
+    raw += [m.group(2) for m in REF_DEF.finditer(text)]
+    base = os.path.dirname(index_path)
+    for item in raw:
+        target = unquote(item.strip()).split('#', 1)[0]
+        if not target or target.startswith(NON_LOCAL):
+            continue
+        yield os.path.normpath(os.path.join(base, target))
+
+for index_path, artifacts, kind in (
+    ("specs/index.md", spec_files, "SPEC"),
+    ("evidence/index.md", evidence_files, "EVIDENCE"),
+):
+    if not os.path.isfile(index_path):
+        errors.append(f"INDEX_NOT_FOUND:{index_path}")
+        continue
+    linked = set(index_targets(index_path))
+    for artifact in sorted(artifacts):
+        if os.path.normpath(artifact) not in linked:
+            errors.append(f"{kind}_NOT_IN_INDEX:{artifact}")
+    for target in sorted(linked):
+        if not os.path.exists(target):
+            errors.append(f"INDEX_BROKEN_LINK:{index_path}:{target}")
 
 print(f"ok={ok} errors={len(errors)}")
 for e in errors:
