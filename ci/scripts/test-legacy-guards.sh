@@ -121,6 +121,9 @@ elif mode == 'failed':
     data['results']['failed'] = 1
 elif mode == 'empty_passed':
     data['results']['passed'] = 0
+elif mode == 'timestamp':
+    # Naive timestamp: no timezone, so it is not RFC 3339.
+    data['timestamp'] = '2026-11-18 05:42:57'
 else:
     raise SystemExit('unknown tamper mode: ' + mode)
 with open(dst, 'w', encoding='utf-8') as fh:
@@ -148,7 +151,7 @@ else
     fail=$((fail+1))
   fi
 
-  for mode in hash failed empty_passed; do
+  for mode in hash failed empty_passed timestamp; do
     if ! tamper_evidence "$source_json" "$evidence_copy" "$mode"; then
       echo "  FAIL: could not prepare tampered evidence ($mode)"
       fail=$((fail+1))
@@ -159,6 +162,7 @@ else
       hash) pattern='SPEC_HASH_MISMATCH' ;;
       failed) pattern='FAILED_TESTS' ;;
       empty_passed) pattern='NO_PASSING_TESTS' ;;
+      timestamp) pattern='BAD_TIMESTAMP' ;;
     esac
     if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
       echo "  PASS: check-evidence.sh rejects tampered $mode"

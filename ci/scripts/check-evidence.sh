@@ -9,7 +9,9 @@
 # Every spec must also contain the four required test-spec sections, the
 # seven-column Traceability header, the six 29119-3 information items in
 # Document map, and a tailored conformance statement (test-spec skill).
-# No secret values are read.
+# Evidence timestamps must be RFC 3339, signatures self-attested, and
+# document_type (when present) one of the declared kinds. Values are withheld
+# from error output; no secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -31,6 +33,12 @@ errors = []
 covered = set()
 ok = 0
 
+# A timezone is mandatory: naive ISO strings are not RFC 3339. Fractional
+# seconds and either "Z"/"z" or a numeric offset are accepted.
+RFC3339 = re.compile(
+    r'^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$')
+DOCUMENT_TYPES = ("test-execution-log", "test-result", "test-summary-report")
+
 def digest(path):
     return "sha256:" + hashlib.sha256(open(path, "rb").read()).hexdigest()
 
@@ -43,6 +51,15 @@ for f in evidence_files:
     missing = [k for k in required if k not in d]
     if missing:
         errors.append(f"{f}: MISSING:{','.join(missing)}"); continue
+    # Reject value-less errors only: the offending values are never printed.
+    ts = d["timestamp"]
+    if not isinstance(ts, str) or not RFC3339.match(ts):
+        errors.append(f"{f}: BAD_TIMESTAMP"); continue
+    if d["signature"] != "self-attested":
+        errors.append(f"{f}: BAD_SIGNATURE"); continue
+    doc_type = d.get("document_type")
+    if doc_type is not None and doc_type not in DOCUMENT_TYPES:
+        errors.append(f"{f}: BAD_DOCUMENT_TYPE"); continue
     top = d["spec_hash"]
     if not isinstance(top, str) or not top.startswith("sha256:"):
         errors.append(f"{f}: BAD_HASH_FORMAT"); continue
