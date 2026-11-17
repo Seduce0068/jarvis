@@ -59,5 +59,17 @@ else
   ok=$((ok+1))
 fi
 
+# P0-9: drift check must flag a missing deployed allowlist as DANGER, not
+# silently skip all allowlist/web.fetch checks.
+drift_script="$repo/infra/scripts/check-deploy-drift.sh"
+out=$(JARVIS_DRIFT_ALLOWLIST=/nonexistent/allowlist.toml bash "$drift_script" 2>&1)
+if printf '%s' "$out" | grep -q "MISSING (deployed)"; then
+  echo "  PASS: drift flags missing deployed allowlist"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift silently skipped missing allowlist"
+  fail=$((fail+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

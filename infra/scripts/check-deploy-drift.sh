@@ -4,6 +4,8 @@
 # 「設定は一致しているが実行時に失敗する」乖離も検出する。
 set -uo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# Overridable for regression tests; production uses the fixed paths.
+deployed_allowlist="${JARVIS_DRIFT_ALLOWLIST:-/etc/jarvis/mcp_allowlist.toml}"
 drift=0; danger=0
 say() { printf '%-32s %s\n' "$1" "$2"; }
 echo "== deploy drift =="
@@ -15,15 +17,22 @@ if [ -x /opt/jarvis/bin/jarvis-mcp-gw ] && [ -x "$repo/rust/target/release/jarvi
 else
   say "binary" "MISSING"; drift=1
 fi
-# 2) allowlist
-if [ -f /etc/jarvis/mcp_allowlist.toml ] && [ -f "$repo/infra/config/mcp_allowlist.toml" ]; then
-  if cmp -s /etc/jarvis/mcp_allowlist.toml "$repo/infra/config/mcp_allowlist.toml"; then
+# 2) allowlist. A missing deployed allowlist is a DANGER, not a skipped check:
+# otherwise `web.fetch` approval and drift would silently pass (A-H2/P0-9).
+if [ ! -f "$deployed_allowlist" ]; then
+  say "allowlist" "MISSING (deployed)"
+  danger=1
+elif [ ! -f "$repo/infra/config/mcp_allowlist.toml" ]; then
+  say "allowlist" "MISSING (repo)"
+  danger=1
+else
+  if cmp -s "$deployed_allowlist" "$repo/infra/config/mcp_allowlist.toml"; then
     say "allowlist" "OK (same)"
   else
     say "allowlist" "DIFF"; drift=1
   fi
   # 3) web.fetch の承認設定（配備版）
-  if grep -A8 'name = "web.fetch"' /etc/jarvis/mcp_allowlist.toml 2>/dev/null | grep -q 'requires_approval = false'; then
+  if grep -A8 'name = "web.fetch"' "$deployed_allowlist" 2>/dev/null | grep -q 'requires_approval = false'; then
     say "web.fetch approval" "DANGER: false -> active on deploy"; danger=1
   else
     say "web.fetch approval" "OK (requires approval)"
