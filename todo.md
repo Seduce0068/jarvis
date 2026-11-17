@@ -105,7 +105,7 @@ generated:
 
 ## P2: ゲート・テスト・CI（中）
 
-- [ ] **P2-1** PII フィルタと normalizer にテスト追加（R4-TEST-001,
+- [x] **P2-1** PII フィルタと normalizer にテスト追加（2026-11-17 一部対応: pii.rs に from_config を追加し再帰 redact / enabled=false パススルー / 不正パターンスキップの3テスト。normalizer 側は未対応）（R4-TEST-001,
     R4-TEST-002, R2-DATA-008)
   - `pii.rs` / `normalizer.rs` に `#[cfg(test)]` が皆無。無効パターンの
     サイレントスキップ、`enabled=false` バイパス、policy deny 時の

@@ -31,20 +31,24 @@ impl PiiFilter {
             enabled: true,
         });
 
+        Ok(Self::from_config(pii_config))
+    }
+
+    /// Build a filter directly from a config (used by tests and embedders
+    /// that keep patterns in memory instead of on disk).
+    pub fn from_config(config: PiiConfig) -> Self {
         let mut patterns = Vec::new();
-        for (name, pattern) in pii_config.patterns {
-            if let Ok(re) = Regex::new(&pattern) {
-                patterns.push((name, re));
-            } else {
-                warn!("Invalid PII pattern '{}': {}", name, pattern);
+        for (name, pattern) in config.patterns {
+            match Regex::new(&pattern) {
+                Ok(re) => patterns.push((name, re)),
+                Err(error) => warn!("Invalid PII pattern '{}': {}", name, error),
             }
         }
-
-        Ok(Self {
+        Self {
             patterns,
-            replacement: pii_config.redact_replacement,
-            enabled: pii_config.enabled,
-        })
+            replacement: config.redact_replacement,
+            enabled: config.enabled,
+        }
     }
 
     fn default_patterns() -> HashMap<String, String> {
@@ -98,5 +102,62 @@ impl PiiFilter {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn filter(enabled: bool) -> PiiFilter {
+        let mut patterns = HashMap::new();
+        patterns.insert(
+            "email".into(),
+            r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#.into(),
+        );
+        PiiFilter::from_config(PiiConfig {
+            patterns,
+            redact_replacement: "[REDACTED]".into(),
+            enabled,
+        })
+    }
+
+    #[test]
+    fn redacts_strings_recursively() {
+        let value = json!({
+            "message": "mail me at user@example.com",
+            "nested": ["a@b.co", { "text": "x@example.org" }],
+            "count": 7
+        });
+        let out = filter(true).filter(value).expect("filter runs");
+        assert_eq!(out["message"], "mail me at [REDACTED]");
+        assert_eq!(out["nested"][0], "[REDACTED]");
+        assert_eq!(out["nested"][1]["text"], "[REDACTED]");
+        assert_eq!(out["count"], 7); // non-strings untouched
+    }
+
+    #[test]
+    fn disabled_filter_is_passthrough() {
+        let value = json!({ "text": "user@example.com" });
+        let out = filter(false).filter(value.clone()).expect("filter runs");
+        assert_eq!(out, value);
+    }
+
+    #[test]
+    fn invalid_pattern_is_skipped_not_fatal() {
+        let mut patterns = HashMap::new();
+        patterns.insert("bad".into(), "[unclosed".into());
+        patterns.insert(
+            "email".into(),
+            r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#.into(),
+        );
+        let f = PiiFilter::from_config(PiiConfig {
+            patterns,
+            redact_replacement: "[X]".into(),
+            enabled: true,
+        });
+        let out = f.filter(json!("a@example.com")).expect("filter runs");
+        assert_eq!(out, "[X]");
     }
 }
