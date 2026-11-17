@@ -39,8 +39,6 @@ impl EventNormalizer {
         let normalizer = Arc::new(
             normalizer::Normalizer::new(
                 config.clone(),
-                ha_client.clone(),
-                android_client.clone(),
                 policy_client.clone(),
                 opencode.clone(),
                 context_client.clone(),

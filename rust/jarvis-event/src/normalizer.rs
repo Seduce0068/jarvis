@@ -8,22 +8,14 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, instrument};
 
-#[allow(dead_code)]
 pub struct Normalizer {
     config: crate::config::EventConfig,
-    ha_client: Arc<crate::sources::HomeAssistantClient>,
-    android_client: Arc<crate::sources::AndroidClient>,
-    policy_client: Arc<jarvis_policy::PolicyClient>,
-    opencode: Arc<crate::opencode::OpenCodeClient>,
-    context_client: Arc<jarvis_context::ContextBuilder>,
     event_tx: mpsc::UnboundedSender<UnifiedEvent>,
 }
 
 impl Normalizer {
     pub async fn new(
         config: crate::config::EventConfig,
-        ha_client: Arc<crate::sources::HomeAssistantClient>,
-        android_client: Arc<crate::sources::AndroidClient>,
         policy_client: Arc<jarvis_policy::PolicyClient>,
         opencode: Arc<crate::opencode::OpenCodeClient>,
         context_client: Arc<jarvis_context::ContextBuilder>,
@@ -32,17 +24,8 @@ impl Normalizer {
 
         let normalizer = Self {
             config: config.clone(),
-            ha_client,
-            android_client,
-            policy_client: policy_client.clone(),
-            opencode: opencode.clone(),
-            context_client: context_client.clone(),
             event_tx,
         };
-
-        // Spawn event processor - clone Arcs for the spawned task
-        let policy_client = policy_client.clone();
-        let context_client = context_client.clone();
 
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
