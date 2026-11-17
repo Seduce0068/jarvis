@@ -65,6 +65,16 @@ infra/
 └── cloud-init.yaml             # 未使用レガシー: OCI instance initialization
 ```
 
+## Self-host setup note
+
+[`scripts/setup-selfhost.sh`](scripts/setup-selfhost.sh) は PostgreSQL の
+`jarvis` role を作成する際、ハードコードされたパスワードを使わなくなりました
+（P2-11）。新規ホストでは `JARVIS_DB_PASSWORD` を環境変数に設定して実行するか、
+peer 認証などで別途 role を準備してください。未設定の場合は role 作成を
+スキップし、既存 environment を壊しません。code-server の生成パスワードも
+標準出力に出さず、`/home/<user>/.config/code-server/config.yaml`（0600）に
+保存します。
+
 ## Deployment (legacy: OCI, 現行非使用)
 
 > **2026-11-15 注記（ADR-0004）**: OCI は使用しないため、以下の OCI/OpenTofu/cloud-init 手順は現行のデプロイ手順ではありません。

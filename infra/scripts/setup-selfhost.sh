@@ -57,7 +57,10 @@ cert: false
 EOF
   chown "${JARVIS_USER}:${JARVIS_USER}" "${CODE_SERVER_CONFIG}"
   chmod 600 "${CODE_SERVER_CONFIG}"
-  echo "code-server password: ${CODE_SERVER_PASSWORD}"
+  # Do not print the generated credential; it is stored in a 0600 config
+  # file the operator can read directly if needed (P2-11).
+  unset CODE_SERVER_PASSWORD
+  echo "code-server password generated and stored in ${CODE_SERVER_CONFIG}"
 fi
 
 # OpenTelemetry Collector (deb package; the tarball was retired)
@@ -87,7 +90,17 @@ chown -R "${JARVIS_USER}:${JARVIS_USER}" /opt/jarvis /var/lib/jarvis
 
 # PostgreSQL
 systemctl enable --now postgresql
-sudo -u postgres psql -c "CREATE USER jarvis WITH PASSWORD 'jarvis';" || true
+# P2-11: never hardcode a database password. Require the operator to supply
+# one via the environment; peer auth / a secrets manager can also be used.
+if [ -z "${JARVIS_DB_PASSWORD:-}" ]; then
+  echo "JARVIS_DB_PASSWORD is not set; skipping PostgreSQL role creation." >&2
+  echo "Set it to a strong value and re-run, or provision the role out-of-band." >&2
+else
+  sudo -u postgres psql -v pw="${JARVIS_DB_PASSWORD}" <<'SQL' || true
+CREATE USER jarvis WITH PASSWORD :'pw';
+SQL
+  unset JARVIS_DB_PASSWORD
+fi
 sudo -u postgres psql -c "CREATE DATABASE jarvis OWNER jarvis;" || true
 sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE jarvis TO jarvis;" || true
 

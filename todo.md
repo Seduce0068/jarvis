@@ -144,7 +144,7 @@ generated:
 - [ ] **P2-10** `.gitignore` を `infra/config/*.env` へ拡張（R1-SEC-005）
   - 現状 `config/*.env` はリポジトリ直下にしか一致しない。Runtime Proof
     で `.gitignore:10-11,48` を確認済み。`bws.env.example` のみ例外化。
-- [ ] **P2-11** setup スクリプトの固定 DB パスワードを除去（R1-SEC-007）
+- [x] **P2-11** setup スクリプトの固定 DB パスワードを除去（2026-11-17 対応済み: `JARVIS_DB_PASSWORD` 環境変数必須化、code-server 生成パスワードの標準出力を廃止、infra/README に手順追記）（R1-SEC-007）
   - 固定文字列をハードコード、生成パスワードを標準出力へ表示。
     `secret_scan.py` が SQL の `WITH PASSWORD` を検出できない問題も。
 
