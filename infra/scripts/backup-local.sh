@@ -22,7 +22,13 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --backup-dir) backup_dir="$2"; shift 2 ;;
     --apply) apply=1; shift ;;
-    --retain-days) retain_days="$2"; shift 2 ;;
+    --retain-days)
+      [ "$#" -ge 2 ] || { echo "ERROR: --retain-days requires a value" >&2; exit 2; }
+      case "$2" in
+        ''|*[!0-9]*) echo "ERROR: --retain-days must be a positive integer" >&2; exit 2 ;;
+      esac
+      [ "$2" -gt 0 ] || { echo "ERROR: --retain-days must be greater than zero" >&2; exit 2; }
+      retain_days="$2"; shift 2 ;;
     --skip-db) skip_db=1; shift ;;
     --skip-qdrant) skip_qdrant=1; shift ;;
     -h|--help) usage; exit 0 ;;
