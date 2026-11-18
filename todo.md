@@ -347,3 +347,167 @@ generated:
     自動契約テストは未実装（段階移行の範囲外）」と明記済み。範囲外固定として
     判断を記録し、新規タスク化はしない（必要になった時点で起票）。
   - `adr/0002-runtime-agnostic.md:65`「ACP session / doctor の自動契約テストは未実装」。範囲外固定とするか残タスク登録して判断を記録。
+
+## 追加指摘（swarm コンボ 2026-11-18）
+
+### 実施記録
+
+- 構成: `swarm-project-review` + `swarm-todo-discovery` を R1〜R5 並列実行。
+  初回 80 エージェント（観点 4 × 対象 4 × 5 ラウンド、深度 1）で 695 件取得したが、
+  tool 出力制限で R2 以降が欠落したため、コンパクト化して再取得
+  （40 エージェント、190 件、上位 100 件を返却）。**合計 120 エージェント起動**。
+- 集約: 同一根因を 1 件へ統合（例: approval_api_token 未配線 5 件、
+  gRPC unwrap 5 件、RegisterMcpServer 4 件）。`confirmed` は親が
+  `path:line` を実読して確認。既存 TODO との重複は追記せず、
+  完了記録の矛盾のみ「訂正」として明記。
+- 却下: ADR-0002 の「PII 保存時マスクしない」記録と同一の
+  `store_memory` 指摘、既存 P0-1/P0-3 と同一の principal 申告、
+  Casbin+Cedar の「重複」主張（意図的な二段評価）は採用しない。
+- 未配線の参照実装 `ci/review-gate.yml` に関する指摘は、方針確定まで
+  既存 P2-2 の判断（安全版のみを配線経路とする）を維持し、優先度を中へ留める。
+
+### 既存記録の訂正
+
+- [x] **P0-2 の「対応済み」を撤回し本番配線を実装**（2026-11-18 対応済み: `lib.rs:41-46` を `ApprovalClient::new_with_token(config.policy_http_addr, config.approval_api_token)` へ結線。トークン値は差分に不含。全ワークスペース 141 tests pass / clippy exit 0） — 根拠
+  `rust/jarvis-mcp-gw/src/lib.rs:41-43` / R1-AR01,R1-CF01,R1-AP01,R2-FG1 /
+  重大度 high / confirmed。2026-11-17 の完了記録は誤り。本番 `McpGateway::new`
+  は依然 `ApprovalClient::new(...)`（トークンなし）で、
+  `new_with_token` は `approval.rs:80` の内部委譲とテスト
+  （`:378,399,436`）のみ。grep で全 9 箇所を確認済み。
+  policy 側で `require_approval_api_token=true` にすると全承認ツールが
+  503 で fail-closed となり機能停止する。
+
+### 優先度 高（critical / high）
+
+- [ ] **gRPC `RegisterMcpServer` が無認証で任意コマンドを起動する** — 根拠
+  `rust/jarvis-mcp-gw/src/grpc.rs:38-48`, `proto/mcp_gateway.proto:20-23`,
+  `src/gateway.rs:102-117` / R3-AU1,R1-AR01,R1-CF01,R1-AP01 / 重大度 critical /
+  confirmed。proto に認証フィールドが無く interceptor も無い。
+  allowlist・policy 承認を迂回した任意プロセス常駐の経路。
+- [x] **gRPC `ExecuteTool` の unwrap + `panic="abort"` で 1 リクエストが全停止**（2026-11-18 対応済み: `from_str` を `Status::invalid_argument`、`to_string` を `Status::internal` へ変換し公開ハンドラの unwrap を除去。回帰テスト `invalid_args_json_returns_invalid_argument_without_panicking` 追加、targeted 1 pass / full 141 tests pass / clippy exit 0） — 根拠
+  `rust/jarvis-mcp-gw/src/grpc.rs:28,34`, `rust/Cargo.toml:105` /
+  R2-ER1,R1-AR01,R1-CF01,R1-AP01 / 重大度 high / confirmed。
+  `serde_json::from_str(&req.args).unwrap()` を不正 JSON で発火させられる。
+  dev/test は unwind のためテストで顕在化しない。
+- [ ] **kill switch 状態が既定 `None` で再起動時に非常停止が解除される** — 根拠
+  `rust/jarvis-policy/src/config.rs:72`, `src/kill_switch.rs:159-162` /
+  R4-DR1,R1-AR01,R1-CF01 / 重大度 high / confirmed。
+  `require_kill_switch_admin_token`（P0-10）とは別の永続化問題。
+- [ ] **Cedar スキーマ検証が `#[cfg(test)]` 内のみで本番に接続されていない** — 根拠
+  `rust/jarvis-policy/src/policy.rs:236,353-366` / R1-ST1 / 重大度 high /
+  confirmed。起動時に投入されたポリシーは型検査されない。
+- [x] **`backup.rs --dry-run` がローカルバックアップを削除する**（2026-11-18 対応済み: `cleanup_local` に `dry_run` を伝播し、true 時は `remove_file` せず削除予定をログ出力。選定条件は従来どおり。`rustfmt --check` / `rust-script --test` 1 pass / CLI help exit 0） — 根拠
+  `rust/scripts/backup.rs:94-97,304-327` / R4-DR2,R2-FG2,R1-AR11 /
+  重大度 high / confirmed。`cleanup_remote` にのみ dry_run が渡り
+  `cleanup_local` は無条件実行。ヘルプの「no actual upload/delete」と矛盾。
+- [ ] **復元処理が失敗シグナルを伝播せず成功を報告する** — 根拠
+  `rust/scripts/restore.rs:117,257-259,285-291,326-329,390-399` /
+  R1-AR2,R2-ER2,R4-DR2,R4-DR3 / 重大度 high / confirmed。
+  gunzip/psql 終了コード・Qdrant upload の HTTP ステータス・git clone 成否を
+  検査せず「Restore completed」を出力。
+- [ ] **jarvis-event が jarvis-context/policy をインプロセス化しサイドカー境界を侵害** — 根拠
+  `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
+  `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
+  event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
+- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — 根拠
+  `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
+  重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
+- [ ] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる** — 根拠
+  `rust/jarvis-policy/src/http.rs:43-51,216,221-222` /
+  R2-ER1,R1-AP01,R1-ST01 / 重大度 high / confirmed。
+  `Uuid::parse_str(...).unwrap_or_else(new_v4)` と `unwrap_or_default()`。
+- [ ] **`web.fetch` の機密ファイル判定がファイル名末尾のみ** — 根拠
+  `rust/jarvis-mcp-gw/src/sandbox.rs:250-267` / R3-AU1,R1-ST01 /
+  重大度 high / confirmed。`.ssh/id_rsa` や `.aws/credentials` が
+  filename ベースの拒否リストをすり抜ける。
+- [ ] **イベントキュー溢れ時にドロップしつつ `success: true` を返す** — 根拠
+  `rust/jarvis-event/src/normalizer.rs:21-37`, `src/http.rs:133-139`,
+  `src/grpc.rs:35-36` / R2-ER2,R1-AR11 / 重大度 high / confirmed。
+- [ ] **登録済み upstream MCP サーバがメモリのみで再起動時に消える** — 根拠
+  `rust/jarvis-mcp-gw/src/gateway.rs:50,102-120`, `src/main.rs:44-65` /
+  R4-DR1,R1-ST01 / 重大度 high / confirmed。設定駆動の起動時登録が無い。
+- [ ] **jarvis-context の memory/context API に認証・認可が無い** — 根拠
+  `rust/jarvis-context/src/http.rs:55-64` / R3-AU2 / 重大度 high / confirmed。
+  `/v1/context/build`, `/v1/memory`, `/v1/memory/search` が認証レイヤーなし。
+- [ ] **jarvis-event の emit API が無認証で主体が `jarvis` にハードコード** — 根拠
+  `rust/jarvis-event/src/http.rs:130-139` / R3-AU2 / 重大度 high / confirmed。
+- [ ] **`build-selfhost.sh` が OpenCode ポートを 49374→49375 に書き換え unit と乖離** — 根拠
+  `infra/scripts/build-selfhost.sh:43` / R2-FG3 / 重大度 high / confirmed。
+  AGENTS.md の port 表（49374）とも不一致。
+- [ ] **`secret_scan.py` が docs/ を safe path に格下げして実資格情報をゲート失敗にしない** — 根拠
+  `ci/scripts/secret_scan.py:32-41` / R5-VU4 / 重大度 high / confirmed。
+- [ ] **`#[instrument]` が HTTP リクエスト本文全体をログへ記録し機微情報を漏洩** — 根拠
+  `rust/jarvis-policy/src/http.rs:198-201` / R5-VU1 / 重大度 high / confirmed。
+- [ ] **`install-backup-timer.sh` が `backup-local.sh` を無バックアップで上書きしロールバックで削除** — 根拠
+  `infra/scripts/install-backup-timer.sh:52` / R2-ER3 / 重大度 high / confirmed。
+- [ ] **bootstrap 再実行が本番 `config/jarvis.env` をトランケートし秘密情報を失う** — 根拠
+  `scripts/bootstrap/bootstrap.rs:183` / R4-DR4 / 重大度 high / confirmed。
+  `SERVER_ENV`（REPLACE_ME プレースホルダ）で無条件書き込み。
+- [x] **`Makefile clean` が上書き可能な `JARVIS_ROOT` を検証せず `rm -rf` を実行**（2026-11-18 対応済み: `/`・`$HOME`・`.`・`..`・相対パス・空を exit 2 で拒否。実機テストで全危険値が拒否され `/bin` 無傷を確認） — 根拠
+  `Makefile:6,119-123` / R4-DR4 / 重大度 high / likely。
+  `make clean JARVIS_ROOT=/` 等で破壊的范围が拡大。
+
+### 優先度 中
+
+- [ ] `sandbox_type` / `sandbox_config` が `let _ =` で読み捨てられ no-op — `src/sandbox.rs:29-37` / R1-ST1,R1-CF01 / confirmed
+- [ ] 承認ウィンドウが gateway 側 300 秒固定で policy 設定と drift — `src/approval.rs:21-31`, `policy/src/config.rs:25` / R2-FG1,R1-CF01,R1-ST01 / confirmed
+- [ ] HTTP と gRPC で context 正規化・エラー契約が不一致（内部エラーが空 context / 200 deny に潰れる）— `policy/src/grpc.rs:27`, `policy/src/http.rs:203-207`, `client.rs:80-86` / R2-ER1,R1-AP01 / confirmed
+- [ ] 設定ファイルが CWD 相対の `config/*.toml` — `policy/src/config.rs:51-58`, `mcp-gw/src/config.rs:38-46` / R1-CF01 / confirmed
+- [ ] 同名ツールの upstream 選択が HashMap 反復順依存 — `mcp-gw/src/gateway.rs:79-89,143-156` / R1-AR01 / confirmed
+- [ ] PII フィルタが JSON キー名を対象外のまま — `context/src/pii.rs:204` / R1-ST2 / likely（既存 P2-1 と別観点）
+- [ ] `embedding_model` は設定可能だが Qdrant 次元が 384 固定 — `context/src/builder.rs:253-255` / R1-CF11,R1-AR2 / confirmed
+- [ ] PostgreSQL 既定 URL に固定パスワード — `context/src/config.rs:54` / R1-CF11 / confirmed
+- [ ] `CheckResponse` が `allowed` 真偽値のみで拒否理由を返さない — `policy/proto/policy.proto:19-21` / R1-AP01 / confirmed
+- [ ] MCP `tools/list` が upstream inputSchema を破棄し cursor も無視 — `mcp-gw/src/mcp_server.rs:59-99,120-126` / R1-AP01,R5-DC1 / confirmed
+- [ ] otelcol 設定の配布経路がビルドスクリプトから欠落 — `infra/scripts/build-selfhost.sh:26-28` / R1-AR3 / confirmed（既存 P0-6 と関連）
+- [ ] Grafana の job セレクタ / service ラベルが scrape 設定と不一致 — `infra/config/otelcol-config.yaml:25-45`, `dashboards/jarvis-overview.json:46` / R1-AR3,R5-VU3 / confirmed
+- [ ] filelog レシーバの入力が空（`/var/log/jarvis/*.log` を誰も書かない）— `otelcol-config.yaml:52` / R5-VU3 / confirmed
+- [ ] `check-shell` が shellcheck 未インストール時に SKIP して成功扱い — `ci/scripts/check-shell.sh:22-33` / R5-VU4 / confirmed
+- [ ] `check-evidence.sh` が skipped 数・仕様シナリオ数を照合せず合格 — `ci/scripts/check-evidence.sh:82-85` / R3-TQ4 / confirmed
+- [ ] deploy がヘルスチェック失敗を警告のみで完了報告 — `rust/scripts/deploy.rs:385-389` / R4-DR2 / confirmed（既存 P2-8 と関連）
+- [ ] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
+- [ ] jq 欠落時にバックアップ整合性検証をスキップして verified と報告 — `infra/scripts/install-backup-timer.sh:96` / R2-ER3 / confirmed
+- [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed
+- [ ] `/health` が固定 `"OK"` を返し劣化を検知できない — `policy/src/http.rs:187-189` / R4-DR1 / confirmed
+- [ ] シグナル処理・ドレインが無くデプロイ時停止で保留作業が失われる — `policy/src/main.rs:59` / R4-DR1 / confirmed
+- [ ] axum 0.7 と 0.8 が workspace 内で二重解決 — `rust/Cargo.toml:51` / R4-DP1 / confirmed
+- [ ] 配線済み review-gate が PR ではなく既定ブランチを検証 — `.github/workflows/review-gate.yml:33-36` / R1-AR4 / confirmed（未配線の参照実装は既存 P2-2 の判断を維持）
+- [ ] レビューゲートのシグナル解析が `grep ... || true` で fail-open — `ci/review-gate.yml:145-148` / R2-ER4 / likely（未配線）
+- [ ] cloud-init が NOPASSWD root + docker グループ / 固定 DB パスワード — `infra/opentofu/cloud-init.yaml:41-43,133` / R3-AU3 / confirmed（ADR-0004 で未使用のレガシー、削除判断は既存 P3-5 に委譲）
+- [ ] デプロイスクリプトが全 unit を単一ユーザーへ書き換え — `infra/scripts/build-selfhost.sh:40-42` / R3-AU3 / confirmed
+- [ ] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
+- [ ] `install-mcp-gateway.sh` のヘルス確認が HTTP ステータスを検証せずロールバックしない — `infra/scripts/install-mcp-gateway.sh:28` / R4-DR3 / confirmed
+- [ ] 放棄された承認が pending のまま残りキュー枠を枯渇 — `policy/src/approval.rs:148-162` / R5-VU1 / likely
+- [ ] web.fetch の SSRF 検証が DNS 解決の TOCTOU で迂回可能 — `mcp-gw/src/sandbox.rs:359-365` / R3-AU1 / likely
+- [ ] メトリクスが HTTP ステータス別のみで kill switch / 承認の状態が観測不可 — `policy/src/http.rs:155-169` / R5-VU1 / confirmed
+- [ ] 登録済み MCP サーバの子プロセス死活を検知せず孤立登録が残る — `mcp-gw/src/gateway.rs:36-42` / R5-VU1 / likely
+- [ ] Qdrant スナップショット 0 件が warn のみで成功扱い — `rust/scripts/backup.rs:198` / R1-ST2 / confirmed
+
+### 優先度 低
+
+- [ ] バックアップ/リストア CLI が OCI/1Password 前提の説明のまま — `rust/scripts/backup.rs:31,35,79` / R5-DC2 / confirmed（ADR-0004 準拠の文言へ）
+- [ ] トークン予算ドキュメントが文字数とバイト数を混同 — `context/src/builder.rs:195-196` / R5-DC2 / confirmed
+- [ ] OpenCode クライアントのモジュール doc フロー図が実装の認可順序と不一致 — `event/src/opencode.rs:7-8` / R5-DC2 / likely
+- [ ] Grafana README のクエリがダッシュボード JSON の実式と不一致 — `infra/grafana/README.md:14-17` / R5-DC3 / confirmed
+- [ ] OTel `SdkTracerProvider` が shutdown されずバッチスパンが失われる — `policy/src/main.rs:27-30` / R4-DP1 / confirmed
+
+### メモ（要判断・却下）
+
+- **要判断**: Casbin allow が Cedar の ABAC/forbid を短絡する
+  （`policy/src/lib.rs:113-125` / R1-AR01,R1-ST01,R3-AU1）。既存 TODO の
+  妥当性検証では「Casbin 高速 RBAC → Cedar ABAC の意図的な二段評価」として
+  重複主張を却下済みだが、「Cedar の forbid が効かない」点は別問題。
+  設計意図の確認が要るため未採用。
+- **要判断**: `opencode.jsonc:17-28` の jarvis-dev サブエージェント allow-all が
+  ルートの秘密情報 deny を迂回しうる（R1-AR4 / likely）。開発用の明示設定か
+  セキュリティ境界の侵害かを判断が必要。
+- **却下**: `store_memory` の PII マスキング要求は既存 P0-11 と同一。
+  ADR-0002「記録（未決定）」の現行挙動を記録済みのため追記しない。
+- **却下**: `/v1/execute` / gRPC の principal 自己申告は既存 P0-3 と同一。
+- **却下**: `web_max_bytes` キャスト等は既存 P3-7 と同一。
+- **未調査**: 初回 workflow の 5 担当（R1-AP21,R1-ST21,R2-ER31,R3-TQ21,R4-DR31）
+  は出力不正のため「未レビュー」。再取得で全観点をカバーしたため
+  未カバー率は 5/80 = 6.25%（20% 閾値未満）。
+- **制約**: 初回結果は tool 出力制限で R2 以降が欠落。再取得は
+  review 観点を 1 観点/ラウンドへ縮小したため、R2〜R5 の全観点は
+  初回のコンパクト情報と合わせてカバーした（完全網羅ではない）。
