@@ -56,7 +56,7 @@ impl McpGateway {
     }
 
     pub async fn serve_grpc(&self, addr: std::net::SocketAddr) -> Result<()> {
-        grpc::serve(self.clone(), addr).await
+        grpc::serve(self.clone(), addr, self.config.admin_token.clone()).await
     }
 
     pub async fn serve_http(&self, addr: std::net::SocketAddr) -> Result<()> {

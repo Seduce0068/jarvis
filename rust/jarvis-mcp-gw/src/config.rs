@@ -24,6 +24,12 @@ pub struct McpGatewayConfig {
     /// Optional token sent as X-Jarvis-Approval-Token to jarvis-policy.
     #[serde(default)]
     pub approval_api_token: Option<String>,
+    /// Shared token required by the gRPC listener. When set, every RPC must
+    /// send it in the `x-jarvis-grpc-token` metadata header. Administrative
+    /// RPCs (`RegisterMcpServer`) stay fail-closed when it is unset; data-plane
+    /// RPCs keep the legacy loopback behavior for compatibility.
+    #[serde(default)]
+    pub admin_token: Option<String>,
     /// Principal identity used for tool calls that arrive over the MCP
     /// server endpoint (`/mcp`). Calls still pass policy and allowlist
     /// checks; the client never chooses the principal.
@@ -62,6 +68,7 @@ impl Default for McpGatewayConfig {
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
             policy_http_addr: default_policy_http_addr(),
             approval_api_token: None,
+            admin_token: None,
             mcp_principal: "opencode".into(),
             require_server_side_principal: false,
         }
@@ -122,6 +129,41 @@ mcp_principal = "opencode"
 "#;
         let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
         assert_eq!(config.approval_api_token, None);
+    }
+
+    /// Pre-auth configs have no admin_token; data-plane RPCs must stay usable
+    /// while administrative RPCs are guarded separately in grpc.rs.
+    #[test]
+    fn legacy_config_without_admin_token_still_loads() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+mcp_principal = "opencode"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
+        assert_eq!(config.admin_token, None);
+    }
+
+    #[test]
+    fn explicit_admin_token_is_honoured() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+admin_token = "grpc-test-token"
+mcp_principal = "opencode"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
+        assert_eq!(config.admin_token.as_deref(), Some("grpc-test-token"));
     }
 
     #[test]
