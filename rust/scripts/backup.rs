@@ -94,7 +94,7 @@ fn main() -> Result<()> {
         cleanup_remote(&args, &hostname, &rclone_config_flag, args.dry_run)?;
     }
 
-    cleanup_local(backup_dir)?;
+    cleanup_local(backup_dir, args.dry_run)?;
 
     info!("Backup completed successfully: {}", date);
     Ok(())
@@ -301,7 +301,11 @@ fn upload_to_oci(backup_dir: &Path, args: &Args, hostname: &str, config_flag: &s
     Ok(())
 }
 
-fn cleanup_local(backup_dir: &Path) -> Result<()> {
+fn cleanup_local(backup_dir: &Path, dry_run: bool) -> Result<()> {
+    cleanup_local_at(backup_dir, dry_run, std::time::SystemTime::now())
+}
+
+fn cleanup_local_at(backup_dir: &Path, dry_run: bool, now: std::time::SystemTime) -> Result<()> {
     info!("Cleaning up old local backups (older than 7 days)...");
     let count = fs::read_dir(backup_dir)?
         .filter_map(|e| e.ok())
@@ -311,19 +315,29 @@ fn cleanup_local(backup_dir: &Path) -> Result<()> {
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .map(|t| {
-                    let elapsed = std::time::SystemTime::now()
-                        .duration_since(t)
-                        .unwrap_or_default();
-                    elapsed.as_secs() > 7 * 24 * 3600
+                    now.duration_since(t)
+                        .map(|elapsed| elapsed.as_secs() > 7 * 24 * 3600)
+                        .unwrap_or(false)
                 })
                 .unwrap_or(false)
         })
         .inspect(|e| {
-            let _ = fs::remove_file(e.path());
+            if dry_run {
+                info!(
+                    "[dry-run] Would remove old local backup: {}",
+                    e.path().display()
+                );
+            } else {
+                let _ = fs::remove_file(e.path());
+            }
         })
         .count();
 
-    info!("Cleaned up {} old local backups", count);
+    if dry_run {
+        info!("[dry-run] Would remove {} old local backups", count);
+    } else {
+        info!("Cleaned up {} old local backups", count);
+    }
     Ok(())
 }
 
@@ -339,4 +353,54 @@ fn cleanup_remote(args: &Args, hostname: &str, config_flag: &str, dry_run: bool)
 
     run_rclone(&cmd_args, config_flag)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "jarvis-backup-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            nonce
+        ))
+    }
+
+    #[test]
+    fn cleanup_local_dry_run_keeps_old_files() {
+        let dir = unique_temp_dir("dry-run");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let old_file = dir.join("pg-20260101-000000.sql.gz");
+        fs::write(&old_file, b"backup data").unwrap();
+
+        // Inject a "now" 8 days in the future so the freshly created file counts
+        // as older than 7 days without altering its mtime (portable across Rust
+        // versions and filesystems).
+        let future_now =
+            std::time::SystemTime::now() + std::time::Duration::from_secs(8 * 24 * 3600);
+
+        cleanup_local_at(&dir, true, future_now).unwrap();
+        assert!(
+            old_file.exists(),
+            "dry-run must not delete {}",
+            old_file.display()
+        );
+
+        cleanup_local_at(&dir, false, future_now).unwrap();
+        assert!(
+            !old_file.exists(),
+            "non-dry-run must delete {}",
+            old_file.display()
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
