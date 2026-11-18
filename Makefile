@@ -117,6 +117,22 @@ test: ## Rust workspace と rust-script のテスト
 	@TERMUX_VERSION=test rust-script scripts/bootstrap/bootstrap.rs --target termux --dry-run --skip-android-mcp --source-root . --root "$(JARVIS_ROOT)"
 
 clean: ## 生成物削除 (注意: 設定ファイルも消える)
+	@root='$(JARVIS_ROOT)'; \
+	home="$$HOME"; \
+	while [ "$$root" != "/" ] && [ "$${root%/}" != "$$root" ]; do root="$${root%/}"; done; \
+	while [ "$$home" != "/" ] && [ "$${home%/}" != "$$home" ]; do home="$${home%/}"; done; \
+	if [ -z "$$root" ]; then \
+		echo "ERROR: JARVIS_ROOT is empty; refusing clean." >&2; \
+		exit 1; \
+	fi; \
+	case "$$root" in \
+		/*) ;; \
+		*) echo "ERROR: JARVIS_ROOT must be an absolute path (got: $$root); refusing clean." >&2; exit 1 ;; \
+	esac; \
+	case "$$root" in \
+		/|.|..|"$$home") echo "ERROR: JARVIS_ROOT must not be /, ., .., or HOME (got: $$root); refusing clean." >&2; exit 1 ;; \
+	esac; \
+	echo "JARVIS_ROOT safety check passed: $$root"
 	@echo "This will remove: bin/ state/ logs/ repos/ config/*.env policies/*.json"
 	@read -p "Continue? [y/N] " ans && [ "$$ans" = "y" ]
 	@rm -rf $(JARVIS_ROOT)/bin $(JARVIS_ROOT)/state $(JARVIS_ROOT)/logs $(JARVIS_ROOT)/repos
