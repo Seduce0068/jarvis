@@ -38,8 +38,11 @@ impl McpGateway {
         let gateway = Arc::new(
             gateway::Gateway::new(config.clone(), allowlist.clone(), sandbox.clone()).await?,
         );
-        let approval = Arc::new(approval::ApprovalClient::new(
+        // Forward the configured approval API token so policy's
+        // require_approval_api_token check does not fail closed.
+        let approval = Arc::new(approval::ApprovalClient::new_with_token(
             config.policy_http_addr.clone(),
+            config.approval_api_token.clone(),
         ));
 
         Ok(Self {
