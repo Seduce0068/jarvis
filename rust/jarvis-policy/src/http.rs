@@ -72,7 +72,7 @@ fn default_deny_reason() -> String {
 
 // SECURITY NOTE: the approval endpoints are unauthenticated by default for
 // backward compatibility with the loopback-only deployment. Set
-// `JARVIS_POLICY_APPROVAL_TOKEN` to require the X-Jarvis-Approval-Token header
+// `JARVIS_POLICY_APPROVAL_API_TOKEN` to require the X-Jarvis-Approval-Token header
 // before exposing the listener beyond loopback. The MCP gateway and UI read
 // the same value from their own configuration and send it on every call.
 // P0-1 staged rollout: set `JARVIS_POLICY_REQUIRE_APPROVAL_API_TOKEN` to fail
