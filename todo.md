@@ -513,3 +513,133 @@ generated:
 - **制約**: 初回結果は tool 出力制限で R2 以降が欠落。再取得は
   review 観点を 1 観点/ラウンドへ縮小したため、R2〜R5 の全観点は
   初回のコンパクト情報と合わせてカバーした（完全網羅ではない）。
+
+## 追加指摘（swarm コンボ 2026-11-19 第2イテレーション）
+
+### 実施記録
+
+- 構成: review と discovery を R1〜R5 で並列実行。**40 エージェント**
+  （観点 2 × 対象 4 × 5 ラウンド、深度 1、無制限プロファイル）、
+  189 件の生指摘から上位 100 件をコンパクトに返却。出力不正・
+  秘密情報による破棄は 0 件。前回の tool 出力制限を避けるため、
+  最初からコンパクト出力設計を採用した。
+- 重複排除: 既存の未着手 75 件と前回追記（2026-11-18）を
+  既知情報として全エージェントへ配布し、同一内容の報告を禁止。
+  R6 で既存 P0-3 / P0-10 / P1-2 / P1-7 / P1-12 / P2-1 等と
+  同一の指摘を除外した。
+- 却下: gRPC データプレーン RPC が `admin_token` 未設定時に
+  無認証な点は、2026-11-19 の実装で「互換性のため意図的に
+  残した」設計判断なので「要判断」として記録し、障害としては
+  採用しない。Casbin/Cedar の短絡は前回同様「要判断」を維持。
+
+### 優先度 高（critical / high）
+
+- [x] **Qdrant 復元が停止後に HTTP upload しており復元不能**（2026-11-19 対応済み: `restore.rs` から `systemctl stop/start qdrant` を削除し、稼働中の upload API へ POST する順序へ変更。`error_for_status()` を追加して HTTP 失敗を検出。rustfmt / `rust-script --test` 2 tests pass / full tests / clippy / `ci-local` exit 0） — 根拠
+  `rust/scripts/restore.rs:316-320,326-329` / R4-DR2 / 重大度 critical /
+  confirmed。`systemctl stop qdrant` の後に
+  `localhost:6333/.../snapshots/upload` へ POST しており、
+  スナップショットが取り込まれない。2026-11-19 に導入した
+  バックアップ timer の復元演習前に要修正。
+- [x] **`backup-local.sh --retain-days` に境界値検証がなく全バックアップを削除し得る**（2026-11-19 対応済み: 引数欠落・非整数・0以下を exit 2 で拒否。実機テスト5パターンすべて拒否、正常値 `7` の dry-run は通過、`bash -n` OK） — 根拠
+  `infra/scripts/backup-local.sh:25` / R3-TQ3 / 重大度 high / confirmed。
+- [ ] **HTTP ツール実行面に認証がなく `admin_token` も効かない** — 根拠
+  `rust/jarvis-mcp-gw/src/http.rs:57-58` / R3-AU1 / 重大度 high /
+  confirmed。gRPC 側だけ認証を導入したため `/v1/execute` と
+  `/mcp` は無認証のまま。
+- [ ] **承認要求と承認決定が同一トークンで保護され自己承認が可能** — 根拠
+  `rust/jarvis-policy/src/http.rs:84-93` / R3-AU1 / 重大度 high / confirmed。
+- [ ] **`check-shell.sh` が `set -uo pipefail`（`-e` 無し）で fail-open** — 根拠
+  `ci/scripts/check-shell.sh:6` / R2-ER4 / 重大度 high / confirmed。
+  チェック対象ゼロや `git ls-files` 失敗が成功扱いになる。
+- [ ] **`build-selfhost.sh` の再デプロイで policy 設定が入れ子コピーされる** — 根拠
+  `infra/scripts/build-selfhost.sh:26` / R4-DR3 / 重大度 high / confirmed。
+  `cp -r .../policy /etc/jarvis/` が既存 `/etc/jarvis/policy` の
+  中に `policy/` を作り実効設定が更新されない。
+- [ ] **`install-backup-timer.sh` のロールバックが有効化済み timer を停止・無効化しない** — 根拠
+  `infra/scripts/install-backup-timer.sh:63` / R4-DR3 / 重大度 high / confirmed。
+- [ ] **最新バックアップ選択が pg 系のみで他コンポーネントの欠落を検証しない** — 根拠
+  `rust/scripts/restore.rs:194-216` / R4-DR2 / 重大度 high / confirmed。
+- [ ] **`store_memory` が呼び出し側指定 id で既存メモリを無条件上書き** — 根拠
+  `rust/jarvis-context/src/http.rs:133-136` / R3-AU2 / 重大度 high / confirmed。
+- [ ] **承認 UI の approve/deny POST 成功経路とトークン送出が無テスト** — 根拠
+  `ui/src/policy_client.rs:131-146` / R3-TQ4 / 重大度 high / confirmed。
+- [x] **承認トークンの SECURITY NOTE が実在しない環境変数名を記載**（2026-11-19 対応済み: コメントを `JARVIS_POLICY_APPROVAL_API_TOKEN` へ修正。`config.rs:57` の `Env::prefixed("JARVIS_POLICY_")` とフィールド `approval_api_token` から実名を確認。`ci-local` exit 0） — 根拠
+  `rust/jarvis-policy/src/http.rs:73-79` / R5-DC1 / 重大度 high / confirmed。
+  実装は `JARVIS_POLICY_REQUIRE_APPROVAL_API_TOKEN` 等だが
+  コメントは `JARVIS_POLICY_APPROVAL_TOKEN` と書かれている。
+- [ ] **承認キュー枯渇が HTTP 200 の通常拒否として返る** — 根拠
+  `rust/jarvis-policy/src/approval.rs:109-113` / R5-VU1 / 重大度 high / confirmed。
+- [ ] **kill switch の非常停止ログが永続化失敗後の実状態と矛盾** — 根拠
+  `rust/jarvis-policy/src/kill_switch.rs:61-65` / R5-VU1 / 重大度 high / confirmed。
+- [ ] **現行ローカルバックアップが Git リポジトリを含まない** — 根拠
+  `infra/README.md:274-279` / R5-VU3 / 重大度 high / confirmed。
+- [ ] **`web.fetch` の宛先ドメイン制限（egress allowlist）が未実装** — 根拠
+  `docs/integration/tool-matrix.md:162` / R1-ST4 / 重大度 high / confirmed。
+- [ ] **`review-run.sh` のランナー契約が OpenCode CLI 形で固定され ADR-0002 と矛盾** — 根拠
+  `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed。
+- [ ] **埋め込み失敗を空検索結果に変換して成功を返す** — 根拠
+  `rust/jarvis-context/src/builder.rs:115-121` / R2-ER2 / 重大度 high / confirmed。
+- [ ] **`expires_at` 付きメモリが失効後も検索・直近コンテキストに混入** — 根拠
+  `rust/jarvis-context/proto/context.proto:28` / R2-FG2 / 重大度 high / confirmed。
+- [ ] **バックアップ/リストアが Qdrant コレクション名をハードコード** — 根拠
+  `rust/jarvis-context/src/config.rs:17` / R2-FG2 / 重大度 high / confirmed。
+- [ ] **`kill_switch::arm()` が `SystemTime::duration_since` を unwrap し非常停止経路が abort** — 根拠
+  `rust/jarvis-policy/src/kill_switch.rs:126-129` / R2-ER1 / 重大度 high / likely。
+- [ ] **PII パターン設定の読み込み・解析失敗が黙ってデフォルトへフォールバック** — 根拠
+  `rust/jarvis-context/src/pii.rs:25-27` / R1-AR2 / 重大度 high / confirmed。
+- [ ] **`secret_scan.py` が追跡ファイルの読み取り失敗を黙ってスキップ** — 根拠
+  `ci/scripts/secret_scan.py:61-64` / R2-ER2 / 重大度 high / likely。
+- [ ] **OpenCode の秘密ファイル read deny が bash allow で実質無効化** — 根拠
+  `infra/config/opencode/opencode.jsonc:17-19` / R1-AR3 / 重大度 high / confirmed。
+
+### 優先度 中
+
+- [ ] gRPC Check が不正 JSON コンテキストを空 Object にフォールバック — `policy/src/grpc.rs:27` / R1-AR1 / confirmed（既存 P2-1 と別経路）
+- [ ] kill switch の永続化失敗が unauthenticated として返される — `kill_switch.rs:147-150` / R2-ER1 / confirmed
+- [ ] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
+- [ ] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — `policy/src/policy.rs:101-107` / R2-ER1 / likely
+- [ ] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — `kill_switch.rs:133` / R2-FG1 / confirmed
+- [ ] Casbin `add_policy` / `remove_policy` が公開 API を持たず設定ファイル手編集に依存 — `policy.rs:190,205` / R2-FG1 / confirmed
+- [ ] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — `gateway.rs:11-16` / R2-FG1 / confirmed
+- [ ] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — `backup.rs:331` / R2-ER2 / confirmed
+- [ ] deploy がビナリ・スクリプト欠落を警告スキップして完了報告 — `deploy.rs:308-311` / R2-ER2 / confirmed
+- [ ] gRPC EmitEvent が不正入力をデフォルト値に置換して success を返す — `event/src/grpc.rs:27-32` / R2-ER2 / confirmed
+- [ ] WS 受信エラーに生メッセージ本文を埋め込みログへ流出 — `event/src/sources.rs:248-249` / R2-ER2 / likely
+- [ ] `restore.rs` の `restart_services` が systemctl start のみで再起動していない — `restore.rs:408` / R2-FG2 / confirmed
+- [ ] `deploy.rs --dry-run` がヘルスチェック未実行なのに healthy と報告 — `deploy.rs:164` / R2-FG2 / confirmed
+- [ ] Cedar 認可コンテキストが生のツール引数で呼び出し元が ABAC 属性を捏造可能 — `mcp-gw/src/lib.rs:86-89` / R3-AU1 / likely
+- [ ] AllowList の `add_tool` / `remove_tool` が無認証・無永続化の公開ミューテーション API — `allowlist.rs:95-106` / R3-AU1 / confirmed
+- [ ] Qdrant の不正 point id が nil UUID にフォールバック — `builder.rs:305` / R1-ST2 / likely
+- [ ] OTLP エンドポイント書式エラーが起動を失敗させテレメトリが致命依存 — `policy/src/main.rs:22-25` / R4-DR1 / likely
+- [ ] `try_join!` による二重リスナ起動で片方のエラーがプロセス全体を終了 — `policy/src/main.rs:59` / R4-DR1 / likely
+- [ ] ワークスペースに MSRV と lint 宣言がなく CI とローカルのゲートが不一致 — `rust/Cargo.toml:11-16` / R4-DP1 / confirmed
+- [ ] Qdrant クライアントの互換性チェックが起動時に無効化 — `builder.rs:236` / R4-DP2 / confirmed
+- [ ] `deploy-mcp-gw-safe.sh` のロールバックが repo 側 allowlist 変更を戻さない — `infra/scripts/deploy-mcp-gw-safe.sh:65` / R4-DR3 / confirmed
+- [ ] `jarvis-mcp-gw.service` のベースディレクトリが開発環境の絶対パスに固定 — `infra/systemd/jarvis-mcp-gw.service:52` / R4-DR3 / confirmed
+- [ ] MCP プロトコルバージョン定数がスモークテストとドリフト検査で不一致 — `infra/scripts/smoke-mcp-gw.sh:101` / R4-DP3 / confirmed
+- [ ] upstream MCP ツールのエラー本文が API 応答とログへそのまま流出 — `gateway.rs:200-203` / R5-VU1 / confirmed
+- [ ] イベント処理失敗ログに `event_id` / `correlation_id` が欠落 — `normalizer.rs:64` / R5-VU2 / confirmed
+- [ ] トークン予算超過によるコンテキスト切り捨てが無観測 — `builder.rs:197-203` / R5-VU2 / confirmed
+- [ ] HTTP ハンドラが内部エラーの理由を 500 に変換して捨てる — `context/src/http.rs:120-123` / R5-VU2 / confirmed
+- [ ] Qdrant スナップショット取得に HTTP タイムアウトがなくバックアップがハングし得る — `backup.rs:181` / R5-VU2 / likely
+
+### メモ（要判断・却下）
+
+- **要判断**: gRPC データプレーン RPC（`ExecuteTool`）が `admin_token` 未設定時に
+  無認証な点（`grpc.rs:49-53` / R1-ST1）。2026-11-19 の実装で
+  loopback 互換のため意図的に残した経路。`RegisterMcpServer` は
+  fail-closed 済み。データプレーンも認証必須にするかは運用判断。
+- **要判断**: Casbin allow が Cedar を短絡する
+  （`policy/src/lib.rs:113-125` / R1-AR1）。前回と同じく意図的な
+  二段評価だが、Cedar の forbid が効かない点は未解決。
+- **要判断**: OpenCode の `bash` allow が secrets deny を実質無効化する
+  （`infra/config/opencode/opencode.jsonc:17-19` / R1-AR3）。
+  開発用許容か境界侵害かを判断する必要がある。
+- **却下（重複）**: 既存 P0-3（principal 自己申告）、P0-10（kill switch 既定
+  トークン）、P1-2（PG/Qdrant 二段書き込み）、P1-7（jarvis-core 分裂）、
+  P1-12（Webhook 認証）、P2-1（PII テスト）、P0-7（Grafana 認証）、
+  axum 二重依存、otelcol debug exporter、`op inject` 依存、
+  `restore.rs --local-only`、Qdrant スナップショット先頭取得、
+  `setup-selfhost.sh || true`、初回 review の全 high 指摘。
+- **制約**: 観点を 2/ラウンドに絞ったため、前回のような全観点網羅ではない。
+  既知情報として前回の全 high を配布し重複は回避できた。
