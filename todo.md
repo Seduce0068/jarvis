@@ -96,7 +96,9 @@ generated:
   - `/var/lib/postgresql/jarvis-backups` は本番データと同一親ディスクで
     SPoF。最低 1 世代を別媒体へ。RPO/RTO も併せて決定。
 - [ ] **P1-5** timer を実機で有効化し復元演習へ（R3-DR-004, R3-DR-005）
-  - repo 側は完了、実機は未導入 / inactive。隔離先での実復元検証も未実施。
+  - **2026-11-19 一部対応**: 実機 timer 導入完了（ユーザー実行: `sudo -n bash infra/scripts/install-backup-timer.sh --apply` exit 0）。`active` / `enabled`、次回発動 2026-11-20 00:25:56 JST。手動バックアップ1回実行し整合性検証 **ok=30 fail=0**（COMPLETE marker / postgres footer / qdrant tar / config 8ファイルすべて OK）。配置先 `/etc/systemd/system/jarvis-backup.{service,timer}` と `/opt/jarvis/scripts/backup-local.sh`（いずれも root:root）をエージェントが読み取り確認。
+  - **残る対応**: 隔離先での実復元演習は未実施。
+  - （旧状態）repo 側は完了、実機は未導入 / inactive。隔離先での実復元検証も未実施。
     `make timer-status` → `sudo ... install-backup-timer.sh --apply` →
     確認 → 復元演習の順（ユーザー実行が必要）。
 - [ ] **P1-6** バックアップを暗号化・署名し保持期間を設定（R3-DR-002,
@@ -379,7 +381,7 @@ generated:
 
 ### 優先度 高（critical / high）
 
-- [ ] **gRPC `RegisterMcpServer` が無認証で任意コマンドを起動する** — 根拠
+- [x] **gRPC `RegisterMcpServer` が無認証で任意コマンドを起動する**（2026-11-19 対応済み: `JARVIS_MCP_GW_ADMIN_TOKEN` を設定項目に追加し、`x-jarvis-grpc-token` metadata を全 gRPC RPC で検証。トークン設定時は `ExecuteTool` も必須、未設定時は `ExecuteTool` は従来動作を維持し `RegisterMcpServer` は fail-closed（Unauthenticated）。定数時間比較、新規認証テスト4件＋config 2件 pass、full tests / clippy / ci-local exit 0、commit `0760de2`） — 根拠
   `rust/jarvis-mcp-gw/src/grpc.rs:38-48`, `proto/mcp_gateway.proto:20-23`,
   `src/gateway.rs:102-117` / R3-AU1,R1-AR01,R1-CF01,R1-AP01 / 重大度 critical /
   confirmed。proto に認証フィールドが無く interceptor も無い。
