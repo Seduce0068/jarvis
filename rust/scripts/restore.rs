@@ -313,26 +313,19 @@ fn restore_qdrant(args: &Args, hostname: &str, date: &str, config_flag: &str) ->
         return Ok(());
     }
 
-    // Stop Qdrant
-    Command::new("sudo")
-        .args(["systemctl", "stop", "qdrant"])
-        .status()
-        .context("Failed to stop Qdrant")?;
-
-    // Restore snapshot via Qdrant API
+    // Restore snapshot via Qdrant API. The upload endpoint loads the
+    // snapshot into the running collection; stopping Qdrant first would
+    // make this HTTP call fail because nothing is listening. The endpoint
+    // performs the restore itself, so no separate stop/start is needed.
     let client = Client::new();
     let form = reqwest::blocking::multipart::Form::new().file("snapshot", &local_file)?;
 
     client
         .post("http://localhost:6333/collections/jarvis_memories/snapshots/upload")
         .multipart(form)
-        .send()?;
-
-    // Start Qdrant
-    Command::new("sudo")
-        .args(["systemctl", "start", "qdrant"])
-        .status()
-        .context("Failed to start Qdrant")?;
+        .send()?
+        .error_for_status()
+        .context("Qdrant snapshot upload failed")?;
 
     info!("Qdrant restored");
     Ok(())
