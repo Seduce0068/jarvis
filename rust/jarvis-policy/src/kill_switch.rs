@@ -386,6 +386,12 @@ impl KillSwitch {
     /// Restore state from disk. A missing file is a normal first start. An
     /// unreadable file is treated as activated: a corrupt safety device must
     /// not silently disarm itself.
+    ///
+    /// I50-B: every warning here carries only fixed `status_vocabulary` kinds,
+    /// a `bool` fail-closed flag and a literal message. The path and the raw
+    /// I/O / serde error stay in the in-memory reason slot for the typed status
+    /// surface, but are never interpolated into a tracing event forwarded to
+    /// OTLP/Grafana.
     fn restore(&self) {
         let Some(path) = &self.state_path else {
             return;
@@ -397,27 +403,41 @@ impl KillSwitch {
             Err(error) => {
                 self.arm(format!("unreadable kill switch state: {error}"));
                 warn!(
-                    "Kill switch state at {} cannot be read; treating as activated: {error}",
-                    path.display()
+                    error_kind = status_vocabulary::REASON_STATE_UNREADABLE,
+                    activated = true,
+                    "KILL SWITCH STATE UNREADABLE; TREATING AS ACTIVATED"
                 );
                 return;
             }
         };
         match serde_json::from_str::<PersistedState>(&contents) {
             Ok(state) if state.activated => {
+                // Classify the persisted reason before it is moved into the
+                // audit slot; `reason_kind` yields only fixed literals, so the
+                // (attacker-controlled) file contents cannot reach tracing.
+                let restored_kind = state
+                    .reason
+                    .as_deref()
+                    .map(reason_kind)
+                    .unwrap_or(status_vocabulary::REASON_OPERATOR_DEFINED);
                 self.activated.store(true, Ordering::SeqCst);
                 self.activated_at
                     .store(state.activated_at, Ordering::SeqCst);
                 Self::write_slot(&self.reason, state.reason);
                 Self::write_slot(&self.activated_by, state.activated_by);
-                warn!("Kill switch restored as ACTIVE from {}", path.display());
+                warn!(
+                    error_kind = restored_kind,
+                    activated = true,
+                    "KILL SWITCH RESTORED AS ACTIVE"
+                );
             }
             Ok(_) => {}
             Err(error) => {
                 self.arm(format!("unreadable kill switch state: {error}"));
                 warn!(
-                    "Kill switch state at {} is unreadable; treating as activated: {error}",
-                    path.display()
+                    error_kind = status_vocabulary::REASON_STATE_UNREADABLE,
+                    activated = true,
+                    "KILL SWITCH STATE UNREADABLE; TREATING AS ACTIVATED"
                 );
             }
         }
@@ -444,8 +464,14 @@ impl KillSwitch {
         let bytes = match serde_json::to_vec_pretty(&state) {
             Ok(bytes) => bytes,
             Err(error) => {
-                warn!("Failed to serialize kill switch state: {error}");
                 self.arm(PERSIST_FAILURE_REASON.into());
+                // I50-B: the raw serde error stays in the typed error returned
+                // to the caller; only the fixed kind/message reach tracing.
+                warn!(
+                    error_kind = status_vocabulary::REASON_PERSISTENCE_FAILURE,
+                    activated = true,
+                    "KILL SWITCH STATE NOT PERSISTED; FAILING CLOSED"
+                );
                 let error = anyhow::anyhow!("failed to serialize kill switch state: {error}");
                 return Err(error.context(PERSIST_ERROR_CONTEXT));
             }
@@ -453,18 +479,25 @@ impl KillSwitch {
         if let Some(parent) = path.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
         {
-            warn!("Failed to create {}: {error}", parent.display());
             self.arm(PERSIST_FAILURE_REASON.into());
+            warn!(
+                error_kind = status_vocabulary::REASON_PERSISTENCE_FAILURE,
+                activated = true,
+                "KILL SWITCH STATE NOT PERSISTED; FAILING CLOSED"
+            );
+            // `parent.display()` / `{error}` remain confined to the returned
+            // `KillSwitchError::Persistence.detail`, never to a log line.
             let error = anyhow::anyhow!("failed to create {}: {error}", parent.display());
             return Err(error.context(PERSIST_ERROR_CONTEXT));
         }
         if let Err(error) = std::fs::write(path, bytes) {
-            warn!(
-                "Failed to persist kill switch state to {}: {error}",
-                path.display()
-            );
             // `arm` never calls `persist`, so this cannot recurse.
             self.arm(PERSIST_FAILURE_REASON.into());
+            warn!(
+                error_kind = status_vocabulary::REASON_PERSISTENCE_FAILURE,
+                activated = true,
+                "KILL SWITCH STATE NOT PERSISTED; FAILING CLOSED"
+            );
             let error = anyhow::anyhow!(
                 "failed to persist kill switch state to {}: {error}",
                 path.display()
@@ -1057,5 +1090,189 @@ mod tests {
             !log.contains(ACTIVATION_LOG_PROBE_REASON),
             "caller reason leaked into the activation log: {log}"
         );
+    }
+
+    // ---- I50-B restore/persist log redaction / PROBE non-leak regression ----
+
+    /// The `create_dir_all` failure in `persist()` must emit only the fixed
+    /// vocabulary: the configured parent path (PROBE marker) and the raw
+    /// std::io error must stay out of the OTLP-bound JSON line.
+    #[test]
+    fn persist_log_never_leaks_state_path_or_io_error() {
+        const PERSIST_LOG_PROBE_PATH: &str = "I50B_PERSIST_PATH_PROBE_DO_NOT_LEAK";
+
+        let control = capture_activation_logs(|| {
+            tracing::info!(probe = PERSIST_LOG_PROBE_PATH, "capture control event");
+        });
+        assert!(
+            control.contains(PERSIST_LOG_PROBE_PATH),
+            "control event must be observable: {control}"
+        );
+
+        let path = temp_path(PERSIST_LOG_PROBE_PATH);
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+        assert!(!switch.is_activated());
+
+        // A regular file at the parent makes create_dir_all (and therefore
+        // the whole persist) fail while the token path stays valid.
+        let parent = path.parent().expect("state path has a parent");
+        std::fs::remove_dir_all(parent).expect("remove temp dir");
+        std::fs::write(parent, b"blocker").expect("create blocker file");
+
+        let log = capture_activation_logs(|| switch.activate("maintenance".into()));
+
+        assert!(
+            log.contains("\"error_kind\":\"persistence_failure\""),
+            "fixed persist error_kind must be present: {log}"
+        );
+        assert!(
+            log.contains("KILL SWITCH STATE NOT PERSISTED; FAILING CLOSED"),
+            "fixed persist message must be present: {log}"
+        );
+        assert!(
+            log.contains("\"activated\":true"),
+            "fail-closed flag: {log}"
+        );
+        assert!(
+            !log.contains(PERSIST_LOG_PROBE_PATH),
+            "state path leaked into persist log: {log}"
+        );
+        assert!(
+            !log.contains("os error"),
+            "raw io error leaked into persist log: {log}"
+        );
+        assert!(
+            !log.contains("failed to create"),
+            "raw persist error text leaked into persist log: {log}"
+        );
+
+        std::fs::remove_file(parent).expect("clean blocker file");
+    }
+
+    /// A corrupt state file must produce the fixed `state_unreadable` warning:
+    /// neither the absolute path nor the serde_json error / file content may
+    /// reach tracing during `restore()`.
+    #[test]
+    fn restore_log_never_leaks_state_path_or_parse_error() {
+        const RESTORE_LOG_PROBE_PATH: &str = "I50B_RESTORE_PATH_PROBE_DO_NOT_LEAK";
+        const RESTORE_LOG_PROBE_CONTENT: &str = "I50B_RESTORE_CONTENT_PROBE_DO_NOT_LEAK";
+
+        let control = capture_activation_logs(|| {
+            tracing::info!(probe = RESTORE_LOG_PROBE_PATH, "capture control event");
+        });
+        assert!(
+            control.contains(RESTORE_LOG_PROBE_PATH),
+            "control event must be observable: {control}"
+        );
+
+        let path = temp_path(RESTORE_LOG_PROBE_PATH);
+        let corrupt = format!("{{not json {RESTORE_LOG_PROBE_CONTENT}");
+        std::fs::write(&path, corrupt.as_bytes()).expect("write corrupt state");
+
+        let log = capture_activation_logs(|| {
+            let _switch = KillSwitch::new("admin-token", Some(path.clone()));
+        });
+
+        assert!(
+            log.contains("\"error_kind\":\"state_unreadable\""),
+            "fixed restore error_kind must be present: {log}"
+        );
+        assert!(
+            log.contains("KILL SWITCH STATE UNREADABLE; TREATING AS ACTIVATED"),
+            "fixed restore message must be present: {log}"
+        );
+        assert!(
+            log.contains("\"activated\":true"),
+            "fail-closed flag: {log}"
+        );
+        assert!(
+            !log.contains(RESTORE_LOG_PROBE_PATH),
+            "state path leaked into restore log: {log}"
+        );
+        assert!(
+            !log.contains(RESTORE_LOG_PROBE_CONTENT),
+            "corrupt content / parse error leaked into restore log: {log}"
+        );
+
+        std::fs::remove_dir_all(path.parent().unwrap()).expect("clean temp dir");
+    }
+
+    /// A directory at the state path makes both `read_to_string` (restore)
+    /// and `fs::write` (persist) fail. Both warnings must stay fixed: the path
+    /// and raw error text are excluded from tracing in both functions.
+    #[test]
+    fn restore_and_persist_io_warnings_never_leak_path_or_error() {
+        const IO_LOG_PROBE_PATH: &str = "I50B_IO_PATH_PROBE_DO_NOT_LEAK";
+
+        let path = temp_path(IO_LOG_PROBE_PATH);
+        // read_to_string on a directory fails (restore); create_dir_all on the
+        // parent still succeeds, so fs::write fails next (persist).
+        std::fs::create_dir_all(&path).expect("create directory at state path");
+
+        let log = capture_activation_logs(|| {
+            let switch = KillSwitch::new("admin-token", Some(path.clone()));
+            switch.activate("maintenance".into());
+        });
+
+        assert!(
+            log.contains("\"error_kind\":\"state_unreadable\""),
+            "restore io failure must use the fixed kind: {log}"
+        );
+        assert!(
+            log.contains("KILL SWITCH STATE UNREADABLE; TREATING AS ACTIVATED"),
+            "restore io failure must use the fixed message: {log}"
+        );
+        assert!(
+            log.contains("\"error_kind\":\"persistence_failure\""),
+            "persist write failure must use the fixed kind: {log}"
+        );
+        assert!(
+            log.contains("KILL SWITCH STATE NOT PERSISTED; FAILING CLOSED"),
+            "persist write failure must use the fixed message: {log}"
+        );
+        assert!(
+            !log.contains(IO_LOG_PROBE_PATH),
+            "state path leaked into restore/persist log: {log}"
+        );
+        assert!(
+            !log.contains("os error"),
+            "raw io error leaked into restore/persist log: {log}"
+        );
+
+        std::fs::remove_dir_all(path.parent().unwrap()).expect("clean temp dir");
+    }
+
+    /// The success-side restore warning must also collapse the persisted
+    /// reason/actor and the path to the fixed vocabulary.
+    #[test]
+    fn restore_active_log_never_leaks_state_path_or_reason() {
+        const RESTORE_ACTIVE_PROBE: &str = "I50B_RESTORE_ACTIVE_PROBE_DO_NOT_LEAK";
+
+        let path = temp_path(RESTORE_ACTIVE_PROBE);
+        let seed = KillSwitch::new("admin-token", Some(path.clone()));
+        seed.activate_with_actor(
+            RESTORE_ACTIVE_PROBE.to_owned(),
+            RESTORE_ACTIVE_PROBE.to_owned(),
+        );
+        drop(seed);
+
+        let log = capture_activation_logs(|| {
+            let _switch = KillSwitch::new("admin-token", Some(path.clone()));
+        });
+
+        assert!(
+            log.contains("\"error_kind\":\"operator_defined\""),
+            "restored reason must collapse to fixed vocabulary: {log}"
+        );
+        assert!(
+            log.contains("KILL SWITCH RESTORED AS ACTIVE"),
+            "fixed restore message must be present: {log}"
+        );
+        assert!(
+            !log.contains(RESTORE_ACTIVE_PROBE),
+            "state path or restored reason leaked into restore log: {log}"
+        );
+
+        std::fs::remove_dir_all(path.parent().unwrap()).expect("clean temp dir");
     }
 }
