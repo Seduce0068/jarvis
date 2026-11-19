@@ -543,5 +543,74 @@ else
   fail=$((fail+1))
 fi
 
+# I58-A: regression guards for the Round 54 shell fail-closed fixes.
+# (a) An env with a leading empty egress assignment and a trailing non-empty
+# one must be rejected in --env-only mode. The fixture lives in the existing
+# temp tree; only the error CODE is matched and never the fixture's values.
+dup_egress_env="$tmp/i58_dup_egress.env"
+printf '%s\n' \
+  'JARVIS_MCP_GW_BASE_DIR=/opt/jarvis' \
+  'JARVIS_MCP_GW_EGRESS_ALLOWLIST=' \
+  'JARVIS_MCP_GW_EGRESS_ALLOWLIST=example.com' \
+  > "$dup_egress_env"
+out=$(JARVIS_DRIFT_ENV="$dup_egress_env" \
+      bash "$repo/infra/scripts/check-deploy-drift.sh" --env-only 2>&1)
+code=$?
+if [ "$code" -eq 2 ] && printf '%s' "$out" | grep -q 'E_ENV_DUP_EGRESS_ALLOWLIST'; then
+  echo "  PASS: drift --env-only rejects duplicate egress assignment"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift --env-only accepted duplicate egress (exit=$code)"
+  fail=$((fail+1))
+fi
+
+# (b) A live rollback needs root and mutates /etc, /opt and systemd, so the
+# non-root CI gate cannot exercise it safely. Use a structural guard on the
+# rollback body instead: the missing-.bak branch must install the repo deny-all
+# template as root:root 0600, and the deployed env must never be deleted
+# (deleting it would fall back to the unit's permissive literal default).
+deploy_script="$repo/infra/scripts/deploy-mcp-gw-safe.sh"
+rollback_body="$(sed -n '/^rollback()/,/^}/p' "$deploy_script")"
+if printf '%s\n' "$rollback_body" \
+     | grep -Fq "install -o root -g root -m 0600 \"\$repo_env\" \"\$env_target\"" \
+   && printf '%s\n' "$rollback_body" \
+     | grep -Fq "if [ -f \"\$env_target.bak-\$ts\" ]" \
+   && ! printf '%s\n' "$rollback_body" | grep -Fq "rm -f \"\$env_target\""; then
+  echo "  PASS: rollback restores deny-all env template when .bak is missing"
+  ok=$((ok+1))
+else
+  echo "  FAIL: rollback lost fail-closed env restore (structural guard)"
+  fail=$((fail+1))
+fi
+
+# (c) Exercise the real post-rollback drift gate with a stubbed drift command:
+# extract the case block from rollback() and substitute a return code for the
+# drift script, so no service or file is touched. DANGER (2) and any unknown
+# code must both map to exit 3 instead of being swallowed as a warning.
+drift_gate="$(printf '%s\n' "$rollback_body" \
+  | sed -n '/^  bash "[$]repo\/infra\/scripts\/check-deploy-drift[.]sh"/,/^  esac/p')"
+gate_with_rc() { # stub_rc
+  local stub_rc="$1"
+  (
+    # Override `bash` only inside this subshell so the extracted drift call
+    # returns the stub code; no real script or service is invoked.
+    # Invoked indirectly by the eval below.
+    # shellcheck disable=SC2329
+    bash() { return "$stub_rc"; }
+    eval "$drift_gate"
+  )
+}
+gate_with_rc 2 >/dev/null 2>&1
+danger_rc=$?
+gate_with_rc 99 >/dev/null 2>&1
+unknown_rc=$?
+if [ -n "$drift_gate" ] && [ "$danger_rc" -eq 3 ] && [ "$unknown_rc" -eq 3 ]; then
+  echo "  PASS: rollback drift gate forces exit 3 on DANGER"
+  ok=$((ok+1))
+else
+  echo "  FAIL: rollback drift gate regressed (DANGER must exit 3)"
+  fail=$((fail+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
