@@ -61,6 +61,21 @@ prost = "0.14"
 prost-types = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
+# 依存グラフ安全性メモ（2026-11-19 調査、Cargo.lock 照合済み）:
+# - 直接依存の axum は 0.7.9。axum 0.8.9 は tonic 0.14.6 が要求する（tonic の server 実装が
+#   axum 0.8 を前提）。tower-http 0.6.11 の dependencies に axum は無く、
+#   「tower-http 0.6 が axum 0.8 を要求」という仮説は Cargo.lock 上で否定された。
+# - axum 0.7.9 を要求するのは jarvis-policy / jarvis-mcp-gw / jarvis-event / jarvis-context の
+#   4 crate（いずれも workspace 依存）。axum 0.8.9 の参照は tonic 0.14.6 のみ。
+# - 統一には axum 0.7 -> 0.8 の major update が必要だが、4 crate のルータ/ハンドラ
+#   （Router, from_fn_with_state, State, axum::serve 等、src 全体で 146 参照）に
+#   破壊的変更が及ぶリスクがあり、manifest/lock のみを担当する本作業では型整合を検証できない。
+#   tonic 0.14 -> 0.13 への downgrade も prost / tonic-prost / tonic-prost-build の
+#   連鎖変更と gRPC サーバの再検証が必要で同等以上にリスクが高い。
+# - よって現状維持（0.7 + 0.8 共存）とする。統一は cargo check --workspace / test を
+#   伴う専用の移行タスクで判断する。
+# - 影響: axum-core 0.4.5/0.5.6、matchit 0.7.3/0.8.4 等が重複し、バイナリサイズ・
+#   コンパイル時間・Heavy 依存が増加する（実測値は未確認）。
 axum = { version = "0.7", features = ["tracing"] }
 tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
