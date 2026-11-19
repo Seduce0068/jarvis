@@ -182,9 +182,42 @@ shopt -u nullglob
 # of a completed deploy: if an install aborts mid-way, set -e stops here, the
 # "start with:" instructions below are never printed and the previous markers
 # no longer describe the mixed on-disk payload. The next successful run
-# re-installs the whole set and is idempotent. (A true atomic swap of the bin
-# and migrations trees is not attempted here because their install paths are
-# referenced directly by the systemd units.)
+# re-installs the whole set and is idempotent.
+#
+# I40-C: close the stale-SQL `sudo rm -f` -> new-SQL `sudo install` race.
+# jarvis-migrations.service is a oneshot pre-flight whose ExecStart reads SQL
+# directly from ${MIGRATIONS_DST} (`--source /opt/jarvis/rust/migrations`).
+# During the rm+install window below that directory is incomplete, and any
+# (re)start of the unit in that window would read a partial tree; marker-only
+# post-hoc detection cannot prevent that. Adopted approach: STOP the unit for
+# the whole /opt write boundary, do the rm+install, write the markers LAST, and
+# restore the unit afterwards. If any write fails, set -e aborts before the
+# restore, so the unit stays stopped and the next run re-installs the complete
+# set -- no reader can ever observe a partial tree. Old SQL is deliberately NOT
+# restored on failure (a restore would add its own failure window); the whole
+# deploy is already idempotent, so leaving the unit stopped and delegating to
+# the next run is the safe failure policy.
+# Alternative considered and NOT adopted: staging a complete tree in a sibling
+# directory and switching it in with rename. `mv migrations migrations.old &&
+# mv staging migrations` is two renames with a gap where `--source` does not
+# exist (not truly atomic); a real exchange needs renameat2(RENAME_EXCHANGE),
+# which this shell cannot call, and pointing --source at a versioned path or a
+# symlink would break the unit's path contract. Stopping the reader also avoids
+# the sync/durability concerns a directory swap introduces. The --source path
+# is left unchanged either way.
+MIGRATIONS_UNIT="jarvis-migrations.service"
+mig_unit_was_active=0
+if sudo systemctl is-active --quiet "${MIGRATIONS_UNIT}"; then
+  mig_unit_was_active=1
+fi
+# Only stop a unit systemd actually knows about. On a first install this script
+# generates and loads the unit later (unit loop + daemon-reload below), so a
+# `stop` here would fail with "Unit not found" and abort before any write. A
+# missing unit means there is no pre-flight that could read the tree mid-swap.
+if sudo systemctl cat "${MIGRATIONS_UNIT}" >/dev/null 2>&1; then
+  sudo systemctl stop "${MIGRATIONS_UNIT}"
+fi
+
 for bin in "${BINARIES[@]}"; do
   install -m 755 "${STAGE_BIN}/${bin}" "/opt/jarvis/bin/${bin}"
 done
@@ -201,6 +234,16 @@ fi
 sudo install -o root -g root -m 0644 "${STAGED_SQL_FILES[@]}" "${MIGRATIONS_DST}/"
 sudo install -o root -g root -m 0644 "${bin_commit_file}" /opt/jarvis/bin/.jarvis-build-commit
 sudo install -o root -g root -m 0644 "${mig_commit_file}" "${MIGRATIONS_DST}/.jarvis-source-commit"
+
+# I40-C: the write boundary is sealed (SQL filename set complete, both markers
+# written), so restore the pre-flight unit to its prior active state and let it
+# apply the new SQL. On a fresh install the unit was unknown/inactive above, so
+# it stays stopped and is started by the normal `systemctl enable --now ...`
+# flow at the end of this script -- this script still never starts services on
+# its own beyond restoring a previously active unit.
+if (( mig_unit_was_active )); then
+  sudo systemctl start "${MIGRATIONS_UNIT}"
+fi
 
 sudo mkdir -p /etc/jarvis
 # Copy the *contents* of infra/config/policy/ directly into /etc/jarvis/policy/.
