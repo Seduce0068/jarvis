@@ -2,8 +2,9 @@
 # Install the local-only JARVIS backup service + timer (BK-2).
 # Dry-run by default; --apply performs the changes. Root required for --apply.
 # Idempotent and reversible: previous unit files are backed up before replace,
-# and pre-existing timer state (active/enabled, next elapse) is restored on
-# rollback instead of being stopped unconditionally.
+# and pre-existing timer state (active/enabled) is restored on rollback instead
+# of being stopped unconditionally. The next elapse is NOT restored: systemd has
+# no API to pin a timer's next trigger, so it is recalculated and may differ.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -101,6 +102,10 @@ fi
 if systemctl is-enabled --quiet jarvis-backup.timer 2>/dev/null; then
   pre_timer_enabled=1
 fi
+# Informational only: pre_timer_next is captured solely for the log line below.
+# Rollback does NOT try to restore it. systemd has no API to pin a timer's next
+# trigger, so after rollback the next elapse is recalculated and may differ from
+# the value recorded here; only active/enabled are re-asserted on rollback.
 pre_timer_next="$(systemctl list-timers jarvis-backup.timer --no-pager 2>/dev/null \
   | awk 'NR==2 {print $1, $2, $3}' || true)"
 echo "  pre-install timer: known=$pre_timer_known active=$pre_timer_active enabled=$pre_timer_enabled${pre_timer_next:+ next=$pre_timer_next}"
