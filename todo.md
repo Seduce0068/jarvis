@@ -86,10 +86,10 @@ generated:
 - [ ] **P1-1** ベクトル検索の順序を保持（2026-11-18 一部対応: 順序保持は実装済み、スコア保持は残。PG の `WHERE id = ANY` が順序を保たないため、Qdrant の relevance 順に再組み立てる reorder_by_ids を追加。純粋関数テスト2件。スコア自体の保持は MemoryEntry 共有型変更が必要で保留）（R2-DATA-001）
   - `ScoredPoint.score` を破棄し `WHERE id = ANY($1)`（ORDER BY なし）で
     再取得 → ランキングが失われハイブリッド検索が ID 突き合わせに退化。
-- [ ] **P1-2** PG / Qdrant 二段書き込みに補償を追加（R2-DATA-002）
+- [x] **P1-2** PG / Qdrant 二段書き込みに補償を追加（2026-11-19 対応済み: `pending_embeddings` outbox を新設し Qdrant 失敗時に id/content/metadata/ vector を記録、起動時 reconcile で再 upsert・成功時のみ削除。回帰テスト5件追加）（R2-DATA-002）
   - Qdrant upsert 失敗時に PG だけ残り、再送でも自己修復されない。
     outbox または起動時整合性チェック＋再埋め込み。
-- [ ] **P1-3** マイグレーションをバージョン管理へ移行（R2-DATA-003）
+- [x] **P1-3** マイグレーションをバージョン管理へ移行（2026-11-19 対応済み: 毎起動 `batch_execute` を `sqlx::migrate!()` へ移行、既存 DB は 001 が no-op で version 記録後に 002 適用。新規依存なし・baseline 手順をコメント明記）（R2-DATA-003）
   - 毎起動 `batch_execute("001_initial.sql")` で `IF NOT EXISTS` のみ、
     `_sqlx_migrations` 不在。sqlx migrate またはデプロイ時 CLI に分離。
 - [ ] **P1-4** バックアップの保全先を外部化（R3-DR-001）
@@ -105,7 +105,7 @@ generated:
     R3-DR-003）
   - manifest は平文 SHA-256 のみ、署名なし。`--retain-days` は opt-in で
     unit が渡していない。ディスク枯渇と改ざん検知不能のリスク。
-- [ ] **P1-7** 共有ドメインモデルを一本化（R2-ARCH-001, R2-ARCH-005,
+- [ ] **P1-7** 共有ドメインモデルを一本化（**2026-11-19 設計決定: 案A（jarvis-core を単一情報源、proto/HTTP DTO は境界契約として維持）を推奨。最初のスライスは core に `approval` モジュールを追加するだけ（他クレート無変更）。後続スライスは policy→mcp-gw→UI の順に後方互換で移行。詳細は Round 21 の設計結果を参照**。実装は未着手）（R2-ARCH-001, R2-ARCH-005,
     R2-ARCH-009）
   - `jarvis-core` が policy / mcp-gw / UI から未参照で、承認型が
     4 種類（`String+i64` / `Uuid+DateTime` / …）に分裂。core を真の
@@ -680,7 +680,7 @@ generated:
   `docs/integration/index.md` への追記、`backup-restore-runbook.md`
   からの相互リンク、`restore.rs` への非推奨ヘッダ、
   `infra/README.md` のレガシー記述更新。
-- [ ] **S9: 隔離先での全コンポーネント統合テストと実機復元演習** — 根拠
+- [ ] **S9: 隔離先での全コンポーネント統合テストと実機復元演習** — **2026-11-19 一部対応: `infra/scripts/test-restore-local.sh` を新規作成し合成フィクスチャで dry-run/apply 経路を自動検証（47 tests pass、本番リソース非接触を多重ガード）。実機の隔離先復元演習はユーザー承認待ちで残る** — 根拠
   `docs/integration/local-restore-design.md:253-255` / 優先度 高。
   使い捨て DB / Qdrant コレクション / ディレクトリで全コンポーネントを
   復元し Runtime Proof を記録する。本番適用はユーザー承認後に実施。
@@ -804,11 +804,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] check-shell が予測可能 `/tmp` パスを使用 — `check-shell.sh:25,27,39,43` / B4 / 中。
 - [x] jarvis-backup.service に `Wants=postgresql.service qdrant.service` が欠落 — 2026-11-19 対応済み: repo unit へ追加し systemd-analyze verify exit 0。**実機への unit 再適用は root 必須・ユーザー実行が残る** / `jarvis-backup.service:4` / B7 / 中 / confirmed。
 - [ ] S9 のうち隔離先統合テストのみ自動化可能 — `docs/integration/local-restore-design.md:253-255` / B5 / 中。
-- [ ] AGENTS.md の adr/ 一覧が ADR-0002/0003/0005 を欠落 — `AGENTS.md:37-39` / B8 / 中。
-- [ ] ADR-0005 の「ui-build/ui-run 追加」が実装済みなのに未完了 — `adr/0005:104` / B8 / 中。
-- [ ] ADR-0003 の web.fetch `requires_approval=false` 記述が古い — `adr/0003:35-40` / B8 / 中。
-- [ ] infra/README のバックアップ節が自己矛盾（未導入記述と導入済み記述が併存） — `infra/README.md:268-293` / B8 / 中。
-- [ ] mcp_allowlist.toml の「承認必須ツールは tools/list から非表示」コメントが旧挙動 — `infra/config/mcp_allowlist.toml:81,98,115` / B8 / 中。
+- [x] AGENTS.md の adr/ 一覧が ADR-0002/0003/0005 を欠落 — 2026-11-19 対応済み: Project Structure ツリーと References に実在する5件すべてを追記 / `AGENTS.md:37-39` / B8 / 中。
+- [x] ADR-0005 の「ui-build/ui-run 追加」が実装済みなのに未完了 — 2026-11-19 対応済み: 該当チェックを [x] へ更新（本番自動起動は未実装で [ ] 維持）/ `adr/0005:104` / B8 / 中。
+- [x] ADR-0003 の web.fetch `requires_approval=false` 記述が古い — 2026-11-19 対応済み: 現行 `true`・人間承認必須・allowlist 同期確認へ更新し、旧記述は「（履歴）」と明記。ADR の決定内容（ネイティブ実装・SSRF 対策）は不変 / `adr/0003:35-40` / B8 / 中。
+- [x] infra/README のバックアップ節が自己矛盾（未導入記述と導入済み記述が併存） — 2026-11-19 対応済み: 現行状態（timer 導入済み・OCI 不使用・ローカル完結）を前面へ出し、旧 OCI 記述は「履歴（2026-11-15 時点）」へ集約。関連ドキュメントのリンクは維持 / `infra/README.md:268-293` / B8 / 中。
+- [x] mcp_allowlist.toml の「承認必須ツールは tools/list から非表示」コメントが旧挙動 — 2026-11-19 対応済み: 3箇所のコメントを「tools/list に表示され、呼び出しは人間承認を待つ」へ更新。`requires_approval` 値と実コードは不変 / `infra/config/mcp_allowlist.toml:81,98,115` / B8 / 中。
 
 ### メモ（要判断・却下）
 
@@ -816,3 +816,13 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - **stale**: P0-3 は `/mcp` の server-side principal guard で対応済み（B5 / confirmed）。opt-in ガードの本番有効化は残る。
 - **speculative**: NAT64 prefix (64:ff9b::/96) と予約 IPv4 レンジの SSRF すり抜け — `sandbox.rs:484-508` / B1 / speculative。通常環境では NAT64 無く未検証。
 - **実機確認済み**: P0-6 は実機 4317/4318/8888 すべて `127.0.0.1`（B5 / confirmed）。repo テンプレートの全6リスナー版を実機へ適用するかは方針判断。
+
+## 完了記録（2026-11-19 Round 21）
+
+- [x] **otelcol traces/logs が debug exporter のみで Grafana Cloud へ送信されない**
+  — `infra/config/otelcol-config.yaml` に `otlp/grafana` exporter を追加
+  （endpoint / auth は `${env:...}` 参照、値はファイルに記載しない）。
+  traces / logs パイプラインは `[debug, otlp/grafana]` の両方へ出力。
+  `GRAFANA_CLOUD_OTLP_ENDPOINT` と `GRAFANA_CLOUD_AUTH` の供給経路
+  （P0-7）は未確定のまま、実機テンプレート同期と bws 側の値設定は
+  ユーザー判断として残る。ダミー env で `otelcol-contrib validate` exit 0。
