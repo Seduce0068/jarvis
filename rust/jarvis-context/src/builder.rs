@@ -251,6 +251,24 @@ const RECONCILE_BATCH_LIMIT: usize = 100;
 /// Upper bound on the delay between two reconcile attempts for a single row.
 const MAX_RETRY_BACKOFF_MINUTES: i64 = 60 * 24; // 24 h
 
+/// Maximum number of failed reconcile attempts for one `pending_embeddings`
+/// row (I61-B). A row at this count is "exhausted": `PgPendingStore::list`
+/// filters it out with `attempts < $limit`, so a permanently-failing row can
+/// no longer occupy a slot of [`RECONCILE_BATCH_LIMIT`] on every startup.
+const MAX_RECONCILE_ATTEMPTS: i32 = 10;
+
+/// `true` when a vector holds at least one non-finite component — NaN, a
+/// signed infinity, or a finite f64 that saturated on the f32 cast (I61-B).
+///
+/// Re-embedding the same content cannot repair a poisoned embedding source,
+/// so detection must dead-letter the row rather than defer it. An empty vector
+/// is deliberately *not* poison: that is the recoverable "stale dimension"
+/// case which still uses the embedder/retry path. Pure and data-free, so no
+/// vector value can ever reach a log record.
+fn is_non_finite_vector(vector: &[f32]) -> bool {
+    vector.iter().any(|value| !value.is_finite())
+}
+
 /// Exponential backoff after `attempts` failures: `2^attempts` minutes, capped
 /// at [`MAX_RETRY_BACKOFF_MINUTES`]. The exponent is clamped before shifting so
 /// even a hostile/corrupt attempt count cannot overflow. Pure, so the policy is
@@ -264,10 +282,14 @@ fn retry_backoff(attempts: i32) -> chrono::Duration {
     chrono::Duration::minutes(minutes)
 }
 
-/// State to persist after a failed reconcile attempt: the incremented attempt
-/// count and the next eligible instant (`now + backoff`). Pure for tests.
+/// State to persist after a failed reconcile attempt: the capped attempt count
+/// and the next eligible instant (`now + backoff`). Pure for tests.
+///
+/// I61-B: `attempts` saturates at [`MAX_RECONCILE_ATTEMPTS`]. Every failure site
+/// goes through this helper, so no row can climb past the cap and the `list`
+/// gate (`attempts < cap`) is sufficient to retire it from every future batch.
 fn next_retry_state(attempts: i32, now: DateTime<Utc>) -> (i32, DateTime<Utc>) {
-    let attempts = attempts.saturating_add(1);
+    let attempts = attempts.saturating_add(1).min(MAX_RECONCILE_ATTEMPTS);
     (attempts, now + retry_backoff(attempts))
 }
 
@@ -371,16 +393,19 @@ impl PendingStore for PgPendingStore {
 
     async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
         let client = self.pool.get().await?;
-        // Only rows that are due are selected. A permanently-failing row that
-        // was deferred with a future `next_retry_at` drops out of the head of
-        // the batch, so later rows are no longer starved (I30-C).
+        // Only rows that are due AND still inside the attempt budget are
+        // selected. A permanently-failing row deferred with a future
+        // `next_retry_at` drops out of the head of the batch (I30-C); once its
+        // attempts reach `MAX_RECONCILE_ATTEMPTS` it drops out entirely
+        // (I61-B), so poison rows can never starve healthy PG-only memories.
         let rows = client
             .query(
                 "SELECT id, content, metadata, embedding, attempts, next_retry_at
                  FROM pending_embeddings
-                 WHERE next_retry_at IS NULL OR next_retry_at <= NOW()
+                 WHERE attempts < $2
+                   AND (next_retry_at IS NULL OR next_retry_at <= NOW())
                  ORDER BY created_at ASC LIMIT $1",
-                &[&(limit as i64)],
+                &[&(limit as i64), &MAX_RECONCILE_ATTEMPTS],
             )
             .await?;
         rows.into_iter()
@@ -471,7 +496,9 @@ async fn store_memory_with_sinks(
 /// Both the replayed and the re-embedded vector pass the shared embedding
 /// validator. A queued vector can be non-finite (an f64 that saturated on the
 /// f32 cast before it was persisted); replaying it would feed a poisoned value
-/// straight into Qdrant, so the row must be deferred instead.
+/// straight into Qdrant. `reconcile_pending` detects that case before calling
+/// this helper and dead-letters the row (I61-B); the validator here stays as
+/// the helper's own fail-closed boundary.
 async fn vector_for_pending(
     pending: &PendingEmbedding,
     embedder: Option<&crate::embedding::EmbeddingClient>,
@@ -506,9 +533,11 @@ async fn vector_for_pending(
 }
 
 /// Persist a failed reconcile attempt so the row is deferred out of the head
-/// of the queue (I30-C). Backoff bookkeeping is best-effort: if it cannot be
-/// written the row stays queued and will simply be retried on the next pass,
-/// which is safe (no worse than the pre-fix behaviour).
+/// of the queue (I30-C). `next_retry_state` caps `attempts` at
+/// [`MAX_RECONCILE_ATTEMPTS`], at which point `list` excludes the row entirely
+/// (I61-B). Backoff bookkeeping is best-effort: if it cannot be written the row
+/// stays queued and will simply be retried on the next pass, which is safe (no
+/// worse than the pre-fix behaviour).
 async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
     let (attempts, next_retry_at) = next_retry_state(attempts, Utc::now());
     if let Err(error) = outbox.mark_failed(id, attempts, next_retry_at).await {
@@ -521,11 +550,39 @@ async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
     }
 }
 
+/// Dead-letter a pending row whose vector is non-finite (I61-B).
+///
+/// A poisoned embedding source cannot be repaired by re-embedding the same
+/// content, so deferring only retries the same bad vector every 24h forever:
+/// once [`RECONCILE_BATCH_LIMIT`] rows were poisoned, healthy PG-only memories
+/// were starved of their Qdrant reflection. The row is deleted instead, with a
+/// single decision warning using only the fixed `id`/`attempts`/`error_kind`
+/// vocabulary. No raw error, payload or vector value is ever formatted.
+async fn dead_letter_retry(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
+    warn!(
+        id = %id,
+        attempts = attempts,
+        error_kind = ErrorKind::Embedding.as_str(),
+        "pending memory has a non-finite vector; dead-lettering this row"
+    );
+    if let Err(error) = outbox.remove(id).await {
+        warn!(
+            id = %id,
+            error_kind = error_kind(&error, ErrorKind::Persistence),
+            "could not delete a dead-lettered pending memory"
+        );
+    }
+}
+
 /// Startup reconcile of queued vector upserts (P1-2). Never fails the whole
 /// startup: a transient Qdrant/embedding failure leaves the row queued with a
-/// warning so the next startup retries it. Every failure bumps `attempts` and
-/// sets a future `next_retry_at`, so a permanently-failing row is filtered out
-/// of the next batch instead of starving later rows (I30-C).
+/// warning so the next startup retries it. Every transient failure bumps
+/// `attempts` and sets a future `next_retry_at`, so a permanently-failing row
+/// is filtered out of the next batch instead of starving later rows (I30-C);
+/// at [`MAX_RECONCILE_ATTEMPTS`] it is excluded from every batch (I61-B). A
+/// non-finite vector is different: re-embedding cannot repair it, so it is
+/// dead-lettered (deleted) on detection with a single warning rather than
+/// retried forever (I61-B).
 async fn reconcile_pending(
     outbox: &dyn PendingStore,
     sink: &dyn VectorSink,
@@ -548,6 +605,16 @@ async fn reconcile_pending(
         // Copy before the partial move of `item.content` / `item.metadata`
         // below, so the failure path can still defer this row.
         let attempts = item.attempts;
+
+        // I61-B: detect poison before any re-embedding is attempted. An empty
+        // vector is not poison (it is the recoverable stale-dimension case), so
+        // only real non-finite components take the dead-letter branch. The row
+        // is deleted, so it cannot reappear in a later batch and warn again.
+        if is_non_finite_vector(&item.embedding) {
+            dead_letter_retry(outbox, item.id, attempts).await;
+            continue;
+        }
+
         let vector = match vector_for_pending(&item, embedder, embedding_dim).await {
             Ok(vector) => vector,
             Err(error) => {
@@ -575,11 +642,16 @@ async fn reconcile_pending(
         };
 
         // Last line of defense immediately before Qdrant: `vector_for_pending`
-        // already validates, but gate again so no future caller can feed a
-        // non-finite vector into the upsert/distance computation. A bad row is
-        // deferred (not deleted), exactly like a transient upsert failure, and
-        // only the fixed `error_kind` vocabulary is logged.
+        // already validates, but gate again so no future caller can feed an
+        // invalid vector into the upsert/distance computation. I61-B: a
+        // non-finite vector is dead-lettered (never deferred); a merely
+        // wrong-shaped vector keeps the transient retry path. Only the fixed
+        // `error_kind` vocabulary is logged.
         if validate_embedding(&memory.embedding, embedding_dim).is_err() {
+            if is_non_finite_vector(&memory.embedding) {
+                dead_letter_retry(outbox, memory.id, attempts).await;
+                continue;
+            }
             warn!(
                 id = %memory.id,
                 attempts = attempts,
@@ -2313,11 +2385,14 @@ mod tests {
 
         async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
             let now = Utc::now();
+            // Mirror both production SQL gates: exhausted rows never enter a
+            // batch (I61-B), deferred rows only when due (I30-C).
             Ok(self
                 .rows
                 .lock()
                 .expect("outbox lock")
                 .iter()
+                .filter(|row| row.attempts < MAX_RECONCILE_ATTEMPTS)
                 .filter(|row| !self.respect_backoff || is_retry_due(row.next_retry_at, now))
                 .take(limit)
                 .cloned()
@@ -2445,13 +2520,12 @@ mod tests {
         }
     }
 
-    /// Reconcile must never upsert a non-finite pending vector: the row is
-    /// deferred instead (caught by the replay gate, with the pre-upsert check
-    /// as the last line of defense). The sink has no scripted result, so any
-    /// upsert attempt would panic; the in-memory outbox and mock sink keep this
-    /// free of live DB/Qdrant access.
+    /// I61-B: a non-finite pending vector cannot be repaired by re-embedding,
+    /// so reconcile must dead-letter (delete) the row rather than defer it.
+    /// The sink has no scripted result, so any upsert attempt would panic; the
+    /// in-memory outbox and mock sink keep this free of live DB/Qdrant access.
     #[tokio::test]
-    async fn reconcile_defers_pending_row_with_non_finite_vector() {
+    async fn reconcile_dead_letters_pending_row_with_non_finite_vector() {
         let mut pending = pending_entry();
         pending.embedding[0] = f32::INFINITY;
         let outbox = MemoryOutbox::with_backoff_filter(vec![pending.clone()]);
@@ -2460,14 +2534,9 @@ mod tests {
         reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
 
         let rows = outbox.snapshot();
-        assert_eq!(rows.len(), 1, "the row must remain queued, not upserted");
-        assert_eq!(
-            rows[0].attempts, 1,
-            "a rejected vector is recorded as a deferred failure"
-        );
         assert!(
-            rows[0].next_retry_at.is_some_and(|at| at > Utc::now()),
-            "the row must be deferred out of the next batch"
+            rows.is_empty(),
+            "a poisoned vector must be deleted, not deferred: {rows:?}"
         );
     }
 
@@ -2638,6 +2707,142 @@ mod tests {
             !remaining.iter().any(|r| r.id == good_id),
             "a retryable row must not be starved by the failing head of the queue"
         );
+    }
+
+    // --- I61-B: poison dead-lettering + bounded retry attempts (pure/mock) ---
+
+    #[test]
+    fn is_non_finite_vector_only_matches_actual_poison() {
+        // An empty vector is the recoverable stale-dimension case and must keep
+        // using the embedder/retry path, not the dead-letter branch.
+        assert!(!is_non_finite_vector(&[]));
+        assert!(!is_non_finite_vector(&[0.1; 384]));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e100_f64 as f32] {
+            assert!(
+                is_non_finite_vector(&[bad, 0.2, 0.3]),
+                "a non-finite component must be detected"
+            );
+        }
+    }
+
+    #[test]
+    fn next_retry_state_caps_attempts_at_the_reconcile_limit() {
+        let now = fixed_now();
+        let (attempts, next) = next_retry_state(MAX_RECONCILE_ATTEMPTS - 1, now);
+        assert_eq!(attempts, MAX_RECONCILE_ATTEMPTS);
+        assert_eq!(next, now + retry_backoff(MAX_RECONCILE_ATTEMPTS));
+
+        // A hostile/corrupt stored count cannot climb past the cap either.
+        let (attempts, _) = next_retry_state(i32::MAX, now);
+        assert_eq!(attempts, MAX_RECONCILE_ATTEMPTS);
+    }
+
+    /// Head-of-line regression for the Round 57 poison-row bug (I61-B): a full
+    /// batch of non-finite rows is dead-lettered (deleted) on pass 1, so the
+    /// healthy row just past `RECONCILE_BATCH_LIMIT` reaches the sink on pass 2.
+    /// Under the old defer policy the batch stayed full of rows retried every
+    /// 24h and this PG-only memory was never reflected into Qdrant.
+    #[tokio::test]
+    async fn poison_rows_do_not_starve_the_healthy_row() {
+        let mut rows: Vec<PendingEmbedding> = (0..RECONCILE_BATCH_LIMIT)
+            .map(|_| {
+                let mut row = pending_entry();
+                row.embedding[0] = f32::NAN; // unrecoverable poison
+                row
+            })
+            .collect();
+        let good = pending_entry(); // valid 384-dim vector: retryable
+        let good_id = good.id;
+        rows.push(good);
+
+        let outbox = MemoryOutbox::with_backoff_filter(rows);
+        let embedder = disabled_embedder();
+
+        // Pass 1: only the first RECONCILE_BATCH_LIMIT rows are listed; all are
+        // poison and are deleted. The sink script is empty, so any attempted
+        // upsert would panic. The good row is past the limit and untouched.
+        reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
+        let after_first = outbox.snapshot();
+        assert_eq!(
+            after_first.len(),
+            1,
+            "all poison rows must be dead-lettered, not deferred"
+        );
+        assert_eq!(after_first[0].id, good_id);
+        assert_eq!(
+            after_first[0].attempts, 0,
+            "the un-reached healthy row must be untouched"
+        );
+
+        // Pass 2: the healthy row is now in the batch and reaches the sink.
+        reconcile_pending(
+            &outbox,
+            &ScriptedSink::new(vec![true]),
+            Some(&embedder),
+            384,
+        )
+        .await;
+        assert!(
+            outbox.snapshot().is_empty(),
+            "the healthy row must be reconciled and removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn attempts_exhausted_rows_are_excluded_from_the_batch() {
+        let mut exhausted = pending_entry();
+        exhausted.attempts = MAX_RECONCILE_ATTEMPTS;
+        let exhausted_id = exhausted.id;
+        let good = pending_entry();
+        let good_id = good.id;
+        let outbox = MemoryOutbox::with_backoff_filter(vec![exhausted, good]);
+        let embedder = disabled_embedder();
+
+        // The exhausted row is never listed; only the good row reaches the sink.
+        reconcile_pending(
+            &outbox,
+            &ScriptedSink::new(vec![true]),
+            Some(&embedder),
+            384,
+        )
+        .await;
+
+        let rows = outbox.snapshot();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the exhausted row stays in the table but out of the batch"
+        );
+        assert_eq!(rows[0].id, exhausted_id);
+        assert!(!rows.iter().any(|row| row.id == good_id));
+    }
+
+    #[tokio::test]
+    async fn repeated_failures_stop_at_the_attempts_cap() {
+        let pending = pending_entry();
+        let outbox = MemoryOutbox::with_rows(vec![pending]);
+        let embedder = disabled_embedder();
+
+        for _ in 0..MAX_RECONCILE_ATTEMPTS {
+            reconcile_pending(
+                &outbox,
+                &ScriptedSink::new(vec![false]),
+                Some(&embedder),
+                384,
+            )
+            .await;
+        }
+        let rows = outbox.snapshot();
+        assert_eq!(rows.len(), 1, "a failed retry must not be deleted");
+        assert_eq!(
+            rows[0].attempts, MAX_RECONCILE_ATTEMPTS,
+            "attempts must saturate at the cap"
+        );
+
+        // One more pass with an empty sink script: the exhausted row is not
+        // listed, so no upsert is attempted and the row is left for inspection.
+        reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
+        assert_eq!(outbox.snapshot()[0].attempts, MAX_RECONCILE_ATTEMPTS);
     }
 }
 
@@ -2930,6 +3135,36 @@ mod log_safety_tests {
         // Do not pin the textual rendering of structured fields: it depends on
         // the tracing-subscriber formatter version. The contract is the absence
         // of raw error text; the fixed `error_kind` fields are set at the sites.
+    }
+
+    /// I61-B: a poison row emits exactly one decision warning, carrying only
+    /// `id`, `attempts` and `error_kind` — never the vector value, a raw error
+    /// or the row payload. The row is deleted, so no later pass warns again.
+    #[test]
+    fn dead_letter_warns_once_with_fixed_vocabulary() {
+        let mut poison = pending();
+        poison.embedding[0] = f32::NAN;
+        let id = poison.id;
+
+        let logs = capture_warns(async {
+            reconcile_pending(&LeakStore::new(vec![poison]), &OkSink, None, 384).await;
+        });
+
+        assert_eq!(
+            logs.lines().count(),
+            1,
+            "a dead-lettered row must warn exactly once: {logs}"
+        );
+        assert!(logs.contains("dead-lettering"), "{logs}");
+        assert!(!logs.contains(PROBE), "raw error text leaked: {logs}");
+        assert!(!logs.contains("private payload"), "payload leaked: {logs}");
+        assert!(!logs.contains("NaN"), "a vector value leaked: {logs}");
+        assert!(
+            logs.contains(&id.to_string()),
+            "the fixed id field must be present: {logs}"
+        );
+        assert!(logs.contains("error_kind"), "{logs}");
+        assert!(logs.contains("attempts"), "{logs}");
     }
 
     #[test]
