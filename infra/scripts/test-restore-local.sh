@@ -7,7 +7,12 @@
 #     --apply（隔離先 = 一時ディレクトリ）経路を通す。
 #   - --apply の事後検証では、モックの呼び出し記録とバックアップセットの
 #     不変性を確認し、本番リソースへ到達していないことを証明する。
-#   - 本番データの復元演習はユーザー承認が必要なため対象外（--confirm を渡さない）。
+#   - config allowlist 必須ゲート（Round 66）の回帰として、非 allowlist の
+#     config-* を含むセットが --apply --confirm / --skip-configs の双方で
+#     拒否され、DB / Qdrant / サービスが触られないことを検証する。
+#   - 本番データの復元演習はユーザー承認が必要なため対象外。通常の --apply 経路
+#     では --confirm を渡さない。allowlist ゲート検証のみ --apply --confirm を使う
+#     （ゲートが停止処理より前に立ち、モックが全外部呼び出しを隔離するため安全）。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -431,6 +436,77 @@ if [ "$apply" -eq 1 ]; then
 else
   printf '%s\n' '-- --apply not requested: isolated apply path skipped (default contract) --'
 fi
+
+# --- 4. non-allowlisted config ゲート（Round 66 回帰。常時実行）-------------
+# verify_set() の allowlist 検査は stop_services() より前の必須ゲート。
+# 非 allowlist の config-* を含むセットが --apply --confirm でも --skip-configs
+# 付きでも拒否され、DB / Qdrant / サービスが一切触られないことを、
+# 一時フィクスチャとモックだけで証明する（実 /etc・DB・Qdrant は使わない）。
+printf '%s\n' '-- non-allowlisted config gate (Round 66 regression) --'
+bad_cfg="$tmp/bad-config"
+cp -R -- "$set_dir" "$bad_cfg" || exit 1
+# 値はプレースホルダー。名前（bws.env）が allowlist 外であることだけが重要。
+printf '%s\n' 'SYNTHETIC=not-a-real-secret' > "$bad_cfg/config-bws.env"
+# サイズ / SHA を manifest に記録し、整合性チェックを通らせた上で
+# allowlist ゲート単独の拒否であることを確認する。
+{
+  printf '# created_at=2026-11-19T00:00:00Z\n'
+  for name in postgres-jarvis.sql.gz qdrant-snapshot.bin \
+              config-mcp_allowlist.toml config-bws.env git-jarvis-head.tar.gz; do
+    bytes="$(wc -c < "$bad_cfg/$name" | tr -d ' ')"
+    sha="$(sha256sum "$bad_cfg/$name" | cut -d' ' -f1)"
+    printf '%s %s %s\n' "$name" "$bytes" "$sha"
+  done
+} > "$bad_cfg/manifest.txt"
+printf 'complete 2026-11-19T00:00:00Z\n' > "$bad_cfg/COMPLETE"
+
+# 外部 verifier は config 名を検査しないため、このセットを受理する。
+# したがって以降の拒否は restore-local.sh 自身の allowlist ゲートによるもの。
+check_exit "verify-backup.sh accepts bad-config fixture (gate lives in driver)" \
+  0 bash "$verifier" "$bad_cfg"
+
+# 4a. --apply --confirm（本番上書き許可付きでもゲートが先に立つ）
+rm -f -- "$tmp/logs"/*.log
+bad_cfg_code=0
+bad_cfg_out="$(run_driver --backup-set "$bad_cfg" --apply --confirm 2>&1)" || bad_cfg_code=$?
+if [ "$bad_cfg_code" -ne 0 ]; then
+  pass "bad config rejected with --apply --confirm (exit $bad_cfg_code)"
+else
+  fail_case "bad config accepted with --apply --confirm"
+fi
+if has_fragment "$bad_cfg_out" 'non-allowlisted config entry'; then
+  pass "bad config: non-allowlisted config entry reported"
+else
+  fail_case "bad config: non-allowlisted config entry not reported"
+  printf '%s\n' "$bad_cfg_out" | head -12 >&2
+fi
+if has_fragment "$bad_cfg_out" 'config-bws.env'; then
+  pass "bad config: offending entry named"
+else
+  fail_case "bad config: offending entry not named"
+fi
+assert_no_log "bad config: psql never called" "$tmp/logs/psql.log"
+assert_no_log "bad config: curl never called" "$tmp/logs/curl.log"
+assert_no_log "bad config: no service stop/start" "$tmp/logs/systemctl.log"
+
+# 4b. 同じセットを --skip-configs 付きでも呼ぶ。ゲートは依然として発火する。
+rm -f -- "$tmp/logs"/*.log
+bad_cfg_skip_code=0
+bad_cfg_skip_out="$(run_driver --backup-set "$bad_cfg" --apply --confirm --skip-configs 2>&1)" || bad_cfg_skip_code=$?
+if [ "$bad_cfg_skip_code" -ne 0 ]; then
+  pass "bad config still rejected with --skip-configs (exit $bad_cfg_skip_code)"
+else
+  fail_case "bad config accepted with --skip-configs"
+fi
+if has_fragment "$bad_cfg_skip_out" 'non-allowlisted config entry'; then
+  pass "--skip-configs: allowlist gate still fires"
+else
+  fail_case "--skip-configs: allowlist gate did not fire"
+  printf '%s\n' "$bad_cfg_skip_out" | head -12 >&2
+fi
+assert_no_log "--skip-configs bad config: psql never called" "$tmp/logs/psql.log"
+assert_no_log "--skip-configs bad config: curl never called" "$tmp/logs/curl.log"
+assert_no_log "--skip-configs bad config: no service stop/start" "$tmp/logs/systemctl.log"
 
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"
 [ "$bad" -eq 0 ]
