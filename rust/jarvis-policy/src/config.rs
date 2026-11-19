@@ -48,6 +48,12 @@ pub struct PolicyConfig {
     /// legacy warn-only behavior.
     #[serde(default)]
     pub require_kill_switch_admin_token: bool,
+    /// Opt-in I8-E guard: when true, startup fails if
+    /// `kill_switch_state_path` is unset (or blank). Without a durable state
+    /// file an activated kill switch is lost on restart and automated actions
+    /// resume. Default false keeps the legacy in-memory + warn behavior.
+    #[serde(default)]
+    pub require_kill_switch_state_path: bool,
     pub default_deny: bool,
 }
 
@@ -63,6 +69,20 @@ impl PolicyConfig {
             // would turn JARVIS_POLICY_GRPC_ADDR into the nested key `grpc.addr`.
             .merge(Env::prefixed("JARVIS_POLICY_"))
             .extract()?;
+        // I8-E fail-closed guard: enforce at load time so the real binary
+        // aborts before any service starts when a durable state path is
+        // required but missing.
+        config.validate_kill_switch_state_path()?;
+        if config
+            .kill_switch_state_path
+            .as_deref()
+            .is_none_or(|path| path.trim().is_empty())
+        {
+            tracing::warn!(
+                "kill_switch_state_path is unset; kill switch state is \
+                 in-memory only and will not survive a restart"
+            );
+        }
         Ok(config)
     }
 }
@@ -83,6 +103,7 @@ impl Default for PolicyConfig {
             approval_admin_token: None,
             require_approval_api_token: false,
             require_kill_switch_admin_token: false,
+            require_kill_switch_state_path: false,
             default_deny: true,
         }
     }
@@ -91,6 +112,31 @@ impl Default for PolicyConfig {
 impl PolicyConfig {
     pub fn kill_switch_admin_token(&self) -> &str {
         &self.kill_switch_admin_token
+    }
+
+    /// Fail-closed startup validation for the I8-E guard.
+    ///
+    /// When `require_kill_switch_state_path` is enabled, a missing or blank
+    /// state path aborts startup: without a durable state file an activated
+    /// kill switch is lost on restart and automated actions would resume.
+    /// With the guard off this is a no-op, preserving the legacy in-memory
+    /// behavior. Kept public so callers that build a `PolicyConfig`
+    /// programmatically (rather than via [`Self::load`]) can enforce the same
+    /// guard before constructing a `PolicyEngine`.
+    pub fn validate_kill_switch_state_path(&self) -> Result<()> {
+        let path_missing = self
+            .kill_switch_state_path
+            .as_deref()
+            .is_none_or(|path| path.trim().is_empty());
+        if self.require_kill_switch_state_path && path_missing {
+            anyhow::bail!(
+                "kill_switch_state_path is unset but \
+                 require_kill_switch_state_path = true; set \
+                 JARVIS_POLICY_KILL_SWITCH_STATE_PATH so an emergency stop \
+                 survives a restart"
+            );
+        }
+        Ok(())
     }
 }
 
@@ -393,5 +439,156 @@ default_deny = true
             Some("gateway-api-token")
         );
         assert_eq!(config.approval_admin_token.as_deref(), Some("admin-secret"));
+    }
+
+    /// Minimal legacy TOML shared by the I8-E state-path guard tests.
+    fn base_toml() -> String {
+        format!(
+            r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "{token}"
+approval_timeout_secs = 300
+default_deny = true
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        )
+    }
+
+    /// Legacy configs written before I8-E must keep the in-memory default:
+    /// the new guard is opt-in and `kill_switch_state_path` stays unset.
+    #[test]
+    fn state_path_guard_defaults_to_false_for_legacy_config() {
+        assert!(!PolicyConfig::default().require_kill_switch_state_path);
+        assert!(PolicyConfig::default().kill_switch_state_path.is_none());
+
+        let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
+            .extract()
+            .expect("legacy config parses");
+        assert!(!config.require_kill_switch_state_path);
+        assert!(config.kill_switch_state_path.is_none());
+        config
+            .validate_kill_switch_state_path()
+            .expect("guard off is a no-op");
+    }
+
+    #[test]
+    fn state_path_guard_can_be_enabled_in_toml() {
+        let toml = format!("{}\nrequire_kill_switch_state_path = true\n", base_toml());
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("config parses");
+        assert!(config.require_kill_switch_state_path);
+    }
+
+    /// With the guard on, a missing or blank state path must fail closed.
+    #[test]
+    fn state_path_guard_rejects_missing_path() {
+        for path in [None, Some(String::new()), Some("   ".to_string())] {
+            let config = PolicyConfig {
+                kill_switch_state_path: path,
+                require_kill_switch_state_path: true,
+                ..Default::default()
+            };
+            let error = config
+                .validate_kill_switch_state_path()
+                .expect_err("missing state path must fail closed");
+            assert!(
+                error.to_string().contains("require_kill_switch_state_path"),
+                "error names the opt-in flag"
+            );
+            assert!(
+                error
+                    .to_string()
+                    .contains("JARVIS_POLICY_KILL_SWITCH_STATE_PATH"),
+                "error names the env override"
+            );
+        }
+    }
+
+    /// The figment/serde path must preserve the guard so `load()`-style configs
+    /// with the flag on and no state path fail closed as well.
+    #[test]
+    fn toml_guard_without_path_fails_closed() {
+        let toml = format!("{}\nrequire_kill_switch_state_path = true\n", base_toml());
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("config parses");
+        assert!(
+            config.validate_kill_switch_state_path().is_err(),
+            "guard=true with no path must fail closed"
+        );
+    }
+
+    /// The guard passes when a non-blank state path is configured.
+    #[test]
+    fn state_path_guard_accepts_configured_path() {
+        let toml = format!(
+            "{}\nkill_switch_state_path = \"/var/lib/jarvis/kill-switch.json\"\nrequire_kill_switch_state_path = true\n",
+            base_toml()
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("config parses");
+        assert_eq!(
+            config.kill_switch_state_path.as_deref(),
+            Some("/var/lib/jarvis/kill-switch.json")
+        );
+        config
+            .validate_kill_switch_state_path()
+            .expect("configured state path satisfies the guard");
+    }
+
+    /// `JARVIS_POLICY_REQUIRE_KILL_SWITCH_STATE_PATH` maps to the guard field
+    /// via `Env::prefixed("JARVIS_POLICY_")`. No OS env var is mutated (edition
+    /// 2024 makes `set_var` unsafe and racy); the same provider chain is driven
+    /// by a `Serialized` value merged last.
+    #[test]
+    fn env_key_maps_to_state_path_guard_flag() {
+        const PREFIX: &str = "JARVIS_POLICY_";
+        const ENV_KEY: &str = "JARVIS_POLICY_REQUIRE_KILL_SWITCH_STATE_PATH";
+
+        let field = ENV_KEY
+            .strip_prefix(PREFIX)
+            .expect("key uses the policy env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "require_kill_switch_state_path");
+
+        let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
+            .merge(Env::prefixed(PREFIX).only(&[field.as_str()]))
+            .merge(Serialized::default(field.as_str(), true))
+            .extract()
+            .expect("env-style key merges into the guard field");
+        assert!(config.require_kill_switch_state_path);
+    }
+
+    /// `JARVIS_POLICY_KILL_SWITCH_STATE_PATH` maps to the path field through
+    /// the same provider chain.
+    #[test]
+    fn env_key_maps_to_state_path_field() {
+        const PREFIX: &str = "JARVIS_POLICY_";
+        const ENV_KEY: &str = "JARVIS_POLICY_KILL_SWITCH_STATE_PATH";
+
+        let field = ENV_KEY
+            .strip_prefix(PREFIX)
+            .expect("key uses the policy env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "kill_switch_state_path");
+
+        let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
+            .merge(Env::prefixed(PREFIX).only(&[field.as_str()]))
+            .merge(Serialized::default(
+                field.as_str(),
+                "/var/lib/jarvis/kill-switch.json",
+            ))
+            .extract()
+            .expect("env-style key merges into the state path field");
+        assert_eq!(
+            config.kill_switch_state_path.as_deref(),
+            Some("/var/lib/jarvis/kill-switch.json")
+        );
     }
 }
