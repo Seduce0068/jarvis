@@ -49,7 +49,7 @@ prost = { workspace = true }
 tonic-prost = { workspace = true }
 
 # Core types
-jarvis-core = { path = "../jarvis-core" }
+jarvis-core = { path = "../jarvis-core", features = ["http"] }
 
 # HTTP
 axum = { workspace = true }
