@@ -2,6 +2,7 @@
 
 use crate::ContextBuilder;
 use crate::config::{CONTEXT_TOKEN_HEADER, token_matches};
+use crate::error::ContextError;
 use chrono::{DateTime, Utc};
 use jarvis_core::{EventSource, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
 use tonic::{Request, Response, Status};
@@ -66,6 +67,47 @@ fn authorize<T>(request: &Request<T>, expected: Option<&str>) -> Result<(), Stat
             "missing or invalid context admin token",
         ))
     }
+}
+
+/// The only message a gRPC client ever receives for an internal failure.
+///
+/// Mirrors the HTTP transport's bare-500 contract (`http::log_internal_error`):
+/// the caller learns that the operation failed, never why.
+const INTERNAL_ERROR_MESSAGE: &str = "internal context error";
+
+/// Reduce an internal error to a fixed-vocabulary category safe for logging.
+///
+/// `ContextError`'s `Display` can embed database URLs and SQL, Qdrant endpoints
+/// and responses, PII payloads, and config paths. Only the variant token is
+/// logged; the error text is neither echoed to the client nor written to any
+/// log record.
+fn error_kind(err: &anyhow::Error) -> &'static str {
+    match err.downcast_ref::<ContextError>() {
+        Some(ContextError::Database(_)) => "database",
+        Some(ContextError::Qdrant(_)) => "qdrant",
+        Some(ContextError::Pii(_)) => "pii",
+        Some(ContextError::Config(_)) => "config",
+        Some(ContextError::Grpc(_)) => "grpc",
+        Some(ContextError::Serialization(_)) => "serialization",
+        None => "other",
+    }
+}
+
+/// Preserve an internal failure in the server log using fixed vocabulary only,
+/// then return a bare `Status::internal` with no error detail attached.
+///
+/// Input errors keep their own classification at the call sites (e.g.
+/// `InvalidArgument` for malformed JSON); this helper is only for failures
+/// originating inside the store or context assembly.
+fn internal_status<T>(result: anyhow::Result<T>, op: &'static str) -> Result<T, Status> {
+    result.map_err(|err| {
+        tracing::error!(
+            operation = op,
+            error_kind = error_kind(&err),
+            "internal context error"
+        );
+        Status::internal(INTERNAL_ERROR_MESSAGE)
+    })
 }
 
 /// Build the memory entry and its response without touching the store.
@@ -160,11 +202,7 @@ impl ContextService for GrpcContextService {
             timestamp,
             correlation_id: req.correlation_id,
         };
-        let context = self
-            .builder
-            .build_context(&event)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let context = internal_status(self.builder.build_context(&event).await, "build_context")?;
         Ok(Response::new(BuildContextResponse {
             context: context.to_string(),
         }))
@@ -177,10 +215,7 @@ impl ContextService for GrpcContextService {
         // Auth stays first so unauthenticated callers cannot reach the store.
         authorize(&request, self.admin_token.as_deref())?;
         let (memory, response) = prepare_store_memory(request.into_inner());
-        self.builder
-            .store_memory(memory)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        internal_status(self.builder.store_memory(memory).await, "store_memory")?;
         Ok(Response::new(response))
     }
 
@@ -190,11 +225,12 @@ impl ContextService for GrpcContextService {
     ) -> Result<Response<SearchMemoryResponse>, Status> {
         authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
-        let memories = self
-            .builder
-            .search_memory(&req.query, req.limit as usize)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let memories = internal_status(
+            self.builder
+                .search_memory(&req.query, req.limit as usize)
+                .await,
+            "search_memory",
+        )?;
         Ok(Response::new(SearchMemoryResponse {
             memories: memories.into_iter().map(to_proto_memory_entry).collect(),
         }))
@@ -213,9 +249,9 @@ pub async fn serve(builder: ContextBuilder, addr: std::net::SocketAddr) -> anyho
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildContextRequest, CONTEXT_TOKEN_HEADER, DateTime, EventSource, Request,
-        StoreMemoryRequest, Utc, authorize, event_metadata_from_request, prepare_store_memory,
-        to_proto_memory_entry,
+        BuildContextRequest, CONTEXT_TOKEN_HEADER, ContextError, DateTime, EventSource,
+        INTERNAL_ERROR_MESSAGE, Request, StoreMemoryRequest, Utc, authorize,
+        event_metadata_from_request, internal_status, prepare_store_memory, to_proto_memory_entry,
     };
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -423,5 +459,55 @@ mod tests {
 
         assert_eq!(source, EventSource::Manual);
         assert!(timestamp >= before && timestamp <= after);
+    }
+
+    /// Regression: an internal failure must never echo its `Display` text —
+    /// which can carry DB URLs/SQL, Qdrant endpoints/responses, PII bodies,
+    /// config paths or decision bodies — into the gRPC status or the logs.
+    #[test]
+    fn internal_status_never_leaks_error_details() {
+        const SENSITIVE: &str = "postgres://svc:pw@db.local:5432/jarvis SELECT secret FROM decisions /etc/jarvis/config.toml http://qdrant.local:6333/decision-body";
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let status = tracing::subscriber::with_default(subscriber, || {
+            let err: anyhow::Error = ContextError::Qdrant(SENSITIVE.to_owned()).into();
+            internal_status::<()>(Err(err), "build_context").expect_err("internal failure")
+        });
+
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(
+            status.message(),
+            INTERNAL_ERROR_MESSAGE,
+            "only the fixed message may cross the gRPC boundary"
+        );
+        assert!(!status.message().contains("postgres://"));
+        assert!(!status.message().contains("SELECT"));
+        assert!(!status.message().contains("/etc/jarvis"));
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        for token in [
+            "postgres://",
+            "SELECT",
+            "/etc/jarvis",
+            "http://qdrant",
+            "decision-body",
+        ] {
+            assert!(
+                !logs.contains(token),
+                "sensitive detail leaked to logs: {token}"
+            );
+        }
+        assert!(logs.contains("internal context error"));
+        // Do not assert on the rendering of structured fields: their textual
+        // form depends on the tracing-subscriber formatter version. The contract
+        // here is that the raw error text never reaches either the status or
+        // the logs; the fixed category fields are set at the call site.
     }
 }
