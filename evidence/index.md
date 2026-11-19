@@ -14,9 +14,9 @@ JSON はテキスト形式のため、リンク先として記載しています
   — [test-mcp-gateway.md](../specs/test-mcp-gateway.md) の実測結果。
   126 passed / 0 failed / 1 skipped。
 - [context の実行ログ][run-context]
-  — [test-context.md](../specs/test-context.md) の実測結果。162 passed / 0 failed。
+  — [test-context.md](../specs/test-context.md) の実測結果。166 passed / 0 failed。
 - [backup の実行ログ][run-backup]
-  — [test-backup.md](../specs/test-backup.md) の実測結果。29 passed / 0 failed。
+  — [test-backup.md](../specs/test-backup.md) の実測結果。31 passed / 0 failed。
 - [event の実行ログ][run-event]
   — [test-event.md](../specs/test-event.md) の実測結果。77 passed / 0 failed。
 - [ui の実行ログ][run-ui]
