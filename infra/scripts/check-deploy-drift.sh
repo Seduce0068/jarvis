@@ -12,7 +12,74 @@ deployed_pii="${JARVIS_DRIFT_PII:-/etc/jarvis/pii_patterns.toml}"
 deployed_env="${JARVIS_DRIFT_ENV:-/etc/jarvis/jarvis-mcp-gw.env}"
 drift=0; danger=0
 say() { printf '%-32s %s\n' "$1" "$2"; }
+# I54-B: --env-only は mcp-gw env の形式検査のみを行い、binary/unit/policy/
+# runtime E2E 等の他検査をスキップする。build-selfhost.sh が env 配置直後に
+# 即時検証するためのモード（サービス未起動でも env 自体の正当性は検証できる）。
+# 既定（引数なし）の挙動は不変。
+env_only=0
+for arg in "$@"; do
+  case "$arg" in
+    --env-only) env_only=1 ;;
+  esac
+done
+
+# I54-B: EnvironmentFile は同一キー「最後の割り当てが勝ち」セマンティクス。
+# any-match な grep は先頭に安全な絶対パス・末尾に相対パスを置いたすり抜けを
+# 許し、実効値が相対パスになって sandbox escape 境界が消える。よって同一キーの
+# 重複自体を DANGER とし、最後の割り当て行のみを抽出して形式検査する。
+# 絶対パス・/ 単独でない・.. 成分なしを必須化。値は一切出力しない（secret を
+# 含みうるためエラーコードのみ）。egress の空値は正当（deny-all）なのでキーの
+# 有無のみを検査する。
+check_mcp_env() {
+  local base_count base_last base_val
+  base_count="$(grep -Ec '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env" 2>/dev/null || true)"
+  base_last="$(grep -E '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env" 2>/dev/null | tail -n1 || true)"
+  if [ ! -r "$deployed_env" ]; then
+    say "mcp-gw env" "DANGER: E_ENV_UNREADABLE (code only)"
+    danger=1
+  elif [ "${base_count:-0}" -eq 0 ]; then
+    say "mcp-gw env" "DANGER: E_ENV_MISSING_BASE_DIR (code only)"
+    danger=1
+  elif [ "${base_count:-0}" -gt 1 ]; then
+    say "mcp-gw env" "DANGER: E_ENV_DUP_BASE_DIR (code only)"
+    danger=1
+  else
+    # 最後の割り当て行のみを検査する（行全体・値は出力しない）。
+    base_val="${base_last#*=}"
+    base_val="${base_val#"${base_val%%[![:space:]]*}"}"
+    base_val="${base_val%"${base_val##*[![:space:]]}"}"
+    case "$base_val" in
+      \"*\") base_val="${base_val#\"}"; base_val="${base_val%\"}" ;;
+      \'*\') base_val="${base_val#\'}"; base_val="${base_val%\'}" ;;
+    esac
+    if [[ "$base_val" != /* ]]; then
+      say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; not absolute)"
+      danger=1
+    elif [ "$base_val" = "/" ]; then
+      say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; root)"
+      danger=1
+    elif [[ "/${base_val}/" == */../* ]]; then
+      say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; dotdot)"
+      danger=1
+    elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$deployed_env"; then
+      say "mcp-gw env" "DANGER: E_ENV_MISSING_EGRESS_ALLOWLIST (code only)"
+      danger=1
+    else
+      say "mcp-gw env" "OK (last BASE_DIR absolute, non-root, no dotdot; egress key present)"
+    fi
+  fi
+}
+
 echo "== deploy drift =="
+if [ "$env_only" -eq 1 ]; then
+  check_mcp_env
+  if [ "$danger" -eq 1 ]; then
+    echo "== RESULT: DANGER (env-only) =="
+    exit 2
+  fi
+  echo "== RESULT: OK (env-only) =="
+  exit 0
+fi
 # 1) binary
 if [ -x /opt/jarvis/bin/jarvis-mcp-gw ] && [ -x "$repo/rust/target/release/jarvis-mcp-gw" ]; then
   a=$(sha256sum /opt/jarvis/bin/jarvis-mcp-gw | cut -d' ' -f1)
@@ -99,32 +166,12 @@ elif grep -Eq '^[[:space:]]*Environment=.*[$][{]' "$unit_sys"; then
 else
   say "systemd env expansion" "OK (no unexpanded variable in Environment=)"
 fi
-# 5c) I50-A: host override env の存在と必須キーを fail-closed で検証する。
-# これが欠けると unit のリテラル既定値（開発用 BASE_DIR と egress=example.com）
-# が実効になり、filesystem.* 全失敗＋「deny-all のつもりが example.com 許可」
-# の fail-open が起きる。値は一切出力せず、エラーコードのみを出す（secret を含む
-# 可能性があるため）。コメント行（先頭 #）はキー存在とみなさない。
-# I52-B: BASE_DIR は filesystem.* / git.* のパスエスケープ境界であり、非空かつ
-# 絶対パスでなければならない。空値・相対パスは境界が消えるためキー存在チェック
-# とは別に拒否する（実在チェックは root が読めないディレクトリを誤判定しうる
-# ため、ここでは先頭 / の形式までを検査する）。
-# egress の空値は正当（genuine deny-all）なのでキーの有無のみを検査する。
-# 値は一切出力せず、エラーコードのみを出す。
-if [ ! -r "$deployed_env" ]; then
-  say "mcp-gw env" "DANGER: E_ENV_UNREADABLE (code only)"
-  danger=1
-elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env"; then
-  say "mcp-gw env" "DANGER: E_ENV_MISSING_BASE_DIR (code only)"
-  danger=1
-elif ! grep -Eq "^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=[[:space:]]*[\"']?/" "$deployed_env"; then
-  say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; empty or relative)"
-  danger=1
-elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$deployed_env"; then
-  say "mcp-gw env" "DANGER: E_ENV_MISSING_EGRESS_ALLOWLIST (code only)"
-  danger=1
-else
-  say "mcp-gw env" "OK (present, required keys; BASE_DIR absolute)"
-fi
+# 5c) I50-A / I52-B / I54-B: host override env の存在と必須キーを fail-closed で
+# 検証する。これが欠けると unit のリテラル既定値（開発用 BASE_DIR と
+# egress=example.com）が実効になり、filesystem.* 全失敗＋「deny-all のつもりが
+# example.com 許可」の fail-open が起きる。I54-B の最終割り当て検査は上記
+# check_mcp_env に集約し、通常経路と --env-only 経路の両方から呼ぶ。
+check_mcp_env
 # 6) 実行時E2E: systemd 配下の実サービスに読み取り系 tools/call を行う。
 #    ProtectHome の取り違えのように「設定一致でも実行不能」な乖離を検出する。
 runtime_check() {

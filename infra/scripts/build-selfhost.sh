@@ -188,6 +188,25 @@ STAGE_DIR="$(mktemp -d)"
 # the flag is only set when *we* applied the mask (never unmask an admin mask).
 cleanup_selfhost() {
   rm -rf "${STAGE_DIR}"
+  # I54-B: env 配置セクションに入った後、原子的配置・即時検証が完了する前に失敗
+  # した場合は退避 .bak を元位置へ復元し、unit のリテラル既定
+  # （egress=example.com）が実効化する窓を閉じる。成功時（mcp_gw_env_done=1）は
+  # 何もしない。退避の mv 自体が失敗した場合は元ファイルがまだ元位置にあるため
+  # 削除せず、退避に成功した場合のみ .bak から復元する（fail-safe）。
+  if [[ "${mcp_gw_env_entered:-0}" -eq 1 && "${mcp_gw_env_done:-0}" -eq 0 ]]; then
+    if [[ -n "${mcp_gw_env_tmp:-}" && -e "${mcp_gw_env_tmp}" ]]; then
+      sudo rm -f "${mcp_gw_env_tmp}" 2>/dev/null || true
+    fi
+    if [[ "${mcp_gw_env_backup_made:-0}" -eq 1 ]]; then
+      if [[ -n "${mcp_gw_env_backup:-}" && -f "${mcp_gw_env_backup}" ]]; then
+        sudo install -o root -g root -m 0600 "${mcp_gw_env_backup}" "${MCP_GW_ENV_DST}" 2>/dev/null || true
+      fi
+      # 退避设置有無を示すフラグは立ったが .bak が無い場合は元位置を触らない。
+    else
+      # 元ファイルが無かった（退避なし）場合のみ、途中まで配置した先を削除する。
+      sudo rm -f "${MCP_GW_ENV_DST}" 2>/dev/null || true
+    fi
+  fi
   if [[ "${mig_unit_masked:-0}" -eq 1 ]]; then
     sudo systemctl unmask "${MIGRATIONS_UNIT:-jarvis-migrations.service}" >/dev/null 2>&1 || true
     # R4-D: remove our marker together with the unmask so a clean exit is not
@@ -535,21 +554,53 @@ if [[ -e "${OTEL_DST}" || -L "${OTEL_DST}" ]]; then
 fi
 sudo install -o root -g root -m 0644 "${OTEL_SRC}" "${OTEL_DST}"
 
-# I52-B: jarvis-mcp-gw.service は EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env を
-# optional で読む。この配布経路が無いと unit のリテラル既定値
+# I52-B / I54-B: jarvis-mcp-gw.service は EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env
+# を optional で読む。この配布経路が無いと unit のリテラル既定値
 # （egress=example.com / 開発用 BASE_DIR）が実効化し、deny-all のつもりが
-# example.com 許可になる fail-open を起こす。repo テンプレートを root:root
-# 0600 で配置する（secret を含みうるため 0644 にしない）。既存ファイルは
-# otelcol と同じく .bak-<ts> へ退避してから配置し、配置順序・エラー処理も
-# 既存ブロックに合わせる（set -e により install 失敗はそのまま中止）。
+# example.com 許可になる fail-open を起こす。旧コードの mv(退避) -> install(配置) は
+# 非アトミックで、mv 成功後に install が失敗すると set -e で中止されるだけで env が
+# 欠落していた。I54-B では一時パスへ root:root 0600 で install してから同一ディレクトリ
+# の mv -f で原子的に置換し、失敗時は EXIT trap が .bak を元位置へ復元する。退避
+# ファイルも元パーミッション（例 0644）を継承しないよう明示 0600 にする。配置直後に
+# は drift 検査（--env-only）を即時実行し、DANGER なら導入失敗として復元させる。
 MCP_GW_ENV_SRC="${REPO_DIR}/infra/config/mcp_gateway.env"
 MCP_GW_ENV_DST="/etc/jarvis/jarvis-mcp-gw.env"
+# I54-B: 以降の失敗を EXIT trap が拾えるよう、退避 mv の前に entered を立てる。
+mcp_gw_env_entered=1
+mcp_gw_env_done=0
+mcp_gw_env_backup=""
+mcp_gw_env_backup_made=0
+mcp_gw_env_tmp=""
 if [[ -e "${MCP_GW_ENV_DST}" || -L "${MCP_GW_ENV_DST}" ]]; then
   mcp_gw_env_backup="${MCP_GW_ENV_DST}.bak-$(date +%Y%m%d%H%M%S)"
   sudo mv "${MCP_GW_ENV_DST}" "${mcp_gw_env_backup}"
+  # I54-B: mv は元パーミッションを継承するため明示的に 0600 へ。
+  sudo chmod 0600 "${mcp_gw_env_backup}"
+  mcp_gw_env_backup_made=1
   echo "backed up existing mcp-gw env to ${mcp_gw_env_backup}"
 fi
-sudo install -o root -g root -m 0600 "${MCP_GW_ENV_SRC}" "${MCP_GW_ENV_DST}"
+# 同一ディレクトリの一時ファイルへ staged してから mv -f で原子的に置換する。
+mcp_gw_env_tmp="$(sudo mktemp "${MCP_GW_ENV_DST}.tmp.XXXXXX")" || {
+  echo "failed to create temp file for mcp-gw env" >&2
+  exit 1
+}
+if ! sudo install -o root -g root -m 0600 "${MCP_GW_ENV_SRC}" "${mcp_gw_env_tmp}"; then
+  echo "failed to stage mcp-gw env to temp file" >&2
+  exit 1
+fi
+if ! sudo mv -f "${mcp_gw_env_tmp}" "${MCP_GW_ENV_DST}"; then
+  echo "failed to atomically install mcp-gw env" >&2
+  exit 1
+fi
+mcp_gw_env_tmp=""
+# I54-B: 配置直後の即時 drift 検査。--env-only でサービス起動状態に依存せず
+# env 自体（最終割り当ての BASE_DIR / egress キー）を検証する。DANGER なら
+# 導入失敗として EXIT trap に .bak の復元を任せる。
+if ! JARVIS_DRIFT_ENV="${MCP_GW_ENV_DST}" bash "${REPO_DIR}/infra/scripts/check-deploy-drift.sh" --env-only; then
+  echo "post-install drift check(DANGER) for mcp-gw env; rolling back" >&2
+  exit 1
+fi
+mcp_gw_env_done=1
 
 # R3-AU3: policy / mcp-gw / event / context は認可境界を担う正当なサービス。
 # 各 unit テンプレートが宣言する User=/Group=（専用ユーザー）を正とし、単一の

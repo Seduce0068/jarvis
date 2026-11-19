@@ -164,10 +164,31 @@ systemd-analyze verify "$repo_unit" >/dev/null 2>&1 || die "unit ファイルの
 [ -f "$repo_env" ] || die "env テンプレートがありません: $repo_env"
 # 必須キーが無い/不正なテンプレートを配置すると事後 check-deploy-drift.sh が
 # 必ず DANGER になりロールバックするため、配置前に fail-closed で拒否する。
-# I52-B: BASE_DIR はパスエスケープ境界。空値や相対パスはキー欠落と同じく境界が
-# 消えるため、非空かつ絶対パス（先頭 /）を必須とする。
-grep -Eq "^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=[[:space:]]*[\"']?/" "$repo_env" \
-  || die "env テンプレートの JARVIS_MCP_GW_BASE_DIR が空または絶対パスではありません: $repo_env"
+# I52-B / I54-B: BASE_DIR はパスエスケープ境界。EnvironmentFile は同一キーの
+# 「最後の割り当てが勝ち」なので、any-match な grep は先頭に安全値・末尾に相対
+# パスを置いたすり抜けを許す。check-deploy-drift.sh と同じロジック（重複拒否 +
+# 最後の割り当て行のみ検査 + 絶対パス/非ルート/.. なし）を適用する。値は出力しない。
+repo_base_count="$(grep -Ec '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$repo_env" 2>/dev/null || true)"
+repo_base_last="$(grep -E '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$repo_env" 2>/dev/null | tail -n1 || true)"
+[ "${repo_base_count:-0}" -ge 1 ] \
+  || die "env テンプレートに JARVIS_MCP_GW_BASE_DIR がありません: $repo_env"
+[ "${repo_base_count:-0}" -eq 1 ] \
+  || die "env テンプレートの JARVIS_MCP_GW_BASE_DIR が重複しています（最後の割り当てが実効値）: $repo_env"
+# 最後の割り当て行から値を取り出し、前後の空白と引用符を除去して形式検査する。
+repo_base_val="${repo_base_last#*=}"
+repo_base_val="${repo_base_val#"${repo_base_val%%[![:space:]]*}"}"
+repo_base_val="${repo_base_val%"${repo_base_val##*[![:space:]]}"}"
+case "$repo_base_val" in
+  \"*\") repo_base_val="${repo_base_val#\"}"; repo_base_val="${repo_base_val%\"}" ;;
+  \'*\') repo_base_val="${repo_base_val#\'}"; repo_base_val="${repo_base_val%\'}" ;;
+esac
+[[ "$repo_base_val" == /* ]] \
+  || die "env テンプレートの JARVIS_MCP_GW_BASE_DIR が絶対パスではありません: $repo_env"
+[ "$repo_base_val" != "/" ] \
+  || die "env テンプレートの JARVIS_MCP_GW_BASE_DIR が / 単独です: $repo_env"
+case "/$repo_base_val/" in
+  */../*) die "env テンプレートの JARVIS_MCP_GW_BASE_DIR に .. 成分があります: $repo_env" ;;
+esac
 # egress allowlist の空値は正当（genuine deny-all）。キーの有無のみ検査する。
 grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$repo_env" \
   || die "env テンプレートに JARVIS_MCP_GW_EGRESS_ALLOWLIST がありません: $repo_env"
