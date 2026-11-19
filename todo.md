@@ -573,7 +573,7 @@ generated:
   `rust/jarvis-policy/src/kill_switch.rs:61-65` / R5-VU1 / 重大度 high / confirmed。
 - [x] **現行ローカルバックアップが Git リポジトリを含まない**（2026-11-19 対応済み: `backup-local.sh` が既定で `git archive HEAD` を生成し manifest に name/size/sha256 を記録、`--skip-git` で opt-out。tracked HEAD のみで `.env` / `*.key` / `.git/config` は非包含を fail-closed 検証。隔離ディレクトリでの実バックアップ成功。**ただし timer unit が `--repo-dir` を渡さないため実機 timer 実行時は WARN スキップ — 下記「補足発見」を参照**） — 根拠
   `infra/README.md:274-279` / R5-VU3 / 重大度 high / confirmed。
-- [ ] **`web.fetch` の宛先ドメイン制限（egress allowlist）が未実装** — 根拠
+- [x] **`web.fetch` の宛先ドメイン制限（egress allowlist）が未実装**（2026-11-19 対応済み: `JARVIS_MCP_GW_EGRESS_ALLOWLIST`（カンマ区切り、完全一致と `*.` サフィックス）を追加。未設定時は無制限で互換、設定時は IP リテラルを拒否し初期 URL と全 redirect hop に適用。新規3テスト追加、mcp-gw 68 tests pass） — 根拠
   `docs/integration/tool-matrix.md:162` / R1-ST4 / 重大度 high / confirmed。
 - [x] **`review-run.sh` のランナー契約が OpenCode CLI 形で固定され ADR-0002 と矛盾** — 2026-11-19 対応済み: `JARVIS_REVIEW_RUNNER` と `build_runner_args()` でランナーごとの argv を吸収（dsh: `--profile <name> --json <prompt>`、opencode 他は従来どおり）。既存4契約テスト pass、スタブで dsh 分岐を確認 / `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed
   `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed。
@@ -607,9 +607,9 @@ generated:
 - [x] WS 受信エラーに生メッセージ本文を埋め込みログへ流出 — 2026-11-19 対応済み: `decode_ha_message()` ヘルパでエラーを再構成し source/bytes/エラー分類のみを記録。回帰テストで本文・トークン様文字列の非漏洩を検証（テスト文字列は secret scanner に VALUE-LIKE と誤検出されない値へ調整） / `event/src/sources.rs:248-249` / R2-ER2 / likely
 - [ ] `restore.rs` の `restart_services` が systemctl start のみで再起動していない — `restore.rs:408` / R2-FG2 / confirmed
 - [x] `deploy.rs --dry-run` がヘルスチェック未実行なのに healthy と報告 — 2026-11-19 対応済み: dry-run では curl を一切呼ばず `DRY RUN: health check skipped` のみを出力。実機 dry-run で当該ログを確認し `healthy` の出現0回を検証 / `deploy.rs:164` / R2-FG2 / confirmed
-- [ ] Cedar 認可コンテキストが生のツール引数で呼び出し元が ABAC 属性を捏造可能 — `mcp-gw/src/lib.rs:86-89` / R3-AU1 / likely
+- [x] Cedar 認可コンテキストが生のツール引数で呼び出し元が ABAC 属性を捏造可能 — 2026-11-19 対応済み: `policy_context()` で `{tool, principal, resource, requires_approval}` のみをサーバ生成し `is_allowed` に渡す。同梱 Cedar ポリシー/スキーマは context 属性を参照しないため条件は不変。回帰テスト追加 / `mcp-gw/src/lib.rs:86-89` / R3-AU1 / likely
 - [x] AllowList の `add_tool` / `remove_tool` が無認証・無永続化の公開ミューテーション API — 2026-11-19 対応済み: 呼び出し箇所がテスト以外に無いため `#[cfg(test)] pub fn` へ絞り本番バイナリから公開面を除去。同期検証テスト1件追加 / `allowlist.rs:95-106` / R3-AU1 / confirmed
-- [ ] Qdrant の不正 point id が nil UUID にフォールバック — `builder.rs:305` / R1-ST2 / likely
+- [x] Qdrant の不正 point id が nil UUID にフォールバック — 2026-11-19 対応済み: `parse_point_id()` / `entries_from_raw_points()` を新設し、欠落・数値・不正文字列は warn 付きでスキップ。nil/random UUID の代用を除去。回帰テスト3件追加、context 38 tests pass / `builder.rs:305` / R1-ST2 / likely
 - [ ] OTLP エンドポイント書式エラーが起動を失敗させテレメトリが致命依存 — `policy/src/main.rs:22-25` / R4-DR1 / likely
 - [ ] `try_join!` による二重リスナ起動で片方のエラーがプロセス全体を終了 — `policy/src/main.rs:59` / R4-DR1 / likely
 - [ ] ワークスペースに MSRV と lint 宣言がなく CI とローカルのゲートが不一致 — `rust/Cargo.toml:11-16` / R4-DP1 / confirmed
@@ -721,3 +721,14 @@ generated:
   `max_bytes` を `filesystem.read` から削除し、`web.fetch` は実装の
   clamp 範囲 [1024, 1048576] へ合わせた。子のテストが `"required"` キー
   欠落でパニックしたため親が `get()` ベースへ修正、対象テスト pass。
+
+## 完了記録（2026-11-19 Round 7 / R4 対応）
+
+- [x] **証跡の skipped 数を検証** — `check-evidence.sh` に `SKIPPED_TESTS` を追加。
+  ただし実証跡1件が Docker 依存 `#[ignore]` の `skipped=1` だったため、
+  親が「notes に `ignored` の明記がある場合のみ許可」へ調整（数値の書き換えは
+  証跡改ざんになるため却下）。`make check-evidence` ok=6 errors=0、
+  legacy guards 22 tests pass。
+- [x] **bootstrap の `config/mobile.env` も保護** — `write_private_if_absent`
+  へ統一し既存ファイルは警告のみでスキップ。無条件上書きの `write_private`
+  定義を削除。`rustfmt --check` / `--help` pass。
