@@ -99,15 +99,18 @@ async fn require_admin_token(
         .headers()
         .get(ADMIN_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok());
-    // Constant-time-ish comparison, mirroring the gRPC and approval-token
-    // gates: check the length first, then XOR-fold every byte so a mismatch
-    // does not short-circuit on the first differing byte.
+    // Length-inclusive constant-time comparison, mirroring the gRPC gate and
+    // kill_switch::constant_time_eq: the length difference is folded into the
+    // accumulator and the loop always runs `max` bytes, so neither a content
+    // nor a length mismatch short-circuits.
     let authorized = provided.is_some_and(|p| {
-        p.len() == expected.len()
-            && p.bytes()
-                .zip(expected.bytes())
-                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                == 0
+        let a = p.as_bytes();
+        let b = expected.as_bytes();
+        let mut diff = a.len() ^ b.len();
+        for i in 0..a.len().max(b.len()) {
+            diff |= (a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0)) as usize;
+        }
+        diff == 0
     });
     if !authorized {
         return Err(axum::http::StatusCode::UNAUTHORIZED);

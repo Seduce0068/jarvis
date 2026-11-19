@@ -51,14 +51,35 @@ pub struct GrpcMcpGatewayService {
     admin_token: Option<String>,
 }
 
-/// Constant-time-ish comparison, mirroring the HTTP approval-token gate.
+/// Constant-time token comparison that folds a length difference into the
+/// accumulator instead of short-circuiting on it.
+///
+/// Mirrors `jarvis_policy::kill_switch::constant_time_eq`: the loop covers
+/// `max(a.len(), b.len())` bytes and pads the shorter input with zero bytes,
+/// so neither a content mismatch nor a length mismatch exits early. Seeding
+/// `diff` with `a.len() ^ b.len()` makes a length difference contribute even
+/// though the XOR loop only runs `max` iterations. No `unsafe` code and no
+/// extra dependency are involved.
+///
+/// A missing presented token is rejected without comparison. The unconfigured
+/// token and fail-closed decisions live in [`authorize_grpc`] and are
+/// unchanged; neither token value is ever logged.
 fn token_matches(provided: Option<&str>, expected: &str) -> bool {
     provided.is_some_and(|p| {
-        p.len() == expected.len()
-            && p.bytes()
-                .zip(expected.bytes())
-                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                == 0
+        let a = p.as_bytes();
+        let b = expected.as_bytes();
+        let max = a.len().max(b.len());
+        let mut diff = a.len() ^ b.len();
+        for (x, y) in a
+            .iter()
+            .map(Some)
+            .chain(std::iter::repeat(None))
+            .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
+            .take(max)
+        {
+            diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
+        }
+        diff == 0
     })
 }
 
@@ -209,6 +230,50 @@ requires_approval = false
             let status = authorize_grpc(&request, Some("correct-token"), false)
                 .expect_err("invalid or missing token must be rejected");
             assert_eq!(status.code(), Code::Unauthenticated);
+        }
+    }
+
+    /// `token_matches` must fold a length difference into the accumulator
+    /// instead of short-circuiting, matching `kill_switch::constant_time_eq`.
+    /// A shorter, a longer, and a same-length wrong token must all be
+    /// rejected, while exact matches (including empty/empty) still pass.
+    #[test]
+    fn token_matches_rejects_length_and_content_mismatches() {
+        let expected = "correct-token";
+
+        assert!(token_matches(Some(expected), expected));
+        assert!(token_matches(Some(""), ""));
+
+        // Same-length content mismatch.
+        assert!(!token_matches(Some("Correct-token"), expected));
+
+        // Length mismatches in both directions; these were rejected before as
+        // well, but via a timing-observable `p.len() == expected.len()` exit.
+        assert!(!token_matches(Some("correct"), expected));
+        assert!(!token_matches(Some("correct-token-extra"), expected));
+
+        // A prefix-only match must not be accepted by the padded XOR loop.
+        assert!(!token_matches(Some("correct-to"), expected));
+
+        // Missing token stays rejected (unchanged fail-closed contract).
+        assert!(!token_matches(None, expected));
+    }
+
+    /// The call site rejects a length-mismatched header token with the same
+    /// status as a same-length wrong one, and never echoes token values.
+    #[test]
+    fn authorize_grpc_rejects_length_mismatched_header_token() {
+        for provided in [
+            Some("correct"),
+            Some("correct-token-extra"),
+            Some("Correct-token"),
+        ] {
+            let request = request_with_token((), provided);
+            let status = authorize_grpc(&request, Some("correct-token"), false)
+                .expect_err("length/content mismatch must be rejected");
+            assert_eq!(status.code(), Code::Unauthenticated);
+            assert!(!status.message().contains("correct-token"));
+            assert!(!status.message().contains(provided.unwrap_or("")));
         }
     }
 
