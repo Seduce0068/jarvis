@@ -281,7 +281,10 @@ pub const DEFAULT_MAX_PENDING: usize = 100;
 /// allowed for an in-flight decision notification or the parallel durable
 /// re-read to resolve after the deadline elapsed. Retains the legacy 100 ms
 /// value so existing timing assumptions stay unchanged; exposed as a constant
-/// so the budget is visible and assertable.
+/// so the budget is visible and assertable. It is also the hard cap for the
+/// final bounded `reread.await` (I42-A (b)): once the grace budget is spent,
+/// a still-pending re-read gets at most one more `RECOVERY_GRACE` before the
+/// waiter falls back to `Expired`, so DB RTT can never make the wait unbounded.
 const RECOVERY_GRACE: Duration = Duration::from_millis(100);
 
 /// Upper bound on yields to an in-flight `decide` commit before the timeout
@@ -572,60 +575,114 @@ impl ApprovalStore {
                                         Grace,
                                     }
 
+                                    // Resolve a durable re-read into the
+                                    // `(decision, authoritative decided_at)` pair.
+                                    // `Ok(Some(_))` is the only authoritative
+                                    // outcome; `Ok(None)`/`Err` stay fail-closed.
+                                    // Fixed vocabulary only: never log an id,
+                                    // SQL text or decision body here.
+                                    fn resolve_durable(
+                                        id: Uuid,
+                                        result: Result<Option<LoadedDecision>, ApprovalError>,
+                                    ) -> Option<(ApprovalDecision, Option<DateTime<Utc>>)>
+                                    {
+                                        match result {
+                                            Ok(Some(loaded)) => {
+                                                Some((loaded.decision, Some(loaded.decided_at)))
+                                            }
+                                            Ok(None) => None,
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    error_category = error.category(),
+                                                    request_id = %id,
+                                                    "durable decision re-read failed after lost expiry CAS"
+                                                );
+                                                None
+                                            }
+                                        }
+                                    }
+
                                     // `(decision, authoritative decided_at)`; a
                                     // `None` timestamp means the backend has no
                                     // time seam and the observation time is used.
                                     let recovered = if let Some(decision) = published {
                                         Some((decision, None))
                                     } else {
-                                        let winner = tokio::select! {
-                                            changed = rx.changed() => {
-                                                if changed.is_ok() { Race::Watch } else { Race::Grace }
-                                            }
-                                            result = &mut reread => Race::Durable(result),
-                                            _ = tokio::time::sleep(RECOVERY_GRACE) => Race::Grace,
-                                        };
-                                        match winner {
-                                            Race::Watch => {
-                                                let guard = rx.borrow_and_update();
-                                                (*guard).clone().map(|d| (d, None))
-                                            }
-                                            Race::Durable(result) => match result {
-                                                Ok(Some(loaded)) => {
-                                                    Some((loaded.decision, Some(loaded.decided_at)))
+                                        // One visible budget shared by the watch
+                                        // re-check and the parallel re-read. A
+                                        // non-authoritative durable result
+                                        // (`Ok(None)`/`Err`) is recorded but never
+                                        // ends the wait early: a late watch
+                                        // notification may still carry the
+                                        // committed decision, so resolving
+                                        // `Expired` before the grace deadline
+                                        // would reintroduce the DB=decided /
+                                        // waiter=Expired split brain (I42-A (a)).
+                                        let deadline = tokio::time::Instant::now() + RECOVERY_GRACE;
+                                        let mut durable_fallback: Option<
+                                            Result<Option<LoadedDecision>, ApprovalError>,
+                                        > = None;
+
+                                        loop {
+                                            let remaining = deadline.saturating_duration_since(
+                                                tokio::time::Instant::now(),
+                                            );
+                                            let winner = tokio::select! {
+                                                changed = rx.changed() => {
+                                                    if changed.is_ok() { Race::Watch }
+                                                    else { Race::Grace }
+                                                },
+                                                // Disabled once the re-read has
+                                                // resolved non-authoritatively: the
+                                                // watch still gets the full budget.
+                                                result = &mut reread, if durable_fallback.is_none() => Race::Durable(result),
+                                                _ = tokio::time::sleep(remaining) => Race::Grace,
+                                            };
+                                            match winner {
+                                                Race::Watch => {
+                                                    let guard = rx.borrow_and_update();
+                                                    if let Some(decision) = (*guard).clone() {
+                                                        break Some((decision, None));
+                                                    }
                                                 }
-                                                Ok(None) => None,
-                                                Err(error) => {
-                                                    // Fixed vocabulary only: no id,
-                                                    // SQL or decision body in logs.
-                                                    tracing::warn!(
-                                                        error_category = error.category(),
-                                                        request_id = %id,
-                                                        "durable decision re-read failed after lost expiry CAS"
-                                                    );
-                                                    None
-                                                }
-                                            },
-                                            Race::Grace => {
-                                                // Grace elapsed without a watch
-                                                // notification. The re-read was
-                                                // started in parallel and is still
-                                                // the authority, so await its
-                                                // already-running result instead of
-                                                // falling back to Expired early.
-                                                match reread.await {
-                                                    Ok(Some(loaded)) => Some((
-                                                        loaded.decision,
-                                                        Some(loaded.decided_at),
-                                                    )),
-                                                    Ok(None) => None,
-                                                    Err(error) => {
-                                                        tracing::warn!(
-                                                            error_category = error.category(),
-                                                            request_id = %id,
-                                                            "durable decision re-read failed after lost expiry CAS"
-                                                        );
-                                                        None
+                                                Race::Durable(result) => match result {
+                                                    Ok(Some(loaded)) => {
+                                                        break Some((
+                                                            loaded.decision,
+                                                            Some(loaded.decided_at),
+                                                        ));
+                                                    }
+                                                    other => durable_fallback = Some(other),
+                                                },
+                                                Race::Grace => {
+                                                    if let Some(result) = durable_fallback.take() {
+                                                        break resolve_durable(id, result);
+                                                    }
+                                                    // The re-read is still in
+                                                    // flight at budget expiry. Give
+                                                    // it one final BOUNDED wait: a
+                                                    // slow/stalled DB RTT must not
+                                                    // hold the waiter indefinitely
+                                                    // (I42-A (b)). On timeout, a
+                                                    // fixed-vocabulary warn with the
+                                                    // request id only, then the
+                                                    // Expired fallback below.
+                                                    match tokio::time::timeout(
+                                                        RECOVERY_GRACE,
+                                                        &mut reread,
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(result) => {
+                                                            break resolve_durable(id, result);
+                                                        }
+                                                        Err(_) => {
+                                                            tracing::warn!(
+                                                                request_id = %id,
+                                                                "durable decision re-read timed out after lost expiry CAS; waiter expires"
+                                                            );
+                                                            break None;
+                                                        }
                                                     }
                                                 }
                                             }
@@ -2652,6 +2709,162 @@ mod tests {
             entry.decided_at,
             Some(authoritative_at),
             "DB commit time must win over the local timeout instant"
+        );
+    }
+
+    // ---- I42-A (a)/(b) bounded durable re-read after a lost expiry CAS ------
+
+    /// I42-A (a): an immediately failing durable re-read must NOT resolve the
+    /// waiter to `Expired` before the grace window is up. A late watch
+    /// notification carrying the concurrently committed decision (published
+    /// after the transient DB error) must still be adopted, so DB=decided and
+    /// waiter=Expired cannot split brain. No real DB, no `decide` preconditions:
+    /// the watch send is injected directly into the entry's sender.
+    #[tokio::test]
+    async fn lost_expiry_cas_reread_error_then_late_watch_wins() {
+        #[derive(Debug)]
+        struct FailingRereadPersistence {
+            load_started: Arc<AtomicBool>,
+            load_calls: AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalPersistence for FailingRereadPersistence {
+            async fn record_request(
+                &self,
+                _request: &ApprovalRequest,
+                _deadline: DateTime<Utc>,
+            ) -> Result<(), ApprovalError> {
+                Ok(())
+            }
+
+            async fn record_decision(
+                &self,
+                _id: Uuid,
+                _decision: &ApprovalDecision,
+                _decided_at: DateTime<Utc>,
+            ) -> Result<(), ApprovalError> {
+                Ok(())
+            }
+
+            async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+                Ok(Vec::new())
+            }
+
+            async fn load_decision_with_time(
+                &self,
+                _id: Uuid,
+            ) -> Result<Option<LoadedDecision>, ApprovalError> {
+                self.load_started.store(true, Ordering::SeqCst);
+                self.load_calls.fetch_add(1, Ordering::SeqCst);
+                // Transient DB error resolved immediately after the CAS loss.
+                Err(ApprovalError::Persistence)
+            }
+
+            async fn mark_expired(
+                &self,
+                id: Uuid,
+                _expired_at: DateTime<Utc>,
+            ) -> Result<(), ApprovalError> {
+                Err(ApprovalError::AlreadyDecided(id))
+            }
+        }
+
+        let load_started = Arc::new(AtomicBool::new(false));
+        let persistence = Arc::new(FailingRereadPersistence {
+            load_started: load_started.clone(),
+            load_calls: AtomicUsize::new(0),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(30),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let request = make_request();
+        let id = request.id;
+
+        let waiter = {
+            let store = store.clone();
+            tokio::spawn(async move { store.request(request).await })
+        };
+        wait_for_registration(&store, id).await;
+
+        // Wait until the durable re-read has failed, proving the recovery path
+        // is now re-checking the watch inside the grace window.
+        for _ in 0..200 {
+            if load_started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            load_started.load(Ordering::SeqCst),
+            "the durable re-read must have failed before the watch decision arrives"
+        );
+        assert!(
+            !waiter.is_finished(),
+            "a non-authoritative durable error must not expire the waiter early"
+        );
+
+        // Simulate a concurrent decider publishing slightly later. Injecting
+        // directly into the watch sender avoids `decide`'s `AlreadyDecided`
+        // precondition (the timeout path has already marked the entry Expired).
+        let decision = approved();
+        {
+            let mut entries = store.inner.entries.write().await;
+            let entry = entries
+                .get_mut(&id)
+                .expect("entry survives until recovery resolves");
+            let _ = entry.tx.send(Some(decision.clone()));
+        }
+
+        let result = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter completes")
+            .expect("waiter task");
+        assert_eq!(
+            result, decision,
+            "a late watch decision must beat the non-authoritative durable error"
+        );
+        assert_eq!(persistence.load_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// I42-A (b): a durable re-read that never resolves (stalled DB RTT) must
+    /// be cut off by the timeout wrapper, converging to `Expired` instead of
+    /// waiting forever. The sender is deliberately kept alive, so the gate
+    /// future stays pending for the whole test.
+    #[tokio::test]
+    async fn lost_expiry_cas_reread_timeout_falls_back_to_expired() {
+        let (_release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let committed = LoadedDecision {
+            decision: approved(),
+            decided_at: Utc::now(),
+        };
+        let started = Arc::new(AtomicBool::new(false));
+        let persistence = Arc::new(RereadDecisionPersistence {
+            committed,
+            started: started.clone(),
+            gate: tokio::sync::Mutex::new(Some(release_rx)),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(30),
+            DEFAULT_MAX_PENDING,
+            persistence,
+        );
+
+        // Without the timeout wrapper the re-read gate never opens, so this
+        // outer timeout would fire and fail the test. With the bound in place
+        // the waiter returns Expired after grace + one bounded re-read wait.
+        let decision = tokio::time::timeout(Duration::from_secs(1), store.request(make_request()))
+            .await
+            .expect("waiter must be bounded by the re-read timeout");
+        assert!(
+            matches!(decision, ApprovalDecision::Expired),
+            "a timed-out re-read must converge to Expired: {decision:?}"
+        );
+        assert!(
+            started.load(Ordering::SeqCst),
+            "the parallel durable re-read must have started"
         );
     }
 }
