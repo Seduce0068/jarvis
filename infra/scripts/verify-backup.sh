@@ -59,6 +59,32 @@ for set in "${sets[@]}"; do
     echo "  FAIL: COMPLETE marker missing (partial run)"
     fail=$((fail+1))
   fi
+
+  # Required components: manifest.txt and COMPLETE are checked above. A set
+  # that carries the COMPLETE marker claims a successful run, so the mandatory
+  # payloads must exist on disk as well. Validating only manifest-listed files
+  # lets a run whose dump/snapshot steps produced nothing still pass, because
+  # record() appends an entry only after each step succeeds. Legacy sets (no
+  # marker, no created_at) stay accepted for backward compatibility.
+  if [ -f "$set/COMPLETE" ]; then
+    for required in postgres-jarvis.sql.gz qdrant-snapshot.bin; do
+      if [ ! -f "$set/$required" ]; then
+        echo "  REQUIRED MISSING: $required"
+        fail=$((fail+1))
+      fi
+    done
+    config_found=0
+    for config in "$set"/config-*; do
+      [ -f "$config" ] || continue
+      config_found=1
+      break
+    done
+    if [ "$config_found" -eq 0 ]; then
+      echo "  REQUIRED MISSING: config-* (at least one config file)"
+      fail=$((fail+1))
+    fi
+  fi
+
   while read -r name expected_bytes expected_sha; do
     case "$name" in ''|\#*) continue ;; esac
     path="$set/$name"
