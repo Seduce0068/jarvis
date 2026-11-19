@@ -286,6 +286,12 @@ MIGRATIONS_VERSIONS="${MIGRATIONS_ROOT}/migrations.d"
 MIGRATION_TS="$(date +%Y%m%d%H%M%S)"
 MIGRATION_VERSION_DIR="${MIGRATIONS_VERSIONS}/${BUILD_COMMIT}-${MIGRATION_TS}-$$"
 MIGRATION_LINK_TMP="${MIGRATIONS_ROOT}/.migrations.next-${MIGRATION_TS}-$$"
+# I45-D: the binary build marker is published through the SAME atomic symlink
+# boundary as the migrations. /opt/jarvis/bin/.jarvis-build-commit becomes a
+# symlink to the stable --source path below, so a single rename(2) of
+# MIGRATIONS_DST flips both the SQL tree and the binary marker together.
+BIN_MARKER_LINK="/opt/jarvis/bin/.jarvis-build-commit"
+BIN_MARKER_LINK_TMP="/opt/jarvis/bin/.jarvis-build-commit.next-${MIGRATION_TS}-$$"
 
 # The I38-B stale-SQL property is preserved structurally: every version tree
 # is created fresh from the verified STAGED_SQL_FILES set, so an SQL file
@@ -299,6 +305,9 @@ MIGRATION_LINK_TMP="${MIGRATIONS_ROOT}/.migrations.next-${MIGRATION_TS}-$$"
 # "start with:" instructions below are never printed and the previous markers
 # no longer describe the mixed on-disk payload. The next successful run
 # re-installs the whole set and is idempotent.
+# I45-D: both markers are now sealed into the version tree before publication;
+# /opt/jarvis/bin/.jarvis-build-commit is a symlink through the same atomic
+# MIGRATIONS_DST swap, so the two markers never straddle the deploy boundary.
 #
 # I40-C / I42-B(a): the old in-place rm+install exposed a partial SQL tree.
 # We now build a complete version directory, seal it with the marker, and
@@ -370,6 +379,26 @@ sudo install -o root -g root -m 0644 "${STAGED_SQL_FILES[@]}" "${MIGRATION_VERSI
 # marker exists, before the tree is published.
 sudo install -o root -g root -m 0644 "${mig_commit_file}" "${MIGRATION_VERSION_DIR}/.jarvis-source-commit"
 
+# I45-D: the binary build marker now lives in the SAME sealed version tree, so
+# it is published atomically with the SQL sources by the single MIGRATIONS_DST
+# swap below. Previously it was installed into /opt/jarvis/bin/ only AFTER the
+# swap, exposing a window where the migration side reported the new commit while
+# the bin side still reported the old one. Keeping both markers in one tree also
+# makes a later prune-tripwire failure harmless: by then both markers already
+# resolve to the new commit, so there is no stale-bin-marker half-applied state.
+sudo install -o root -g root -m 0644 "${bin_commit_file}" "${MIGRATION_VERSION_DIR}/.jarvis-build-commit"
+
+# I45-D: (re)point /opt/jarvis/bin/.jarvis-build-commit at the stable --source
+# path BEFORE the swap. The symlink always targets MIGRATIONS_DST (never this
+# version dir), so it never needs rewriting on later deploys and its resolved
+# content flips exactly when the atomic swap below runs. A legacy regular-file
+# marker is replaced here via ln -sfn + mv -Tf (one atomic rename in the same
+# directory); until the swap the old tree's marker (or, on the first upgrade
+# from a legacy layout, a briefly dangling target) is seen -- a missing marker
+# is fail-closed and never a wrong-commit mismatch.
+sudo ln -sfn "${MIGRATIONS_DST}/.jarvis-build-commit" "${BIN_MARKER_LINK_TMP}"
+sudo mv -Tf "${BIN_MARKER_LINK_TMP}" "${BIN_MARKER_LINK}"
+
 # Publish with one atomic rename(2). `ln -s` + `mv -T` replaces the symlink at
 # the stable --source path atomically, so readers see a complete tree either
 # way. A legacy real directory is moved aside once (the mask makes that one
@@ -379,9 +408,9 @@ if [[ -d "${MIGRATIONS_DST}" && ! -L "${MIGRATIONS_DST}" ]]; then
   sudo mv "${MIGRATIONS_DST}" "${MIGRATIONS_ROOT}/migrations.legacy-${MIGRATION_TS}"
 fi
 sudo mv -Tf "${MIGRATION_LINK_TMP}" "${MIGRATIONS_DST}"
-# Deploy marker LAST (after the payload is published), preserving the original
-# staging -> verify -> deploy -> marker -> unit-restore order.
-sudo install -o root -g root -m 0644 "${bin_commit_file}" /opt/jarvis/bin/.jarvis-build-commit
+# I45-D: no separate post-swap marker install here. The binary marker is sealed
+# into the version tree above and published by the atomic swap, so both markers
+# cross the deploy boundary at the same instant as the SQL sources.
 
 # Keep the 3 newest version trees as immutable snapshots for manual rollback.
 #
