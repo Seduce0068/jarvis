@@ -420,11 +420,11 @@ generated:
   R1-AR2,R2-ER2,R4-DR2,R4-DR3 / 重大度 high / confirmed。
   gunzip/psql 終了コード・Qdrant upload の HTTP ステータス・git clone 成否を
   検査せず「Restore completed」を出力。
-- [ ] **jarvis-event が jarvis-context/policy をインプロセス化しサイドカー境界を侵害** — **2026-11-19 スライス1 対応済み: `ports.rs` に `ContextProvider` / `PolicyGate` トレイトと既定アダプタを追加、`Normalizer::new` / `process_event` をトレイト経由化（公開シグネチャ・挙動不変、fail-closed 維持）。トレイト差し替え回帰2件追加。残るスライス: context gRPC クライアント／既定 grpc 化と型依存削除／policy 型依存削除＋ADR 改訂** — 根拠
+- [ ] **jarvis-event が jarvis-context/policy をインプロセス化しサイドカー境界を侵害** — **2026-11-19 スライス1-2 対応済み: トレイト seams に加え、context.proto へ source/timestamp を加算追加、`GrpcContextProvider` と `ContextMode`（既定 in_process／opt-in grpc）を実装。source/timestamp の wire 往復を実ネットワークなしで検証。残るスライス: 既定 grpc 化と型依存削除／policy 型依存削除＋ADR 改訂** — 根拠
   `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
   `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
   event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
-- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1-2 対応済み: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
+- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1-3 対応済み: `reconcile_pending()` を `PolicyEngine::new()` から呼び、未決定行を待機者なしで再登録、期限切れ行を Expired 決着＋audit（Noop では no-op）。R4 で `record_request` 失敗を fail-closed 化（メモリ登録取消し＋QueueFull/503）、`mark_expired` 失敗を warn 可視化。残るスライス: opt-in ロールアウト／再接続ロジック／専用 Persistence エラー型** — **スライス1-2: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
   重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
 - [x] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる**（2026-11-19 対応済み: id と requested_at はサーバ生成、expires_at は server timeout でクランプし生成値をレスポンスで返却。不正値は 400 で拒否。回帰テスト6件追加、policy 73 tests pass） — 根拠
@@ -904,3 +904,33 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `dead_code`（`is_retry_due` を `#[cfg(test)]` 化、テスト用フィールドに
   `#[allow(dead_code)]`）、空白トークンの `contains("")` 誤検証、
   secret_scan 誤検出（テスト変数名を `probe_path` へ）。
+
+### Round 28 のレビュー／発掘結果
+
+- [x] UI が存在しない `JARVIS_POLICY_APPROVAL_TOKEN` を読み認証有効時に操作不能
+  （confirmed high）— UI を `JARVIS_POLICY_APPROVAL_API_TOKEN` /
+  `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN` の scope 分割へ修正。旧名は警告付き
+  フォールバック。Debug redaction と env→ヘッダ契約テスト9件追加、UI 36 tests pass。
+- [x] gRPC が ClientError / Forbidden の生テキストを返し HTTP サニタイズを迂回
+  （confirmed high）— `safe_client_error_text` を `pub(crate)` 化して共有、
+  Forbidden は固定ポリシー文言へ。漏洩を期待していたテストを更新。
+- [x] Pg `record_request` 失敗の握り潰し（confirmed high）— メモリ登録取消し＋
+  `QueueFull`(503) で fail-closed、`mark_expired` は warn 可視化。DB 失敗注入2件追加。
+- [ ] **migration が jarvis-context に独占され policy が先起動すると 003 未適用**
+  （confirmed high）— `jarvis-policy.service` に `After=jarvis-context.service`
+  を追加すると**循環依存**になる（context が policy に After を持つため、
+  `systemd-analyze verify` で検出）ので repo 側ではコメントで注意喚起に留めた。
+  真の解決は migration 用 oneshot unit の分離、または policy 起動時 migration
+  実行／必須テーブル CHECK。初回導入時は context を先に起動するか
+  `cargo sqlx migrate run` を手動実行する必要がある。
+- [ ] **PgApprovalPersistence が単一接続で再接続しない**（likely medium）—
+  PostgreSQL 再起動後に永続化が恒久停止する。接続死活監視＋再生成、
+  または明示的な Persistence エラー通知が必要。
+- [ ] **ドキュメントドリフト5件**（i31-todo-discovery / 中〜低）—
+  policy.env / ui/README / remaining-tasks.md の旧トークン名、
+  specs/test-policy-approval.md の2トークン分離未反映、
+  ui/README と ADR-0005 のテスト件数（実測27→36）、
+  smoke-mcp-gw.sh:4 の旧「承認必須ツール非表示」コメント、
+  remaining-tasks.md の `require_server_side_principal`「未実装」記述。
+- 親が子の出力で3点を修正: UI テストの lifetime 明示、`or_else`→`or`、
+  systemd 循環依存の回避（コメント化）。
