@@ -119,6 +119,12 @@ impl Gateway {
     /// terminates its child process. Discovered tools are not added to the
     /// allowlist automatically: operators must list each tool in
     /// `mcp_allowlist.toml` before it can be executed.
+    ///
+    /// A registration is rejected when any advertised tool name is already
+    /// advertised by a *different* server (see [`Self::register_transport`]).
+    /// Re-registering the same `name` keeps the explicit replacement
+    /// semantics above: that server is the one being replaced, so its tools
+    /// are not treated as a conflict.
     pub async fn register_mcp_server(&self, name: &str, command: Vec<String>) -> Result<()> {
         if name.trim().is_empty() {
             return Err(client_error("MCP server name must not be empty"));
@@ -143,7 +149,9 @@ impl Gateway {
     ///
     /// Split out of [`Self::register_mcp_server`] so tests can drive the
     /// same protocol path with an in-memory duplex instead of a child
-    /// process.
+    /// process. Both paths therefore share the duplicate-tool-name check
+    /// below: a name advertised by another registered server is rejected
+    /// instead of silently making `execute` routing order-dependent.
     pub(crate) async fn register_transport<T, E, A>(&self, name: &str, transport: T) -> Result<()>
     where
         T: IntoTransport<RoleClient, E, A>,
@@ -161,13 +169,39 @@ impl Gateway {
             .with_context(|| format!("Failed to list tools from MCP server '{name}'"))?;
 
         let tool_names: HashSet<String> = tools.iter().map(|tool| tool.name.to_string()).collect();
-        info!(
-            server = name,
-            tools = tool_names.len(),
-            "Registered MCP server"
-        );
+        let tool_count = tool_names.len();
 
-        let previous = self.servers.write().await.insert(
+        // Hold the write lock across both the conflict check and the insert
+        // so two concurrent registrations cannot both pass the check.
+        let mut servers = self.servers.write().await;
+
+        // `execute` resolves a tool with `servers.values().find(...)`. If two
+        // different servers advertised the same tool name, routing would
+        // depend on HashMap iteration order. Reject the newcomer so the
+        // first owner stays authoritative. A re-registration under the same
+        // `name` is excluded: that is an explicit replacement of a single
+        // server and keeps its existing semantics.
+        let mut conflicts: Vec<String> = Vec::new();
+        for (existing_name, existing_server) in servers.iter() {
+            if existing_name.as_str() == name {
+                continue;
+            }
+            for tool in &tool_names {
+                if existing_server.tools.contains(tool) {
+                    conflicts.push(format!("'{tool}' -> '{existing_name}'"));
+                }
+            }
+        }
+        if !conflicts.is_empty() {
+            conflicts.sort();
+            return Err(client_error(format!(
+                "MCP server '{name}' advertises tool name(s) already registered by another server: {}. \
+                 Each tool name may be advertised by only one server; the first registration wins.",
+                conflicts.join(", ")
+            )));
+        }
+
+        let previous = servers.insert(
             name.to_string(),
             Arc::new(RegisteredServer {
                 client,
@@ -181,6 +215,7 @@ impl Gateway {
             drop(previous);
             info!(server = name, "Replaced existing MCP server registration");
         }
+        info!(server = name, tools = tool_count, "Registered MCP server");
 
         Ok(())
     }
@@ -313,6 +348,102 @@ requires_approval = false
             .await
             .expect("tool call succeeds after replacement");
         assert_eq!(result["content"][0]["text"], "pong");
+    }
+
+    #[tokio::test]
+    async fn registering_a_duplicate_tool_name_from_another_server_is_rejected() {
+        let gateway = test_gateway("duplicate-tool").await;
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
+        gateway
+            .register_transport("first", client_side)
+            .await
+            .expect("first registration succeeds");
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
+        let error = gateway
+            .register_transport("second", client_side)
+            .await
+            .expect_err("duplicate tool name from another server is rejected");
+
+        let message = error.to_string();
+        assert!(message.contains("echo"), "names the tool: {message}");
+        assert!(
+            message.contains("first"),
+            "names the owning server: {message}"
+        );
+        assert!(message.contains("only one server"), "uniqueness: {message}");
+
+        {
+            let servers = gateway.servers.read().await;
+            assert!(servers.contains_key("first"), "first registration kept");
+            assert!(!servers.contains_key("second"), "not inserted");
+        }
+
+        let result = gateway
+            .execute("echo", json!({ "message": "hi" }))
+            .await
+            .expect("tool still routed to the first server");
+        assert_eq!(result["content"][0]["text"], "pong");
+    }
+
+    #[tokio::test]
+    async fn distinct_tool_names_from_different_servers_are_allowed() {
+        let gateway = test_gateway("distinct-tools").await;
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
+        gateway
+            .register_transport("alpha", client_side)
+            .await
+            .expect("first registration succeeds");
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "ping", false));
+        gateway
+            .register_transport("beta", client_side)
+            .await
+            .expect("non-conflicting tool name is accepted");
+
+        let servers = gateway.servers.read().await;
+        assert!(servers.contains_key("alpha"));
+        assert!(servers.contains_key("beta"));
+    }
+
+    #[tokio::test]
+    async fn re_registering_a_name_conflicting_with_another_server_is_rejected() {
+        let gateway = test_gateway("replace-conflict").await;
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
+        gateway
+            .register_transport("owner", client_side)
+            .await
+            .expect("owner registration succeeds");
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "ping", false));
+        gateway
+            .register_transport("other", client_side)
+            .await
+            .expect("other registration succeeds");
+
+        // Re-registering "other" is normally an allowed replacement, but its
+        // new tool name is owned by a different server, so it must be rejected.
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
+        gateway
+            .register_transport("other", client_side)
+            .await
+            .expect_err("a replacement cannot steal another server's tool");
+
+        let servers = gateway.servers.read().await;
+        assert!(servers.contains_key("owner"));
+        let other = servers.get("other").expect("original 'other' kept");
+        assert!(other.tools.contains("ping"));
+        assert!(!other.tools.contains("echo"));
     }
 
     #[tokio::test]
