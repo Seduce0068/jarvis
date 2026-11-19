@@ -27,6 +27,24 @@ fn warn_tracer_shutdown_failure(_err: &dyn std::fmt::Display) {
     );
 }
 
+/// Handle the result of a `SdkTracerProvider::shutdown` attempt, shared by the
+/// explicit path and [`TracerGuard::drop`].
+///
+/// `AlreadyShutdown` is the benign duplicate-shutdown signal produced when the
+/// explicit path already flushed spans; it stays silent so the normal exit is
+/// quiet. Every other error means queued spans may have been lost and is
+/// surfaced through the fixed-category warning. This is the only trace left on
+/// an early `?` return, where `Drop` is the sole shutdown attempt.
+fn report_shutdown_result(result: opentelemetry_sdk::error::OTelSdkResult) {
+    use opentelemetry_sdk::error::OTelSdkError;
+    match result {
+        Err(err) if !matches!(&err, OTelSdkError::AlreadyShutdown) => {
+            warn_tracer_shutdown_failure(&err);
+        }
+        _ => {}
+    }
+}
+
 /// Keeps the [`SdkTracerProvider`] alive for the lifetime of `main` and makes
 /// sure the batch exporter is shut down on every exit path.
 ///
@@ -40,21 +58,21 @@ struct TracerGuard {
 }
 
 impl TracerGuard {
-    /// Flush queued spans. A failure is intentionally non-fatal and is reported
-    /// with a fixed error category only, never with the raw SDK error text.
+    /// Flush queued spans. A failure is intentionally non-fatal. A repeat
+    /// `AlreadyShutdown` is benign; any other failure is reported with a fixed
+    /// error category only, never with the raw SDK error text.
     fn shutdown(&self) {
-        if let Err(err) = self.provider.shutdown() {
-            warn_tracer_shutdown_failure(&err);
-        }
+        report_shutdown_result(self.provider.shutdown());
     }
 }
 
 impl Drop for TracerGuard {
     fn drop(&mut self) {
-        // Safety net for error paths that return early via `?`. A repeated
-        // shutdown is a harmless `AlreadyShutdown` error and is ignored here so
-        // the normal path, where `main` already called `shutdown()`, stays quiet.
-        let _ = self.provider.shutdown();
+        // Safety net for error paths that return early via `?`: `main` never
+        // reaches `complete_shutdown`, so this is the only shutdown attempt and
+        // a real failure must leave a warning. A repeat `AlreadyShutdown` after
+        // the explicit path stays quiet via `report_shutdown_result`.
+        self.shutdown();
     }
 }
 
@@ -420,6 +438,105 @@ mod tests {
         assert!(
             log.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
             "fixed error category missing: {log}"
+        );
+    }
+
+    /// A span processor whose shutdown always fails. Used to reproduce the
+    /// early-`?` exit where `TracerGuard::drop` is the only shutdown attempt.
+    #[derive(Debug)]
+    struct FailingShutdownProcessor;
+
+    impl opentelemetry_sdk::trace::SpanProcessor for FailingShutdownProcessor {
+        fn on_start(
+            &self,
+            _span: &mut opentelemetry_sdk::trace::Span,
+            _cx: &opentelemetry::Context,
+        ) {
+            // No-op: this processor exists only to make shutdown fail.
+        }
+
+        fn on_end(&self, _span: opentelemetry_sdk::trace::SpanData) {}
+
+        fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
+                "I53D-drop-shutdown-failure".into(),
+            ))
+        }
+    }
+
+    /// I53-D regression: an early `?` return never reaches `complete_shutdown`,
+    /// so `TracerGuard::drop` is the only shutdown attempt. A real failure there
+    /// must leave the fixed warning instead of being silently discarded.
+    #[test]
+    fn drop_warns_on_shutdown_failure_on_early_return_path() {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                let provider = SdkTracerProvider::builder()
+                    .with_span_processor(FailingShutdownProcessor)
+                    .build();
+                // Simulate an early `?` return: no explicit shutdown, so Drop is
+                // the sole shutdown attempt.
+                {
+                    let _guard = TracerGuard { provider };
+                }
+            });
+        }
+        let log = String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8");
+        // The OpenTelemetry SDK itself emits a DEBUG line carrying the raw
+        // error. Our contract covers our own WARN record only.
+        let app_warn: String = log
+            .lines()
+            .filter(|line| line.contains("\"level\":\"WARN\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            app_warn.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
+            "early-return Drop swallowed the shutdown failure: {app_warn}"
+        );
+        assert!(
+            !app_warn.contains("I53D-drop-shutdown-failure"),
+            "raw SDK shutdown error leaked through Drop warning: {app_warn}"
+        );
+    }
+
+    /// The normal path already flushed spans, so Drop's repeat attempt returns
+    /// `AlreadyShutdown`; that benign case must not emit a duplicate warning.
+    #[test]
+    fn drop_stays_quiet_for_already_shutdown() {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                let provider = SdkTracerProvider::builder().build();
+                let guard = TracerGuard { provider };
+                // First (explicit) shutdown succeeds; the Drop repeat is the
+                // benign AlreadyShutdown case.
+                guard.shutdown();
+            });
+        }
+        let log = String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8");
+        assert!(
+            !log.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
+            "benign AlreadyShutdown must stay silent: {log}"
         );
     }
 
