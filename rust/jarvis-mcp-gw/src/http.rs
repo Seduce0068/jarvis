@@ -172,54 +172,26 @@ async fn execute_tool(
 /// distinguish denials (403), bad arguments (400), and internal failures.
 fn http_error(error: anyhow::Error) -> (axum::http::StatusCode, Json<Value>) {
     let message = error.to_string();
-    (
-        http_status_for(&error, &message),
-        Json(json!({ "error": message })),
-    )
+    (http_status_for(&error), Json(json!({ "error": message })))
 }
 
-fn http_status_for(error: &anyhow::Error, message: &str) -> axum::http::StatusCode {
-    match error.downcast_ref::<crate::error::McpGatewayError>() {
-        Some(crate::error::McpGatewayError::ArgsTooLarge { .. }) => {
-            axum::http::StatusCode::BAD_REQUEST
-        }
-        Some(
-            crate::error::McpGatewayError::NotAllowed(_)
-            | crate::error::McpGatewayError::PolicyDenied { .. }
-            | crate::error::McpGatewayError::PrincipalNotAllowed { .. }
-            | crate::error::McpGatewayError::ApprovalRequired { .. }
-            | crate::error::McpGatewayError::ApprovalDenied { .. },
-        ) => axum::http::StatusCode::FORBIDDEN,
-        _ if is_client_error(message) => axum::http::StatusCode::BAD_REQUEST,
-        _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+/// Map an error to an HTTP status purely by its concrete type.
+///
+/// Unknown error types (including bare `anyhow!` values) fall back to 500.
+/// This deliberately never inspects `error.to_string()`: rewording a message
+/// must not change the API contract.
+fn http_status_for(error: &anyhow::Error) -> axum::http::StatusCode {
+    use crate::error::ErrorKind;
+
+    let kind = error
+        .downcast_ref::<crate::error::McpGatewayError>()
+        .map(crate::error::McpGatewayError::kind)
+        .unwrap_or(ErrorKind::Internal);
+    match kind {
+        ErrorKind::ClientError => axum::http::StatusCode::BAD_REQUEST,
+        ErrorKind::Forbidden => axum::http::StatusCode::FORBIDDEN,
+        ErrorKind::Internal => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
     }
-}
-
-/// Native handlers reject bad input with these message prefixes; such errors
-/// are caller mistakes (400), not gateway failures (500).
-fn is_client_error(message: &str) -> bool {
-    const PREFIXES: [&str; 19] = [
-        "missing '",
-        "invalid url",
-        "unsupported scheme",
-        "url has no host",
-        "credentials in URL",
-        "unsupported content type",
-        "response too large",
-        "too many redirects",
-        "refusing to fetch",
-        "dns lookup",
-        "file too large",
-        "no native handler",
-        "path escapes",
-        "invalid git path",
-        "path is a directory",
-        "stat ",
-        "read ",
-        "read_dir ",
-        "canonicalize ",
-    ];
-    PREFIXES.iter().any(|prefix| message.starts_with(prefix))
 }
 
 pub async fn serve(gateway: Arc<McpGateway>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
@@ -494,17 +466,32 @@ requires_approval = true
         assert!(body.0["error"].as_str().unwrap().contains("exceed"));
     }
 
+    /// Build a typed client error while preserving the original message.
+    fn client_error(message: &str) -> anyhow::Error {
+        crate::error::McpGatewayError::ClientError(message.to_owned()).into()
+    }
+
     #[test]
     fn client_errors_map_to_400_with_json_body() {
-        let (status, body) = http_error(anyhow::anyhow!("missing 'url' argument"));
+        let (status, body) = http_error(client_error("missing 'url' argument"));
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         assert!(body.0["error"].as_str().unwrap().contains("missing 'url'"));
         let (status, _) = http_error(anyhow::anyhow!("kaboom"));
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        let (status, _) = http_error(anyhow::anyhow!(
-            "refusing to fetch non-public address 127.0.0.1"
+        let (status, _) = http_error(client_error(
+            "refusing to fetch non-public address 127.0.0.1",
         ));
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// Rewording a client error (or faking a magic prefix on an untyped
+    /// `anyhow!` error) must not influence the mapped status.
+    #[test]
+    fn status_comes_from_type_not_message() {
+        let (status, _) = http_error(client_error("completely reworded 500 missing 'url'"));
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        let (status, _) = http_error(anyhow::anyhow!("missing 'url' argument"));
+        assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     /// When an admin token is configured, `/v1/execute` requires it in

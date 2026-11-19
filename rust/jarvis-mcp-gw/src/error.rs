@@ -2,6 +2,21 @@
 
 use thiserror::Error;
 
+/// Transport-neutral classification of a gateway failure.
+///
+/// HTTP/gRPC adapters map this to their own status codes instead of parsing
+/// the human-readable message, so rewording an error cannot silently change
+/// the API contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    /// Caller mistake (malformed arguments, oversized payload, bad input).
+    ClientError,
+    /// The caller is authenticated but not permitted to perform the action.
+    Forbidden,
+    /// Gateway-side failure the caller cannot fix by changing its input.
+    Internal,
+}
+
 #[derive(Error, Debug)]
 pub enum McpGatewayError {
     #[error("Tool not in allowlist: {0}")]
@@ -13,6 +28,12 @@ pub enum McpGatewayError {
         max: usize,
         actual: usize,
     },
+
+    /// A caller-supplied argument failed validation (native handlers).
+    /// The original wording is preserved for the response body, but the
+    /// status is derived from the variant, not from this text.
+    #[error("{0}")]
+    ClientError(String),
 
     #[error("Policy denied tool '{tool}' for principal '{principal}'")]
     PolicyDenied { tool: String, principal: String },
@@ -42,6 +63,25 @@ pub enum McpGatewayError {
 
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+}
+
+impl McpGatewayError {
+    /// Classify this error for transport adapters without reading its text.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::ArgsTooLarge { .. } | Self::ClientError(_) => ErrorKind::ClientError,
+            Self::NotAllowed(_)
+            | Self::PolicyDenied { .. }
+            | Self::PrincipalNotAllowed { .. }
+            | Self::ApprovalRequired { .. }
+            | Self::ApprovalDenied { .. } => ErrorKind::Forbidden,
+            Self::Sandbox(_)
+            | Self::Mcp(_)
+            | Self::Config(_)
+            | Self::Grpc(_)
+            | Self::Serialization(_) => ErrorKind::Internal,
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, McpGatewayError>;
