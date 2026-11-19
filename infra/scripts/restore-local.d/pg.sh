@@ -7,12 +7,20 @@
 #   CONFIRM   : 1=本番反映まで行う（APPLY=1 と併用して初めて有効）
 #   log()     : 情報ログ（秘密情報を渡さない）
 #   fail()    : エラー報告（呼び出し側の規約に従う）
+#   KEEP_ISOLATED_DB : 1=隔離DBを保持（既定=検証後にDROP）。--keep-isolated-db 由来。
+#   ISOLATED_DB_NAME / ISOLATED_DB_CREATED : 後始末状態を EXIT trap と共有するグローバル。
 #
 # 定義する関数は restore_pg() のみ（引数なし、戻り値 0/1）。
 # 実 DB 操作は APPLY=1 のときだけ行う。入力は $SET_DIR/postgres-jarvis.sql.gz。
 # 設定: DB_NAME=jarvis / 隔離 DB=jarvis_restore_test。
 # 出力・ログには DB 名とテーブル件数（数値）のみを出し、テーブル内容・行データ・
 # 接続情報（秘密情報）は一切出力しない。
+#
+# 後始末ポリシー: 既定では隔離 DB の検証直後に DROP し、Qdrant の隔離
+# コレクション削除と対称に本番データのコピーを残さない。保持する場合は
+# 呼び出し側が --keep-isolated-db を明示する（KEEP_ISOLATED_DB=1）。
+# CREATE 成功後 DROP 完了前に異常終了した分は restore-local.sh の EXIT trap が
+# ISOLATED_DB_CREATED を見て片付ける（既存のサービス再起動 trap は変更しない）。
 
 restore_pg() {
   local db_name="jarvis"
@@ -33,6 +41,11 @@ restore_pg() {
     log "PG: 入力 = $dump_file"
     log "PG: 隔離DB '$isolated_db' へ gzip -cd | psql -v ON_ERROR_STOP=1 で復元する計画"
     log "PG: information_schema.tables の件数を検証する計画（件数のみ記録）"
+    if [ "${KEEP_ISOLATED_DB:-0}" -eq 1 ]; then
+      log "PG: [計画] 隔離DB '$isolated_db' は --keep-isolated-db により検証後も保持"
+    else
+      log "PG: [計画] 隔離DB '$isolated_db' は検証後に DROP（Qdrant と対称）"
+    fi
     if [ "${CONFIRM:-0}" -eq 1 ]; then
       log "PG: [計画] CONFIRM あり — 旧DB '$db_name' を退避 → DROP/CREATE → 再復元 → 再検証"
     else
@@ -59,6 +72,10 @@ restore_pg() {
     fail "PG: 隔離DB '$isolated_db' の作成に失敗しました"
     return 1
   }
+  # CREATE 成功を EXIT trap に通知。DROP 前に失敗した場合の保険として残す。
+  # export は呼び出し側シェル (restore-local.sh の on_exit) との共有を示す。
+  export ISOLATED_DB_NAME="$isolated_db"
+  export ISOLATED_DB_CREATED=1
   if ! gzip -cd "$dump_file" | psql -v ON_ERROR_STOP=1 -d "$isolated_db" >/dev/null; then
     fail "PG: 隔離DB '$isolated_db' への復元に失敗しました"
     return 1
@@ -77,6 +94,21 @@ restore_pg() {
     return 1
   fi
   log "PG: 隔離DB '$isolated_db' のテーブル数 = $table_count"
+
+  # --- 隔離 DB の後始末（Qdrant の隔離コレクション削除と対称）---------------
+  # 既定は検証直後に DROP し、本番データのコピーを残さない。
+  # 残す場合は --keep-isolated-db（KEEP_ISOLATED_DB=1）の明示指定のみ。
+  if [ "${KEEP_ISOLATED_DB:-0}" -eq 1 ]; then
+    log "PG: 隔離DB '$isolated_db' を保持します（--keep-isolated-db）"
+  else
+    psql -v ON_ERROR_STOP=1 -d postgres -tAc \
+      "DROP DATABASE \"$isolated_db\"" >/dev/null 2>&1 || {
+      fail "PG: 隔離DB '$isolated_db' の DROP に失敗しました"
+      return 1
+    }
+    export ISOLATED_DB_CREATED=0
+    log "PG: 隔離DB '$isolated_db' を削除しました（Qdrant と対称）"
+  fi
 
   # --- CONFIRM 時のみ本番反映 ---
   if [ "${CONFIRM:-0}" -eq 1 ]; then

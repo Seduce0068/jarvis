@@ -6,8 +6,11 @@
 # Safety invariants:
 #   - Only the 6 non-secret config-<basename> allowlist entries are ever read
 #     or copied. bws.env / *.env / otelcol-config.yaml / token files are never
-#     opened. Any config-* manifest name outside the allowlist is rejected
-#     (fail-closed) before any write.
+#     opened. The authoritative "before any write" rejection of non-allowlisted
+#     config-* names now lives in verify_set() in ../restore-local.sh, which
+#     runs before stop_services()/dispatch_restore() and even with --skip-configs.
+#     The re-check below is read-only and idempotent; it reuses the very same
+#     config_dest_for_base() helper as a defense-in-depth net.
 #   - Config contents are NEVER printed. Only filenames and a change status
 #     are logged (diff summary, filename only).
 #   - APPLY=0 => plan only, zero writes (no temp dir, no production copy).
@@ -34,11 +37,12 @@ restore_configs() {
     return 1
   fi
 
-  # --- step 1: scan manifest config-* entries and enforce the allowlist ---
-  # Read-only. Skip blank/comment lines and non-config entries. Every
-  # config-* name must map to one of the 6 reviewed destinations; anything
-  # else (including path traversal or a secret-bearing name) is rejected
-  # before any write or diff.
+  # --- step 1: scan manifest config-* entries and resolve destinations ---
+  # Read-only and idempotent. The authoritative "before any write" allowlist
+  # gate is verify_set() in ../restore-local.sh (it runs before
+  # stop_services()/dispatch_restore(), and also for --skip-configs). This
+  # block merely re-checks via the same config_dest_for_base() helper as a
+  # defense-in-depth net; rejection here never writes anything.
   while read -r name _bytes _sha; do
     case "$name" in
       ''|\#*) continue ;;
@@ -47,24 +51,10 @@ restore_configs() {
     esac
 
     base="${name#config-}"
-    case "$base" in
-      mcp_allowlist.toml)
-        dest=/etc/jarvis/mcp_allowlist.toml ;;
-      pii_patterns.toml)
-        dest=/etc/jarvis/pii_patterns.toml ;;
-      casbin_model.conf)
-        dest=/etc/jarvis/policy/casbin_model.conf ;;
-      casbin_policy.csv)
-        dest=/etc/jarvis/policy/casbin_policy.csv ;;
-      cedar_schema.cedarschema)
-        dest=/etc/jarvis/policy/cedar_schema.cedarschema ;;
-      policies.cedar)
-        dest=/etc/jarvis/policy/policies.cedar ;;
-      *)
-        fail "configs: manifest has non-allowlisted config entry: $name"
-        return 1
-        ;;
-    esac
+    if ! dest="$(config_dest_for_base "$base")"; then
+      fail "configs: manifest has non-allowlisted config entry: $name"
+      return 1
+    fi
 
     if [ ! -f "$set_dir/$name" ]; then
       fail "configs: allowlisted config file missing from set: $name"

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Local restore driver for JARVIS (ADR-0004; docs/integration/local-restore-design.md S1-S3).
 # Reads backup-local.sh output sets. This file owns: argument parsing, set
-# resolution, the integrity verification gate, service inventory + stop/restart,
-# and dispatch to the component modules. Actual component restore lives in
-# restore-local.d/{pg,qdrant,configs,git}.sh.
+# resolution, the integrity + config-allowlist verification gate (the single
+# "before any write" gate, also enforced with --skip-configs), service inventory
+# + stop/restart, and dispatch to the component modules. Actual component
+# restore lives in restore-local.d/{pg,qdrant,configs,git}.sh.
 #
 # Default is dry-run: verification + plan only, zero writes (no files changed,
 # no services stopped). --apply restores into an isolated target; --apply
@@ -20,6 +21,14 @@ DB_NAME="${DB_NAME:-jarvis}"
 SET_DIR=""        # absolute path of the selected backup set
 APPLY=0           # 0 = dry-run, 1 = restore into an isolated target
 CONFIRM=0         # 0 = never touch production, 1 = allow production overwrite
+# Isolated-DB aftercare state shared with restore-local.d/pg.sh and on_exit().
+# pg.sh sets CREATED=1 after a successful CREATE DATABASE and clears it after a
+# successful DROP. The EXIT trap drops any leftover so a failed exercise never
+# leaves a copy of production data behind. Default is cleanup; the explicit
+# --keep-isolated-db option is the only way to retain the isolated database.
+ISOLATED_DB_NAME=""
+ISOLATED_DB_CREATED=0
+KEEP_ISOLATED_DB=0
 ALLOW_LEGACY=0    # accept a set that has no COMPLETE marker
 SKIP_DB=0
 SKIP_QDRANT=0
@@ -50,8 +59,8 @@ fail() {
 usage() {
   cat <<'USAGE'
 Usage: restore-local.sh [--backup-set DIR | --latest] [--apply] [--confirm]
-                        [--allow-legacy] [--skip-db] [--skip-qdrant]
-                        [--skip-configs] [--skip-git] [--help]
+                        [--keep-isolated-db] [--allow-legacy] [--skip-db]
+                        [--skip-qdrant] [--skip-configs] [--skip-git] [--help]
 
   Default: dry-run (verify the selected set and print the plan; no writes).
   --backup-set DIR  select a specific backup set directory (absolute or relative).
@@ -60,6 +69,9 @@ Usage: restore-local.sh [--backup-set DIR | --latest] [--apply] [--confirm]
   --apply           execute restore into an isolated target via the modules.
   --confirm         must be combined with --apply for production overwrite;
                     rejected on its own.
+  --keep-isolated-db
+                    retain the isolated PostgreSQL database after verification
+                    (default: drop it, like Qdrant drops its isolated collection).
   --allow-legacy    accept a set without the COMPLETE marker.
   --skip-*          omit a component (and its manifest presence gate).
   -h, --help        show this help.
@@ -80,6 +92,7 @@ while [ "$#" -gt 0 ]; do
     --latest) LATEST=1; shift ;;
     --apply) APPLY=1; shift ;;
     --confirm) CONFIRM=1; shift ;;
+    --keep-isolated-db) KEEP_ISOLATED_DB=1; shift ;;
     --allow-legacy) ALLOW_LEGACY=1; shift ;;
     --skip-db) SKIP_DB=1; shift ;;
     --skip-qdrant) SKIP_QDRANT=1; shift ;;
@@ -138,9 +151,28 @@ manifest_has_prefix() { # manifest name prefix -> 0/1
   return 1
 }
 
+# Single source of truth for the 6 reviewed, non-secret config-<basename>
+# entries. Given a basename (config-* with the prefix stripped), print its
+# reviewed destination and return 0; return 1 for any other name (including
+# path traversal or secret-bearing names). verify_set() uses this as the
+# authoritative "before any write" allowlist gate; restore_configs() reuses
+# the same helper for destination resolution, so the two can never diverge.
+config_dest_for_base() {
+  local base="$1"
+  case "$base" in
+    mcp_allowlist.toml)       printf '%s\n' /etc/jarvis/mcp_allowlist.toml ;;
+    pii_patterns.toml)        printf '%s\n' /etc/jarvis/pii_patterns.toml ;;
+    casbin_model.conf)        printf '%s\n' /etc/jarvis/policy/casbin_model.conf ;;
+    casbin_policy.csv)        printf '%s\n' /etc/jarvis/policy/casbin_policy.csv ;;
+    cedar_schema.cedarschema) printf '%s\n' /etc/jarvis/policy/cedar_schema.cedarschema ;;
+    policies.cedar)           printf '%s\n' /etc/jarvis/policy/policies.cedar ;;
+    *) return 1 ;;
+  esac
+}
+
 verify_set() {
   local manifest="$SET_DIR/manifest.txt"
-  local name expected_bytes expected_sha path actual_bytes actual_sha
+  local name expected_bytes expected_sha path actual_bytes actual_sha base
   local failures=0 has_pg=0 has_qdrant=0 verifier=""
 
   [ -d "$SET_DIR" ] || { log "FAIL: backup set directory not found: $SET_DIR"; return 1; }
@@ -170,6 +202,24 @@ verify_set() {
       log "OK: $name ($actual_bytes bytes)"
     else
       log "MISMATCH: $name (size ${actual_bytes}/${expected_bytes} sha ${actual_sha:0:12}/${expected_sha:0:12})"
+      failures=$((failures + 1))
+    fi
+  done < "$manifest"
+
+  # config-* allowlist: the authoritative "before any write" gate. It runs
+  # unconditionally (also with --skip-configs), because a set carrying a
+  # non-allowlisted config name can still drive pg/qdrant production writes
+  # under --apply --confirm. Rejecting here precedes stop_services(),
+  # load_modules() and dispatch_restore(), so no DB/Qdrant/config is touched.
+  while read -r name _; do
+    case "$name" in
+      ''|\#*) continue ;;
+      config-*) ;;
+      *) continue ;;
+    esac
+    base="${name#config-}"
+    if ! config_dest_for_base "$base" >/dev/null; then
+      log "FAIL: non-allowlisted config entry in manifest: $name"
       failures=$((failures + 1))
     fi
   done < "$manifest"
@@ -284,6 +334,32 @@ stop_services() {
   done
 }
 
+# Failure-path insurance for the isolated PostgreSQL database. It only acts when
+# pg.sh created the DB but did not drop it (e.g. fail()/set -e aborted between
+# CREATE and DROP). It never overrides an explicit --keep-isolated-db choice and
+# never masks the existing service-restart behaviour of on_exit().
+cleanup_isolated_db() {
+  if [ "$ISOLATED_DB_CREATED" -ne 1 ] || [ "$KEEP_ISOLATED_DB" -eq 1 ]; then
+    return 0
+  fi
+  [ -n "$ISOLATED_DB_NAME" ] || return 0
+  if ! command -v psql >/dev/null 2>&1; then
+    printf '[restore-local] WARN: isolated DB %s left behind (psql unavailable)\n' \
+      "$ISOLATED_DB_NAME" >&2
+    return 0
+  fi
+  log "cleaning up leftover isolated DB: $ISOLATED_DB_NAME"
+  if psql -v ON_ERROR_STOP=1 -d postgres -tAc \
+      "DROP DATABASE IF EXISTS \"$ISOLATED_DB_NAME\"" >/dev/null 2>&1; then
+    ISOLATED_DB_CREATED=0
+    log "leftover isolated DB dropped: $ISOLATED_DB_NAME"
+  else
+    printf '[restore-local] ERROR: failed to drop leftover isolated DB: %s\n' \
+      "$ISOLATED_DB_NAME" >&2
+  fi
+  return 0
+}
+
 on_exit() {
   trap - EXIT
   if [ "${#STOPPED_SERVICES[@]}" -gt 0 ]; then
@@ -298,6 +374,10 @@ on_exit() {
       fi
     done
   fi
+
+  # Aftercare on both success (normally a no-op: pg.sh already dropped it) and
+  # failure paths. Service restart above keeps its original order and priority.
+  cleanup_isolated_db
   return 0
 }
 
@@ -375,6 +455,7 @@ configs=$([ "$SKIP_CONFIGS" -eq 0 ] && echo restore || echo skip) \
 git=$([ "$SKIP_GIT" -eq 0 ] && echo restore || echo skip)"
   log "PLAN: services to stop: ${SERVICES_TO_STOP[*]:-<none>}"
   log "PLAN: production overwrite: $([ "$CONFIRM" -eq 1 ] && echo enabled || echo disabled)"
+  log "PLAN: isolated DB aftercare: $([ "$KEEP_ISOLATED_DB" -eq 1 ] && echo keep || echo drop)"
   log "PLAN: qdrant.service is NOT a stop target (HTTP API restore requires it active)"
 
   if [ "$APPLY" -ne 1 ]; then

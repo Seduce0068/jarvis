@@ -119,6 +119,7 @@ status: "draft"
 restore-local --latest                       # 検証 + 計画のみ（dry-run）
 restore-local --latest --apply               # 隔離先へ復元（本番は触らない）
 restore-local --latest --apply --confirm     # 本番上書き（破壊的）
+restore-local --latest --apply --keep-isolated-db  # 隔離DBを保持（既定は検証後に削除）
 restore-local --latest --skip-git --skip-configs --apply
 ```
 
@@ -148,7 +149,13 @@ restore-local --latest --skip-git --skip-configs --apply
    `gzip -cd "$SET/postgres-jarvis.sql.gz" | psql -v ON_ERROR_STOP=1 -d <隔離DB>`
    で復元する。既存 DB がある場合は上書きせず失敗させる。
 2. `information_schema.tables` の件数を検証する（値そのものはログに出さない）。
-3. 本番反映は `--confirm` 時のみ。旧 DB を退避してから
+3. 検証後に `DROP DATABASE "<隔離DB>"` で隔離 DB を削除する。Qdrant の
+   隔離コレクション削除と対称な後始末であり、既定では本番データのコピーを
+   残さない。保持する場合のみ `--keep-isolated-db` を明示する。
+4. `CREATE DATABASE` 成功後に `DROP` 完了前に異常終了した場合は、
+   `restore-local.sh` の EXIT trap が残存隔離 DB を削除する。既存の
+   サービス再起動 trap はそのまま維持し、後始末はその後に実行する。
+5. 本番反映は `--confirm` 時のみ。旧 DB を退避してから
    `DROP DATABASE` / `CREATE DATABASE` → 復元 → 再度件数検証を行う。
 
 #### Qdrant
@@ -158,7 +165,9 @@ restore-local --latest --skip-git --skip-configs --apply
    `priority=snapshot` が必須（既定の `replica` では空コレクションになる）。
    手順は [backup-restore-runbook.md](backup-restore-runbook.md) と
    [Qdrant 公式ドキュメント](https://qdrant.tech/documentation/snapshots/) に準拠。
-2. `points_count` を検証し、隔離コレクションを削除する。
+2. `points_count` を検証し、隔離コレクションを削除する。PostgreSQL の隔離 DB も
+   検証後に DROP して同じく後始末する（保持オプション `--keep-isolated-db` は
+   PostgreSQL 側のみ）。
 3. 本番反映は `--confirm` 時のみ。同一コレクションへ API 復元するか、
    新規コレクションへ復元して alias を切り替えるかは「未決定事項」とする。
 4. いずれの場合も Qdrant は active のまま操作し、停止後 HTTP 呼び出しをしない。
@@ -196,6 +205,9 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
   読み取らず、config は allowlist のみ。
 - **停止/再起動の保証**: 停止したユニットの記録を `trap EXIT` で保持し、
   途中で `set -e` による異常終了でも再起動を試みる。
+- **隔離リソースの後始末**: 既定では検証直後に隔離 DB / 隔離コレクションを削除し、
+  本番データのコピーを残さない。`--keep-isolated-db` は明示的な保持オプション。
+  CREATE 後に失敗した場合も EXIT trap が隔離 DB を片付け、サービス再起動は維持する。
 - **ロールバック**: 本番上書き前に旧 DB / 旧コレクション / 旧 config の退避先を必須とする。
   PostgreSQL の `DROP DATABASE` は退避なしでは実行しない。
 - **検証コマンド**: 実装後は `bash -n` / `shellcheck` / `shfmt -d`、
@@ -234,7 +246,7 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
    受け入れ: モック `systemctl` を PATH に置き、停止リストと
    エラー時の再起動呼び出しをアサート。Qdrant が停止対象に含まれないこと。
 4. **S4: PostgreSQL 復元**
-   隔離 DB 復元と件数検証、`--confirm` 時の本番反映と退避。
+   隔離 DB 復元と件数検証、検証後の隔離 DB DROP、`--confirm` 時の本番反映と退避。
    受け入れ: モック `psql` / `gzip` で `ON_ERROR_STOP=1` と退避手順を確認。
 5. **S5: Qdrant 復元**
    `priority=snapshot` 付き upload、`points_count` 検証、隔離コレクション削除、

@@ -382,8 +382,10 @@ if [ "$apply" -eq 1 ]; then
   # 事後検証: モック記録から「隔離先のみ・本番ゼロ」を確認する。
   assert_present "apply: isolated DB created" \
     'CREATE DATABASE "jarvis_restore_test"' "$tmp/logs/psql.log"
+  assert_present "apply: isolated DB dropped after verification" \
+    'DROP DATABASE "jarvis_restore_test"' "$tmp/logs/psql.log"
   assert_absent "apply: no production DROP DATABASE" \
-    'DROP DATABASE' "$tmp/logs/psql.log"
+    'DROP DATABASE "jarvis"' "$tmp/logs/psql.log"
   assert_absent "apply: no production DB as -d target" \
     '[-]d jarvis([[:space:]]|$)' "$tmp/logs/psql.log"
   assert_absent "apply: no production DB name in SQL" \
