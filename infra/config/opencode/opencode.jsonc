@@ -17,41 +17,131 @@
   // Keep credential material out of agent context even when a task asks
   // for it. The gateway handles execution; these rules constrain what the
   // agent runtime itself can read or edit.
+  //
+  // Schema note: the enforced top-level field is `permission` (singular);
+  // `permissions` (plural) is accepted by the loader but informational only
+  // (OpenCodeRust docs/opencode-config.md:37-46, MAPPING.md:75-86).
+  // A tool value may be a pattern map: "*" is the fallback and the runtime
+  // sorts wildcard first / longer patterns last, so the most specific match
+  // wins (opencode-agent/src/agent.rs:811-824, 1132-1168). Pattern matching is
+  // substring based: "*<text>*" matches any target containing <text>
+  // (opencode-permission/src/ruleset.rs:123-142). For bash the target is the
+  // command string; for read/edit/glob/grep/list it is the normalized path.
+  // Keep development allows via "*": "allow" and add targeted denials only.
   "permission": {
     "read": {
-      "*/secrets/**": "deny",
-      "*/.env*": "deny",
-      "*.pem": "deny",
-      "*.key": "deny",
-      "id_rsa*": "deny",
-      "*.kdbx": "deny",
-      "secrets/**": "deny",
-      ".aws/credentials": "deny",
-      "*/.aws/*": "deny",
-      "*/.kube/*": "deny",
-      "*/.config/gcloud/*": "deny",
-      "*/.npmrc": "deny"
+      "*.env*": "deny",
+      "*.env.example*": "allow",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*id_rsa*": "deny",
+      "*.kdbx*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.kube/*": "deny",
+      "*.config/gcloud/*": "deny",
+      "*.npmrc*": "deny"
     },
     "edit": {
-      "*.pem": "deny",
-      "*.key": "deny",
-      "id_rsa*": "deny",
-      "*.kdbx": "deny",
-      "secrets/**": "deny",
-      ".aws/credentials": "deny",
-      "*/.aws/*": "deny",
-      "*/.kube/*": "deny",
-      "*/.config/gcloud/*": "deny",
-      "*/.npmrc": "deny"
+      "*.env*": "deny",
+      "*.env.example*": "allow",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*id_rsa*": "deny",
+      "*.kdbx*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.kube/*": "deny",
+      "*.config/gcloud/*": "deny",
+      "*.npmrc*": "deny"
     },
-    "bash": "allow",
-    "glob": "allow",
-    "grep": "allow",
-    "list": "allow",
+    // bash: command-string patterns block `cat`/`cp`/`python -c`/... reads
+    // of secret paths instead of letting the shell bypass read/edit deny.
+    // No .env.example exception here: a command mentioning both templates and
+    // real .env would match the longer allow pattern and slip through.
+    "bash": {
+      "*": "allow",
+      "*.env*": "deny",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*id_rsa*": "deny",
+      "*.kdbx*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.kube/*": "deny",
+      "*.config/gcloud/*": "deny",
+      "*.npmrc*": "deny"
+    },
+    // task's match target is subagent_type, so path patterns are inert here;
+    // the effective containment for delegated work is the per-agent
+    // `permission` blocks below.
+    "task": {
+      "*": "allow",
+      "*.env*": "deny",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.config/gcloud/*": "deny"
+    },
+    // glob/grep/list can locate secrets; deny the same path markers.
+    "glob": {
+      "*": "allow",
+      "*.env*": "deny",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.config/gcloud/*": "deny"
+    },
+    "grep": {
+      "*": "allow",
+      "*.env*": "deny",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.config/gcloud/*": "deny"
+    },
+    "list": {
+      "*": "allow",
+      "*.env*": "deny",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.config/gcloud/*": "deny"
+    },
+    // patch/write/multiedit map to the "edit" permission in the runtime;
+    // keep an explicit map for runtimes that use the tool name directly.
+    "patch": {
+      "*": "allow",
+      "*.env*": "deny",
+      "*.env.example*": "allow",
+      "*bws.env*": "deny",
+      "*.key*": "deny",
+      "*.pem*": "deny",
+      "*secrets/*": "deny",
+      "*.ssh/*": "deny",
+      "*.aws/*": "deny",
+      "*.config/gcloud/*": "deny"
+    },
     "webfetch": "allow",
-    "websearch": "allow",
-    "patch": "allow",
-    "task": "allow"
+    "websearch": "allow"
   },
   // Subagents inherit the host model: no model id is pinned here so the
   // host's authenticated provider stays authoritative.
@@ -70,7 +160,47 @@
         { "action": "subagent", "resource": "*", "effect": "deny" },
         { "action": "webfetch", "resource": "*", "effect": "deny" },
         { "action": "websearch", "resource": "*", "effect": "deny" }
-      ]
+      ],
+      // The local runtime enforces the singular `permission` field (plural
+      // `permissions` is informational). Keep the dev allows, deny secrets.
+      "permission": {
+        "bash": {
+          "*": "allow",
+          "*.env*": "deny",
+          "*bws.env*": "deny",
+          "*.key*": "deny",
+          "*.pem*": "deny",
+          "*secrets/*": "deny",
+          "*.ssh/*": "deny",
+          "*.aws/*": "deny",
+          "*.config/gcloud/*": "deny"
+        },
+        "read": {
+          "*.env*": "deny",
+          "*.env.example*": "allow",
+          "*bws.env*": "deny",
+          "*.key*": "deny",
+          "*.pem*": "deny",
+          "*secrets/*": "deny",
+          "*.ssh/*": "deny",
+          "*.aws/*": "deny",
+          "*.config/gcloud/*": "deny"
+        },
+        "edit": {
+          "*.env*": "deny",
+          "*.env.example*": "allow",
+          "*bws.env*": "deny",
+          "*.key*": "deny",
+          "*.pem*": "deny",
+          "*secrets/*": "deny",
+          "*.ssh/*": "deny",
+          "*.aws/*": "deny",
+          "*.config/gcloud/*": "deny"
+        },
+        "task": "deny",
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
     },
     "jarvis-policy-audit": {
       "mode": "subagent",
@@ -85,7 +215,24 @@
         { "action": "shell", "resource": "*", "effect": "deny" },
         { "action": "webfetch", "resource": "*", "effect": "deny" },
         { "action": "websearch", "resource": "*", "effect": "deny" }
-      ]
+      ],
+      // Enforced form of the read-only intent above for the local runtime.
+      "permission": {
+        "bash": { "*": "deny" },
+        "edit": { "*": "deny" },
+        "read": {
+          "*.env*": "deny",
+          "*bws.env*": "deny",
+          "*.key*": "deny",
+          "*.pem*": "deny",
+          "*secrets/*": "deny",
+          "*.ssh/*": "deny",
+          "*.aws/*": "deny",
+          "*.config/gcloud/*": "deny"
+        },
+        "webfetch": "deny",
+        "websearch": "deny"
+      }
     }
   }
 }
