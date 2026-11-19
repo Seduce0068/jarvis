@@ -77,13 +77,14 @@ const ALREADY_DECIDED_409_BODY: &str = jarvis_core::ALREADY_DECIDED_409_BODY;
 /// "期限切れ" outcome.
 const APPROVAL_EXPIRED_BODY: &str = jarvis_core::APPROVAL_EXPIRED_BODY;
 
-// Closed `/health` vocabulary (I62-C), aliased from `jarvis-core` so this
-// classifier cannot drift from what `jarvis-policy` emits. An unexpected status
-// or reason is never a release: the probe fails closed (Err -> `unwrap_or(true)`).
-const HEALTH_STATUS_OK: &str = jarvis_core::HEALTH_STATUS_OK;
-const HEALTH_STATUS_DEGRADED: &str = jarvis_core::HEALTH_STATUS_DEGRADED;
-const HEALTH_REASON_KILL_SWITCH: &str = jarvis_core::HEALTH_REASON_KILL_SWITCH;
-const HEALTH_REASON_NO_POLICY: &str = jarvis_core::HEALTH_REASON_NO_POLICY;
+// Complete `/health` wire bodies (I62-C, hardened in I64-B), aliased from
+// `jarvis-core` so this classifier cannot drift from what `jarvis-policy`
+// emits. Classification is a trimmed exact match on the whole body — never a
+// partial `Value` field read — so an extra key, a duplicate key or an unknown
+// shape is never a release: the probe fails closed (Err -> `unwrap_or(true)`).
+const HEALTH_OK_BODY: &str = jarvis_core::HEALTH_OK_BODY;
+const HEALTH_KILL_SWITCH_BODY: &str = jarvis_core::HEALTH_KILL_SWITCH_BODY;
+const HEALTH_NO_POLICY_BODY: &str = jarvis_core::HEALTH_NO_POLICY_BODY;
 
 /// Classify the bounded read of a 409 response body (I56-B, I58-B).
 ///
@@ -577,25 +578,26 @@ impl PolicyClient {
     }
 
     /// Read-only, unauthenticated probe of the policy service's emergency-stop
-    /// state (I48-D, I60-A, I62-C). `GET /health` answers `503` with the fixed
-    /// body `{"status":"degraded","reason":"kill_switch"}` while the kill switch
-    /// is active, `503` with `reason=no_policy` when a policy source is missing,
-    /// and `200 {"status":"ok"}` otherwise. This is a *display* signal only: the
-    /// decision POST still returns `200 Approved` when a stop lands mid-commit,
-    /// while `jarvis-mcp-gw` re-checks the kill switch before the tool runs.
+    /// state (I48-D, I60-A, I62-C, I64-B). `GET /health` answers `503` with the
+    /// fixed body `{"status":"degraded","reason":"kill_switch"}` while the kill
+    /// switch is active, `503` with `{"status":"degraded","reason":"no_policy"}`
+    /// when a policy source is missing, and `200 {"status":"ok"}` otherwise.
+    /// This is a *display* signal only: the decision POST still returns
+    /// `200 Approved` when a stop lands mid-commit, while `jarvis-mcp-gw`
+    /// re-checks the kill switch before the tool runs.
     ///
-    /// Only three definitive answers exist, all requiring an exact body match:
-    /// `503` + `status=degraded` + `reason=kill_switch` reports `true`; the same
-    /// with `reason=no_policy` and `200` + `status=ok` (no `reason` key) report
-    /// `false`. Everything else is an *incomplete* probe and **fails closed**:
-    /// a timeout, a connection error, an unreadable body, a missing/unknown
-    /// `status` or `reason`, a 200 carrying a `reason`, a redirect, or any status
-    /// other than `200`/`503` (including a proxy `500`/`502`/`504`) returns
+    /// Only three definitive answers exist, each requiring a **trimmed exact
+    /// match of the entire body** against the fixed literals aliased from
+    /// `jarvis-core`: the kill-switch body on `503` reports `true`; the no-policy
+    /// body on `503` and the ok body on `200` report `false`. There is no partial
+    /// field interpretation: an extra key, a duplicate key (serde_json keeps the
+    /// last value, so a relay could rewrite `reason=no_policy` into a false
+    /// release), a whitespace variant of a known shape, an unknown shape, a read
+    /// failure, a timeout, a redirect, or any status other than `200`/`503`
+    /// (including a proxy `500`/`502`/`504`) is an *incomplete* probe and returns
     /// `Err`, which this method projects to `true` through `unwrap_or(true)`
-    /// (I54-A, I60-A, I62-C). Otherwise a transient failure or a proxy that
-    /// strips `status`/`reason` right after a kill-switch 409 would masquerade
-    /// as "switch lifted" and drop the halt pin. No reason text, token, or
-    /// request data is surfaced.
+    /// (I54-A, I60-A, I62-C, I64-B). No reason text, token, or request data is
+    /// surfaced.
     pub fn kill_switch_active(&self) -> bool {
         self.kill_switch_probe().unwrap_or(true)
     }
@@ -624,27 +626,24 @@ impl PolicyClient {
         if status != 200 && status != 503 {
             bail!("GET {url} returned unexpected HTTP {status}");
         }
-        let value = response
+        // I64-B: classify the whole body, not individual JSON fields. The old
+        // `read_json::<Value>()` + `get("reason")` path let a relay append a
+        // second `reason` key: serde_json keeps the last value, so a rewritten
+        // kill-switch body reported `no_policy` and lifted the halt pin. A
+        // bounded exact match against the fixed literals has no such ambiguity.
+        let body = response
             .body_mut()
-            .read_json::<serde_json::Value>()
-            .with_context(|| format!("invalid health JSON from GET {url}"))?;
-        let wire_status = value.get("status").and_then(|status| status.as_str());
-        let wire_reason = value.get("reason").and_then(|reason| reason.as_str());
-        if status == 200 {
-            // I62-C: a 200 is a release only for the exact `{"status":"ok"}`
-            // body. Any `reason` key (even a null value) makes it unclassifiable
-            // so a rewritten degraded answer cannot become a false release.
-            if wire_status == Some(HEALTH_STATUS_OK) && value.get("reason").is_none() {
-                return Ok(false);
-            }
-            bail!("unexpected health body from GET {url}");
-        }
-        // I62-C: a 503 is definitive only when BOTH fields match the shared
-        // closed vocabulary. A missing status, an unknown reason, or a 200 body
-        // reused under a 503 is an incomplete probe and must fail closed.
-        match (wire_status, wire_reason) {
-            (Some(HEALTH_STATUS_DEGRADED), Some(HEALTH_REASON_KILL_SWITCH)) => Ok(true),
-            (Some(HEALTH_STATUS_DEGRADED), Some(HEALTH_REASON_NO_POLICY)) => Ok(false),
+            .with_config()
+            .limit(256)
+            .read_to_string()
+            .with_context(|| format!("unreadable health body from GET {url}"))?;
+        let body = body.trim();
+        match status {
+            200 if body == HEALTH_OK_BODY => Ok(false),
+            503 if body == HEALTH_KILL_SWITCH_BODY => Ok(true),
+            503 if body == HEALTH_NO_POLICY_BODY => Ok(false),
+            // Extra keys, duplicate keys, unknown shapes, unknown reasons and a
+            // known body under the wrong status are all incomplete probes.
             _ => bail!("unexpected health body from GET {url}"),
         }
     }
@@ -1982,34 +1981,84 @@ mod tests {
         }
     }
 
-    /// I62-C cross-crate pin: the classifier accepts exactly what
-    /// `jarvis-policy` emits from the shared `jarvis-core` vocabulary. Literal
-    /// fixtures are independent of the constants, so a one-sided vocabulary
-    /// change fails here instead of silently flipping a halt display.
+    /// I64-B regression (finding (a)): serde_json's `Value` map keeps the last
+    /// value for a duplicate key, so a relay appending `reason=no_policy` to a
+    /// kill-switch body used to be read as an explicit release. Exact whole-body
+    /// matching rejects the rewritten body and fails closed.
+    #[test]
+    fn health_probe_duplicate_key_body_fails_closed() {
+        assert_health_status_fails_closed(
+            "HTTP/1.1 503 Service Unavailable",
+            r#"{"status":"degraded","reason":"kill_switch","reason":"no_policy"}"#,
+        );
+        // The reverse rewrite must not be read as an active stop either; it is
+        // simply unclassifiable.
+        assert_health_status_fails_closed(
+            "HTTP/1.1 503 Service Unavailable",
+            r#"{"status":"degraded","reason":"no_policy","reason":"kill_switch"}"#,
+        );
+        // A duplicate `status` on a 200 cannot masquerade as the ok body.
+        assert_health_status_fails_closed("HTTP/1.1 200 OK", r#"{"status":"ok","status":"ok"}"#);
+    }
+
+    /// I64-B regression (finding (b)): the old two-key check accepted extra
+    /// keys, e.g. `{"status":"ok","extra":1}`, even though the comment promised
+    /// "exact body match". Extra keys are now unclassifiable on all three shapes.
+    #[test]
+    fn health_probe_extra_key_body_fails_closed() {
+        assert_health_status_fails_closed("HTTP/1.1 200 OK", r#"{"status":"ok","extra":1}"#);
+        assert_health_status_fails_closed(
+            "HTTP/1.1 503 Service Unavailable",
+            r#"{"status":"degraded","reason":"kill_switch","extra":1}"#,
+        );
+        assert_health_status_fails_closed(
+            "HTTP/1.1 503 Service Unavailable",
+            r#"{"status":"degraded","reason":"no_policy","extra":1}"#,
+        );
+    }
+
+    /// I64-B: an unknown shape is never definitive. Inner whitespace variants,
+    /// unknown reasons and a known body under the wrong status are incomplete
+    /// probes as well.
+    #[test]
+    fn health_probe_unknown_shape_fails_closed() {
+        assert_health_status_fails_closed(
+            "HTTP/1.1 503 Service Unavailable",
+            r#"{"status":"degraded","reason":"unknown"}"#,
+        );
+        assert_health_status_fails_closed("HTTP/1.1 200 OK", r#"{ "status": "ok" }"#);
+        // A known degraded body under 200 is not a release.
+        assert_health_status_fails_closed(
+            "HTTP/1.1 200 OK",
+            r#"{"status":"degraded","reason":"kill_switch"}"#,
+        );
+        // A known ok body under 503 is not an active stop.
+        assert_health_status_fails_closed("HTTP/1.1 503 Service Unavailable", r#"{"status":"ok"}"#);
+    }
+
+    /// I62-C / I64-B cross-crate pin: the classifier accepts exactly what
+    /// `jarvis-policy` emits from the shared `jarvis-core` constants. The literal
+    /// fixtures are independent of the constants, so a one-sided wording change
+    /// fails here (or in the core/policy pins) instead of silently flipping a
+    /// halt display. This pins the *whole* body, not just two field values.
     #[test]
     fn health_vocabulary_matches_core_wire_contract() {
         const OK_BODY: &str = r#"{"status":"ok"}"#;
         const KILL_SWITCH_BODY: &str = r#"{"status":"degraded","reason":"kill_switch"}"#;
         const NO_POLICY_BODY: &str = r#"{"status":"degraded","reason":"no_policy"}"#;
 
-        assert_eq!(HEALTH_STATUS_OK, jarvis_core::HEALTH_STATUS_OK);
-        assert_eq!(jarvis_core::HEALTH_STATUS_OK, "ok");
-        assert_eq!(HEALTH_STATUS_DEGRADED, jarvis_core::HEALTH_STATUS_DEGRADED);
-        assert_eq!(jarvis_core::HEALTH_STATUS_DEGRADED, "degraded");
+        assert_eq!(HEALTH_OK_BODY, jarvis_core::HEALTH_OK_BODY);
         assert_eq!(
-            HEALTH_REASON_KILL_SWITCH,
-            jarvis_core::HEALTH_REASON_KILL_SWITCH
+            HEALTH_KILL_SWITCH_BODY,
+            jarvis_core::HEALTH_KILL_SWITCH_BODY
         );
-        assert_eq!(jarvis_core::HEALTH_REASON_KILL_SWITCH, "kill_switch");
-        assert_eq!(
-            HEALTH_REASON_NO_POLICY,
-            jarvis_core::HEALTH_REASON_NO_POLICY
-        );
-        assert_eq!(jarvis_core::HEALTH_REASON_NO_POLICY, "no_policy");
-        assert!(OK_BODY.contains(jarvis_core::HEALTH_STATUS_OK));
-        assert!(KILL_SWITCH_BODY.contains(jarvis_core::HEALTH_STATUS_DEGRADED));
-        assert!(KILL_SWITCH_BODY.contains(jarvis_core::HEALTH_REASON_KILL_SWITCH));
-        assert!(NO_POLICY_BODY.contains(jarvis_core::HEALTH_REASON_NO_POLICY));
+        assert_eq!(HEALTH_NO_POLICY_BODY, jarvis_core::HEALTH_NO_POLICY_BODY);
+        assert_eq!(HEALTH_OK_BODY, OK_BODY);
+        assert_eq!(HEALTH_KILL_SWITCH_BODY, KILL_SWITCH_BODY);
+        assert_eq!(HEALTH_NO_POLICY_BODY, NO_POLICY_BODY);
+        assert_ne!(HEALTH_OK_BODY, HEALTH_KILL_SWITCH_BODY);
+        assert_ne!(HEALTH_OK_BODY, HEALTH_NO_POLICY_BODY);
+        assert_ne!(HEALTH_KILL_SWITCH_BODY, HEALTH_NO_POLICY_BODY);
 
         for (status_line, body, expected) in [
             ("HTTP/1.1 200 OK", OK_BODY, false),

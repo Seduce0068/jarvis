@@ -58,15 +58,16 @@ pub const ALREADY_DECIDED_409_BODY: &str = "approval request already decided";
 /// consumers.
 pub const APPROVAL_EXPIRED_BODY: &str = "approval request expired";
 
-/// Closed vocabulary of the policy service's `GET /health` wire contract (I62-C).
+/// Closed field vocabulary of the policy service's `GET /health` wire contract
+/// (I62-C). A healthy service answers `200 {"status":"ok"}` (no `reason` key);
+/// a degraded service answers `503 {"status":"degraded","reason":<reason>}`.
 ///
-/// A healthy service answers `200 {"status":"ok"}` (no `reason` key); a degraded
-/// service answers `503 {"status":"degraded","reason":<reason>}`. `jarvis-policy`
-/// emits these literals and the approval UI classifies the same probe against
-/// them. Keeping one definition here makes a one-sided wording change visible
-/// as a failing pin in both consumers instead of silently turning an active
-/// kill switch into a false "switch lifted" display. The wire text is stable:
-/// changing it requires updating the pins in both consumers.
+/// Since I64-B the complete raw bodies below ([`HEALTH_OK_BODY`],
+/// [`HEALTH_KILL_SWITCH_BODY`], [`HEALTH_NO_POLICY_BODY`]) are the authoritative
+/// wire contract: the UI matches a whole body exactly rather than interpreting
+/// individual fields. These tokens remain the fixed status/reason vocabulary
+/// and are pinned separately. The wire text is stable: changing it requires
+/// updating the pins in both consumers.
 pub const HEALTH_STATUS_OK: &str = "ok";
 /// Degraded `status` value of the `503` health response. See
 /// [`HEALTH_STATUS_OK`] for the shared-contract rationale.
@@ -75,6 +76,25 @@ pub const HEALTH_STATUS_DEGRADED: &str = "degraded";
 pub const HEALTH_REASON_KILL_SWITCH: &str = "kill_switch";
 /// `503` health `reason` for a missing policy source.
 pub const HEALTH_REASON_NO_POLICY: &str = "no_policy";
+
+/// Fixed raw body of the healthy `200` `/health` response (I64-B).
+///
+/// This is the complete wire body, not just a field vocabulary. The approval UI
+/// classifies a probe by a *trimmed exact match* against the three body literals
+/// below: a body with an extra key, a duplicate key, or any unknown shape is an
+/// incomplete probe and fails closed (`Err` -> `kill_switch_active`'s
+/// `unwrap_or(true)`). Keeping the raw bodies here means a relay cannot turn a
+/// degraded answer into a false release by exploiting serde_json's last-wins
+/// handling of duplicate keys. The emit side (`jarvis-policy`) and the UI
+/// classifier both alias these constants, and independent fixtures in both
+/// consumers catch a one-sided change the same way the 409/410 pins do.
+pub const HEALTH_OK_BODY: &str = r#"{"status":"ok"}"#;
+/// Fixed raw body of the `503` `/health` response for an active kill switch
+/// (I64-B). See [`HEALTH_OK_BODY`] for the shared-contract rationale.
+pub const HEALTH_KILL_SWITCH_BODY: &str = r#"{"status":"degraded","reason":"kill_switch"}"#;
+/// Fixed raw body of the `503` `/health` response for a missing policy source
+/// (I64-B). See [`HEALTH_OK_BODY`] for the shared-contract rationale.
+pub const HEALTH_NO_POLICY_BODY: &str = r#"{"status":"degraded","reason":"no_policy"}"#;
 
 /// Fixed classification token emitted when a JSON body fails to deserialize.
 ///
@@ -93,21 +113,52 @@ pub const INVALID_JSON_BODY_FIELD: &str = "body";
 /// response or a log record. axum's own `status()` is deliberately not used:
 /// it reports 422 for `JsonDataError`, while every service here keeps the
 /// historical bare 400 for wrong types and syntax errors.
+///
+/// I64-C: `BytesRejection` is not a single cause. It wraps
+/// `FailedToBufferBody`, whose `LengthLimitError` is the real 2 MiB overflow
+/// (axum → 413) and whose `UnknownBodyError` is a body read failure such as a
+/// client disconnect or a stream error (axum → 400). Only the former is fixed
+/// by shrinking the payload; mapping both to 413 mislabels transport failures
+/// as client input errors and pollutes 413 metrics. Adopted policy here:
+/// length-limit → 413, every other body-buffer failure → 400 (axum parity).
+/// Detecting/counting oversized bodies at a dedicated body-limit middleware is
+/// left to the owning service; this extractor only classifies what axum reports.
 #[cfg(feature = "http")]
 fn bare_json_rejection_status(
     rejection: &axum::extract::rejection::JsonRejection,
 ) -> axum::http::StatusCode {
-    use axum::extract::rejection::JsonRejection;
+    use axum::extract::rejection::{BytesRejection, FailedToBufferBody, JsonRejection};
     match rejection {
         // The client can fix this by adding `Content-Type: application/json`.
         JsonRejection::MissingJsonContentType(_) => axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
-        // `BytesRejection` is the default 2 MiB body-limit rejection: the client
-        // can fix this by shrinking the payload. Keep it visible to metrics.
-        JsonRejection::BytesRejection(_) => axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+        // Only an actual length-limit overflow is client-fixable by shrinking
+        // the payload. Discriminating via `FailedToBufferBody` keeps axum's own
+        // 400 for `UnknownBodyError` (disconnect / stream read failure).
+        JsonRejection::BytesRejection(bytes_rejection) => {
+            let is_length_limit = matches!(
+                bytes_rejection,
+                BytesRejection::FailedToBufferBody(FailedToBufferBody::LengthLimitError(_))
+            );
+            bare_json_body_buffer_status(is_length_limit)
+        }
         // Type mismatches (`JsonDataError`) and syntax errors
         // (`JsonSyntaxError`) stay on the established bare-400 contract. The
-        // wildcard also covers any future `#[non_exhaustive]` variant.
+        // wildcard also covers any future `#[non_exhaustive]` variant, including
+        // new `BytesRejection` / `FailedToBufferBody` variants.
         _ => axum::http::StatusCode::BAD_REQUEST,
+    }
+}
+
+/// Status for a failed body-buffer rejection, split out so the non-length-limit
+/// branch (axum's `UnknownBodyError`: client disconnect / stream read error)
+/// has a direct regression without adding a streaming-body dev-dependency to
+/// jarvis-core. See [`bare_json_rejection_status`] for the adopted policy.
+#[cfg(feature = "http")]
+fn bare_json_body_buffer_status(is_length_limit: bool) -> axum::http::StatusCode {
+    if is_length_limit {
+        axum::http::StatusCode::PAYLOAD_TOO_LARGE
+    } else {
+        axum::http::StatusCode::BAD_REQUEST
     }
 }
 
@@ -120,8 +171,10 @@ fn bare_json_rejection_status(
 /// body bypasses each service's no-leak contract and makes HTTP asymmetric with
 /// gRPC's fixed `InvalidArgument`. Wrapping `Json<T>` here discards the rejection
 /// detail and selects an empty status from the rejection kind: 415 when the
-/// `Content-Type` header is missing, 413 when the body exceeds axum's default
-/// 2 MiB limit, and 400 for every other failure (wrong type or bad syntax).
+/// `Content-Type` header is missing, 413 only when axum reports a length-limit
+/// overflow (body exceeds its default 2 MiB limit), and 400 for every other
+/// failure — including `UnknownBodyError` from a client disconnect or stream
+/// read error, plus wrong type or bad syntax (I64-C).
 ///
 /// Every rejection emits one fixed-vocabulary log record — the same
 /// `error_kind = "invalid_input"` / `field = "body"` / "invalid client input"
@@ -355,9 +408,10 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
     }
 
-    /// I61-A: axum's 2 MiB `BytesRejection` stays visible as a bare 413 so the
-    /// size error is not erased from metrics. The rejection is a `StatusCode`,
-    /// so no rejection text or body can cross the boundary.
+    /// I61-A / I64-C: axum's 2 MiB `LengthLimitError` stays visible as a bare
+    /// 413 so the size error is not erased from metrics. A body read failure is
+    /// not a size error and now takes the 400 branch instead. The rejection is
+    /// a `StatusCode`, so no rejection text or body can cross the boundary.
     #[cfg(feature = "http")]
     #[test]
     fn bare_json_oversized_body_is_413() {
@@ -367,6 +421,26 @@ mod tests {
             Some("application/json"),
         );
         assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// I64-C: a failed body buffer that is NOT a length-limit overflow (axum's
+    /// `UnknownBodyError`, e.g. a client disconnect or stream read error) must
+    /// be a bare 400, not the misleading "shrink your body" 413. The mapping
+    /// seam is asserted directly because producing an erroring stream body in
+    /// this crate would require a `futures-util` dev-dependency, which is out
+    /// of scope for this lib.rs-only change. The second assertion guards the
+    /// other half of the seam against an accidental flip.
+    #[cfg(feature = "http")]
+    #[test]
+    fn bare_json_unknown_body_error_is_400() {
+        assert_eq!(
+            bare_json_body_buffer_status(false),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            bare_json_body_buffer_status(true),
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 
     /// Wrong types and bad syntax keep the established bare-400 contract;
@@ -435,6 +509,35 @@ mod tests {
         assert_eq!(HEALTH_REASON_KILL_SWITCH, "kill_switch");
         assert_eq!(HEALTH_REASON_NO_POLICY, "no_policy");
         assert_ne!(HEALTH_REASON_KILL_SWITCH, HEALTH_REASON_NO_POLICY);
+    }
+
+    /// Single canonical pins of the three complete `/health` wire bodies
+    /// (I64-B). Policy emits these literals and the UI accepts only a trimmed
+    /// exact match; both consumers keep independent fixtures, so a one-sided
+    /// wording change fails a pin here or on either side instead of silently
+    /// turning a rewritten 503 into a false "switch lifted" display.
+    #[test]
+    fn health_wire_bodies_pin_the_wire_contract() {
+        assert_eq!(HEALTH_OK_BODY, r#"{"status":"ok"}"#);
+        assert_eq!(
+            HEALTH_KILL_SWITCH_BODY,
+            r#"{"status":"degraded","reason":"kill_switch"}"#
+        );
+        assert_eq!(
+            HEALTH_NO_POLICY_BODY,
+            r#"{"status":"degraded","reason":"no_policy"}"#
+        );
+        // The vocabulary tokens are the atoms of the raw bodies; pin that
+        // relationship too so a one-sided token edit cannot drift unnoticed.
+        assert!(HEALTH_OK_BODY.contains(HEALTH_STATUS_OK));
+        assert!(HEALTH_KILL_SWITCH_BODY.contains(HEALTH_STATUS_DEGRADED));
+        assert!(HEALTH_KILL_SWITCH_BODY.contains(HEALTH_REASON_KILL_SWITCH));
+        assert!(HEALTH_NO_POLICY_BODY.contains(HEALTH_STATUS_DEGRADED));
+        assert!(HEALTH_NO_POLICY_BODY.contains(HEALTH_REASON_NO_POLICY));
+        // The three definitive bodies must stay mutually distinguishable.
+        assert_ne!(HEALTH_OK_BODY, HEALTH_KILL_SWITCH_BODY);
+        assert_ne!(HEALTH_OK_BODY, HEALTH_NO_POLICY_BODY);
+        assert_ne!(HEALTH_KILL_SWITCH_BODY, HEALTH_NO_POLICY_BODY);
     }
 
     fn all_sources() -> [EventSource; 7] {

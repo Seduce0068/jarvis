@@ -6,12 +6,10 @@ use crate::policy::{ApprovalDecision, ApprovalRequest};
 use axum::{
     Json, Router,
     extract::{Path, State},
+    response::IntoResponse,
     routing::{get, post},
 };
-use jarvis_core::{
-    BareJson, HEALTH_REASON_KILL_SWITCH, HEALTH_REASON_NO_POLICY, HEALTH_STATUS_DEGRADED,
-    HEALTH_STATUS_OK,
-};
+use jarvis_core::{BareJson, HEALTH_KILL_SWITCH_BODY, HEALTH_NO_POLICY_BODY, HEALTH_OK_BODY};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tracing::instrument;
@@ -357,20 +355,30 @@ fn status_label(status: axum::http::StatusCode) -> &'static str {
     }
 }
 
-/// Fixed, non-sensitive health states. The body deliberately uses a tiny
-/// closed vocabulary: no file paths, no tokens, and never the kill-switch
-/// reason string. Generic probes can poll `/health` without receiving
-/// operational details even while the service is degraded.
-#[derive(Serialize, Debug)]
-struct HealthResponse {
-    status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'static str>,
+/// Wrap one of the three fixed `/health` bodies with the stable JSON content
+/// type (I64-B).
+///
+/// The body itself is never assembled from request data or from a serde struct:
+/// it is one of the three complete literals owned by `jarvis-core`, byte for
+/// byte. That lets the UI classify with a trimmed exact match instead of
+/// interpreting individual JSON fields, which serde_json resolves last-wins for
+/// duplicate keys. Only the status code and the fixed literal are chosen here.
+fn fixed_json_response(
+    status: axum::http::StatusCode,
+    body: &'static str,
+) -> axum::response::Response {
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response
 }
 
-// I62-C: the wire vocabulary is owned by `jarvis-core` and imported above, so
-// the emit side and the UI classifier cannot drift into different strings.
-// Both consumers pin these constants against their own observed wire values.
+// I62-C / I64-B: the complete wire bodies are owned by `jarvis-core` and
+// imported above, so the emit side and the UI classifier cannot drift into
+// different strings or accept a rewritten shape. Both consumers pin these
+// constants against their own independent wire fixtures.
 
 /// Lightweight check that at least one configured policy source is still
 /// present. `PolicyEngine` loads Cedar rules from `cedar_policy_dir` and Casbin
@@ -395,37 +403,25 @@ fn policy_available(engine: &PolicyEngine) -> bool {
         })
 }
 
-/// 200 `{"status":"ok"}` while the service is usable, otherwise 503 with a
-/// fixed reason. The kill switch takes precedence so an operator always sees
-/// the emergency-stop state first. The normal 200 contract is unchanged for
-/// existing `/health` pollers.
-async fn health(
-    State(engine): State<Arc<PolicyEngine>>,
-) -> (axum::http::StatusCode, Json<HealthResponse>) {
-    let degraded_reason = if engine.kill_switch_status().activated {
-        Some(HEALTH_REASON_KILL_SWITCH)
-    } else if !policy_available(&engine) {
-        Some(HEALTH_REASON_NO_POLICY)
-    } else {
-        None
-    };
-
-    match degraded_reason {
-        Some(reason) => (
+/// 200 `{"status":"ok"}` while the service is usable, otherwise 503 with one of
+/// the two fixed degraded bodies. The kill switch takes precedence so an
+/// operator always sees the emergency-stop state first. The normal 200 contract
+/// and the `application/json` content type are unchanged for existing pollers.
+async fn health(State(engine): State<Arc<PolicyEngine>>) -> axum::response::Response {
+    let (status, body) = if engine.kill_switch_status().activated {
+        (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
-            Json(HealthResponse {
-                status: HEALTH_STATUS_DEGRADED,
-                reason: Some(reason),
-            }),
-        ),
-        None => (
-            axum::http::StatusCode::OK,
-            Json(HealthResponse {
-                status: HEALTH_STATUS_OK,
-                reason: None,
-            }),
-        ),
-    }
+            HEALTH_KILL_SWITCH_BODY,
+        )
+    } else if !policy_available(&engine) {
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            HEALTH_NO_POLICY_BODY,
+        )
+    } else {
+        (axum::http::StatusCode::OK, HEALTH_OK_BODY)
+    };
+    fixed_json_response(status, body)
 }
 
 /// Prometheus scrape endpoint. State gauges are refreshed here so the
@@ -1683,6 +1679,67 @@ mod tests {
             .expect("health body is JSON");
         assert_eq!(degraded["status"], jarvis_core::HEALTH_STATUS_DEGRADED);
         assert_eq!(degraded["reason"], jarvis_core::HEALTH_REASON_KILL_SWITCH);
+    }
+
+    /// I64-B cross-crate pin: the emit side writes the complete raw bodies
+    /// defined in `jarvis-core` byte for byte. The fixtures below are literal
+    /// strings independent of the constants, so a one-sided wording change in
+    /// core or policy fails here (or in the UI pin) instead of silently
+    /// changing the wire shape the UI exact-match classifier accepts.
+    #[tokio::test]
+    async fn health_wire_bodies_match_core_constants() {
+        const OK_BODY: &str = r#"{"status":"ok"}"#;
+        const KILL_SWITCH_BODY: &str = r#"{"status":"degraded","reason":"kill_switch"}"#;
+        const NO_POLICY_BODY: &str = r#"{"status":"degraded","reason":"no_policy"}"#;
+
+        assert_eq!(jarvis_core::HEALTH_OK_BODY, OK_BODY);
+        assert_eq!(jarvis_core::HEALTH_KILL_SWITCH_BODY, KILL_SWITCH_BODY);
+        assert_eq!(jarvis_core::HEALTH_NO_POLICY_BODY, NO_POLICY_BODY);
+
+        let (engine, _dir) = test_engine("http-health-body-pin").await;
+        let base = start_server(engine.clone()).await;
+        let client = reqwest::Client::new();
+
+        let ok = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(ok.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            ok.text().await.expect("health body text"),
+            jarvis_core::HEALTH_OK_BODY
+        );
+
+        engine
+            .activate_kill_switch("pin".into(), "test-admin-token")
+            .expect("activate kill switch");
+        let killed = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(killed.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            killed.text().await.expect("health body text"),
+            jarvis_core::HEALTH_KILL_SWITCH_BODY
+        );
+
+        engine
+            .deactivate_kill_switch("test-admin-token")
+            .expect("deactivate kill switch");
+        let policy_path = PathBuf::from(&engine.config.casbin_policy_path);
+        std::fs::remove_file(&policy_path).expect("remove policy file");
+        let no_policy = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(no_policy.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            no_policy.text().await.expect("health body text"),
+            jarvis_core::HEALTH_NO_POLICY_BODY
+        );
     }
 
     /// P0-1 opt-in guard: with no token configured, approval endpoints fail
