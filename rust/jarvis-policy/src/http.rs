@@ -259,8 +259,76 @@ fn status_label(status: axum::http::StatusCode) -> &'static str {
     }
 }
 
-async fn health() -> &'static str {
-    "OK"
+/// Fixed, non-sensitive health states. The body deliberately uses a tiny
+/// closed vocabulary: no file paths, no tokens, and never the kill-switch
+/// reason string. Generic probes can poll `/health` without receiving
+/// operational details even while the service is degraded.
+#[derive(Serialize, Debug)]
+struct HealthResponse {
+    status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+const HEALTH_STATUS_OK: &str = "ok";
+const HEALTH_STATUS_DEGRADED: &str = "degraded";
+const HEALTH_REASON_KILL_SWITCH: &str = "kill_switch";
+const HEALTH_REASON_NO_POLICY: &str = "no_policy";
+
+/// Lightweight check that at least one configured policy source is still
+/// present. `PolicyEngine` loads Cedar rules from `cedar_policy_dir` and Casbin
+/// rules from `casbin_policy_path` at startup, so a file removed later is
+/// exactly the "policy file missing" degradation a probe must detect.
+///
+/// This is a metadata-only lookup: no DB/Qdrant connection and no new
+/// dependency. An empty Cedar directory is acceptable while the Casbin policy
+/// file exists, because authorization stays deny-by-default in that setup
+/// (the same setup used by the test engines).
+fn policy_available(engine: &PolicyEngine) -> bool {
+    if std::path::Path::new(&engine.config.casbin_policy_path).is_file() {
+        return true;
+    }
+    std::fs::read_dir(&engine.config.cedar_policy_dir)
+        .ok()
+        .is_some_and(|entries| {
+            entries.flatten().any(|entry| {
+                let path = entry.path();
+                path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("cedar")
+            })
+        })
+}
+
+/// 200 `{"status":"ok"}` while the service is usable, otherwise 503 with a
+/// fixed reason. The kill switch takes precedence so an operator always sees
+/// the emergency-stop state first. The normal 200 contract is unchanged for
+/// existing `/health` pollers.
+async fn health(
+    State(engine): State<Arc<PolicyEngine>>,
+) -> (axum::http::StatusCode, Json<HealthResponse>) {
+    let degraded_reason = if engine.kill_switch_status().activated {
+        Some(HEALTH_REASON_KILL_SWITCH)
+    } else if !policy_available(&engine) {
+        Some(HEALTH_REASON_NO_POLICY)
+    } else {
+        None
+    };
+
+    match degraded_reason {
+        Some(reason) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(HealthResponse {
+                status: HEALTH_STATUS_DEGRADED,
+                reason: Some(reason),
+            }),
+        ),
+        None => (
+            axum::http::StatusCode::OK,
+            Json(HealthResponse {
+                status: HEALTH_STATUS_OK,
+                reason: None,
+            }),
+        ),
+    }
 }
 
 async fn metrics() -> String {
@@ -1100,6 +1168,91 @@ mod tests {
             .expect("request")
             .status();
         assert_eq!(check, reqwest::StatusCode::OK);
+    }
+
+    /// I15-B: a healthy engine keeps the historical 200 contract and returns a
+    /// minimal JSON body without any reason field.
+    #[tokio::test]
+    async fn health_reports_ok_without_reason_when_service_is_healthy() {
+        let (engine, _dir) = test_engine("http-health-ok").await;
+        let base = start_server(engine).await;
+        let response = reqwest::Client::new()
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.expect("health body is JSON");
+        assert_eq!(body, json!({ "status": "ok" }));
+        assert!(body.get("reason").is_none());
+    }
+
+    /// I15-B: an activated kill switch is visible as 503/degraded, and the
+    /// free-form reason string plus configured paths never reach the body.
+    /// Deactivation must restore the normal 200 response.
+    #[tokio::test]
+    async fn health_reports_kill_switch_degradation_without_leaking_details() {
+        let (engine, _dir) = test_engine("http-health-kill-switch").await;
+        let shared = engine.clone();
+        let probe_reason = "SENTINEL-KILL-REASON-DO-NOT-LEAK";
+        engine
+            .activate_kill_switch(probe_reason.to_string(), "test-admin-token")
+            .expect("activate kill switch");
+
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let text = response.text().await.expect("health body text");
+        assert!(
+            !text.contains(probe_reason),
+            "kill-switch reason must not leak"
+        );
+        assert!(!text.contains("casbin"), "policy paths must not leak");
+        let body: Value = serde_json::from_str(&text).expect("health body is JSON");
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["reason"], "kill_switch");
+
+        shared
+            .deactivate_kill_switch("test-admin-token")
+            .expect("deactivate kill switch");
+        let recovered = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(recovered.status(), reqwest::StatusCode::OK);
+    }
+
+    /// I15-B: deleting the policy file makes the probe fail closed with a
+    /// generic reason; the removed path itself is not echoed back.
+    #[tokio::test]
+    async fn health_reports_degraded_when_policy_file_is_missing() {
+        let (engine, dir) = test_engine("http-health-no-policy").await;
+        let policy_path = PathBuf::from(&engine.config.casbin_policy_path);
+        std::fs::remove_file(&policy_path).expect("remove policy file");
+
+        let base = start_server(engine).await;
+        let response = reqwest::Client::new()
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request");
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let text = response.text().await.expect("health body text");
+        assert!(
+            !text.contains(&policy_path.to_string_lossy().into_owned()),
+            "policy path must not leak"
+        );
+        let body: Value = serde_json::from_str(&text).expect("health body is JSON");
+        assert_eq!(body["status"], "degraded");
+        assert_eq!(body["reason"], "no_policy");
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
     }
 
     /// P0-1 opt-in guard: with no token configured, approval endpoints fail
