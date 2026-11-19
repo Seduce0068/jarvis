@@ -18,8 +18,13 @@ restore_qdrant() {
 
   local snapshot_file="${SET_DIR}/qdrant-snapshot.bin"
   local qdrant_url="${QDRANT_URL:-http://127.0.0.1:6333}"
-  local qdrant_collection="${QDRANT_COLLECTION:-jarvis_memories}"
-  local isolated_collection="jarvis_memories_restore_test"
+  # Single source of truth shared with backup-local.sh; mirrors the
+  # configurable jarvis-context `collection_name`. The default preserves the
+  # existing behaviour. The legacy QDRANT_COLLECTION driver global is not used.
+  local qdrant_collection="${JARVIS_QDRANT_COLLECTION:-jarvis_memories}"
+  local isolated_collection="${qdrant_collection}_restore_test"
+  local isolated_url="${qdrant_url}/collections/${isolated_collection}"
+  local production_url="${qdrant_url}/collections/${qdrant_collection}"
 
   # --- APPLY=0: plan only, zero writes (no HTTP request at all) -------------
   if [ "$APPLY" -eq 0 ]; then
@@ -45,7 +50,7 @@ restore_qdrant() {
   local upload_code="" upload_rc=0
   upload_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
     -F "snapshot=@${snapshot_file}" \
-    "${qdrant_url}/collections/${isolated_collection}/snapshots/upload?priority=snapshot")" || upload_rc=$?
+    "${isolated_url}/snapshots/upload?priority=snapshot")" || upload_rc=$?
   if [ "$upload_rc" -ne 0 ] || [[ ! "$upload_code" =~ ^2[0-9][0-9]$ ]]; then
     fail "Qdrant: isolated snapshot upload failed (http=${upload_code}, curl_rc=${upload_rc})"
     return 1
@@ -55,7 +60,7 @@ restore_qdrant() {
   # --- Step 2a: verify points_count of the isolated collection -------------
   local probe="" probe_rc=0 probe_code="" probe_body="" points_count=""
   probe="$(curl -sS -w $'\n%{http_code}' \
-    "${qdrant_url}/collections/${isolated_collection}")" || probe_rc=$?
+    "${isolated_url}")" || probe_rc=$?
   probe_code="${probe##*$'\n'}"
   probe_body="${probe%$'\n'*}"
   if [ "$probe_rc" -ne 0 ] || [[ ! "$probe_code" =~ ^2[0-9][0-9]$ ]]; then
@@ -78,7 +83,7 @@ restore_qdrant() {
   # --- Step 2b: remove the isolated collection ------------------------------
   local del_code="" del_rc=0
   del_code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
-    "${qdrant_url}/collections/${isolated_collection}")" || del_rc=$?
+    "${isolated_url}")" || del_rc=$?
   if [ "$del_rc" -ne 0 ] || [[ ! "$del_code" =~ ^2[0-9][0-9]$ ]]; then
     fail "Qdrant: isolated collection cleanup failed (http=${del_code}, curl_rc=${del_rc})"
     return 1
@@ -96,7 +101,7 @@ restore_qdrant() {
     local prod_code="" prod_rc=0
     prod_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
       -F "snapshot=@${snapshot_file}" \
-      "${qdrant_url}/collections/${qdrant_collection}/snapshots/upload?priority=snapshot")" || prod_rc=$?
+      "${production_url}/snapshots/upload?priority=snapshot")" || prod_rc=$?
     if [ "$prod_rc" -ne 0 ] || [[ ! "$prod_code" =~ ^2[0-9][0-9]$ ]]; then
       fail "Qdrant: production snapshot upload failed (http=${prod_code}, curl_rc=${prod_rc})"
       return 1
@@ -104,7 +109,7 @@ restore_qdrant() {
 
     local prod_probe="" prod_probe_rc=0 prod_probe_code="" prod_probe_body="" prod_points=""
     prod_probe="$(curl -sS -w $'\n%{http_code}' \
-      "${qdrant_url}/collections/${qdrant_collection}")" || prod_probe_rc=$?
+      "${production_url}")" || prod_probe_rc=$?
     prod_probe_code="${prod_probe##*$'\n'}"
     prod_probe_body="${prod_probe%$'\n'*}"
     if [ "$prod_probe_rc" -ne 0 ] || [[ ! "$prod_probe_code" =~ ^2[0-9][0-9]$ ]]; then

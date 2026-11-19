@@ -13,6 +13,11 @@ skip_db=0
 skip_qdrant=0
 skip_git=0
 repo_dir=""
+# Qdrant collection name mirrors the configurable jarvis-context
+# `collection_name` (rust/jarvis-context/src/config.rs). The default preserves
+# the existing backup timer behaviour; no unit change is needed.
+qdrant_collection="${JARVIS_QDRANT_COLLECTION:-jarvis_memories}"
+qdrant_collection_url="http://127.0.0.1:6333/collections/${qdrant_collection}"
 
 usage() {
   cat <<'USAGE'
@@ -98,7 +103,7 @@ echo "JARVIS local backup: dest=${set_dir} apply=${apply}"
 if [ "$apply" -ne 1 ]; then
   echo "DRY RUN: no files will be written (pass --apply to execute)"
   [ "$skip_db" -eq 0 ] && echo "DRY RUN: would dump PostgreSQL 'jarvis'"
-  [ "$skip_qdrant" -eq 0 ] && echo "DRY RUN: would snapshot Qdrant 'jarvis_memories'"
+  [ "$skip_qdrant" -eq 0 ] && echo "DRY RUN: would snapshot Qdrant '${qdrant_collection}'"
   if [ "$skip_git" -eq 0 ]; then
     dry_repo="$(resolve_repo_dir || true)"
     echo "DRY RUN: would backup git repo (path=${dry_repo:-<auto-detect>})"
@@ -150,18 +155,18 @@ if [ "$skip_db" -eq 0 ]; then
 fi
 
 if [ "$skip_qdrant" -eq 0 ]; then
-  curl -fsS -X POST "http://127.0.0.1:6333/collections/jarvis_memories/snapshots" >/dev/null
+  curl -fsS -X POST "${qdrant_collection_url}/snapshots" >/dev/null
   sleep 2
-  snapshot_name="$(curl -fsS "http://127.0.0.1:6333/collections/jarvis_memories/snapshots" \
+  snapshot_name="$(curl -fsS "${qdrant_collection_url}/snapshots" \
     | jq -r '.result[0].name // empty')"
   if [ -z "$snapshot_name" ]; then
     echo "ERROR: no Qdrant snapshot returned" >&2
     exit 1
   fi
-  curl -fsS "http://127.0.0.1:6333/collections/jarvis_memories/snapshots/${snapshot_name}" \
+  curl -fsS "${qdrant_collection_url}/snapshots/${snapshot_name}" \
     > "$set_dir/qdrant-snapshot.bin"
   record qdrant-snapshot.bin "$set_dir/qdrant-snapshot.bin"
-  echo "Qdrant snapshot OK"
+  echo "Qdrant snapshot OK (collection=${qdrant_collection})"
 fi
 
 # Non-secret config allowlist. Never include .env / bws.env / token files.
