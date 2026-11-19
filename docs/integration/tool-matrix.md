@@ -104,7 +104,10 @@ generated:
 
 - `infra/systemd/jarvis-mcp-gw.service`
   - `ProtectHome=yes` → `ProtectHome=read-only`（`/home` を読み取り専用で参照可能に）
-  - `JARVIS_MCP_GW_BASE_DIR=/home/koppe` を明示（読み取り境界を unit 上で明確化）
+  - `JARVIS_MCP_GW_BASE_DIR` を明示（読み取り境界を unit 上で明確化）。
+     unit のフォールバック値は
+     `/home/koppe/ドキュメント/作業用/jarvis/jarvis`
+     （`infra/systemd/jarvis-mcp-gw.service` の `Environment=` 行、実機は上書き値を優先）。
   - デプロイ実態に合わせて `User`/`Group` を `koppe` に同期
 - `infra/config/mcp_allowlist.toml`
   - ネイティブ未実装の `web.search` / `homeassistant.get_state` / `android.get_device_info` を `requires_approval = true` に変更（`tools/list` から非表示）

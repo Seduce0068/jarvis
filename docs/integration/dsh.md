@@ -38,7 +38,11 @@ generated:
 ## 更新（2026-11-09 01:07）: ネイティブハンドラ実装
 - `sandbox.rs` の `execute_native` を **Rustネイティブ実装**へ置換（opencode CLI依存を排除）。
   - `filesystem.read` / `filesystem.list` / `git.status` / `git.diff`
-  - パスは `JARVIS_MCP_GW_BASE_DIR`（既定 `/home/koppe`）配下に制限（canonicalizeで脱出拒否）
+  - パスは `JARVIS_MCP_GW_BASE_DIR` 配下に制限（canonicalizeで脱出拒否）。
+     コード既定は `/home/koppe` だが、unit のフォールバックは
+     `/home/koppe/ドキュメント/作業用/jarvis/jarvis` である
+     （`infra/systemd/jarvis-mcp-gw.service` の `Environment=` 行）。
+     実機の有効値は unit／上書きファイルを正とする。
   - 読み取り上限 1MiB、gitはツール設定のtimeoutを適用
 - 別ポートの実バイナリでE2E検証:
   - `tools/list` = 7ツール（filesystem.list/read, git.diff/status, homeassistant.get_state, web.fetch/search）
