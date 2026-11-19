@@ -11,23 +11,26 @@ The panels depend on the scrape jobs defined in
 
 | Panel | Source |
 | --- | --- |
-| HTTP request rate | sidecar `/metrics` |
-| Total HTTP requests | sidecar `/metrics` |
+| HTTP request rate by service/status | sidecar `/metrics` |
+| Total HTTP requests by service/status | sidecar `/metrics` |
 | JARVIS services | otelcol Prometheus receiver |
 | Dependencies | otelcol Prometheus receiver |
 
 Queries (kept in sync with `jarvis-overview.json`):
 
 ```promql
-sum by (job) (rate(jarvis_http_requests_total[5m]))
-sum by (job) (jarvis_http_requests_total)
+sum by (service, status) (rate(jarvis_http_requests_total[5m]))
+sum by (service, status) (jarvis_http_requests_total)
 up{job=~"jarvis-.*"}
 up{job=~"(qdrant|opencode|code-server|postgresql|node-exporter)"}
 ```
 
-`jarvis_http_requests_total` has no labels yet; the dashboard aggregates it
-per scrape `job`. Add request-path labels before splitting the panel by
-endpoint.
+`jarvis_http_requests_total` carries two fixed labels emitted by each sidecar's
+`/metrics`: `service` (e.g. `jarvis-policy`) and `status`. `status` has a
+bounded vocabulary that includes `413` (body too large) and `415` (wrong
+content type), so grouping by it keeps those rejections as separate series
+instead of collapsing them into `other`. No request-path/endpoint label is
+emitted, so the panels cannot be split by endpoint.
 
 ## Provisioning
 

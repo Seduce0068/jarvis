@@ -43,12 +43,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (job) (rate(jarvis_http_requests_total[5m]))",
-          "legendFormat": "{{job}}",
+          "expr": "sum by (service, status) (rate(jarvis_http_requests_total[5m]))",
+          "legendFormat": "{{service}} {{status}}",
           "refId": "A"
         }
       ],
-      "title": "HTTP request rate",
+      "title": "HTTP request rate by service and status",
       "type": "timeseries"
     },
     {
@@ -83,12 +83,12 @@
       },
       "targets": [
         {
-          "expr": "sum by (job) (jarvis_http_requests_total)",
-          "legendFormat": "{{job}}",
+          "expr": "sum by (service, status) (jarvis_http_requests_total)",
+          "legendFormat": "{{service}} {{status}}",
           "refId": "A"
         }
       ],
-      "title": "Total HTTP requests",
+      "title": "Total HTTP requests by service and status",
       "type": "stat"
     },
     {

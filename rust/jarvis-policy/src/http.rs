@@ -381,9 +381,10 @@ mod status_label_tests {
 ///
 /// The body itself is never assembled from request data or from a serde struct:
 /// it is one of the three complete literals owned by `jarvis-core`, byte for
-/// byte. That lets the UI classify with a trimmed exact match instead of
-/// interpreting individual JSON fields, which serde_json resolves last-wins for
-/// duplicate keys. Only the status code and the fixed literal are chosen here.
+/// byte. That lets the UI classify with an exact byte match without trimming
+/// (I66-C) instead of interpreting individual JSON fields, which serde_json
+/// resolves last-wins for duplicate keys. Only the status code and the fixed
+/// literal are chosen here.
 fn fixed_json_response(
     status: axum::http::StatusCode,
     body: &'static str,

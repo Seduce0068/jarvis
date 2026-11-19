@@ -76,7 +76,7 @@ Traceability の Req 列集合の両方と一致させる。要件の追加・�
   拒否される（詳細は「契約 step のカバレッジ」を参照）。
 - `results.skipped`: 正の値にする場合は `notes` へ数値付きの `N ignored` が必要。
   ただしスキップは実行済みに数えず、Scenario カバレッジの分子には入らない
-  （mcp-gw の `skipped=1` は `notes` の `1 ignored` と `passed=124` で
+  （mcp-gw の `skipped=1` は `notes` の `1 ignored` と `passed=126` で
   カバレッジを満たす）。
 - `document_type`: 設定する場合は `test-execution-log` / `test-result` /
   `test-summary-report` のいずれか。

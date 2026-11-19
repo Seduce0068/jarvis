@@ -1,25 +1,27 @@
 // JARVIS Cedar schema.
 //
 // Documents the entity model and request shapes used by the services.
-// This file is still NOT parsed for enforcement at runtime; enforcement
+// This file IS parsed at startup: `CedarEngine::new` loads it from the policy
+// directory and type-checks the shipped policies with `Validator::new(schema)`
+// in `ValidationMode::Strict` (the same gate applies to policies added later).
+// A validation error is fatal, so startup fails closed. Enforcement itself
 // comes from policies.cedar (+ optional entities.json) in this directory.
-// Tests in `rust/jarvis-policy/src/policy.rs` verify that this schema parses
-// and that the shipped `policies.cedar` validates against it.
 //
-// 2026-11-15: aligned with the requests actually built by
-// `CedarEngine::is_authorized`:
+// 2026-11-20: aligned with the requests actually built at runtime:
 // - principals/actions/resources are bare string UIDs with no required
 //   attributes (the richer ABAC attributes below are optional placeholders),
-// - actions declare no context attributes yet: the gateway passes tool
-//   arguments as an untyped context object, which cannot be expressed as a
-//   closed record. Enabling schema validation at runtime therefore requires
-//   a typed context contract per tool (or open-record support) first.
+// - the context is not a caller-supplied, untyped tool-argument object.
+//   `jarvis-mcp-gw::policy_context` passes exactly four server-controlled,
+//   allowlist-derived attributes: `tool`, `principal`, `resource` and
+//   `requires_approval`. A caller cannot forge ABAC fields through tool
+//   arguments; the shipped policies condition only on principal/action/
+//   resource, so no context attributes are declared for the actions below.
 
 namespace jarvis {
 
 // Runtime requests reference principals/resources by UID only
 // (e.g. jarvis::Principal::"jarvis_admin"). Attributes are optional so an
-// empty entities.json still validates once schema validation is enabled.
+// empty entities.json still validates under the strict startup validation.
 entity Principal {
     uid?: String,
     role?: String,  // "admin", "user", "agent", "system"
@@ -46,9 +48,11 @@ entity ApprovalRequest {
     expires_at: String  // RFC 3339
 };
 
-// Actions served by the policy engine. Context is intentionally undeclared
-// (defaults to an empty record) until a typed per-tool context contract
-// exists; see the header comment.
+// Actions served by the policy engine. No context attributes are declared
+// because the shipped policies condition only on principal/action/resource.
+// The runtime context is still the fixed, server-controlled four-field record
+// built by `jarvis-mcp-gw::policy_context` (see the header comment), never the
+// caller's raw tool arguments.
 action "read" appliesTo {
     principal: Principal,
     resource: Resource
