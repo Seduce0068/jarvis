@@ -1,5 +1,6 @@
 //! Event normalization core
 
+use crate::ports::{ContextProvider, PolicyGate};
 use anyhow::Result;
 use axum::{Json, Router, extract::State, routing::post};
 use jarvis_core::{EventSource, UnifiedEvent};
@@ -45,9 +46,9 @@ pub struct Normalizer {
 impl Normalizer {
     pub async fn new(
         config: crate::config::EventConfig,
-        policy_client: Arc<jarvis_policy::PolicyClient>,
+        policy_gate: Arc<dyn PolicyGate>,
         opencode: Arc<crate::opencode::OpenCodeClient>,
-        context_client: Arc<jarvis_context::ContextBuilder>,
+        context_provider: Arc<dyn ContextProvider>,
     ) -> Result<Self> {
         let (event_tx, mut event_rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
 
@@ -59,7 +60,7 @@ impl Normalizer {
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 if let Err(e) =
-                    Self::process_event(&policy_client, &context_client, &opencode, &event).await
+                    Self::process_event(&context_provider, &policy_gate, &opencode, &event).await
                 {
                     // Log correlation identifiers, never the event payload:
                     // telemetry must not leak the raw event body.
@@ -97,6 +98,10 @@ impl Normalizer {
 
     /// Policy-gated hand-off of a normalized event to the OpenCode agent.
     ///
+    /// Context building and the authorization check go through the
+    /// [`ContextProvider`] / [`PolicyGate`] ports; the default adapters delegate
+    /// to `jarvis-context` and `jarvis-policy` without changing behaviour.
+    ///
     /// The gate is `auto_respond` on resource `event:<type>` for the `jarvis`
     /// principal (role `agent` in the shipped Casbin policy, which grants
     /// nothing by default). Grant an event type with:
@@ -108,8 +113,8 @@ impl Normalizer {
     /// Forwarded events run through OpenCode; every tool call the agent makes
     /// is re-authorized by the MCP gateway before it executes.
     async fn process_event(
-        policy_client: &jarvis_policy::PolicyClient,
-        context_client: &jarvis_context::ContextBuilder,
+        context_provider: &Arc<dyn ContextProvider>,
+        policy_gate: &Arc<dyn PolicyGate>,
         opencode: &crate::opencode::OpenCodeClient,
         event: &UnifiedEvent,
     ) -> Result<()> {
@@ -118,15 +123,16 @@ impl Normalizer {
             event.event_type, event.source
         );
 
-        // Build context from memory (PII-filtered by jarvis-context)
-        let context = context_client.build_context(event).await?;
+        // Build context from the injected port (the default adapter delegates
+        // to jarvis-context, which applies PII filtering).
+        let context = context_provider.build_context(event).await?;
 
         // Check policy for automated response
         let resource = format!("event:{}", event.event_type);
         // `is_allowed` fails closed (returns false on transport errors), so
         // there is no `?` here: an unreachable policy service must not
         // forward the event.
-        let should_act = policy_client
+        let should_act = policy_gate
             .is_allowed("jarvis", "auto_respond", &resource, &context)
             .await;
 
@@ -283,9 +289,12 @@ async fn calendar_webhook(State(state): State<Arc<Normalizer>>, Json(payload): J
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use serde_json::json;
     use std::io::Write;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
     use tracing_subscriber::fmt::format::FmtSpan;
 
     fn fixed_id() -> uuid::Uuid {
@@ -693,5 +702,151 @@ mod tests {
             "failure log missing correlation_id"
         );
         assert!(!statement.contains("payload"), "failure log leaks payload");
+    }
+
+    /// Injected ports that record calls and always deny, so no event is
+    /// dispatched to OpenCode (no network I/O in these regression tests).
+    struct SeamProbe {
+        context_provider: Arc<dyn ContextProvider>,
+        policy_gate: Arc<dyn PolicyGate>,
+        context_calls: Arc<AtomicUsize>,
+        policy_calls: Arc<AtomicUsize>,
+        event_types: Arc<Mutex<Vec<String>>>,
+        seen_context: Arc<Mutex<Option<Value>>>,
+    }
+
+    impl SeamProbe {
+        fn new() -> Self {
+            let context_calls = Arc::new(AtomicUsize::new(0));
+            let policy_calls = Arc::new(AtomicUsize::new(0));
+            let event_types = Arc::new(Mutex::new(Vec::new()));
+            let seen_context = Arc::new(Mutex::new(None));
+            Self {
+                context_provider: Arc::new(RecordingContextProvider::new(
+                    context_calls.clone(),
+                    event_types.clone(),
+                )),
+                policy_gate: Arc::new(DenyPolicyGate::new(
+                    policy_calls.clone(),
+                    seen_context.clone(),
+                )),
+                context_calls,
+                policy_calls,
+                event_types,
+                seen_context,
+            }
+        }
+    }
+
+    struct RecordingContextProvider {
+        calls: Arc<AtomicUsize>,
+        event_types: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl RecordingContextProvider {
+        fn new(calls: Arc<AtomicUsize>, event_types: Arc<Mutex<Vec<String>>>) -> Self {
+            Self { calls, event_types }
+        }
+    }
+
+    #[async_trait]
+    impl ContextProvider for RecordingContextProvider {
+        async fn build_context(&self, event: &UnifiedEvent) -> anyhow::Result<Value> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.event_types
+                .lock()
+                .expect("event types mutex")
+                .push(event.event_type.clone());
+            Ok(json!({"provider": "recording"}))
+        }
+    }
+
+    struct DenyPolicyGate {
+        calls: Arc<AtomicUsize>,
+        seen_context: Arc<Mutex<Option<Value>>>,
+    }
+
+    impl DenyPolicyGate {
+        fn new(calls: Arc<AtomicUsize>, seen_context: Arc<Mutex<Option<Value>>>) -> Self {
+            Self {
+                calls,
+                seen_context,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PolicyGate for DenyPolicyGate {
+        async fn is_allowed(
+            &self,
+            _principal: &str,
+            _action: &str,
+            _resource: &str,
+            context: &Value,
+        ) -> bool {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.seen_context.lock().expect("context mutex") = Some(context.clone());
+            false
+        }
+    }
+
+    /// Construction is offline: it only builds an HTTP client and never sends.
+    fn offline_opencode() -> Arc<crate::opencode::OpenCodeClient> {
+        Arc::new(
+            crate::opencode::OpenCodeClient::new(&crate::config::EventConfig::default())
+                .expect("offline OpenCode client"),
+        )
+    }
+
+    #[tokio::test]
+    async fn process_event_uses_injected_context_provider_before_policy_gate() {
+        let probe = SeamProbe::new();
+
+        Normalizer::process_event(
+            &probe.context_provider,
+            &probe.policy_gate,
+            &offline_opencode(),
+            &test_event(77, "seam_probe"),
+        )
+        .await
+        .expect("deny decision keeps processing successful");
+
+        assert_eq!(probe.context_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.policy_calls.load(Ordering::SeqCst), 1);
+        {
+            let types = probe.event_types.lock().expect("event types mutex");
+            assert_eq!(types.len(), 1);
+            assert_eq!(types[0], "seam_probe");
+        }
+        let context = probe.seen_context.lock().expect("context mutex");
+        assert_eq!(*context, Some(json!({"provider": "recording"})));
+    }
+
+    #[tokio::test]
+    async fn new_wires_injected_ports_into_worker_task() {
+        let probe = SeamProbe::new();
+        let normalizer = Normalizer::new(
+            crate::config::EventConfig::default(),
+            probe.policy_gate.clone(),
+            offline_opencode(),
+            probe.context_provider.clone(),
+        )
+        .await
+        .expect("normalizer builds with injected ports");
+
+        normalizer.emit(test_event(78, "worker_seam_probe"));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while probe.context_calls.load(Ordering::SeqCst) == 0
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        assert_eq!(probe.context_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(probe.policy_calls.load(Ordering::SeqCst), 1);
+        let types = probe.event_types.lock().expect("event types mutex");
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0], "worker_seam_probe");
     }
 }

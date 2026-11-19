@@ -6,9 +6,11 @@ pub mod grpc;
 pub mod http;
 pub mod normalizer;
 pub mod opencode;
+pub mod ports;
 pub mod sources;
 
 use anyhow::Result;
+use ports::{DefaultContextProvider, DefaultPolicyGate};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -34,14 +36,21 @@ impl EventNormalizer {
 
         let opencode = Arc::new(opencode::OpenCodeClient::new(&config)?);
 
+        // Default adapters preserve the existing behaviour while exposing the
+        // context/policy seams to `Normalizer` as trait objects.
+        let context_provider: Arc<dyn ports::ContextProvider> =
+            Arc::new(DefaultContextProvider::new(context_client.clone()));
+        let policy_gate: Arc<dyn ports::PolicyGate> =
+            Arc::new(DefaultPolicyGate::new(policy_client.clone()));
+
         let ha_client = Arc::new(sources::HomeAssistantClient::new(&config).await?);
         let android_client = Arc::new(sources::AndroidClient::new(&config).await?);
         let normalizer = Arc::new(
             normalizer::Normalizer::new(
                 config.clone(),
-                policy_client.clone(),
+                policy_gate,
                 opencode.clone(),
-                context_client.clone(),
+                context_provider,
             )
             .await?,
         );
