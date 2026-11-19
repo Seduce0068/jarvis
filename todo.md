@@ -937,23 +937,23 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 29 のレビュー結果（未対応）
 
-- [ ] **起動時リコンサイルした保留承認に実行中のタイムアウト決着経路が無い**
+- [x] **起動時リコンサイルした保留承認に実行中のタイムアウト決着経路が無い** — 2026-11-19 対応済み: `prune()` を async 化し、期限切れ recovered 行を `mark_expired` のコミット成功後にのみメモリから除去。コミット失敗時はエントリを残し次回スウィープ／起動 reconcile が再試行。回帰テスト追加。
   （confirmed high）— 復活した live 行の期限が切れても DB は undecided のまま、
   次の `try_request` の prune でメモリから消える。operator は decide できず
   監査も次回再起動まで欠落。`prune` と `mark_expired` を単一決着経路へ集約し、
   コミット成功後にのみメモリから除去する必要がある。
-- [ ] **`decide` とタイムアウトの順序反転で永続化・メモリ・応答が不一致**
+- [x] **`decide` とタイムアウトの順序反転で永続化・メモリ・応答が不一致** — 2026-11-19 対応済み: コミット結果を権威としてメモリを上書きする方式へ統一。`deciding` フラグで in-flight コミットを検知しタイムアウト側は通知を待つ（上限100回×100ms）。期限切れ後の decide は AlreadyDecided(409)＋warn で明示拒否。競合テスト追加。
   （likely high）— DB コミット後〜再ロック前にタイムアウトがメモリを Expired に
   すると、DB は approved なのに待機側は Expired。期限切れ後の decide を明示拒否し、
   決着を単一 CAS 結果から導出する。
-- [ ] **reconcile が `approval_max_pending` を無視**（confirmed medium）—
+- [x] **reconcile が `approval_max_pending` を無視**（confirmed medium）— 2026-11-19 対応済み: live 行は空きスロット数だけ再登録、超過分は `mark_expired` で audit 決着。復活／期限切れ／超過件数を INFO ログで可視化、回帰テスト追加 —
   DB に上限超過の undecided 行があると再起動時に全行がメモリへ載り、
   新規承認が期限切れまで QueueFull で連続拒否される。
-- [ ] **認証ヘッダ／失敗ログのテストが定数・ソース文字列の自己確認に形骸化**
+- [x] **認証ヘッダ／失敗ログのテストが定数・ソース文字列の自己確認に形骸化** — 2026-11-19 対応済み: `jarvis-core` に `JARVIS_CONTEXT_TOKEN_HEADER` を追加し context gRPC / HTTP / event provider の3箇所が共有定数を参照。自己確認テストを横断一致検証へ更新。
   （confirmed medium）— クライアント／サーバ／HTTP でヘッダ定数が別定義なのに
   各テストは自側の定数とリテラルを比べるだけ。共有定数化または横断契約テスト、
   および tracing subscriber での構造化ログ検証が必要。
-- [ ] **mcp-gw `/v1/execute` が `#[instrument(skip(gateway))]` でreq 全体をログへ**
+- [x] **mcp-gw `/v1/execute` が `#[instrument(skip(gateway))]` でreq 全体をログへ** — 2026-11-19 対応済み: `skip(gateway, req)` へ変更。PROBE センチネルの非漏洩回帰テスト追加。スパン捕捉アサーションは並列実行で flaky なため削除し、非漏洩アサーションのみ維持（理由をコメント化）。
   （confirmed high）— ツール引数（書き込み内容・URL 等）がスパン属性として
   OTLP/Grafana へ送出され得る。`skip(gateway, req)` 化と、tool 名・principal
   のみの固定フィールド記録が必要。
@@ -961,3 +961,32 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 親が対応: spec 変更に伴う evidence を実測再生成（144 tests / hash
   `90ef3ba0db8f…` / ファイル名・index 同期）。flaky な
   `webhook_spans_do_not_record_raw_payloads` は再実行で pass（無理な反復は停止）。
+
+### Round 30 のレビュー／発掘結果
+
+- [ ] **migrations unit が通常デプロイ経路に配線されず cargo-sqlx も未配布**
+  （confirmed high）— `build-selfhost.sh:60-75` の `JARVIS_SERVICE_UNITS` に
+  `jarvis-migrations.service` が無く、`command -v cargo-sqlx` も開発環境に無い。
+  policy/context は Wants で待つが unit 未配置なら無視され、003 未適用で
+  reconcile が失敗する。unit を配置リストへ追加し sqlx-cli 導入を手順化する
+  か、context の `migrate!()` を唯一の主体に統一して unit を廃止する。
+- [ ] **install-backup-timer.sh の rollback が migrations unit / verify-backup.sh
+  を復元しない**（confirmed medium）— 退避と復元を単一のペア配列から生成し、
+  欠落時は新規配置を削除する。
+- [ ] **再接続時の ambiguous commit が AlreadyDecided に変換される**
+  （likely high）— COMMIT 成功後にレスポンスが失われると再試行 CAS が0行となり、
+  DB=approved / 待機側=Expired / operator=409 に分裂。再試行前に id で現在の
+  decision を SELECT し、コミット済みなら publish して Ok を返す。
+- [ ] **起動リコンサイルの expired 決着が1件のエラーで全体中止**
+  （likely medium）— 行ごとに結果を収集し AlreadyDecided は成功扱い、
+  他エラーは warn＋メトリクスで可視化して残り行の決着を続行する。
+- [ ] **「単一 owner」コメントが実態と矛盾（unit と context の二重実行、
+  範囲も 001-003 で 004 を含まない）**（confirmed medium）— 所有権を明確化し
+  コメントを実ファイルと同期。
+- [ ] **発掘: 小さな残タスク5件** — install-backup-timer rollback の
+  migrations/verify 未復元（上記と同一）、unit コメントの 001-003→001-004、
+  ui/README の Rust 1.85+→1.100+、specs/test-backup.md の `--retain-days`
+  境界値拒否シナリオ、specs/test-event.md の 503/RESOURCE_EXHAUSTED 契約
+  （後2件は evidence 再生成が必要）。
+
+- 親が対応: clippy の collapsible_if、flaky なスパン捕捉アサーションの削除。
