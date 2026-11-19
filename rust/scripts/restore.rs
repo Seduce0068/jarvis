@@ -129,6 +129,8 @@ fn main() -> Result<()> {
         restart_services()?;
     }
 
+    // Reached only after every command above reported success. No component
+    // logs a "restored" success message before all checks have passed.
     info!("Restore completed. Verify services with: sudo systemctl status jarvis-*");
     Ok(())
 }
@@ -293,6 +295,22 @@ fn run_rclone(args: &[&str], config_flag: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Execute a command and bail immediately when its exit status is non-zero.
+/// A discarded `ExitStatus` would let a failed step be reported as a success.
+fn run_checked(command: &mut Command, label: &str) -> Result<()> {
+    let status = command.status().context("Failed to run command")?;
+    if !status.success() {
+        anyhow::bail!("{label} failed with exit status {status}");
+    }
+    Ok(())
+}
+
+fn run_sudo(args: &[&str], label: &str) -> Result<()> {
+    let mut command = Command::new("sudo");
+    command.args(args);
+    run_checked(&mut command, label)
+}
+
 fn find_latest_backup(
     args: &Args,
     hostname: &str,
@@ -353,49 +371,47 @@ fn restore_postgres(args: &Args, hostname: &str, date: &str, config_flag: &str) 
         "jarvis-context",
         "opencode",
     ] {
-        let _ = Command::new("sudo")
-            .args(["systemctl", "stop", service])
-            .status();
+        run_sudo(
+            &["systemctl", "stop", service],
+            &format!("systemctl stop {service}"),
+        )?;
     }
 
     // Drop and recreate database
-    Command::new("sudo")
-        .args([
-            "-u",
-            "postgres",
-            "psql",
-            "-c",
-            "DROP DATABASE IF EXISTS jarvis;",
-        ])
-        .status()
-        .context("Failed to drop database")?;
-    Command::new("sudo")
-        .args([
-            "-u",
-            "postgres",
-            "psql",
-            "-c",
-            "CREATE DATABASE jarvis OWNER jarvis;",
-        ])
-        .status()
-        .context("Failed to create database")?;
+    run_sudo(
+        &["-u", "postgres", "psql", "-c", "DROP DATABASE IF EXISTS jarvis;"],
+        "psql DROP DATABASE",
+    )?;
+    run_sudo(
+        &["-u", "postgres", "psql", "-c", "CREATE DATABASE jarvis OWNER jarvis;"],
+        "psql CREATE DATABASE",
+    )?;
 
-    // Restore
-    let status = Command::new("gunzip")
+    // Restore: stream the decompressed dump into psql, then verify BOTH
+    // processes. A failing gunzip can leave psql with empty input and a
+    // zero exit status, so checking psql alone is not sufficient.
+    let mut gunzip = Command::new("gunzip")
         .arg("-c")
         .arg(&local_file)
         .stdout(Stdio::piped())
-        .spawn()?
-        .stdout
-        .context("No stdout from gunzip")?;
+        .spawn()
+        .context("Failed to spawn gunzip")?;
+    let gunzip_stdout = gunzip.stdout.take().context("No stdout from gunzip")?;
 
-    Command::new("sudo")
+    let psql_status = Command::new("sudo")
         .args(["-u", "postgres", "psql", "jarvis"])
-        .stdin(Stdio::from(status))
+        .stdin(Stdio::from(gunzip_stdout))
         .status()
-        .context("Failed to restore PostgreSQL")?;
+        .context("Failed to run psql for PostgreSQL restore")?;
+    if !psql_status.success() {
+        anyhow::bail!("psql restore exited with status {psql_status}");
+    }
 
-    info!("PostgreSQL restored");
+    let gunzip_status = gunzip.wait().context("Failed to wait for gunzip")?;
+    if !gunzip_status.success() {
+        anyhow::bail!("gunzip exited with status {gunzip_status}");
+    }
+
     Ok(())
 }
 
@@ -426,7 +442,6 @@ fn restore_qdrant(args: &Args, hostname: &str, date: &str, config_flag: &str) ->
         .error_for_status()
         .context("Qdrant snapshot upload failed")?;
 
-    info!("Qdrant restored");
     Ok(())
 }
 
@@ -443,12 +458,11 @@ fn restore_configs(args: &Args, hostname: &str, date: &str, config_flag: &str) -
         return Ok(());
     }
 
-    Command::new("sudo")
-        .args(["tar", "-xzf", local_file.to_str().unwrap(), "-C", "/"])
-        .status()
-        .context("Failed to restore configs")?;
+    run_sudo(
+        &["tar", "-xzf", local_file.to_str().unwrap(), "-C", "/"],
+        "tar extract configs",
+    )?;
 
-    info!("Configs restored");
     Ok(())
 }
 
@@ -484,24 +498,22 @@ fn restore_repos(args: &Args, hostname: &str, date: &str, config_flag: &str) -> 
                     fs::rename(&repo_path, repos_dir.join(backup_name))?;
                 }
 
-                Command::new("git")
-                    .args(["clone", local_bundle.to_str().unwrap(), repo_name])
-                    .current_dir(repos_dir)
-                    .status()
-                    .context("Failed to clone repo")?;
+                run_checked(
+                    Command::new("git")
+                        .args(["clone", local_bundle.to_str().unwrap(), repo_name])
+                        .current_dir(repos_dir),
+                    &format!("git clone {repo_name}"),
+                )?;
             }
         }
     }
 
-    info!("Repositories restored");
     Ok(())
 }
 
 fn restart_services() -> Result<()> {
     info!("Restarting services...");
-    Command::new("sudo")
-        .args(["systemctl", "daemon-reload"])
-        .status()?;
+    run_sudo(&["systemctl", "daemon-reload"], "systemctl daemon-reload")?;
 
     for service in [
         "jarvis-policy",
@@ -512,9 +524,10 @@ fn restart_services() -> Result<()> {
         "code-server",
         "otelcol",
     ] {
-        Command::new("sudo")
-            .args(["systemctl", "start", service])
-            .status()?;
+        run_sudo(
+            &["systemctl", "start", service],
+            &format!("systemctl start {service}"),
+        )?;
     }
 
     Ok(())
