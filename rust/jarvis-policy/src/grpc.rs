@@ -29,6 +29,10 @@ impl PolicyService for GrpcPolicyService {
         // the caller sent. Reject it at the RPC boundary instead.
         let context: serde_json::Value = serde_json::from_str(&req.context)
             .map_err(|e| Status::invalid_argument(format!("invalid context JSON: {}", e)))?;
+        // I14-B: normalize at the same policy-side boundary as the HTTP
+        // handler. Cedar rejects JSON `null`, so without this the gRPC server
+        // would error on contexts the client used to sanitize before sending.
+        let context = crate::client::without_nulls(&context);
         let allowed = self
             .engine
             .is_allowed(&req.principal, &req.action, &req.resource, &context)
@@ -146,12 +150,53 @@ mod tests {
     }
 
     fn check_request(context: &str) -> Request<CheckRequest> {
+        check_request_for("tool:filesystem.read", context)
+    }
+
+    fn check_request_for(resource: &str, context: &str) -> Request<CheckRequest> {
         Request::new(CheckRequest {
             principal: "jarvis".into(),
             action: "execute".into(),
-            resource: "tool:filesystem.read".into(),
+            resource: resource.into(),
             context: context.into(),
         })
+    }
+
+    /// Engine whose allow decision can only come from Cedar: the Casbin policy
+    /// is left empty (the engine creates it at startup), so the context really
+    /// reaches `Context::from_json_value` instead of the RBAC fast path.
+    async fn cedar_only_service(label: &str) -> GrpcPolicyService {
+        let dir = std::env::temp_dir().join(format!("jarvis-policy-grpc-cedar-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cedar = dir.join("cedar");
+        std::fs::create_dir_all(&cedar).expect("create cedar dir");
+        std::fs::write(
+            cedar.join("allow.cedar"),
+            r#"permit (
+    principal == jarvis::Principal::"jarvis",
+    action == jarvis::Action::"execute",
+    resource == jarvis::Resource::"tool:cedar.only"
+);
+"#,
+        )
+        .expect("write cedar policy");
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
+        let model = dir.join("casbin_model.conf");
+        std::fs::copy(source.join("casbin_model.conf"), &model).expect("copy casbin model");
+        let config = PolicyConfig {
+            cedar_policy_dir: cedar.to_string_lossy().into_owned(),
+            casbin_model_path: model.to_string_lossy().into_owned(),
+            casbin_policy_path: dir.join("casbin_policy.csv").to_string_lossy().into_owned(),
+            kill_switch_admin_token: "test-admin-token".into(),
+            ..Default::default()
+        };
+        let engine = Arc::new(
+            PolicyEngine::new(config)
+                .await
+                .expect("policy engine starts"),
+        );
+        GrpcPolicyService { engine }
     }
 
     /// Regression: unparseable context must not silently become `{}`; the gRPC
@@ -177,5 +222,40 @@ mod tests {
             .check(check_request(r#"{"event":{"type":"state_changed"}}"#))
             .await
             .expect("well-formed JSON context is accepted");
+    }
+
+    /// I14-B: a context containing `null` must produce the same decision over
+    /// gRPC as the equivalent sanitized context. Cedar rejects JSON nulls, so
+    /// without the shared normalization this request returned an error.
+    #[tokio::test]
+    async fn null_context_matches_sanitized_context_over_grpc() {
+        let service = cedar_only_service("null-context-grpc").await;
+        let sanitized = r#"{
+            "event": {"type": "state_changed"},
+            "recent": [{"content": "x"}]
+        }"#;
+        let with_nulls = r#"{
+            "event": {"id": null, "type": "state_changed"},
+            "recent": [null, {"content": "x"}]
+        }"#;
+
+        let clean = service
+            .check(check_request_for("tool:cedar.only", sanitized))
+            .await
+            .expect("sanitized context is accepted")
+            .into_inner()
+            .allowed;
+        let normalized = service
+            .check(check_request_for("tool:cedar.only", with_nulls))
+            .await
+            .expect("null-bearing context is normalized before evaluation")
+            .into_inner()
+            .allowed;
+
+        assert!(clean, "the Cedar-only permit must allow this request");
+        assert_eq!(
+            normalized, clean,
+            "nulls in the context must not change the gRPC decision"
+        );
     }
 }

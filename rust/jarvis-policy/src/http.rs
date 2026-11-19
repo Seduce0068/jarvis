@@ -275,8 +275,12 @@ async fn check(
     State(engine): State<Arc<PolicyEngine>>,
     Json(req): Json<CheckRequest>,
 ) -> Json<CheckResponse> {
+    // I14-B: same policy-side normalization as the gRPC handler. Cedar rejects
+    // JSON `null`, so passing the wire context through verbatim made /v1/check
+    // silently deny requests the gRPC client used to sanitize before sending.
+    let context = crate::client::without_nulls(&req.context);
     let allowed = engine
-        .is_allowed(&req.principal, &req.action, &req.resource, &req.context)
+        .is_allowed(&req.principal, &req.action, &req.resource, &context)
         .await
         .unwrap_or(false);
     Json(CheckResponse { allowed })
@@ -543,6 +547,43 @@ mod tests {
         test_engine_with_cap(label, 100).await
     }
 
+    /// Engine whose allow decision can only come from Cedar: the Casbin policy
+    /// is left empty (the engine creates it at startup), so a null-bearing
+    /// context used to fail `Context::from_json_value` and deny the request.
+    async fn cedar_only_engine(label: &str) -> (Arc<PolicyEngine>, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("jarvis-policy-http-cedar-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cedar = dir.join("cedar");
+        std::fs::create_dir_all(&cedar).expect("create cedar dir");
+        std::fs::write(
+            cedar.join("allow.cedar"),
+            r#"permit (
+    principal == jarvis::Principal::"jarvis",
+    action == jarvis::Action::"execute",
+    resource == jarvis::Resource::"tool:cedar.only"
+);
+"#,
+        )
+        .expect("write cedar policy");
+
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
+        let model = dir.join("casbin_model.conf");
+        std::fs::copy(source.join("casbin_model.conf"), &model).expect("copy casbin model");
+        let config = PolicyConfig {
+            cedar_policy_dir: cedar.to_string_lossy().into_owned(),
+            casbin_model_path: model.to_string_lossy().into_owned(),
+            casbin_policy_path: dir.join("casbin_policy.csv").to_string_lossy().into_owned(),
+            kill_switch_admin_token: "test-admin-token".into(),
+            ..Default::default()
+        };
+        let engine = Arc::new(
+            PolicyEngine::new(config)
+                .await
+                .expect("policy engine starts"),
+        );
+        (engine, dir)
+    }
+
     /// Serve the real router on an ephemeral port; tests drive it with a real
     /// HTTP client so the wire format is covered end to end.
     async fn start_server(engine: Arc<PolicyEngine>) -> String {
@@ -725,6 +766,115 @@ mod tests {
             .await
             .expect("check response is JSON");
         assert_eq!(denied["allowed"], false);
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I14-B: over HTTP, a context containing `null` must be judged exactly
+    /// like the equivalent context with nulls removed.
+    #[tokio::test]
+    async fn null_context_matches_sanitized_context_over_http() {
+        let (engine, dir) = cedar_only_engine("null-context-http").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let sanitized = json!({
+            "event": { "type": "state_changed" },
+            "recent": [{ "content": "x" }],
+        });
+        let with_nulls = json!({
+            "event": { "id": null, "type": "state_changed" },
+            "recent": [null, { "content": "x" }],
+        });
+
+        for (label, context) in [("sanitized", sanitized), ("with nulls", with_nulls)] {
+            let response: Value = client
+                .post(format!("{base}/v1/check"))
+                .json(&json!({
+                    "principal": "jarvis",
+                    "action": "execute",
+                    "resource": "tool:cedar.only",
+                    "context": context,
+                }))
+                .send()
+                .await
+                .expect("check request runs")
+                .json()
+                .await
+                .expect("check response is JSON");
+            assert_eq!(
+                response["allowed"], true,
+                "{label} context must be allowed by the Cedar permit"
+            );
+        }
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I14-B: the same null-bearing context must yield the same decision on
+    /// HTTP and gRPC. Both servers share one engine, and the gRPC side uses the
+    /// raw generated client so client-side normalization cannot hide a
+    /// transport difference.
+    #[tokio::test]
+    async fn null_context_decision_matches_between_http_and_grpc() {
+        let (engine, dir) = cedar_only_engine("null-context-cross-transport").await;
+        let base = start_server(engine.clone()).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind grpc test server");
+        let grpc_addr = listener.local_addr().expect("grpc test server address");
+        tokio::spawn(async move {
+            crate::grpc::serve_with_listener(engine, listener)
+                .await
+                .expect("grpc test server runs");
+        });
+        let channel = tonic::transport::Channel::from_shared(format!("http://{grpc_addr}"))
+            .expect("grpc endpoint")
+            .connect_lazy();
+        use crate::grpc::proto::policy_service_client::PolicyServiceClient as GrpcClient;
+        let mut grpc = GrpcClient::new(channel);
+
+        let context = json!({
+            "event": { "id": null, "type": "state_changed" },
+            "recent": [null, { "content": "x" }],
+        });
+        let http_response: Value = reqwest::Client::new()
+            .post(format!("{base}/v1/check"))
+            .json(&json!({
+                "principal": "jarvis",
+                "action": "execute",
+                "resource": "tool:cedar.only",
+                "context": context.clone(),
+            }))
+            .send()
+            .await
+            .expect("http check runs")
+            .json()
+            .await
+            .expect("http response is JSON");
+        let grpc_allowed = grpc
+            .check(crate::grpc::proto::CheckRequest {
+                principal: "jarvis".into(),
+                action: "execute".into(),
+                resource: "tool:cedar.only".into(),
+                context: context.to_string(),
+            })
+            .await
+            .expect("grpc check runs")
+            .into_inner()
+            .allowed;
+
+        let http_allowed = http_response["allowed"]
+            .as_bool()
+            .expect("http response carries a boolean");
+        assert!(
+            http_allowed,
+            "the Cedar-only permit must allow this request"
+        );
+        assert_eq!(
+            grpc_allowed, http_allowed,
+            "HTTP and gRPC must agree on the same null-bearing context"
+        );
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");
     }

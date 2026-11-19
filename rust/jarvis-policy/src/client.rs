@@ -77,13 +77,15 @@ impl PolicyClient {
         context: &serde_json::Value,
     ) -> Result<bool> {
         let mut client = PolicyServiceClient::new(self.channel.clone());
-        // Cedar rejects JSON nulls, so strip them before sending the context.
-        let context = without_nulls(context);
+        // I14-B: the context is sent verbatim. Null normalization now happens
+        // once at the policy-side boundary (`without_nulls`, shared with the
+        // gRPC and HTTP handlers), so a caller gets the same decision whether
+        // it arrives through this client or posts directly to /v1/check.
         let mut request = tonic::Request::new(CheckRequest {
             principal: principal.to_owned(),
             action: action.to_owned(),
             resource: resource.to_owned(),
-            context: serde_json::to_string(&context)?,
+            context: serde_json::to_string(context)?,
         });
         request.set_timeout(CHECK_TIMEOUT);
         let response = client
@@ -97,7 +99,13 @@ impl PolicyClient {
 
 /// Remove `null` object values and array elements because Cedar's JSON
 /// context parser rejects `null`.
-fn without_nulls(value: &serde_json::Value) -> serde_json::Value {
+///
+/// I14-B: this is the single policy-side normalization boundary. The gRPC and
+/// HTTP `/v1/check` handlers both call it immediately before
+/// `PolicyEngine::is_allowed`, and this client no longer strips nulls itself.
+/// Keeping one implementation makes every transport evaluate the same Cedar
+/// context for the same caller input (the conversion is idempotent).
+pub(crate) fn without_nulls(value: &serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(items) => serde_json::Value::Array(
             items
