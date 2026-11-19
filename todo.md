@@ -433,12 +433,12 @@ generated:
   `/v1/context/build`, `/v1/memory`, `/v1/memory/search` が認証レイヤーなし。
 - [ ] **jarvis-event の emit API が無認証で主体が `jarvis` にハードコード** — 根拠
   `rust/jarvis-event/src/http.rs:130-139` / R3-AU2 / 重大度 high / confirmed。
-- [ ] **`build-selfhost.sh` が OpenCode ポートを 49374→49375 に書き換え unit と乖離** — 根拠
+- [x] **`build-selfhost.sh` が OpenCode ポートを 49374→49375 に書き換え unit と乖離**（2026-11-19 対応済み: 当該 sed 置換1行を削除。スクリプトに 49375 残存なし、`opencode.service` と AGENTS.md の port 表が 49374 で統一、`bash -n` OK） — 根拠
   `infra/scripts/build-selfhost.sh:43` / R2-FG3 / 重大度 high / confirmed。
   AGENTS.md の port 表（49374）とも不一致。
-- [ ] **`secret_scan.py` が docs/ を safe path に格下げして実資格情報をゲート失敗にしない** — 根拠
+- [x] **`secret_scan.py` が docs/ を safe path に格下げして実資格情報をゲート失敗にしない**（2026-11-19 対応済み: `SAFE_PATHS` から `docs/` を除外し、PLACEHOLDER 判定に `replace[_-]?me` を追加。値非出力契約を維持、`make secret-scan` / legacy guards 22 tests pass） — 根拠
   `ci/scripts/secret_scan.py:32-41` / R5-VU4 / 重大度 high / confirmed。
-- [ ] **`#[instrument]` が HTTP リクエスト本文全体をログへ記録し機微情報を漏洩** — 根拠
+- [x] **`#[instrument]` が HTTP リクエスト本文全体をログへ記録し機微情報を漏洩**（2026-11-19 対応済み: check/request/approve/deny の `#[instrument(skip(engine, req))]` 化で本文をスパンから除外。health/metrics/check の認証スコープ不変） — 根拠
   `rust/jarvis-policy/src/http.rs:198-201` / R5-VU1 / 重大度 high / confirmed。
 - [ ] **`install-backup-timer.sh` が `backup-local.sh` を無バックアップで上書きしロールバックで削除** — 根拠
   `infra/scripts/install-backup-timer.sh:52` / R2-ER3 / 重大度 high / confirmed。
@@ -477,7 +477,7 @@ generated:
 - [ ] レビューゲートのシグナル解析が `grep ... || true` で fail-open — `ci/review-gate.yml:145-148` / R2-ER4 / likely（未配線）
 - [ ] cloud-init が NOPASSWD root + docker グループ / 固定 DB パスワード — `infra/opentofu/cloud-init.yaml:41-43,133` / R3-AU3 / confirmed（ADR-0004 で未使用のレガシー、削除判断は既存 P3-5 に委譲）
 - [ ] デプロイスクリプトが全 unit を単一ユーザーへ書き換え — `infra/scripts/build-selfhost.sh:40-42` / R3-AU3 / confirmed
-- [ ] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
+- [x] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — 2026-11-19 対応済み: allowlist と同じ枠組みで `MISSING (deployed)` / `MISSING (repo)` と danger=1 を設定。既存回帰22 tests pass / `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
 - [ ] `install-mcp-gateway.sh` のヘルス確認が HTTP ステータスを検証せずロールバックしない — `infra/scripts/install-mcp-gateway.sh:28` / R4-DR3 / confirmed
 - [ ] 放棄された承認が pending のまま残りキュー枠を枯渇 — `policy/src/approval.rs:148-162` / R5-VU1 / likely
 - [ ] web.fetch の SSRF 検証が DNS 解決の TOCTOU で迂回可能 — `mcp-gw/src/sandbox.rs:359-365` / R3-AU1 / likely
@@ -546,7 +546,7 @@ generated:
   `rust/jarvis-mcp-gw/src/http.rs:57-58` / R3-AU1 / 重大度 high /
   confirmed。gRPC 側だけ認証を導入したため `/v1/execute` と
   `/mcp` は無認証のまま。
-- [ ] **承認要求と承認決定が同一トークンで保護され自己承認が可能** — 根拠
+- [x] **承認要求と承認決定が同一トークンで保護され自己承認が可能**（2026-11-19 対応済み: `approval_admin_token` を新設し request/list/status と approve/deny でトークンを分離。admin token 未設定時は api token へフォールバック（互換＋warn）。定数時間比較、回帰テスト追加。policy http 12 tests / config 11 tests pass） — 根拠
   `rust/jarvis-policy/src/http.rs:84-93` / R3-AU1 / 重大度 high / confirmed。
 - [x] **`check-shell.sh` が `set -uo pipefail`（`-e` 無し）で fail-open**（2026-11-19 対応済み: `set -euo pipefail` 化、`git ls-files` 失敗とチェック対象0件を明示 exit 1、shfmt WARN／shellcheck SKIP の警告扱いは維持。実機で通常 exit 0・失敗注入2パターンとも exit 1 を確認、`ci-local` exit 0） — 根拠
   `ci/scripts/check-shell.sh:6` / R2-ER4 / 重大度 high / confirmed。
@@ -559,7 +559,7 @@ generated:
   `infra/scripts/install-backup-timer.sh:63` / R4-DR3 / 重大度 high / confirmed。
 - [x] **最新バックアップ選択が pg 系のみで他コンポーネントの欠落を検証しない**（2026-11-19 対応済み: `validate_backup_set()` を新設し選択日付の pg/qdrant/configs 3コンポーネントを事前検証、欠落時は `bail!` で部分復元を拒否。`--dry-run` でも検証。fake rclone で部分セット exit 1／完全セット exit 0 を実機確認、5 tests pass） — 根拠
   `rust/scripts/restore.rs:194-216` / R4-DR2 / 重大度 high / confirmed。
-- [ ] **`store_memory` が呼び出し側指定 id で既存メモリを無条件上書き** — 根拠
+- [x] **`store_memory` が呼び出し側指定 id で既存メモリを無条件上書き**（2026-11-19 対応済み: HTTP 保存時にサーバ側 `Uuid::new_v4()` を生成し生成 id を JSON レスポンスで返却。回帰テスト2件追加、context 25 tests pass。**gRPC 側にも同種の問題が残存 — 下記 follow-up を参照**） — 根拠
   `rust/jarvis-context/src/http.rs:133-136` / R3-AU2 / 重大度 high / confirmed。
 - [x] **承認 UI の approve/deny POST 成功経路とトークン送出が無テスト**（2026-11-19 対応済み: `approve_2xx_is_ok_and_sends_token` / `deny_2xx_is_ok_and_sends_token` を追加し 2xx → Ok と `X-Jarvis-Approval-Token` 送出を検証。`make ui-test` 16 tests pass、反復実行でも安定） — 根拠
   `ui/src/policy_client.rs:131-146` / R3-TQ4 / 重大度 high / confirmed。
@@ -694,3 +694,16 @@ generated:
     `ApprovalError::QueueFull`、HTTP `/v1/approval` は 503」と明記する。
   - 仕様変更後は `check-evidence.sh` のハッシュ一致エビデンスを再生成し、
     `make check-evidence` で検証する。
+
+## follow-up（2026-11-19 Round 3 / R4 レビュー）
+
+- [ ] **gRPC の `store_memory` も呼び出し側指定 id で上書き可能** — 根拠
+  `rust/jarvis-context/src/grpc.rs:47-70`, `proto/context.proto:7,22` /
+  R4 レビュー / 優先度 高。
+  - HTTP 側はサーバ生成 UUID へ修正済みだが、gRPC は
+    `Uuid::parse_str(&req.id)` をそのまま `MemoryEntry.id` に使用。
+  - `returns (Empty)` のため生成 id を返すには proto 変更が必要
+    （後方互換を考慮したバージョン設計）。当面は既存 id 指定時に
+    拒否する方式を検討。
+  - 多層防御として `builder.rs:134` の `ON CONFLICT (id) DO UPDATE`
+    の見直しも検討対象。
