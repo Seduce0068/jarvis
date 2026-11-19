@@ -1,10 +1,10 @@
 [Unit]
 Description=JARVIS shared DB migrations (sqlx)
 Documentation=https://github.com/Seduce0068/jarvis
-# Single owner of shared migrations (001-003). jarvis-policy.service and
-# jarvis-context.service both declare After/Wants on this unit, so no
-# policy <-> context ordering cycle is introduced. This unit itself only
-# waits for the local PostgreSQL instance and the network.
+# Single owner of shared migrations (001 and later, currently through 004).
+# jarvis-policy.service and jarvis-context.service both declare After/Wants on
+# this unit, so no policy <-> context ordering cycle is introduced. This unit
+# itself only waits for the local PostgreSQL instance and the network.
 After=network.target postgresql.service
 Wants=postgresql.service
 

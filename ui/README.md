@@ -24,7 +24,7 @@ CI の aarch64 クロスビルドを壊さないための独立クレートで�
 
 ## 必要なもの
 
-- Rust 1.85+（edition 2024）
+- Rust 1.100+（edition 2024）
 - Linux: `fontconfig`, `libxkbcommon`, `wayland-client`, `wayland-cursor`
   （Kubuntu 2026.04 では標準で揃っています）
 - Wayland または X11 セッション

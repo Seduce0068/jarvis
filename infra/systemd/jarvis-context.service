@@ -1,8 +1,9 @@
 [Unit]
 Description=JARVIS Context Builder
 Documentation=https://github.com/Seduce0068/jarvis
-# jarvis-migrations.service is the shared oneshot owner of migrations 001-003;
-# the existing policy ordering below is preserved (no cycle is introduced).
+# jarvis-migrations.service is the shared oneshot owner of migrations
+# 001 and later (currently through 004); the existing policy ordering below
+# is preserved (no cycle is introduced).
 After=network.target postgresql.service qdrant.service jarvis-policy.service jarvis-migrations.service
 Wants=postgresql.service qdrant.service jarvis-policy.service jarvis-migrations.service
 
