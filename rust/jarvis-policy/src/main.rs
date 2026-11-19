@@ -6,6 +6,45 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::sync::Arc;
 use tracing::info;
 
+/// Fixed category for a tracer-provider shutdown failure (I55-B; same contract
+/// as I51-B in jarvis-event / jarvis-context / jarvis-mcp-gw).
+///
+/// The raw SDK error can embed configuration details, so only this constant is
+/// ever rendered into the warning — never the error value itself.
+const TRACER_SHUTDOWN_ERROR_CATEGORY: &str =
+    "opentelemetry_sdk::trace::SdkTracerProvider::shutdown_failed";
+
+/// Emit the non-fatal tracer-shutdown warning using fixed fields only.
+///
+/// `_err` is intentionally unused: its `Display` text can carry endpoint or
+/// other configuration details, and this warning is exported through JSON logs
+/// to the central OTLP/Grafana pipeline. Passing it in keeps the regression
+/// test on the same call site as production code.
+fn warn_tracer_shutdown_failure(_err: &dyn std::fmt::Display) {
+    tracing::warn!(
+        error_category = TRACER_SHUTDOWN_ERROR_CATEGORY,
+        "tracer provider shutdown failed; queued spans may be dropped"
+    );
+}
+
+/// Handle the result of a `SdkTracerProvider::shutdown` attempt, shared by the
+/// explicit path and [`TracerGuard::drop`].
+///
+/// `AlreadyShutdown` is the benign duplicate-shutdown signal produced when the
+/// explicit path already flushed spans; it stays silent so the normal exit is
+/// quiet. Every other error means queued spans may have been lost and is
+/// surfaced through the fixed-category warning. This is the only trace left on
+/// an early `?` return, where `Drop` is the sole shutdown attempt.
+fn report_shutdown_result(result: opentelemetry_sdk::error::OTelSdkResult) {
+    use opentelemetry_sdk::error::OTelSdkError;
+    match result {
+        Err(err) if !matches!(&err, OTelSdkError::AlreadyShutdown) => {
+            warn_tracer_shutdown_failure(&err);
+        }
+        _ => {}
+    }
+}
+
 /// Keeps the [`SdkTracerProvider`] alive for the lifetime of `main` and makes
 /// sure the batch exporter is shut down on every exit path.
 ///
@@ -19,21 +58,21 @@ struct TracerGuard {
 }
 
 impl TracerGuard {
-    /// Flush queued spans. Errors are reported on stderr because this runs at
-    /// process teardown, where the tracing layer may already be gone. A
-    /// failure is intentionally non-fatal, matching the exporter policy.
+    /// Flush queued spans. A failure is intentionally non-fatal. A repeat
+    /// `AlreadyShutdown` is benign; any other failure is reported with a fixed
+    /// error category only, never with the raw SDK error text.
     fn shutdown(&self) {
-        if let Err(err) = self.provider.shutdown() {
-            eprintln!("jarvis-policy: tracer provider shutdown failed: {err}");
-        }
+        report_shutdown_result(self.provider.shutdown());
     }
 }
 
 impl Drop for TracerGuard {
     fn drop(&mut self) {
-        // Safety net for error paths that return early via `?`. A repeated
-        // shutdown is a harmless `AlreadyShutdown` error and is ignored here.
-        let _ = self.provider.shutdown();
+        // Safety net for error paths that return early via `?`: `main` never
+        // reaches `tracer.shutdown()`, so this is the only shutdown attempt and
+        // a real failure must leave a warning. A repeat `AlreadyShutdown` after
+        // the explicit path stays quiet via `report_shutdown_result`.
+        self.shutdown();
     }
 }
 
@@ -260,7 +299,11 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::warn_otlp_exporter_failure;
+    use super::{
+        TRACER_SHUTDOWN_ERROR_CATEGORY, TracerGuard, warn_otlp_exporter_failure,
+        warn_tracer_shutdown_failure,
+    };
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt;
@@ -332,6 +375,166 @@ mod tests {
         assert!(
             log.contains(super::OTLP_EXPORTER_ERROR_CATEGORY),
             "fixed error category missing: {log}"
+        );
+    }
+
+    /// Render the real tracer-shutdown warning through a JSON fmt layer.
+    fn capture_shutdown_warning(raw_err: &str) -> String {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                warn_tracer_shutdown_failure(&raw_err);
+            });
+        }
+        String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8")
+    }
+
+    /// I55-B regression: `TracerGuard` owns the provider and its `Drop` shuts
+    /// the provider down so queued spans flush on every early-return path.
+    #[test]
+    fn tracer_guard_holds_provider_and_drop_shuts_it_down() {
+        let provider = SdkTracerProvider::builder().build();
+        // `SdkTracerProvider` is a clonable handle to the same provider state.
+        // Keeping a clone lets us observe that the guard's `Drop` called
+        // `shutdown` (the second call then reports `AlreadyShutdown`).
+        let observer = provider.clone();
+
+        {
+            let _guard = TracerGuard { provider };
+        }
+
+        assert!(
+            observer.shutdown().is_err(),
+            "TracerGuard::drop did not shut down the retained provider"
+        );
+    }
+
+    /// I55-B regression: a shutdown error must never leak its raw `Display`
+    /// text (which may embed endpoint/config details) into the JSON warning.
+    #[test]
+    fn tracer_shutdown_warning_uses_fixed_vocabulary_only() {
+        const PROBE: &str = "PROBE-I55B-2f8d6b31";
+        let raw_err =
+            format!("sdk shutdown failed at https://u:{PROBE}@h.example:4317/v1/traces?t={PROBE}");
+
+        let log = capture_shutdown_warning(&raw_err);
+
+        assert!(
+            !log.contains(PROBE),
+            "raw shutdown error leaked into warning: {log}"
+        );
+        assert!(
+            !log.contains("h.example"),
+            "endpoint host leaked into warning: {log}"
+        );
+        assert!(
+            log.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
+            "fixed error category missing: {log}"
+        );
+    }
+
+    /// A span processor whose shutdown always fails. Used to reproduce the
+    /// early-`?` exit where `TracerGuard::drop` is the only shutdown attempt.
+    #[derive(Debug)]
+    struct FailingShutdownProcessor;
+
+    impl opentelemetry_sdk::trace::SpanProcessor for FailingShutdownProcessor {
+        fn on_start(
+            &self,
+            _span: &mut opentelemetry_sdk::trace::Span,
+            _cx: &opentelemetry::Context,
+        ) {
+            // No-op: this processor exists only to make shutdown fail.
+        }
+
+        fn on_end(&self, _span: opentelemetry_sdk::trace::SpanData) {}
+
+        fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(
+            &self,
+            _timeout: std::time::Duration,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            Err(opentelemetry_sdk::error::OTelSdkError::InternalFailure(
+                "I55B-drop-shutdown-failure".into(),
+            ))
+        }
+    }
+
+    /// I55-B regression: an early `?` return never reaches `tracer.shutdown()`,
+    /// so `TracerGuard::drop` is the only shutdown attempt. A real failure there
+    /// must leave the fixed warning instead of being silently discarded.
+    #[test]
+    fn drop_warns_on_shutdown_failure_on_early_return_path() {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                let provider = SdkTracerProvider::builder()
+                    .with_span_processor(FailingShutdownProcessor)
+                    .build();
+                // Simulate an early `?` return: no explicit shutdown, so Drop is
+                // the sole shutdown attempt.
+                {
+                    let _guard = TracerGuard { provider };
+                }
+            });
+        }
+        let log = String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8");
+        // The OpenTelemetry SDK itself emits a DEBUG line carrying the raw
+        // error. Our contract covers our own WARN record only.
+        let app_warn: String = log
+            .lines()
+            .filter(|line| line.contains("\"level\":\"WARN\""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            app_warn.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
+            "early-return Drop swallowed the shutdown failure: {app_warn}"
+        );
+        assert!(
+            !app_warn.contains("I55B-drop-shutdown-failure"),
+            "raw SDK shutdown error leaked through Drop warning: {app_warn}"
+        );
+    }
+
+    /// The normal path already flushed spans, so Drop's repeat attempt returns
+    /// `AlreadyShutdown`; that benign case must not emit a duplicate warning.
+    #[test]
+    fn drop_stays_quiet_for_already_shutdown() {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                let provider = SdkTracerProvider::builder().build();
+                let guard = TracerGuard { provider };
+                // First (explicit) shutdown succeeds; the Drop repeat is the
+                // benign AlreadyShutdown case.
+                guard.shutdown();
+            });
+        }
+        let log = String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8");
+        assert!(
+            !log.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
+            "benign AlreadyShutdown must stay silent: {log}"
         );
     }
 }
