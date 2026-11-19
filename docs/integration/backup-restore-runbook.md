@@ -185,6 +185,8 @@ rm -rf "$TMP"
 - [ ] 関連サービス（`jarvis-context` 等）の停止予定を関係者と共有
 - [ ] 旧データの退避先を確保
 - [ ] `bws.env` の再配置方法を確認（バックアップには含まれない）
+- [ ] `jarvis-migrations.service` が active（exited）で、policy が起動していること
+      （下記「jarvis-migrations.service の配置・有効化・検証」を参照）
 
 本番 `jarvis` DB への上書きは、`jarvis_restore_test` での検証が成功した
 場合のみ、明示的に `psql -d jarvis` を実行して行う。
@@ -226,8 +228,65 @@ rm -rf "$TMP"
 
 ## 承認待ち実機タスクの実行手順
 
-timer unit 再適用・S9 実復元演習・バックアップ外部化・Grafana 認証・
-Webhook 公開範囲の「確認 → 修正 → 再確認」手順は、
+timer unit 再適用・MIG migration unit 配線・S9 実復元演習・バックアップ外部化・
+Grafana 認証・Webhook 公開範囲の「確認 → 修正 → 再確認」手順は、
 [残タスク一覧](remaining-tasks.md) の「承認待ち実機タスクの実行手順」節に
 一元化した。復元に固有の操作は本 Runbook の「現行推奨」および
-「手順1〜3」を参照する。
+「手順1〜3」を参照する。MIG のみ、復元直後の service 起動確認に直結するため
+下記に抜粋を置く（比較・判断の詳細は残タスク一覧の MIG 節）。
+
+### jarvis-migrations.service の配置・有効化・検証（MIG）
+
+`jarvis-migrations.service` は `Type=oneshot` + `RemainAfterExit=yes` の
+共有 migration 実行 unit で、policy / context が `After=` + `Wants=` で
+引く。通常デプロイの
+[build-selfhost.sh](../../infra/scripts/build-selfhost.sh) と
+[install-backup-timer.sh](../../infra/scripts/install-backup-timer.sh) の
+`--apply` の両方で配置され、`Wants=` 経由で起動するため個別 `enable` は不要。
+`ExecStart` は `/usr/local/bin/cargo sqlx migrate run` を使うため、
+sqlx-cli（`cargo-sqlx`）が service の PATH に無いと unit は `failed` になる
+（開発環境で `cargo sqlx --version` が `no such command` を確認済み）。
+導入方法の比較の結果、既存の sqlx 0.8 系統とロック済み依存を活かす
+`cargo install sqlx-cli --no-default-features --features postgres --locked`
+を採用する（値・秘密情報なし。詳細は残タスク一覧 MIG 節）。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+
+echo "== 実行環境: Kubuntu ローカル / 実機 systemd を操作 =="
+cd "$JARVIS_REPO"
+
+echo "== 確認: unit の配置と Wants 配線 =="
+systemctl cat jarvis-migrations.service || true
+systemctl show -p Wants --value jarvis-policy || true
+
+echo "== 確認: cargo-sqlx の有無（未導入なら no such command）=="
+command -v cargo-sqlx || true
+
+echo "== 修正: sqlx-cli 導入（root・既存 sqlx 0.8 系統を活用・値なし）=="
+sudo cargo install sqlx-cli --no-default-features --features postgres --locked --root /usr/local
+
+echo "== 修正: 通常デプロイで unit を配置 =="
+# build-selfhost.sh は jarvis ユーザーで実行する（root で実行すると
+# JARVIS_USER=root になり他 unit の User= が書き換わる）。スクリプト内の sudo に権限が必要。
+JARVIS_USER=jarvis REPO_DIR="$JARVIS_REPO" \
+  bash infra/scripts/build-selfhost.sh
+
+echo "== 再確認: migration unit（active (exited) を期待）=="
+sudo systemctl start jarvis-migrations
+systemctl is-active jarvis-migrations
+
+echo "== 再確認: policy 起動確認 =="
+systemctl is-active jarvis-policy
+curl -fsS http://127.0.0.1:8081/health
+```
+
+- 復元後の再起動（`restore-local.sh --apply --confirm` の後）にもこの確認を
+  適用する。`bws.env` が無いと migration unit は起動できないため、
+  「本番反映」チェックリストの `bws.env` 項目と併せて確認する。
+- `failed` の場合は `journalctl -u jarvis-migrations -n 50 --no-pager` で
+  原因を確認する。S9 演習・BK-2 timer 再適用の手順とは独立に実行できるが、
+  DB への書き込みを伴うため承認済みの作業窓で行う。

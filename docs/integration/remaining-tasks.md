@@ -54,6 +54,11 @@ generated:
   部分集合で検証するよう更新済み。トークン関連 env はテンプレートで
   コメントアウトされており、デプロイ時に誤って有効化されることはない。
   `policy_http_addr` は config 既定値が実機の `:8081` と一致。
+- **migration unit のデプロイ配線**: `jarvis-migrations.service` を
+  [build-selfhost.sh](../../infra/scripts/build-selfhost.sh) の
+  `JARVIS_SERVICE_UNITS` と配置ループへ追加（`User=jarvis` を保持したまま
+  通常デプロイで配置）。sqlx-cli の導入と、配置・有効化・検証手順は後述
+  「承認待ち実機タスクの実行手順」の MIG 節に集約。
 
 ## 確認前提（2026-11-17 の洗い出し時点・履歴として保持）
 
@@ -854,6 +859,91 @@ echo "== 本番反映は別途承認・チェックリスト満たす場合の�
 # - bws.env の再配置方法を確認
 # bash infra/scripts/restore-local.sh --latest --apply --confirm
 ```
+
+### MIG: jarvis-migrations.service の配置・有効化・検証
+
+`jarvis-migrations.service`（`Type=oneshot` / `RemainAfterExit=yes`）は共有
+migration を実行する unit で、policy / context が `After=` + `Wants=` で
+引く（所有権の詳細は [todo.md](../../todo.md) の Round 30 を参照）。
+通常デプロイの
+[build-selfhost.sh](../../infra/scripts/build-selfhost.sh) で配置され、
+[install-backup-timer.sh](../../infra/scripts/install-backup-timer.sh) の
+`--apply` でも同じ unit が配置される（内容は同一）。`Wants=` 経由で起動する
+ため個別 `enable` は不要。`ExecStart` は `/usr/local/bin/cargo sqlx migrate run`
+を使うため、service の PATH に `cargo-sqlx`（sqlx-cli）が無いと unit は
+`failed` になる。開発環境では `cargo sqlx --version` が
+`no such command: sqlx` を返すことを確認済み（未導入の根拠）。
+
+#### sqlx-cli の導入方法の比較（既存依存を活かす観点）
+
+- **A. feature を絞った `cargo install` でロック済み依存を再利用（採用）**:
+  workspace は既に `sqlx = "0.8"`（`postgres` / `migrate` feature 有効）を
+  [Cargo.toml](../../rust/Cargo.toml) と [Cargo.lock](../../rust/Cargo.lock) で
+  管理済み。`--no-default-features --features postgres` で不要な mysql /
+  sqlite ドライバを入れず、`--locked` で sqlx-cli 側のロック済み依存を使う。
+  既存の Rust toolchain と sqlx 0.8 系統を活かし、新規の外部成果物を増やさない。
+- **B. 既定 feature の `cargo install sqlx-cli`**: 使わない mysql / sqlite まで
+  ビルドして依存が増え、ロックも無視されるため不採用。
+- **C. ディストリのパッケージ / ビルド済みバイナリを配布**: Kubuntu の標準
+  repo に sqlx-cli は無く、外部成果物の取得・検証経路が増える。既存の
+  Cargo 依存を活かせないため不採用。
+- **D. context の `sqlx::migrate!()` を唯一の主体にして unit を廃止**:
+  unit を残して配線を直す本タスクのスコープ外（[todo.md](../../todo.md) の
+  Round 30 に代替案として記録済み）。
+
+**採用**: A。下記ブロックの `cargo install ... --root /usr/local` 1行を root
+で実行する（値・秘密情報なし）。`--root /usr/local` は unit が参照する
+`/usr/local/bin/cargo` と同じディレクトリへ `cargo-sqlx` を置くため。
+
+#### 確認 → 修正 → 再確認
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+
+echo "== 実行環境: Kubuntu ローカル / 実機 systemd を操作 =="
+cd "$JARVIS_REPO"
+
+echo "== 確認: sqlx-cli（cargo-sqlx）の有無（未導入なら no such command）=="
+command -v cargo-sqlx || true
+
+echo "== 確認: デプロイ経路に unit が含まれるか =="
+grep -n 'jarvis-migrations.service' infra/scripts/build-selfhost.sh
+
+echo "== 確認: Wants 配線（policy / context）=="
+systemctl show -p Wants --value jarvis-policy || true
+systemctl show -p Wants --value jarvis-context || true
+
+echo "== 修正: sqlx-cli 導入（root・既存 sqlx 0.8 系統を活用・値なし）=="
+sudo cargo install sqlx-cli --no-default-features --features postgres --locked --root /usr/local
+
+echo "== 修正: 通常デプロイで unit を配置 =="
+# build-selfhost.sh は jarvis ユーザーで実行する（root で実行すると
+# JARVIS_USER=root になり他 unit の User= が書き換わる）。スクリプト内の sudo に権限が必要。
+JARVIS_USER=jarvis REPO_DIR="$JARVIS_REPO" \
+  bash infra/scripts/build-selfhost.sh
+
+echo "== 再確認: unit を直接実行（oneshot・DB へ DDL 適用は冪等だが書き込み）=="
+sudo systemctl start jarvis-migrations
+systemctl is-active jarvis-migrations
+systemctl status jarvis-migrations --no-pager -l
+
+echo "== 再確認: policy 起動確認（Wants で migration が引かれること）=="
+systemctl is-active jarvis-policy
+curl -fsS http://127.0.0.1:8081/health
+```
+
+- `systemctl is-active jarvis-migrations` は `active (exited)` を期待する
+  （`Type=oneshot` + `RemainAfterExit=yes`）。`failed` なら
+  `journalctl -u jarvis-migrations -n 50 --no-pager` で原因（多くは
+  cargo-sqlx 未配置、または bws 経由の URL 未注入）を確認する。
+- policy / context を再起動して配線を確認する場合は
+  `sudo systemctl restart jarvis-policy jarvis-context` を別途承認のもとで
+  実行し、再び `systemctl is-active jarvis-migrations` と policy の health を
+  確認する。S9・BK-2 の手順とは独立に実行できるが、本番 DB への書き込みを
+  伴うため既存の承認窓に合わせる。
 
 ### P1-4: バックアップ外部化（設計決定が先）
 

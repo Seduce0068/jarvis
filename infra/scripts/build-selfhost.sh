@@ -54,10 +54,19 @@ sudo install -o root -g root -m 0644 "${OTEL_SRC}" "${OTEL_DST}"
 # 各 unit テンプレートが宣言する User=/Group=（専用ユーザー）を正とし、単一の
 # JARVIS_USER へ一括置換しない。一括置換すると policy / event / context が
 # mcp-gw と同じ実行主体になり、認可サービスの権限分離が崩れる (todo.md R3-AU3)。
+# jarvis-migrations.service も User=jarvis を宣言する共有 migration 実行 unit
+# なので、同じく置換対象外にする（bws 経由で URL を注入、unit に秘密情報なし）。
 # JARVIS_USER はテンプレート側の置換プレースホルダ User=jarvis と
 # /home/jarvis パスの解決にだけ使う（opencode / code-server / qdrant / otelcol
 # の既存 deploy 手順は従来どおり維持）。
+#
+# jarvis-migrations.service は Type=oneshot / RemainAfterExit の共有 migration 実行 unit。
+# policy / context が After + Wants で引くため個別 enable は不要だが、ExecStart が
+# `/usr/local/bin/cargo sqlx migrate run` を使うので sqlx-cli (cargo-sqlx) が必須。
+# 未導入なら unit は failed になり Wants 元の起動も失敗する（導入手順は
+# docs/integration/backup-restore-runbook.md の MIG 節を参照）。
 JARVIS_SERVICE_UNITS=(
+  jarvis-migrations.service
   jarvis-policy.service
   jarvis-mcp-gw.service
   jarvis-event.service
@@ -65,6 +74,7 @@ JARVIS_SERVICE_UNITS=(
 )
 
 for unit in \
+  "${REPO_DIR}"/infra/systemd/jarvis-migrations.service \
   "${REPO_DIR}"/infra/systemd/jarvis-policy.service \
   "${REPO_DIR}"/infra/systemd/jarvis-mcp-gw.service \
   "${REPO_DIR}"/infra/systemd/jarvis-event.service \
@@ -76,13 +86,13 @@ for unit in \
   name="$(basename "${unit}")"
   sed_args=()
   if [[ " ${JARVIS_SERVICE_UNITS[*]} " != *" ${name} "* ]]; then
-    # 認可サービス以外のみ、従来どおり jarvis -> JARVIS_USER へ置換。
+    # 認可サービス・migration 以外のみ、従来どおり jarvis -> JARVIS_USER へ置換。
     sed_args+=(
       -e "s/^User=jarvis$/User=${JARVIS_USER}/"
       -e "s/^Group=jarvis$/Group=${JARVIS_USER}/"
     )
   fi
-  # 認可サービスは User=/Group= をテンプレートの宣言どおり保持する。
+  # 認可サービス・migration は User=/Group= をテンプレートの宣言どおり保持する。
   sed_args+=(
     -e "s|/home/jarvis|/home/${JARVIS_USER}|g"
     -e "/^EnvironmentFile=-\/etc\/jarvis\/op.env/d"
@@ -97,5 +107,7 @@ done
 sudo systemctl daemon-reload
 
 echo "binaries and units installed; create /etc/jarvis/bws.env before starting services"
+echo "migrations: install sqlx-cli (cargo-sqlx) on the service PATH before starting policy/context"
 echo "start with:"
 echo "  sudo systemctl enable --now qdrant opencode jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context"
+echo "jarvis-migrations.service is pulled in via Wants= from policy/context (no separate enable needed)"
