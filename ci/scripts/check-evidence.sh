@@ -83,6 +83,16 @@ for f in evidence_files:
         errors.append(f"{f}: FAILED_TESTS"); continue
     if type(r.get("passed", 0)) is not int or r.get("passed", 0) <= 0:
         errors.append(f"{f}: NO_PASSING_TESTS"); continue
+    # A near-total skip must not satisfy the gate. A positive skipped count is
+    # accepted only when the evidence notes explicitly document it as
+    # `ignored` (e.g. Docker-only #[ignore] tests): silently rewriting the
+    # number to 0 would falsify the record. bool True == 1 is excluded so it
+    # cannot bypass. Only the error code is emitted; values are never printed.
+    skipped = r.get("skipped", 0)
+    if skipped is True or (type(skipped) is int and skipped > 0):
+        notes = d.get("notes", "")
+        if not isinstance(notes, str) or "ignored" not in notes.lower():
+            errors.append(f"{f}: SKIPPED_TESTS"); continue
     ref = d.get("test_basis_ref")
     if not isinstance(ref, dict) or not ref.get("spec_path"):
         errors.append(f"{f}: NO_SPEC_PATH"); continue
