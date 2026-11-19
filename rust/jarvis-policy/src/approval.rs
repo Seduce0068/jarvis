@@ -14,7 +14,10 @@
 //! commits [`ApprovalPersistence::mark_expired`] before evicting
 //! an expired entry so no durable row is left undecided and unaudited. A
 //! failed commit leaves the entry Pending so a later sweep can retry the
-//! audit write instead of silently losing it.
+//! audit write instead of silently losing it. R5-C: the sweep classifies in a
+//! short locked section, commits with the store lock released (so a hanging
+//! backend cannot block `status`/`decide`/`list_pending`), then stamps and
+//! evicts in a second short section.
 //!
 //! R4-C: the `deciding` claim is owned by an RAII [`DecidingGuard`] backed by a
 //! shared atomic. Its `Drop` releases the claim synchronously, so a `decide`
@@ -340,6 +343,46 @@ struct Inner {
     entries: RwLock<HashMap<Uuid, Entry>>,
     /// Additive seam handle. In slice 1 this is always [`NoopPersistence`].
     persistence: Arc<dyn ApprovalPersistence>,
+    /// Synchronous authoritative gate re-read at every decision commit
+    /// boundary (R5-D). `None` — used by every pre-existing constructor —
+    /// keeps the historical behavior unchanged. When present, `decide`
+    /// consults it immediately before invoking the backend and again before
+    /// publishing the in-memory decision, so an emergency stop that lands
+    /// after a caller's pre-check cannot commit a decision. The closure is
+    /// called with the store's write guard held: it must not await or
+    /// re-enter the store, only re-read the authority.
+    commit_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+/// Classification produced under the store's write guard before any durable
+/// I/O (R5-C). Each expiry carries an RAII [`DecidingGuard`] so a concurrent
+/// `decide` cannot commit over it while the lock is released for the commit.
+struct PrunePlan {
+    to_expire: Vec<(Uuid, DecidingGuard)>,
+    to_drop: Vec<Uuid>,
+}
+
+/// How one expired entry was settled durably. The distinction matters to the
+/// apply phase: a successful commit keeps an existing stamp, while a lost-ack
+/// fallback always stamps `Expired` locally (the pre-split behavior).
+enum ExpiryCommit {
+    Committed,
+    LostAck,
+    Authoritative(LoadedDecision),
+}
+
+/// A committed expiry still waiting for its short locked stamp/evict section.
+struct ExpiredCommit {
+    id: Uuid,
+    result: ExpiryCommit,
+    _claim: DecidingGuard,
+}
+
+/// Output of the lock-free commit phase. `to_drop` entries need no I/O: the
+/// timeout path already settled them, or they aged out of the retention window.
+struct PruneSweep {
+    to_settle: Vec<ExpiredCommit>,
+    to_drop: Vec<Uuid>,
 }
 
 #[derive(Clone)]
@@ -391,14 +434,38 @@ impl ApprovalStore {
         max_pending: usize,
         persistence: Arc<dyn ApprovalPersistence>,
     ) -> Self {
+        Self::with_commit_gate(timeout, max_pending, persistence, None)
+    }
+
+    /// Additive constructor that also installs a synchronous commit gate.
+    ///
+    /// `is_blocked` is re-read (never cached) at both commit boundaries of
+    /// [`Self::decide`]: before the durable write and before the in-memory
+    /// publish. `PolicyEngine` injects a gate backed by the authoritative
+    /// kill-switch flag; passing `None` reproduces
+    /// [`Self::with_persistence`] exactly. The closure runs with the store's
+    /// write guard held, so it must not await or re-enter the store.
+    pub fn with_commit_gate(
+        timeout: Duration,
+        max_pending: usize,
+        persistence: Arc<dyn ApprovalPersistence>,
+        is_blocked: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 timeout,
                 max_pending,
                 entries: RwLock::new(HashMap::new()),
                 persistence,
+                commit_gate: is_blocked,
             }),
         }
+    }
+
+    /// Re-read the authoritative emergency-stop gate. With no gate installed
+    /// (every legacy constructor) decisions are never blocked here.
+    fn commit_blocked(&self) -> bool {
+        self.inner.commit_gate.as_ref().is_some_and(|gate| gate())
     }
 
     /// Configured decision window for pending approvals.
@@ -461,15 +528,18 @@ impl ApprovalStore {
         };
 
         let (tx, mut rx) = watch::channel(None);
+        // The lazy sweep is split into three phases (R5-C): a short locked
+        // classification, lock-free durable commits, then a short locked
+        // apply. Holding `entries.write()` across `mark_expired` would freeze
+        // `status`/`decide`/`list_pending` behind a hanging database.
+        let plan = {
+            let mut entries = self.inner.entries.write().await;
+            Self::classify_prune(&mut entries, self.inner.timeout, now)
+        };
+        let sweep = Self::commit_prunes(plan, &*self.inner.persistence, now).await;
         {
             let mut entries = self.inner.entries.write().await;
-            Self::prune(
-                &mut entries,
-                &*self.inner.persistence,
-                self.inner.timeout,
-                now,
-            )
-            .await;
+            Self::apply_prune(&mut entries, sweep, now);
             // A caller-supplied id must not overwrite an existing pending
             // request: doing so would drop the original waiter's channel and
             // let a second caller hijack the operator's decision target.
@@ -884,6 +954,13 @@ impl ApprovalStore {
     /// warning) and never reaches the persistence backend. With
     /// [`NoopPersistence`] the commit is immediate, so memory-only behavior is
     /// unchanged.
+    ///
+    /// R5-D: an optional synchronous commit gate ([`Self::with_commit_gate`])
+    /// is re-read at both commit boundaries — before invoking the backend and
+    /// before publishing the in-memory decision. A kill switch activation that
+    /// lands after the transport's pre-check therefore cannot commit a
+    /// decision. This is additive: every pre-existing constructor installs no
+    /// gate, so the timeout, lost-ack, RAII-claim and prune paths are untouched.
     pub async fn decide(&self, id: Uuid, decision: ApprovalDecision) -> Result<(), ApprovalError> {
         let decided_at = Utc::now();
 
@@ -903,6 +980,15 @@ impl ApprovalStore {
             }
             if entry.decision.is_some() || entry.is_deciding() {
                 return Err(ApprovalError::AlreadyDecided(id));
+            }
+            // R5-D: re-read the authoritative emergency-stop state at the
+            // commit boundary, not only in the transport pre-check. This runs
+            // with the entry claimed and no `await` in the critical section,
+            // so an activation that landed after the caller's check is
+            // rejected before the persistence backend is ever touched.
+            if self.commit_blocked() {
+                tracing::warn!("decision commit blocked: kill switch activated after pre-check");
+                return Err(ApprovalError::KillSwitchActivated);
             }
             entry.claim()
         };
@@ -924,6 +1010,16 @@ impl ApprovalStore {
             // A failed commit must leave the entry pending so no waiter can
             // observe a rolled-back decision.
             commit?;
+            // R5-D: re-read the authority once more before finalizing. An
+            // activation that landed while the durable commit was in flight
+            // must not publish a decision to the waiter or the UI. The entry
+            // stays Pending (claim already released) so the operator can retry
+            // after deactivation; the error vocabulary is fixed and carries no
+            // id, path or backend detail.
+            if self.commit_blocked() {
+                tracing::warn!("decision publish blocked: kill switch activated during commit");
+                return Err(ApprovalError::KillSwitchActivated);
+            }
             // The commit is the authority: overwrite any provisional state so
             // a commit that won is never reported back as a 409.
             entry.decision = Some(decision.clone());
@@ -1104,38 +1200,24 @@ impl ApprovalStore {
         }
     }
 
-    /// Drop entries that can no longer produce a real decision, settling every
-    /// expired one durably first.
+    /// Classify expired entries under the caller's write guard (R5-C phase 1).
     ///
-    /// Adopted approach for I33-A (a): recovered holds re-registered by
-    /// [`Self::reconcile_pending`] have no waiter and therefore no timer of
-    /// their own. This lazy sweep at the head of [`Self::try_request`] *is*
-    /// their timeout path. For a pending entry whose deadline has passed we
-    /// call [`ApprovalPersistence::mark_expired`] and remove the entry from
-    /// memory **only after the commit succeeds**; a failed commit keeps the
-    /// entry so a later sweep (or startup reconciliation) retries instead of
-    /// silently leaving an undecided durable row with no audit record. Entries
-    /// already recorded as `Expired` were settled by the timeout path, so they
-    /// are simply evicted. Entries with a live `decide`/expiry commit are
-    /// skipped; a cancelled commit is different — its RAII [`DecidingGuard`]
-    /// releases the claim on drop, so this sweep can settle and evict it
-    /// instead of leaking the approval slot until restart (R4-C).
-    ///
-    /// Besides that, decided entries older than twice the timeout are dropped
-    /// by the usual retention window. Called under the caller's write guard so
-    /// no new decision can be published while an expiry is being committed.
-    /// With [`NoopPersistence`] every commit is an immediate `Ok`, so the
-    /// memory-only default keeps its exact behavior.
-    async fn prune(
+    /// Recovered holds re-registered by [`Self::reconcile_pending`] have no
+    /// waiter and thus no timer: this lazy sweep at the head of
+    /// [`Self::try_request`] is their timeout path. An unclaimed entry past its
+    /// deadline is claimed for the durable expiry; a live `decide`/expiry
+    /// claim is skipped, while a cancelled one is already released by its RAII
+    /// [`DecidingGuard`] (R4-C). Entries already stamped `Expired` by the
+    /// timeout path and decided entries past the retention window only need
+    /// in-memory reclamation. No I/O happens here.
+    fn classify_prune(
         entries: &mut HashMap<Uuid, Entry>,
-        persistence: &dyn ApprovalPersistence,
         timeout: Duration,
         now: DateTime<Utc>,
-    ) {
+    ) -> PrunePlan {
         let retention = timeout.as_secs().saturating_mul(2).min(i64::MAX as u64) as i64;
         let cutoff = now - chrono::Duration::seconds(retention);
 
-        // Phase 1 (no I/O): classify under the caller's write guard.
         let mut to_expire = Vec::new();
         let mut to_drop = Vec::new();
         for (id, entry) in entries.iter_mut() {
@@ -1143,8 +1225,10 @@ impl ApprovalStore {
             let deadline_passed = entry.decided_at.is_none() && now > entry.deadline;
             if deadline_passed && !entry.is_deciding() {
                 // Abandoned waiter or recovered hold: no timeout path will
-                // settle it, so this sweep owns the durable expiry.
-                to_expire.push(*id);
+                // settle it, so this sweep owns the durable expiry. The claim
+                // is carried into the lock-free commit phase so a concurrent
+                // `decide` cannot commit over the pending expiry.
+                to_expire.push((*id, entry.claim()));
             } else if is_expired {
                 // The timeout path already called `mark_expired` and stamped
                 // `decided_at`; only the in-memory entry is reclaimed here.
@@ -1156,12 +1240,80 @@ impl ApprovalStore {
                 to_drop.push(*id);
             }
         }
+        PrunePlan { to_expire, to_drop }
+    }
 
-        // Phase 2: commit each expiry BEFORE evicting its in-memory entry.
-        for id in to_expire {
+    /// Commit every classified expiry with the store lock released (R5-C
+    /// phase 2). Each `mark_expired` may reconnect and block on a hanging
+    /// database, so no `status`, `decide`, `list_pending` or other
+    /// `try_request` may queue behind these awaits. With [`NoopPersistence`]
+    /// every commit is an immediate `Ok`, so the memory-only default keeps its
+    /// exact behavior. A failed commit drops its claim and leaves the entry
+    /// Pending for the next sweep; only fixed error categories are logged.
+    async fn commit_prunes(
+        plan: PrunePlan,
+        persistence: &dyn ApprovalPersistence,
+        now: DateTime<Utc>,
+    ) -> PruneSweep {
+        let mut to_settle = Vec::new();
+        for (id, claim) in plan.to_expire {
             match persistence.mark_expired(id, now).await {
-                Ok(()) => {
-                    if let Some(entry) = entries.get_mut(&id) {
+                Ok(()) => to_settle.push(ExpiredCommit {
+                    id,
+                    result: ExpiryCommit::Committed,
+                    _claim: claim,
+                }),
+                // I43-B (b): a concurrent settlement already committed the
+                // durable decision, so this ghost entry must NOT be retained
+                // forever. Mirror the reconcile / timeout paths: treat it as
+                // success, re-read the authoritative decision (when the backend
+                // exposes it) and reflect it in memory during the apply phase.
+                Err(ApprovalError::AlreadyDecided(_)) => {
+                    let result = match persistence.load_decision_with_time(id).await {
+                        Ok(Some(loaded)) => ExpiryCommit::Authoritative(loaded),
+                        Ok(None) => ExpiryCommit::LostAck,
+                        Err(error) => {
+                            tracing::warn!(
+                                error_category = error.category(),
+                                request_id = %id,
+                                "durable decision re-read failed after prune expiry CAS loss"
+                            );
+                            ExpiryCommit::LostAck
+                        }
+                    };
+                    to_settle.push(ExpiredCommit {
+                        id,
+                        result,
+                        _claim: claim,
+                    });
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error_category = error.category(),
+                        request_id = %id,
+                        "failed to persist expiration during prune; keeping entry for retry"
+                    );
+                    // Release the claim so the next sweep can classify this
+                    // entry again; otherwise it would stay `deciding` forever.
+                    drop(claim);
+                }
+            }
+        }
+        PruneSweep {
+            to_settle,
+            to_drop: plan.to_drop,
+        }
+    }
+
+    /// Stamp and evict committed expiries in one short write critical section
+    /// (R5-C phase 3), held by the caller together with the registration of
+    /// the new request. The RAII claim lives until after the eviction so a
+    /// concurrent `decide` cannot publish over a committed expiry.
+    fn apply_prune(entries: &mut HashMap<Uuid, Entry>, sweep: PruneSweep, now: DateTime<Utc>) {
+        for outcome in sweep.to_settle {
+            if let Some(entry) = entries.get_mut(&outcome.id) {
+                match outcome.result {
+                    ExpiryCommit::Committed => {
                         if entry.decided_at.is_none() {
                             entry.decision = Some(ApprovalDecision::Expired);
                             entry.decided_at = Some(now);
@@ -1171,53 +1323,25 @@ impl ApprovalStore {
                         // errors: no receiver means the waiter already left.
                         let _ = entry.tx.send(Some(ApprovalDecision::Expired));
                     }
-                    entries.remove(&id);
-                }
-                // I43-B (b): a concurrent settlement already committed the
-                // durable decision, so this ghost entry must NOT be retained
-                // forever. Mirror the reconcile / timeout paths: treat it as
-                // success, re-read the authoritative decision (when the backend
-                // exposes it) and reflect it in memory before evicting.
-                Err(ApprovalError::AlreadyDecided(_)) => {
-                    let authoritative = match persistence.load_decision_with_time(id).await {
-                        Ok(Some(loaded)) => Some(loaded),
-                        Ok(None) => None,
-                        Err(error) => {
-                            tracing::warn!(
-                                error_category = error.category(),
-                                request_id = %id,
-                                "durable decision re-read failed after prune expiry CAS loss"
-                            );
-                            None
-                        }
-                    };
-                    if let Some(entry) = entries.get_mut(&id) {
-                        if let Some(loaded) = authoritative {
-                            entry.decision = Some(loaded.decision.clone());
-                            entry.decided_at = Some(loaded.decided_at);
-                            let _ = entry.tx.send(Some(loaded.decision));
-                        } else {
-                            // No authoritative value visible, but the CAS proved
-                            // the durable row is decided. Settle locally as
-                            // `Expired` so a still-waiting receiver is released
-                            // and the ghost is evicted like every other success.
-                            entry.decision = Some(ApprovalDecision::Expired);
-                            entry.decided_at = Some(now);
-                            let _ = entry.tx.send(Some(ApprovalDecision::Expired));
-                        }
+                    ExpiryCommit::LostAck => {
+                        // No authoritative value visible, but the CAS proved
+                        // the durable row is decided. Settle locally as
+                        // `Expired` so a still-waiting receiver is released.
+                        entry.decision = Some(ApprovalDecision::Expired);
+                        entry.decided_at = Some(now);
+                        let _ = entry.tx.send(Some(ApprovalDecision::Expired));
                     }
-                    entries.remove(&id);
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error_category = error.category(),
-                        request_id = %id,
-                        "failed to persist expiration during prune; keeping entry for retry"
-                    );
+                    ExpiryCommit::Authoritative(loaded) => {
+                        entry.decision = Some(loaded.decision.clone());
+                        entry.decided_at = Some(loaded.decided_at);
+                        let _ = entry.tx.send(Some(loaded.decision));
+                    }
                 }
             }
+            entries.remove(&outcome.id);
+            // `outcome._claim` drops here, after eviction.
         }
-        for id in to_drop {
+        for id in sweep.to_drop {
             entries.remove(&id);
         }
     }
@@ -3439,5 +3563,143 @@ mod tests {
             store.list_pending().await.iter().all(|r| r.id != hold_id),
             "the abandoned hold must no longer count against max_pending"
         );
+    }
+
+    // ---- R5-C: lock-free prune commit keeps the approval API responsive ----
+
+    /// Mock whose `mark_expired` can be held open behind a gate. No database.
+    #[derive(Debug, Default)]
+    struct GatedExpiryPersistence {
+        entered: Arc<AtomicBool>,
+        expired: tokio::sync::Mutex<Vec<Uuid>>,
+        gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for GatedExpiryPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.entered.store(true, Ordering::SeqCst);
+            if let Some(rx) = self.gate.lock().await.take() {
+                // A real backend may reconnect and hang here. The pre-fix
+                // prune held `entries.write()` across exactly this await.
+                let _ = rx.await;
+            }
+            self.expired.lock().await.push(id);
+            Ok(())
+        }
+    }
+
+    /// R5-C regression: while prune's durable commit is blocked, `status()`
+    /// must still complete. The old code held the store's write guard across
+    /// `mark_expired`, so this call timed out behind the gate and the whole
+    /// approval API froze whenever the database hung.
+    #[tokio::test]
+    async fn status_responds_while_prune_commit_is_gated() {
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered = Arc::new(AtomicBool::new(false));
+        let persistence = Arc::new(GatedExpiryPersistence {
+            entered: entered.clone(),
+            expired: tokio::sync::Mutex::new(Vec::new()),
+            gate: tokio::sync::Mutex::new(Some(gate_rx)),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+
+        // Recovered-hold shape: pending, no waiter, deadline already past.
+        let hold = make_request();
+        let hold_id = hold.id;
+        let (tx, _rx) = watch::channel(None);
+        {
+            let mut entries = store.inner.entries.write().await;
+            entries.insert(
+                hold_id,
+                Entry {
+                    request: hold,
+                    decision: None,
+                    decided_at: None,
+                    deadline: Utc::now() - chrono::Duration::seconds(1),
+                    deciding: new_deciding(),
+                    tx,
+                },
+            );
+        }
+
+        // A fresh request drives the lazy sweep at the head of `try_request`;
+        // its own waiter is decided as soon as it is registered.
+        let next = make_request();
+        let next_id = next.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(next).await });
+
+        for _ in 0..200 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "prune must have reached the gated mark_expired"
+        );
+
+        // This is the assertion that fails on the pre-fix code: the write guard
+        // was held across the gated await, so a read guard could not be taken.
+        let observed = tokio::time::timeout(Duration::from_millis(500), store.status(hold_id))
+            .await
+            .expect("status must respond while prune's commit is gated");
+        assert!(
+            matches!(observed, Ok(ApprovalDecision::Pending)),
+            "the entry stays Pending until the commit succeeds: {observed:?}"
+        );
+
+        let _ = gate_tx.send(());
+        decide_after_registration(&store, next_id, approved()).await;
+        assert!(matches!(
+            waiter.await.expect("waiter task"),
+            ApprovalDecision::Approved { .. }
+        ));
+        assert!(
+            persistence.expired.lock().await.contains(&hold_id),
+            "the gated expiry must still be committed before eviction"
+        );
+        assert!(matches!(
+            store.status(hold_id).await,
+            Err(ApprovalError::NotFound(_))
+        ));
     }
 }
