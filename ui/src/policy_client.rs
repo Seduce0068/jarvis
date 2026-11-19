@@ -382,6 +382,75 @@ mod tests {
         );
     }
 
+    /// A 2xx from POST /approve must be reported as success and must carry the
+    /// configured approval token. The GET path is covered separately by
+    /// `approval_token_is_sent_as_header`.
+    #[test]
+    fn approve_2xx_is_ok_and_sends_token() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                *seen_for_thread.lock().expect("lock") = Some(request);
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\"}",
+                );
+            },
+            1,
+        );
+
+        let client = PolicyClient::new_with_token(
+            format!("http://{addr}"),
+            Some("approve-token".to_string()),
+        );
+        let result = client.approve("req-1", "koppe");
+        handle.join().expect("server thread");
+        assert!(result.is_ok(), "2xx approve must succeed: {result:?}");
+
+        let request = seen.lock().expect("lock").clone().expect("request seen");
+        assert!(
+            request.starts_with("POST /v1/approval/req-1/approve "),
+            "approve must POST to the approve endpoint: {request}"
+        );
+        assert_eq!(approval_token(&request).as_deref(), Some("approve-token"));
+    }
+
+    /// A 2xx from POST /deny must be reported as success and must carry the
+    /// configured approval token, mirroring the approve success path.
+    #[test]
+    fn deny_2xx_is_ok_and_sends_token() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                *seen_for_thread.lock().expect("lock") = Some(request);
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\"}",
+                );
+            },
+            1,
+        );
+
+        let client =
+            PolicyClient::new_with_token(format!("http://{addr}"), Some("deny-token".to_string()));
+        let result = client.deny("req-2", "because");
+        handle.join().expect("server thread");
+        assert!(result.is_ok(), "2xx deny must succeed: {result:?}");
+
+        let request = seen.lock().expect("lock").clone().expect("request seen");
+        assert!(
+            request.starts_with("POST /v1/approval/req-2/deny "),
+            "deny must POST to the deny endpoint: {request}"
+        );
+        assert_eq!(approval_token(&request).as_deref(), Some("deny-token"));
+    }
+
     /// send_json() returns Ok for any HTTP response, so the status must be
     /// checked before reporting an approve/deny outcome to the operator.
     #[test]
