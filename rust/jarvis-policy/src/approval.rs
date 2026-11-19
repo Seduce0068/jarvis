@@ -15,6 +15,14 @@
 //! an expired entry so no durable row is left undecided and unaudited. A
 //! failed commit leaves the entry Pending so a later sweep can retry the
 //! audit write instead of silently losing it.
+//!
+//! R4-C: the `deciding` claim is owned by an RAII [`DecidingGuard`] backed by a
+//! shared atomic. Its `Drop` releases the claim synchronously, so a `decide`
+//! (or timeout) future cancelled mid-commit always leaves the entry `Pending`
+//! instead of stranding a flag that blocks both `prune` and later `decide`
+//! calls until restart. A time-based stale-claim heuristic was considered and
+//! rejected: a grace window that expires while a legitimate durable commit is
+//! still in flight could split brain (durable `Approved` vs memory `Expired`).
 //! User notification (HA/phone) will be layered on top later.
 //!
 //! Approval is intentionally HTTP-only: the gRPC surface is limited to
@@ -23,6 +31,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -242,6 +251,48 @@ impl ApprovalPersistence for NoopPersistence {
     }
 }
 
+/// Shared claim flag for one [`Entry`] (R4-C).
+///
+/// The store's `RwLock` is deliberately released across a durable commit so
+/// `status()` keeps observing `Pending` until that commit succeeds. The flag
+/// therefore lives behind an `Arc`: a [`DecidingGuard`] can clear it in `Drop`
+/// without re-acquiring the async lock (which is impossible in `Drop`), so
+/// cancelling the owning future mid-commit always releases the claim.
+#[derive(Debug, Default)]
+struct DecidingClaim {
+    claimed: AtomicBool,
+}
+
+impl DecidingClaim {
+    fn is_claimed(&self) -> bool {
+        self.claimed.load(Ordering::Acquire)
+    }
+
+    fn set(&self, value: bool) {
+        self.claimed.store(value, Ordering::Release);
+    }
+}
+
+/// RAII owner of an entry's `deciding` claim (R4-C).
+///
+/// Created under the store's write guard by [`Entry::claim`] and held across
+/// `record_decision` / `mark_expired`. `Drop` clears the claim unconditionally
+/// — on success, on error, and on cancellation of the owning future. A
+/// cancelled `decide` therefore leaves the entry `Pending`, so `prune` (or
+/// startup reconciliation) can still settle it and a later operator retry is
+/// not answered with a spurious `AlreadyDecided` (HTTP 409).
+struct DecidingGuard(Arc<DecidingClaim>);
+
+impl Drop for DecidingGuard {
+    fn drop(&mut self) {
+        self.0.set(false);
+    }
+}
+
+fn new_deciding() -> Arc<DecidingClaim> {
+    Arc::new(DecidingClaim::default())
+}
+
 struct Entry {
     request: ApprovalRequest,
     decision: Option<ApprovalDecision>,
@@ -251,13 +302,36 @@ struct Entry {
     /// can reclaim pending entries whose waiter was abandoned before it ever
     /// reached the timeout branch.
     deadline: DateTime<Utc>,
-    /// True while a `decide` call has claimed this entry and its durable
-    /// commit is in flight. The write guard is deliberately released across
-    /// the commit, so the timeout path checks this flag and yields to an
+    /// Held by a [`DecidingGuard`] while a `decide`/expiry commit is in
+    /// flight. Shared through an `Arc` so the guard's `Drop` releases it
+    /// synchronously even when the owning future is cancelled across the
+    /// commit (R4-C). The write guard is deliberately released across that
+    /// commit, so the timeout path checks this flag and yields to an
     /// in-flight decide instead of masking a successful commit with a
     /// memory-only `Expired` marking (I33-A (b)).
-    deciding: bool,
+    deciding: Arc<DecidingClaim>,
     tx: watch::Sender<Option<ApprovalDecision>>,
+}
+
+impl Entry {
+    /// True while a decide/expiry commit owns this entry.
+    fn is_deciding(&self) -> bool {
+        self.deciding.is_claimed()
+    }
+
+    /// Start a claim and return its RAII owner. Called under the store's
+    /// write guard; the returned guard may outlive that lock and is released
+    /// on `Drop`, including when the owning future is cancelled (R4-C).
+    fn claim(&self) -> DecidingGuard {
+        self.deciding.set(true);
+        DecidingGuard(Arc::clone(&self.deciding))
+    }
+
+    /// Clear a claim early. The guard's `Drop` clears it again on release;
+    /// keeping both makes the in-memory state explicit at each commit point.
+    fn release(&self) {
+        self.deciding.set(false);
+    }
 }
 
 struct Inner {
@@ -422,7 +496,7 @@ impl ApprovalStore {
                     decision: None,
                     decided_at: None,
                     deadline,
-                    deciding: false,
+                    deciding: new_deciding(),
                     tx,
                 },
             );
@@ -502,11 +576,14 @@ impl ApprovalStore {
                 // (I33-A (b)).
                 enum TimeoutOutcome {
                     Decided(ApprovalDecision),
-                    Expire,
+                    /// Carries the RAII claim across the durable commit so a
+                    /// cancelled waiter releases it instead of leaking it.
+                    Expire(DecidingGuard),
                     YieldToDecide,
                 }
-                // Bound the yields: a `decide` task cancelled mid-commit could
-                // otherwise leave `deciding` set forever and hang this waiter.
+                // Bound the yields: a genuinely stuck `decide` commit cannot
+                // hold this waiter forever. A cancelled commit is different —
+                // its guard's `Drop` clears the claim immediately (R4-C).
                 let mut yields = 0usize;
                 loop {
                     let expired_at = Utc::now();
@@ -517,11 +594,11 @@ impl ApprovalStore {
                             Some(entry) => {
                                 if let Some(decision) = &entry.decision {
                                     TimeoutOutcome::Decided(decision.clone())
-                                } else if entry.deciding && yields < MAX_DECIDE_YIELDS {
+                                } else if entry.is_deciding() && yields < MAX_DECIDE_YIELDS {
                                     TimeoutOutcome::YieldToDecide
                                 } else {
-                                    if entry.deciding {
-                                        entry.deciding = false;
+                                    if entry.is_deciding() {
+                                        entry.release();
                                         tracing::warn!(
                                             request_id = %id,
                                             "stale decide claim cleared after repeated yields"
@@ -533,10 +610,11 @@ impl ApprovalStore {
                                     // `decided_at` here would make `prune` drop
                                     // the entry as already-expired even when the
                                     // durable audit write failed, losing the
-                                    // retry. The `deciding` flag also keeps a
-                                    // concurrent prune from racing this commit.
-                                    entry.deciding = true;
-                                    TimeoutOutcome::Expire
+                                    // retry. The `deciding` claim also keeps a
+                                    // concurrent prune from racing this commit;
+                                    // the guard lives across `mark_expired` so a
+                                    // cancelled waiter releases it too (R4-C).
+                                    TimeoutOutcome::Expire(entry.claim())
                                 }
                             }
                         }
@@ -551,7 +629,9 @@ impl ApprovalStore {
                             let _ = tokio::time::timeout(RECOVERY_GRACE, rx.changed()).await;
                             continue;
                         }
-                        TimeoutOutcome::Expire => {
+                        TimeoutOutcome::Expire(_guard) => {
+                            // `_guard` is held until this arm ends (or the
+                            // future is dropped), then releases the claim.
                             // `NoopPersistence` never errors, so the default
                             // path is unchanged. A failed `mark_expired` leaves
                             // the entry Pending (no decision/decided_at stamp),
@@ -713,7 +793,7 @@ impl ApprovalStore {
                                         // publish one.
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id) {
-                                            entry.deciding = false;
+                                            entry.release();
                                             if entry.decision.is_none()
                                                 || matches!(
                                                     entry.decision.as_ref(),
@@ -735,7 +815,7 @@ impl ApprovalStore {
                                     {
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id) {
-                                            entry.deciding = false;
+                                            entry.release();
                                         }
                                     }
                                     tracing::warn!(
@@ -752,7 +832,7 @@ impl ApprovalStore {
                                     {
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id) {
-                                            entry.deciding = false;
+                                            entry.release();
                                         }
                                     }
                                     tracing::warn!(
@@ -767,7 +847,7 @@ impl ApprovalStore {
                                     // in-memory entry decided (I43-B (a)).
                                     let mut entries = self.inner.entries.write().await;
                                     if let Some(entry) = entries.get_mut(&id) {
-                                        entry.deciding = false;
+                                        entry.release();
                                         if entry.decision.is_none() {
                                             entry.decision = Some(ApprovalDecision::Expired);
                                             entry.decided_at = Some(expired_at);
@@ -788,12 +868,16 @@ impl ApprovalStore {
     ///
     /// Ordering (I30-A, tightened by I33-A (b)): the durable backend commits
     /// first and its result is the authority; the in-memory entry is then
-    /// overwritten to match. A short write guard claims the entry (`deciding`)
-    /// before the commit so the timeout path can yield to an in-flight commit
-    /// instead of racing it with a memory-only `Expired` marking. The guard is
-    /// deliberately *not* held across the commit: `status()` and
-    /// `watch_does_not_fire_before_commit` keep observing `Pending` until the
-    /// commit succeeds, and a rollback publishes nothing.
+    /// overwritten to match. A short write critical section claims the entry
+    /// (`deciding`) before the commit so the timeout path can yield to an
+    /// in-flight commit instead of racing it with a memory-only `Expired`
+    /// marking. The claim is handed to an RAII [`DecidingGuard`] that is held
+    /// across the commit and released on `Drop` (R4-C): cancelling this future
+    /// mid-commit can no longer strand a claim that blocks `prune` and later
+    /// decide attempts. The store's write lock is deliberately *not* held
+    /// across the commit: `status()` and `watch_does_not_fire_before_commit`
+    /// keep observing `Pending` until the commit succeeds, and a rollback
+    /// publishes nothing.
     ///
     /// A request whose deadline has already passed is explicitly rejected
     /// (expiry is a terminal decision, reported as `AlreadyDecided` with a
@@ -805,8 +889,9 @@ impl ApprovalStore {
 
         // Precondition + claim in one short write critical section: no `await`
         // while held, and a second `decide` fails closed without touching the
-        // persistence backend.
-        {
+        // persistence backend. The guard outlives the lock and is released on
+        // `Drop` even if this future is cancelled mid-commit (R4-C).
+        let _claim = {
             let mut entries = self.inner.entries.write().await;
             let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
             if decided_at > entry.deadline {
@@ -816,15 +901,16 @@ impl ApprovalStore {
                 );
                 return Err(ApprovalError::AlreadyDecided(id));
             }
-            if entry.decision.is_some() || entry.deciding {
+            if entry.decision.is_some() || entry.is_deciding() {
                 return Err(ApprovalError::AlreadyDecided(id));
             }
-            entry.deciding = true;
-        }
+            entry.claim()
+        };
 
         // Persist (and, for the Pg backend, commit) BEFORE publishing. The
-        // guard is released here on purpose; the `deciding` flag above is what
-        // serializes this path against the timeout path.
+        // store write lock is released here on purpose; the RAII claim above
+        // is what serializes this path against the timeout path, and its
+        // `Drop` releases the flag even when the commit is cancelled.
         let commit = self
             .inner
             .persistence
@@ -834,7 +920,7 @@ impl ApprovalStore {
         {
             let mut entries = self.inner.entries.write().await;
             let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
-            entry.deciding = false;
+            entry.release();
             // A failed commit must leave the entry pending so no waiter can
             // observe a rolled-back decision.
             commit?;
@@ -952,7 +1038,7 @@ impl ApprovalStore {
                             decision: None,
                             decided_at: None,
                             deadline,
-                            deciding: false,
+                            deciding: new_deciding(),
                             tx,
                         },
                     );
@@ -1030,7 +1116,10 @@ impl ApprovalStore {
     /// entry so a later sweep (or startup reconciliation) retries instead of
     /// silently leaving an undecided durable row with no audit record. Entries
     /// already recorded as `Expired` were settled by the timeout path, so they
-    /// are simply evicted. Entries with a `decide` commit in flight are skipped.
+    /// are simply evicted. Entries with a live `decide`/expiry commit are
+    /// skipped; a cancelled commit is different — its RAII [`DecidingGuard`]
+    /// releases the claim on drop, so this sweep can settle and evict it
+    /// instead of leaking the approval slot until restart (R4-C).
     ///
     /// Besides that, decided entries older than twice the timeout are dropped
     /// by the usual retention window. Called under the caller's write guard so
@@ -1052,7 +1141,7 @@ impl ApprovalStore {
         for (id, entry) in entries.iter_mut() {
             let is_expired = matches!(entry.decision.as_ref(), Some(ApprovalDecision::Expired));
             let deadline_passed = entry.decided_at.is_none() && now > entry.deadline;
-            if deadline_passed && !entry.deciding {
+            if deadline_passed && !entry.is_deciding() {
                 // Abandoned waiter or recovered hold: no timeout path will
                 // settle it, so this sweep owns the durable expiry.
                 to_expire.push(*id);
@@ -1503,7 +1592,7 @@ mod tests {
                     decision: None,
                     decided_at: None,
                     deadline: now + chrono::Duration::seconds(30),
-                    deciding: false,
+                    deciding: new_deciding(),
                     tx: active_tx,
                 },
             );
@@ -1514,7 +1603,7 @@ mod tests {
                     decision: None,
                     decided_at: None,
                     deadline: now - chrono::Duration::seconds(1),
-                    deciding: false,
+                    deciding: new_deciding(),
                     tx: stale_tx,
                 },
             );
@@ -3157,7 +3246,7 @@ mod tests {
                     decision: None,
                     decided_at: None,
                     deadline: Utc::now() - chrono::Duration::seconds(1),
-                    deciding: false,
+                    deciding: new_deciding(),
                     tx,
                 },
             );
@@ -3183,6 +3272,172 @@ mod tests {
         assert!(
             matches!(store.status(id).await, Err(ApprovalError::NotFound(_))),
             "the ghost entry must be evicted, not retained forever"
+        );
+    }
+
+    // ---- R4-C: RAII deciding claim / cancelled-decide recovery -------------
+
+    /// The guard must release its claim on every exit path, including a plain
+    /// scope exit that models an aborted future. No timer or lock is involved.
+    #[test]
+    fn deciding_guard_releases_claim_on_drop() {
+        let claim = new_deciding();
+        assert!(!claim.is_claimed());
+        {
+            let _guard = DecidingGuard(Arc::clone(&claim));
+            claim.set(true);
+            assert!(claim.is_claimed());
+        }
+        assert!(
+            !claim.is_claimed(),
+            "Drop must release the claim unconditionally"
+        );
+    }
+
+    /// Mock that (a) replays one live recovered hold with no waiter, (b) gates
+    /// `record_decision` so an operator `decide` can be cancelled mid-commit,
+    /// and (c) records `mark_expired` so the test can prove `prune` settled the
+    /// abandoned hold durably. No database is contacted.
+    #[derive(Debug, Default)]
+    struct CancelledDecidePersistence {
+        live: tokio::sync::Mutex<Vec<ApprovalRequest>>,
+        entered: Arc<AtomicBool>,
+        expired: tokio::sync::Mutex<Vec<Uuid>>,
+        gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for CancelledDecidePersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.entered.store(true, Ordering::SeqCst);
+            if let Some(rx) = self.gate.lock().await.take() {
+                // Cancelling the `decide` future drops this await, so no
+                // in-memory decision is published and no audit row is written.
+                let _ = rx.await;
+            }
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(self.live.lock().await.clone())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.expired.lock().await.push(id);
+            Ok(())
+        }
+    }
+
+    /// R4-C regression: a recovered hold has no waiter, so nothing runs its
+    /// timeout path. If an operator `decide` is cancelled while its durable
+    /// commit is in flight, the old raw `bool` stayed `true` forever: `prune`
+    /// skipped the entry and a retry got 409, leaking the slot until restart.
+    /// The RAII claim must clear on cancellation, leaving the entry Pending so
+    /// `prune` can commit `mark_expired` and evict it.
+    #[tokio::test]
+    async fn cancelled_decide_on_waiterless_entry_is_reclaimed_by_prune() {
+        let (_gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let hold = make_request();
+        let hold_id = hold.id;
+        let persistence = Arc::new(CancelledDecidePersistence {
+            live: tokio::sync::Mutex::new(vec![hold]),
+            entered: Arc::new(AtomicBool::new(false)),
+            expired: tokio::sync::Mutex::new(Vec::new()),
+            gate: tokio::sync::Mutex::new(Some(gate_rx)),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        store.reconcile_pending().await.expect("reconcile");
+
+        // No receiver: exactly the startup-recovery shape from `reconcile_pending`.
+        let decider = {
+            let store = store.clone();
+            tokio::spawn(async move { store.decide(hold_id, approved()).await })
+        };
+        for _ in 0..200 {
+            if persistence.entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            persistence.entered.load(Ordering::SeqCst),
+            "the operator decide must have reached the gated commit"
+        );
+
+        // Cancel mid-commit. `record_decision` never returned, so no decision
+        // was published; `Drop` of the guard must still release the claim.
+        decider.abort();
+        let _ = decider.await;
+        {
+            let entries = store.inner.entries.read().await;
+            let entry = entries
+                .get(&hold_id)
+                .expect("recovered entry is still in the map");
+            assert!(
+                !entry.is_deciding(),
+                "a cancelled decide must release its deciding claim"
+            );
+            assert!(
+                entry.decision.is_none(),
+                "an uncommitted decide leaves the entry Pending"
+            );
+        }
+
+        // Fast-forward past the recovered deadline instead of sleeping: prune's
+        // classification is purely deadline-based. A fresh request runs the
+        // real lazy sweep at the head of `try_request`.
+        {
+            let mut entries = store.inner.entries.write().await;
+            if let Some(entry) = entries.get_mut(&hold_id) {
+                entry.deadline = Utc::now() - chrono::Duration::seconds(1);
+            }
+        }
+        let next = make_request();
+        let next_id = next.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(next).await });
+        decide_after_registration(&store, next_id, approved()).await;
+        let _ = waiter.await.expect("waiter task");
+
+        assert!(
+            persistence.expired.lock().await.contains(&hold_id),
+            "prune must commit mark_expired for the abandoned recovered hold"
+        );
+        assert!(
+            matches!(store.status(hold_id).await, Err(ApprovalError::NotFound(_))),
+            "the settled entry must be evicted, not leak the approval slot"
+        );
+        assert!(
+            store.list_pending().await.iter().all(|r| r.id != hold_id),
+            "the abandoned hold must no longer count against max_pending"
         );
     }
 }
