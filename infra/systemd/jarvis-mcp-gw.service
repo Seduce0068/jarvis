@@ -56,6 +56,10 @@ Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 # set JARVIS_MCP_GW_BASE_DIR in /etc/jarvis/jarvis-mcp-gw.env (or the manager
 # environment) on every target host. ${VAR:-default} keeps that host value.
 Environment=JARVIS_MCP_GW_BASE_DIR=${JARVIS_MCP_GW_BASE_DIR:-/home/koppe/ドキュメント/作業用/jarvis/jarvis}
+# web.fetch egress allowlist (comma-separated host patterns). Empty/invalid
+# means deny-all (fail-closed). Override in /etc/jarvis/jarvis-mcp-gw.env on
+# each host to the minimum set the deployment actually needs.
+Environment=JARVIS_MCP_GW_EGRESS_ALLOWLIST=${JARVIS_MCP_GW_EGRESS_ALLOWLIST:-example.com}
 
 # Resource limits
 LimitNOFILE=65536
