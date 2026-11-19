@@ -8,6 +8,11 @@
 //! On startup, [`ApprovalStore::reconcile_pending`] loads undecided durable
 //! rows: live holds are re-registered without a waiter and expired holds are
 //! settled with an audit record, so stale approvals never linger in the UI.
+//! Recovery honours `max_pending`; the surplus is settled as `Expired` with an
+//! audit row rather than silently exceeding the cap. Recovered holds have no
+//! timer of their own: the lazy `prune` sweep is their timeout path, and it
+//! commits [`ApprovalPersistence::mark_expired`] before evicting
+//! an expired entry so no durable row is left undecided and unaudited.
 //! User notification (HA/phone) will be layered on top later.
 //!
 //! Approval is intentionally HTTP-only: the gRPC surface is limited to
@@ -112,9 +117,11 @@ pub trait ApprovalPersistence: Send + Sync {
 
     /// Mark a pending request as expired at `expired_at`.
     ///
-    /// Used by both the runtime timeout path and startup reconciliation. The
-    /// transactional backend commits the `Expired` decision and its audit row
-    /// in one transaction.
+    /// Used by the runtime timeout path, the lazy `prune` sweep (including
+    /// recovered holds whose waiter was never restored) and startup
+    /// reconciliation. The transactional backend commits the `Expired`
+    /// decision and its audit row in one transaction, so a caller may use a
+    /// successful return as the signal to drop its in-memory entry.
     async fn mark_expired(&self, id: Uuid, expired_at: DateTime<Utc>) -> Result<(), ApprovalError>;
 }
 
@@ -166,6 +173,12 @@ struct Entry {
     /// can reclaim pending entries whose waiter was abandoned before it ever
     /// reached the timeout branch.
     deadline: DateTime<Utc>,
+    /// True while a `decide` call has claimed this entry and its durable
+    /// commit is in flight. The write guard is deliberately released across
+    /// the commit, so the timeout path checks this flag and yields to an
+    /// in-flight decide instead of masking a successful commit with a
+    /// memory-only `Expired` marking (I33-A (b)).
+    deciding: bool,
     tx: watch::Sender<Option<ApprovalDecision>>,
 }
 
@@ -283,7 +296,13 @@ impl ApprovalStore {
         let (tx, mut rx) = watch::channel(None);
         {
             let mut entries = self.inner.entries.write().await;
-            Self::prune(&mut entries, self.inner.timeout, now);
+            Self::prune(
+                &mut entries,
+                &*self.inner.persistence,
+                self.inner.timeout,
+                now,
+            )
+            .await;
             // A caller-supplied id must not overwrite an existing pending
             // request: doing so would drop the original waiter's channel and
             // let a second caller hijack the operator's decision target.
@@ -310,6 +329,7 @@ impl ApprovalStore {
                     decision: None,
                     decided_at: None,
                     deadline,
+                    deciding: false,
                     tx,
                 },
             );
@@ -354,16 +374,20 @@ impl ApprovalStore {
         }
 
         let remaining = (deadline - Utc::now()).to_std().unwrap_or(Duration::ZERO);
-        let wait = async {
+        // Use a cloned receiver so the timeout future does not keep `rx`
+        // borrowed: the timeout-recovery loop below must poll `rx.changed()`
+        // while waiting for an in-flight `decide` commit to publish.
+        let mut wait_rx = rx.clone();
+        let wait = async move {
             loop {
                 let current = {
-                    let guard = rx.borrow_and_update();
+                    let guard = wait_rx.borrow_and_update();
                     (*guard).clone()
                 };
                 if let Some(decision) = current {
                     return decision;
                 }
-                if rx.changed().await.is_err() {
+                if wait_rx.changed().await.is_err() {
                     // Sender dropped without a decision; treat as expired.
                     return ApprovalDecision::Expired;
                 }
@@ -379,40 +403,72 @@ impl ApprovalStore {
         let decision = match decision {
             Some(decision) => decision,
             None => {
-                // Re-check under the lock: a decision may have raced the timeout.
-                let expired_at = Utc::now();
-                let mut marked = false;
-                {
-                    let mut entries = self.inner.entries.write().await;
-                    if let Some(entry) = entries.get_mut(&id) {
-                        if let Some(decision) = &entry.decision {
-                            return Ok(decision.clone());
+                // The wait elapsed. A `decide` may have committed durably but
+                // not yet published its result; yield to that in-flight commit
+                // instead of racing it with a memory-only `Expired` marking
+                // (I33-A (b)).
+                enum TimeoutOutcome {
+                    Decided(ApprovalDecision),
+                    Expire,
+                    YieldToDecide,
+                }
+                // Bound the yields: a `decide` task cancelled mid-commit could
+                // otherwise leave `deciding` set forever and hang this waiter.
+                let mut yields = 0usize;
+                loop {
+                    let expired_at = Utc::now();
+                    let outcome = {
+                        let mut entries = self.inner.entries.write().await;
+                        match entries.get_mut(&id) {
+                            None => TimeoutOutcome::Decided(ApprovalDecision::Expired),
+                            Some(entry) => {
+                                if let Some(decision) = &entry.decision {
+                                    TimeoutOutcome::Decided(decision.clone())
+                                } else if entry.deciding && yields < 100 {
+                                    TimeoutOutcome::YieldToDecide
+                                } else {
+                                    if entry.deciding {
+                                        entry.deciding = false;
+                                        tracing::warn!(
+                                            request_id = %id,
+                                            "stale decide claim cleared after repeated yields"
+                                        );
+                                    }
+                                    entry.decision = Some(ApprovalDecision::Expired);
+                                    entry.decided_at = Some(expired_at);
+                                    TimeoutOutcome::Expire
+                                }
+                            }
                         }
-                        entry.decision = Some(ApprovalDecision::Expired);
-                        entry.decided_at = Some(expired_at);
-                        marked = true;
+                    };
+                    match outcome {
+                        TimeoutOutcome::Decided(decision) => return Ok(decision),
+                        TimeoutOutcome::YieldToDecide => {
+                            // `decide` publishes on the watch channel once its
+                            // commit finishes; the notification wakes this loop
+                            // so it returns the committed decision, not Expired.
+                            yields += 1;
+                            let grace = Duration::from_millis(100);
+                            let _ = tokio::time::timeout(grace, rx.changed()).await;
+                            continue;
+                        }
+                        TimeoutOutcome::Expire => {
+                            // `NoopPersistence` never errors, so the default
+                            // path is unchanged. A failed audit write is
+                            // retried by the next `prune` (or startup
+                            // reconciliation), so no decision/audit is lost.
+                            let mark = self.inner.persistence.mark_expired(id, expired_at).await;
+                            if let Err(error) = mark {
+                                tracing::warn!(
+                                    error = %error,
+                                    request_id = %id,
+                                    "failed to persist approval expiration; audit row may be missing"
+                                );
+                            }
+                            return Ok(ApprovalDecision::Expired);
+                        }
                     }
                 }
-                if marked {
-                    // `NoopPersistence` never errors, so the default path is
-                    // unchanged. For the Pg backend a failed CAS/audit INSERT
-                    // leaves the durable row undecided and the audit row
-                    // missing; surface that for operators instead of silently
-                    // discarding it (R4-PERSIST). The `ApprovalError` carries no
-                    // URL/token, so it is safe to log. Keep the in-memory
-                    // `Expired` marking: the waiter already resolves as
-                    // Expired, and the still-undecided durable row is retried by
-                    // `reconcile_pending` on the next startup, so no decision
-                    // or audit record is permanently lost.
-                    if let Err(error) = self.inner.persistence.mark_expired(id, expired_at).await {
-                        tracing::warn!(
-                            error = %error,
-                            request_id = %id,
-                            "failed to persist approval expiration; audit row may be missing"
-                        );
-                    }
-                }
-                ApprovalDecision::Expired
             }
         };
         Ok(decision)
@@ -420,43 +476,60 @@ impl ApprovalStore {
 
     /// Record `decision` for a pending request and wake its waiter.
     ///
-    /// Ordering is deliberate (I30-A): the durable backend commits first, and
-    /// only then is the decision published in memory and sent on the watch
-    /// channel. A failed commit (or a zero-row CAS reported as
-    /// [`ApprovalError::AlreadyDecided`]) leaves the entry pending, so a waiter
-    /// can never observe a decision that was rolled back.
+    /// Ordering (I30-A, tightened by I33-A (b)): the durable backend commits
+    /// first and its result is the authority; the in-memory entry is then
+    /// overwritten to match. A short write guard claims the entry (`deciding`)
+    /// before the commit so the timeout path can yield to an in-flight commit
+    /// instead of racing it with a memory-only `Expired` marking. The guard is
+    /// deliberately *not* held across the commit: `status()` and
+    /// `watch_does_not_fire_before_commit` keep observing `Pending` until the
+    /// commit succeeds, and a rollback publishes nothing.
+    ///
+    /// A request whose deadline has already passed is explicitly rejected
+    /// (expiry is a terminal decision, reported as `AlreadyDecided` with a
+    /// warning) and never reaches the persistence backend. With
+    /// [`NoopPersistence`] the commit is immediate, so memory-only behavior is
+    /// unchanged.
     pub async fn decide(&self, id: Uuid, decision: ApprovalDecision) -> Result<(), ApprovalError> {
         let decided_at = Utc::now();
 
-        // Cheap precondition under a read lock. No `await` while holding it.
-        // This also makes a second `decide` fail closed without touching the
-        // persistence backend at all.
-        {
-            let entries = self.inner.entries.read().await;
-            let entry = entries.get(&id).ok_or(ApprovalError::NotFound(id))?;
-            if entry.decision.is_some() {
-                return Err(ApprovalError::AlreadyDecided(id));
-            }
-        }
-
-        // Persist (and, for the Pg backend, commit) BEFORE publishing. With
-        // `NoopPersistence` this is an immediate `Ok`, preserving the legacy
-        // in-memory behavior exactly.
-        self.inner
-            .persistence
-            .record_decision(id, &decision, decided_at)
-            .await?;
-
-        // Commit succeeded: publish and wake the waiter. Re-check under the
-        // write lock because a concurrent decider may have won the race while
-        // the (lock-free) persistence call was in flight; this keeps a single
-        // winner even for backends without a database CAS.
+        // Precondition + claim in one short write critical section: no `await`
+        // while held, and a second `decide` fails closed without touching the
+        // persistence backend.
         {
             let mut entries = self.inner.entries.write().await;
             let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
-            if entry.decision.is_some() {
+            if decided_at > entry.deadline {
+                tracing::warn!(
+                    request_id = %id,
+                    "decide rejected: the decision window has elapsed"
+                );
                 return Err(ApprovalError::AlreadyDecided(id));
             }
+            if entry.decision.is_some() || entry.deciding {
+                return Err(ApprovalError::AlreadyDecided(id));
+            }
+            entry.deciding = true;
+        }
+
+        // Persist (and, for the Pg backend, commit) BEFORE publishing. The
+        // guard is released here on purpose; the `deciding` flag above is what
+        // serializes this path against the timeout path.
+        let commit = self
+            .inner
+            .persistence
+            .record_decision(id, &decision, decided_at)
+            .await;
+
+        {
+            let mut entries = self.inner.entries.write().await;
+            let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
+            entry.deciding = false;
+            // A failed commit must leave the entry pending so no waiter can
+            // observe a rolled-back decision.
+            commit?;
+            // The commit is the authority: overwrite any provisional state so
+            // a commit that won is never reported back as a 409.
             entry.decision = Some(decision.clone());
             entry.decided_at = Some(decided_at);
             let _ = entry.tx.send(Some(decision));
@@ -505,27 +578,48 @@ impl ApprovalStore {
     /// audit row atomically, so a stale hold cannot resurface in the UI (or the
     /// `/metrics` pending gauge) after a restart.
     ///
+    /// Recovery honours `max_pending` (I33-A (c)): only as many live rows as
+    /// there are free slots are re-registered. The chosen policy for the
+    /// surplus is **fail-closed at the audit boundary** — each excess live row
+    /// is settled via [`ApprovalPersistence::mark_expired`] (an `Expired`
+    /// decision plus its audit row in one transaction) instead of being loaded
+    /// past the cap. That keeps the queue bounded without aborting startup on a
+    /// backlog: an operator cannot later approve a hold that never got a slot.
+    /// Recovered, expired and over-limit counts are emitted in one `INFO` log
+    /// line so a backlog is visible after every restart.
+    ///
     /// With [`NoopPersistence`] this is a true no-op: `load_pending` yields an
     /// empty vector, so nothing is registered and nothing is audited. No
     /// existing API's return type or behavior changes.
     pub async fn reconcile_pending(&self) -> Result<(), ApprovalError> {
         let pending = self.inner.persistence.load_pending().await?;
+        let total = pending.len();
         let now = Utc::now();
         let mut expired = Vec::new();
+        let mut recovered = 0usize;
+        let mut over_limit = 0usize;
+        let mut already_present = 0usize;
         {
             let mut entries = self.inner.entries.write().await;
             for request in pending {
+                // A request that raced startup must not overwrite an existing
+                // waiter's channel.
+                if entries.contains_key(&request.id) {
+                    already_present += 1;
+                    continue;
+                }
                 let deadline = request.expires_at;
-                if deadline > now {
-                    // A request that raced startup must not overwrite an
-                    // existing waiter's channel.
-                    if entries.contains_key(&request.id) {
-                        continue;
-                    }
+                let live = entries
+                    .values()
+                    .filter(|entry| entry.decision.is_none())
+                    .count();
+                let at_capacity = live >= self.inner.max_pending;
+                if deadline > now && !at_capacity {
                     // The receiver is intentionally dropped: recovered holds
                     // have no original caller to notify. `decide` ignores the
                     // resulting `send` error while still recording the decision
-                    // in memory and durably.
+                    // in memory and durably. Their timeout path is the lazy
+                    // `prune` sweep, which settles them durably on eviction.
                     let (tx, _rx) = watch::channel(None);
                     entries.insert(
                         request.id,
@@ -534,53 +628,112 @@ impl ApprovalStore {
                             decision: None,
                             decided_at: None,
                             deadline,
+                            deciding: false,
                             tx,
                         },
                     );
+                    recovered += 1;
                 } else {
+                    if deadline > now {
+                        over_limit += 1;
+                    }
                     expired.push(request.id);
                 }
             }
         }
+        tracing::info!(
+            loaded = total,
+            recovered,
+            settled_expired = expired.len(),
+            over_limit,
+            already_present,
+            max_pending = self.inner.max_pending,
+            "approval startup reconciliation complete"
+        );
         for id in expired {
             self.inner.persistence.mark_expired(id, now).await?;
         }
         Ok(())
     }
 
-    /// Drop entries that can no longer produce a real decision.
+    /// Drop entries that can no longer produce a real decision, settling every
+    /// expired one durably first.
     ///
-    /// Besides the decided-entry retention window (older than twice the
-    /// timeout), two kinds of expired entries are reclaimed:
-    ///   * entries already recorded as [`ApprovalDecision::Expired`];
-    ///   * pending entries (`decided_at.is_none()`) whose deadline has passed.
+    /// Adopted approach for I33-A (a): recovered holds re-registered by
+    /// [`Self::reconcile_pending`] have no waiter and therefore no timer of
+    /// their own. This lazy sweep at the head of [`Self::try_request`] *is*
+    /// their timeout path. For a pending entry whose deadline has passed we
+    /// call [`ApprovalPersistence::mark_expired`] and remove the entry from
+    /// memory **only after the commit succeeds**; a failed commit keeps the
+    /// entry so a later sweep (or startup reconciliation) retries instead of
+    /// silently leaving an undecided durable row with no audit record. Entries
+    /// already recorded as `Expired` were settled by the timeout path, so they
+    /// are simply evicted. Entries with a `decide` commit in flight are skipped.
     ///
-    /// The second case matters when a waiter is cancelled (e.g. the client
-    /// disconnects) before `try_request` reaches its timeout branch: without
-    /// this, the entry keeps `decision = None` forever and permanently eats a
-    /// `max_pending` slot. Called at the front of [`Self::try_request`], so no
-    /// periodic task is needed.
-    fn prune(entries: &mut HashMap<Uuid, Entry>, timeout: Duration, now: DateTime<Utc>) {
+    /// Besides that, decided entries older than twice the timeout are dropped
+    /// by the usual retention window. Called under the caller's write guard so
+    /// no new decision can be published while an expiry is being committed.
+    /// With [`NoopPersistence`] every commit is an immediate `Ok`, so the
+    /// memory-only default keeps its exact behavior.
+    async fn prune(
+        entries: &mut HashMap<Uuid, Entry>,
+        persistence: &dyn ApprovalPersistence,
+        timeout: Duration,
+        now: DateTime<Utc>,
+    ) {
         let retention = timeout.as_secs().saturating_mul(2).min(i64::MAX as u64) as i64;
         let cutoff = now - chrono::Duration::seconds(retention);
-        entries.retain(|_, entry| {
-            let expired = matches!(entry.decision.as_ref(), Some(ApprovalDecision::Expired));
+
+        // Phase 1 (no I/O): classify under the caller's write guard.
+        let mut to_expire = Vec::new();
+        let mut to_drop = Vec::new();
+        for (id, entry) in entries.iter_mut() {
+            let is_expired = matches!(entry.decision.as_ref(), Some(ApprovalDecision::Expired));
             let deadline_passed = entry.decided_at.is_none() && now > entry.deadline;
-            if expired || deadline_passed {
-                // Wake a still-waiting receiver with the same decision the
-                // ordinary timeout path produces. Dropping the entry (and its
-                // sender) would also end the wait via the closed channel, but
-                // an explicit send keeps this path consistent with `decide`
-                // and the timeout branch. Ignore send errors: no receiver means
-                // the waiter already went away.
-                let _ = entry.tx.send(Some(ApprovalDecision::Expired));
-                return false;
+            if deadline_passed && !entry.deciding {
+                // Abandoned waiter or recovered hold: no timeout path will
+                // settle it, so this sweep owns the durable expiry.
+                to_expire.push(*id);
+            } else if is_expired {
+                // The timeout path already called `mark_expired` and stamped
+                // `decided_at`; only the in-memory entry is reclaimed here.
+                to_drop.push(*id);
+            } else if entry
+                .decided_at
+                .is_some_and(|decided_at| decided_at <= cutoff)
+            {
+                to_drop.push(*id);
             }
-            match entry.decided_at {
-                Some(decided_at) => decided_at > cutoff,
-                None => true,
+        }
+
+        // Phase 2: commit each expiry BEFORE evicting its in-memory entry.
+        for id in to_expire {
+            match persistence.mark_expired(id, now).await {
+                Ok(()) => {
+                    if let Some(entry) = entries.get_mut(&id) {
+                        if entry.decided_at.is_none() {
+                            entry.decision = Some(ApprovalDecision::Expired);
+                            entry.decided_at = Some(now);
+                        }
+                        // Wake a still-waiting receiver with the same decision
+                        // the ordinary timeout path produces. Ignore send
+                        // errors: no receiver means the waiter already left.
+                        let _ = entry.tx.send(Some(ApprovalDecision::Expired));
+                    }
+                    entries.remove(&id);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        request_id = %id,
+                        "failed to persist expiration during prune; keeping entry for retry"
+                    );
+                }
             }
-        });
+        }
+        for id in to_drop {
+            entries.remove(&id);
+        }
     }
 }
 
@@ -926,6 +1079,7 @@ mod tests {
                     decision: None,
                     decided_at: None,
                     deadline: now + chrono::Duration::seconds(30),
+                    deciding: false,
                     tx: active_tx,
                 },
             );
@@ -936,6 +1090,7 @@ mod tests {
                     decision: None,
                     decided_at: None,
                     deadline: now - chrono::Duration::seconds(1),
+                    deciding: false,
                     tx: stale_tx,
                 },
             );
@@ -1694,5 +1849,142 @@ mod tests {
             "the waiter still times out normally when the audit write fails"
         );
         assert_eq!(*persistence.expired.lock().await, vec![id]);
+    }
+
+    // ---- I33-A regression tests (mock backends, no real DB) ---------------
+
+    /// (a) A recovered hold has no waiter, so `prune` is its only timeout
+    /// path. It must commit the expiry (audit row included) before evicting
+    /// the entry; otherwise a restart leaves an undecided, unaudited row.
+    #[tokio::test]
+    async fn prune_commits_expiry_for_recovered_hold_before_eviction() {
+        let mock = Arc::new(ReconcilePersistence::default());
+        let mut recovered = make_request();
+        recovered.expires_at = Utc::now() + chrono::Duration::milliseconds(300);
+        mock.rows.lock().await.push(recovered.clone());
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(30),
+            DEFAULT_MAX_PENDING,
+            mock.clone(),
+        );
+        store.reconcile_pending().await.expect("reconcile");
+        assert_eq!(store.list_pending().await.len(), 1, "hold is recovered");
+
+        // Let the recovered deadline pass, then trigger `prune` with a fresh
+        // request that itself times out quickly.
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        assert!(matches!(
+            store.request(make_request()).await,
+            ApprovalDecision::Expired
+        ));
+
+        assert!(
+            mock.expired.lock().await.contains(&recovered.id),
+            "prune must call mark_expired before evicting the recovered hold"
+        );
+        assert!(
+            mock.audit.lock().await.contains(&recovered.id),
+            "the expired recovered hold must have an audit row"
+        );
+        assert!(
+            store.status(recovered.id).await.is_err(),
+            "entry is removed only after the commit succeeded"
+        );
+    }
+
+    /// (b) When the wait times out while a `decide` commit is still in flight,
+    /// the timeout must not publish `Expired`. The successful commit is the
+    /// authority: the operator gets `Ok` and the waiter observes `Approved`.
+    #[tokio::test]
+    async fn timeout_yields_to_in_flight_decide_commit() {
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let persistence = Arc::new(GatedPersistence {
+            entered: entered.clone(),
+            calls: calls.clone(),
+            gate: tokio::sync::Mutex::new(Some(commit_rx)),
+            rollback: false,
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(400),
+            DEFAULT_MAX_PENDING,
+            persistence,
+        );
+        let request = make_request();
+        let id = request.id;
+
+        let waiter = {
+            let store = store.clone();
+            tokio::spawn(async move { store.request(request).await })
+        };
+        wait_for_registration(&store, id).await;
+
+        let decider = {
+            let store = store.clone();
+            tokio::spawn(async move { store.decide(id, approved()).await })
+        };
+        for _ in 0..200 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "the decide commit must be in flight"
+        );
+
+        // The timeout fires while the commit is gated (400 ms window + slack).
+        tokio::time::sleep(Duration::from_millis(450)).await;
+        assert!(
+            matches!(store.status(id).await, Ok(ApprovalDecision::Pending)),
+            "timeout must not publish Expired over an in-flight decide"
+        );
+
+        commit_tx.send(()).expect("release commit gate");
+        decider
+            .await
+            .expect("decide task")
+            .expect("decide succeeds");
+
+        let decision = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter completes after the commit")
+            .expect("waiter task");
+        assert!(
+            matches!(&decision, ApprovalDecision::Approved { .. }),
+            "the committed decision is authoritative: {decision:?}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// (c) Reconciliation must not load more live rows than `max_pending`.
+    /// The surplus is settled as `Expired` with one audit row each instead.
+    #[tokio::test]
+    async fn reconcile_enforces_max_pending_and_audits_the_surplus() {
+        let mock = Arc::new(ReconcilePersistence::default());
+        for _ in 0..3 {
+            mock.rows.lock().await.push(make_request());
+        }
+        let store = ApprovalStore::with_persistence(Duration::from_secs(5), 2, mock.clone());
+        store.reconcile_pending().await.expect("reconcile");
+
+        assert_eq!(
+            store.list_pending().await.len(),
+            2,
+            "only max_pending live rows may be recovered"
+        );
+        assert_eq!(
+            mock.expired.lock().await.len(),
+            1,
+            "the surplus live row is settled as Expired"
+        );
+        assert_eq!(
+            mock.audit.lock().await.len(),
+            1,
+            "the surplus settlement writes exactly one audit row"
+        );
     }
 }
