@@ -402,7 +402,7 @@ generated:
   `rust/scripts/backup.rs:94-97,304-327` / R4-DR2,R2-FG2,R1-AR11 /
   重大度 high / confirmed。`cleanup_remote` にのみ dry_run が渡り
   `cleanup_local` は無条件実行。ヘルプの「no actual upload/delete」と矛盾。
-- [ ] **復元処理が失敗シグナルを伝播せず成功を報告する** — 根拠
+- [x] **復元処理が失敗シグナルを伝播せず成功を報告する**（2026-11-19 対応済み: 全外部コマンドで `status.success()` を検査し失敗時 `bail!`。gunzip→psql ストリームは両プロセスの終了コードを検証。成功ログは全検証後に1行のみ。Qdrant API 復元・dry-run 非破壊性は維持。rust-script --test 5 tests pass） — 根拠
   `rust/scripts/restore.rs:117,257-259,285-291,326-329,390-399` /
   R1-AR2,R2-ER2,R4-DR2,R4-DR3 / 重大度 high / confirmed。
   gunzip/psql 終了コード・Qdrant upload の HTTP ステータス・git clone 成否を
@@ -425,10 +425,10 @@ generated:
 - [x] **イベントキュー溢れ時にドロップしつつ `success: true` を返す**（2026-11-19 対応済み: HTTP は 503、gRPC は `RESOURCE_EXHAUSTED` を返す。既存 `emit()` の warn&drop は維持し、ハンドラ側で `event_sender().try_send()` の結果を検査。回帰テスト4件追加、event 29 tests pass） — 根拠
   `rust/jarvis-event/src/normalizer.rs:21-37`, `src/http.rs:133-139`,
   `src/grpc.rs:35-36` / R2-ER2,R1-AR11 / 重大度 high / confirmed。
-- [ ] **登録済み upstream MCP サーバがメモリのみで再起動時に消える** — 根拠
+- [x] **登録済み upstream MCP サーバがメモリのみで再起動時に消える**（2026-11-19 対応済み: `McpGatewayConfig.upstreams`（TOML/env 対応）を追加し `main.rs` 起動時に `register_mcp_server` で登録、失敗時は起動失敗（fail-closed）。実行時 RPC 登録は維持。新規テスト4件、mcp-gw 64 tests pass） — 根拠
   `rust/jarvis-mcp-gw/src/gateway.rs:50,102-120`, `src/main.rs:44-65` /
   R4-DR1,R1-ST01 / 重大度 high / confirmed。設定駆動の起動時登録が無い。
-- [ ] **jarvis-context の memory/context API に認証・認可が無い** — 根拠
+- [x] **jarvis-context の memory/context API に認証・認可が無い**（2026-11-19 対応済み: `admin_token`（`JARVIS_CONTEXT_ADMIN_TOKEN`）を追加し全 `/v1/*` と `/metrics` を `x-jarvis-context-token` でゲート。**R4 判断で `/metrics` は Prometheus スクレイプ互換のため認証除外に変更**。未設定時は従来どおり。context 35 tests pass） — 根拠
   `rust/jarvis-context/src/http.rs:55-64` / R3-AU2 / 重大度 high / confirmed。
   `/v1/context/build`, `/v1/memory`, `/v1/memory/search` が認証レイヤーなし。
 - [ ] **jarvis-event の emit API が無認証で主体が `jarvis` にハードコード** — 根拠
@@ -575,7 +575,7 @@ generated:
   `infra/README.md:274-279` / R5-VU3 / 重大度 high / confirmed。
 - [ ] **`web.fetch` の宛先ドメイン制限（egress allowlist）が未実装** — 根拠
   `docs/integration/tool-matrix.md:162` / R1-ST4 / 重大度 high / confirmed。
-- [ ] **`review-run.sh` のランナー契約が OpenCode CLI 形で固定され ADR-0002 と矛盾** — 根拠
+- [x] **`review-run.sh` のランナー契約が OpenCode CLI 形で固定され ADR-0002 と矛盾** — 2026-11-19 対応済み: `JARVIS_REVIEW_RUNNER` と `build_runner_args()` でランナーごとの argv を吸収（dsh: `--profile <name> --json <prompt>`、opencode 他は従来どおり）。既存4契約テスト pass、スタブで dsh 分岐を確認 / `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed
   `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed。
 - [x] **埋め込み失敗を空検索結果に変換して成功を返す**（2026-11-19 対応済み: `query_embedding_outcome()` を新設し endpoint 未設定は明示 skip、設定済み embed() 失敗は `anyhow::Context` 付きで Err 伝播。公開シグネチャ不変、回帰テスト5件追加。full tests / clippy / ci-local exit 0） — 根拠
   `rust/jarvis-context/src/builder.rs:115-121` / R2-ER2 / 重大度 high / confirmed。
@@ -608,7 +608,7 @@ generated:
 - [ ] `restore.rs` の `restart_services` が systemctl start のみで再起動していない — `restore.rs:408` / R2-FG2 / confirmed
 - [x] `deploy.rs --dry-run` がヘルスチェック未実行なのに healthy と報告 — 2026-11-19 対応済み: dry-run では curl を一切呼ばず `DRY RUN: health check skipped` のみを出力。実機 dry-run で当該ログを確認し `healthy` の出現0回を検証 / `deploy.rs:164` / R2-FG2 / confirmed
 - [ ] Cedar 認可コンテキストが生のツール引数で呼び出し元が ABAC 属性を捏造可能 — `mcp-gw/src/lib.rs:86-89` / R3-AU1 / likely
-- [ ] AllowList の `add_tool` / `remove_tool` が無認証・無永続化の公開ミューテーション API — `allowlist.rs:95-106` / R3-AU1 / confirmed
+- [x] AllowList の `add_tool` / `remove_tool` が無認証・無永続化の公開ミューテーション API — 2026-11-19 対応済み: 呼び出し箇所がテスト以外に無いため `#[cfg(test)] pub fn` へ絞り本番バイナリから公開面を除去。同期検証テスト1件追加 / `allowlist.rs:95-106` / R3-AU1 / confirmed
 - [ ] Qdrant の不正 point id が nil UUID にフォールバック — `builder.rs:305` / R1-ST2 / likely
 - [ ] OTLP エンドポイント書式エラーが起動を失敗させテレメトリが致命依存 — `policy/src/main.rs:22-25` / R4-DR1 / likely
 - [ ] `try_join!` による二重リスナ起動で片方のエラーがプロセス全体を終了 — `policy/src/main.rs:59` / R4-DR1 / likely
