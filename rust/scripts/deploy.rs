@@ -311,6 +311,28 @@ fn missing_binaries(target_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Turn health-check outcomes into a deploy result. Any port that is not
+/// healthy (HTTP failure or a failed check) is a hard error for a real deploy,
+/// not a warning. All ports are evaluated so the error lists every failure.
+/// Dry-run never reaches this function: nothing was deployed, so no health is
+/// claimed there (see `DRY_RUN_HEALTH_SKIP_LOG`).
+fn evaluate_health_checks(results: &[(u16, Result<bool>)]) -> Result<()> {
+    let unhealthy: Vec<String> = results
+        .iter()
+        .filter_map(|(port, outcome)| match outcome {
+            Ok(true) => None,
+            Ok(false) => Some(format!("{port} (not responding)")),
+            Err(err) => Some(format!("{port} (check failed: {err})")),
+        })
+        .collect();
+
+    if unhealthy.is_empty() {
+        Ok(())
+    } else {
+        bail!("health check failed for port(s): {}", unhealthy.join(", "))
+    }
+}
+
 fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Result<()> {
     info!("Deploying to {}...", args.host);
 
@@ -418,14 +440,20 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
         info!("Waiting for services to be healthy...");
         std::thread::sleep(std::time::Duration::from_secs(5));
 
+        let mut results = Vec::with_capacity(HEALTH_PORTS.len());
         for port in HEALTH_PORTS {
             let url = format!("http://127.0.0.1:{port}/health");
-            match runner.ssh_output(&remote_base, &format!("curl -sf {url}")) {
+            let outcome = runner.ssh_output(&remote_base, &format!("curl -sf {url}"));
+            match &outcome {
                 Ok(true) => info!("Service on port {port} is healthy"),
                 Ok(false) => warn!("Service on port {port} not responding"),
                 Err(err) => warn!("Health check on port {port} failed: {err}"),
             }
+            results.push((port, outcome));
         }
+        // A real deploy must not report completion with an unhealthy service:
+        // `?` returns early so the "Deployment completed" line below is skipped.
+        evaluate_health_checks(&results)?;
     }
 
     info!("Deployment completed");
@@ -526,5 +554,53 @@ mod tests {
     fn dry_run_health_log_never_claims_healthy() {
         assert_eq!(DRY_RUN_HEALTH_SKIP_LOG, "DRY RUN: health check skipped");
         assert!(!DRY_RUN_HEALTH_SKIP_LOG.to_lowercase().contains("healthy"));
+    }
+
+    fn outcomes(healthy: bool) -> Vec<(u16, Result<bool>)> {
+        HEALTH_PORTS
+            .into_iter()
+            .map(|port| (port, Ok(healthy)))
+            .collect()
+    }
+
+    #[test]
+    fn health_checks_pass_when_all_ports_healthy() {
+        assert!(evaluate_health_checks(&outcomes(true)).is_ok());
+    }
+
+    #[test]
+    fn health_checks_fail_deploy_when_port_not_responding() {
+        let mut results = outcomes(true);
+        let failed_port = HEALTH_PORTS[1];
+        results[1] = (failed_port, Ok(false));
+
+        let err = evaluate_health_checks(&results).expect_err("unhealthy port must fail deploy");
+        assert!(err.to_string().contains(&failed_port.to_string()));
+        assert!(err.to_string().contains("not responding"));
+    }
+
+    #[test]
+    fn health_checks_fail_deploy_when_check_errored() {
+        let mut results = outcomes(true);
+        let failed_port = HEALTH_PORTS[2];
+        results[2] = (
+            failed_port,
+            Err(anyhow::anyhow!("ssh exited with status 255")),
+        );
+
+        let err = evaluate_health_checks(&results).expect_err("check error must fail deploy");
+        assert!(err.to_string().contains(&failed_port.to_string()));
+        assert!(err.to_string().contains("check failed"));
+    }
+
+    #[test]
+    fn health_checks_report_every_failure() {
+        let results = outcomes(false);
+        let msg = evaluate_health_checks(&results)
+            .expect_err("all-unhealthy ports must fail deploy")
+            .to_string();
+        for port in HEALTH_PORTS {
+            assert!(msg.contains(&port.to_string()), "missing port {port} in: {msg}");
+        }
     }
 }
