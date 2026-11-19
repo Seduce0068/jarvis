@@ -1220,3 +1220,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   R4-E で一部追記済みだが、設定キーの網羅性を再確認する。
 - [ ] check-evidence の tamper 期待値が増えたため、次回以降も
       `make safety-test` で全ケースの維持を確認する。
+
+### Round 42 のレビュー結果（R4 で修正済み）
+
+- [x] context gRPC が内部エラー文字列をあらゆる経路へエコー（confirmed high）
+  → `INTERNAL_ERROR_MESSAGE` 固定＋固定語彙カテゴリのみログ、非開示回帰追加。
+- [x] policy gRPC の kill switch Persistence detail／MCP tools/call の Forbidden
+  が生エコー（confirmed medium）→ 両方固定語彙化、回帰追加。
+- [x] prune が entries 書き込みロックを DB コミットの間保持（confirmed high）
+  → 3フェーズ分離（ロック下分類／ロック外コミット／短いロック適用）、
+  「prune 中に status が応答」回帰追加。
+- [x] kill switch の check-then-act TOCTOU（confirmed high）→ `decide()` が
+  `commit_gate` で権威状態をコミット境界とpublish前に再読、3件回帰追加。
+- [x] 設定／ドキュメントの既定値ドリフト（egress unset／SANDBOX_TYPE／
+  timeout_ms clamp／BASE_DIR）を訂正、CONFIG_PATH と OPENCODE_PASSWORD も確認済み。
+
+### Round 42 の残り指摘（未対応）
+
+- [ ] 未使用依存の削除候補（confirmed）— tower-http（全4サービス＋workspace）、
+  zeroize（policy）、prost-types（policy/mcp-gw）、figment json feature、
+  uuid v7 feature、rmcp の transport-child-process / transport-sse-client。
+  削除後に `cargo check --all-targets --locked` と `make ui-test` で検証。
+- [ ] 並行レビューの残り: select! の unbiased による期限境界 split brain、
+  Connection::reconnect のキャンセル、symlink swap と bin マーカーの不一致窓。
+- [ ] jarvis-context の outbox/Qdrant 失敗ログが `{error:#}` で anyhow
+  チェーン全体を OTLP logs へ送出（medium）— 固定語彙化が必要。
+- 親が対応: fmt 差分、JoinHandle 型不一致（spawn 内で Result を unwrap）、
+  tracing field 形式依存アサーションの削除。
