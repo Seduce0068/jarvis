@@ -9,11 +9,15 @@
 //!    are discovered at registration time via `tools/list`.
 //!
 //! There is no agent-runtime CLI fallback (ADR-0002): tools with neither a
-//! native handler nor an upstream server return a clear error. Both
-//! backends are only reachable for tools that pass the allowlist and
-//! policy checks enforced by [`crate::McpGateway`]. Registering a server
-//! never widens the allowlist: the allowlist file remains the single
-//! source of truth for which tools may run at all.
+//! native handler nor an upstream server return a clear error. [`Gateway`]
+//! is a low-level execution primitive: it routes a tool to a registered
+//! server or the native handler and only requires that an allowlist entry
+//! exist. It does **not** itself enforce policy, principal, argument-size
+//! or approval checks. Those guarantees are applied by
+//! [`crate::McpGateway::execute_tool`], the policy-enforcing entry point
+//! used by the REST, gRPC and MCP surfaces. Registering a server never
+//! widens the allowlist: the allowlist file remains the single source of
+//! truth for which tools may run at all.
 
 use anyhow::{Context, Result};
 use rmcp::model::CallToolRequestParam;
@@ -64,12 +68,16 @@ impl Gateway {
         })
     }
 
-    /// Execute a tool.
+    /// Execute a tool through this low-level primitive.
     ///
-    /// The allowlist is consulted first: a tool without an allowlist entry
-    /// cannot run even if a registered server advertises it. Registered
+    /// The allowlist config is consulted first: a tool without an allowlist
+    /// entry cannot run even if a registered server advertises it. Registered
     /// servers take precedence over the sandbox fallback when they expose
     /// the tool name.
+    ///
+    /// This method does not apply policy, principal, argument-size or approval
+    /// checks; callers needing those guarantees must go through
+    /// [`crate::McpGateway::execute_tool`].
     pub async fn execute(&self, tool: &str, args: Value) -> Result<Value> {
         let tool_config = self
             .allowlist
