@@ -211,7 +211,9 @@ fn safe_client_error_text(message: &str) -> &'static str {
 /// adapters do), never the human-readable message. Untyped failures —
 /// including upstream `bail!` results that were summarized by
 /// `gateway::safe_error_summary` and anyhow context chains — fall back to
-/// `Internal` and are sanitized.
+/// `Internal` and are sanitized. Denials use the same fixed phrase as the
+/// HTTP/gRPC adapters: `ApprovalDenied.reason` is approver-controlled free
+/// text and must never become a tool result an OpenCode/LLM client sees.
 fn client_facing_tool_error(error: &anyhow::Error) -> String {
     use crate::error::ErrorKind;
 
@@ -220,9 +222,12 @@ fn client_facing_tool_error(error: &anyhow::Error) -> String {
         .map(crate::error::McpGatewayError::kind)
         .unwrap_or(ErrorKind::Internal);
     match kind {
-        // Fixed policy wording plus tool/principal names the caller already
-        // knows; no sandbox paths or upstream bodies are interpolated here.
-        ErrorKind::Forbidden => error.to_string(),
+        // Fixed policy wording shared with HTTP/gRPC. `error.to_string()`
+        // interpolates tool/principal names and, for `ApprovalDenied`, the
+        // approver's free-form reason (which may be a URL or a path).
+        // Rounding to the fixed phrase keeps it out of the tool result and
+        // out of any downstream log of the client conversation.
+        ErrorKind::Forbidden => crate::http::POLICY_DENIED_MESSAGE.to_string(),
         // Caller-input errors are rounded to a fixed vocabulary as well.
         ErrorKind::ClientError => safe_client_error_text(&error.to_string()).to_string(),
         ErrorKind::Internal => {
@@ -622,11 +627,7 @@ requires_approval = true
             .await
             .expect("denial is reported as a tool result");
         assert_eq!(result.is_error, Some(true));
-        let text = first_text(&result);
-        assert!(
-            text.contains("not allowed to execute"),
-            "unexpected: {text}"
-        );
+        assert_eq!(first_text(&result), crate::http::POLICY_DENIED_MESSAGE);
 
         // Unknown tools are denied by the policy before the allowlist.
         let result = client
@@ -638,8 +639,7 @@ requires_approval = true
             .await
             .expect("denial is reported as a tool result");
         assert_eq!(result.is_error, Some(true));
-        let text = first_text(&result);
-        assert!(text.contains("Policy denied"), "unexpected: {text}");
+        assert_eq!(first_text(&result), crate::http::POLICY_DENIED_MESSAGE);
 
         // The allowlist grants this tool to OpenCode and marks it as
         // approval-required. With no policy HTTP server reachable in this
@@ -654,11 +654,7 @@ requires_approval = true
             .await
             .expect("approval requirement is reported as a tool result");
         assert_eq!(result.is_error, Some(true));
-        let text = first_text(&result);
-        assert!(
-            text.contains("requires human approval"),
-            "unexpected: {text}"
-        );
+        assert_eq!(first_text(&result), crate::http::POLICY_DENIED_MESSAGE);
     }
 
     /// Regression: internal failures must never put their detail in the tool
@@ -701,17 +697,61 @@ requires_approval = true
             "missing 'url' argument"
         );
 
-        // Forbidden wording is unchanged: existing denial contracts rely on
-        // it and it contains no sandbox paths or upstream bodies.
+        // All Forbidden variants collapse to the fixed policy phrase shared
+        // with HTTP/gRPC; principal/tool names are no longer interpolated.
         let denied: anyhow::Error = McpGatewayError::PrincipalNotAllowed {
             principal: "opencode".into(),
             tool: "git.commit".into(),
         }
         .into();
-        assert_eq!(
-            client_facing_tool_error(&denied),
-            "Principal 'opencode' is not allowed to execute tool 'git.commit'"
-        );
+        let denied_text = client_facing_tool_error(&denied);
+        assert_eq!(denied_text, crate::http::POLICY_DENIED_MESSAGE);
+        assert!(!denied_text.contains("git.commit"));
+    }
+
+    /// R5-B regression: an approver's free-form denial reason must never be
+    /// echoed into a `tools/call` error body (which OpenCode feeds to the LLM).
+    /// Every `Forbidden` variant collapses to the HTTP/gRPC fixed phrase, so a
+    /// URL, path or arbitrary reason string cannot become a disclosure channel.
+    #[test]
+    fn forbidden_tool_errors_never_echo_reasons_or_paths() {
+        use crate::error::McpGatewayError;
+
+        const REASON: &str = "operator note: https://internal.example/private/approval";
+        const PATH: &str = "/home/koppe/.secret/approval.json";
+
+        let denials: [anyhow::Error; 6] = [
+            McpGatewayError::ApprovalDenied {
+                tool: "shell.execute".into(),
+                reason: REASON.into(),
+            }
+            .into(),
+            McpGatewayError::ApprovalDenied {
+                tool: PATH.into(),
+                reason: PATH.into(),
+            }
+            .into(),
+            McpGatewayError::PolicyDenied {
+                tool: REASON.into(),
+                principal: PATH.into(),
+            }
+            .into(),
+            McpGatewayError::NotAllowed(REASON.into()).into(),
+            McpGatewayError::ApprovalRequired { tool: PATH.into() }.into(),
+            McpGatewayError::PrincipalNotAllowed {
+                principal: REASON.into(),
+                tool: PATH.into(),
+            }
+            .into(),
+        ];
+
+        for denial in denials {
+            let text = client_facing_tool_error(&denial);
+            assert_eq!(text, crate::http::POLICY_DENIED_MESSAGE);
+            for sentinel in [REASON, PATH, "shell.execute"] {
+                assert!(!text.contains(sentinel), "denial detail leaked: {text}");
+            }
+        }
     }
 
     /// Minimal upstream that answers `tools/call` with an `is_error` result

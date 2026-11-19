@@ -13,6 +13,36 @@ use proto::{
     KillSwitchStatusResponse,
 };
 
+/// Fixed status text for the only authentication failure of the kill switch.
+/// Selected from the error *variant*, never from its text, so neither a token
+/// nor any other caller input can be echoed back.
+const INVALID_ADMIN_TOKEN_MESSAGE: &str = "Invalid admin token";
+
+/// Fixed status text for every non-authentication kill-switch failure.
+/// `KillSwitchError::Persistence::detail` embeds the state-file path and OS
+/// error text; it belongs in the internal tracing log only (R5-B).
+const KILL_SWITCH_INTERNAL_ERROR_MESSAGE: &str = "internal error";
+
+/// Map a kill-switch failure to a gRPC status without disclosing its detail.
+///
+/// The status-code contract is unchanged: `InvalidAdminToken` is the sole
+/// authentication failure (`Unauthenticated`), everything else — including a
+/// persistence failure after a valid token — is `Internal`. Only the message
+/// is fixed: the full error chain is isolated in the server-side log.
+fn kill_switch_status(error: anyhow::Error) -> Status {
+    use crate::kill_switch::KillSwitchError;
+
+    if matches!(
+        error.downcast_ref::<KillSwitchError>(),
+        Some(KillSwitchError::InvalidAdminToken)
+    ) {
+        return Status::unauthenticated(INVALID_ADMIN_TOKEN_MESSAGE);
+    }
+    let detail = format!("{error:#}");
+    tracing::error!(error = %detail, "kill switch RPC failed with internal error");
+    Status::internal(KILL_SWITCH_INTERNAL_ERROR_MESSAGE)
+}
+
 pub struct GrpcPolicyService {
     engine: Arc<PolicyEngine>,
 }
@@ -59,7 +89,7 @@ impl PolicyService for GrpcPolicyService {
             .get(crate::kill_switch::KILL_SWITCH_TOKEN_HEADER)
             .and_then(|value| value.to_str().ok());
         if !token.is_some_and(|token| self.engine.verify_kill_switch_admin_token(token)) {
-            return Err(Status::unauthenticated("Invalid admin token"));
+            return Err(Status::unauthenticated(INVALID_ADMIN_TOKEN_MESSAGE));
         }
         // The status fields are free-form strings; return the same fixed
         // vocabulary the HTTP endpoint exposes, even to an authenticated caller.
@@ -79,17 +109,7 @@ impl PolicyService for GrpcPolicyService {
         let req = request.into_inner();
         self.engine
             .activate_kill_switch(req.reason, &req.admin_token)
-            .map_err(|e| {
-                use crate::kill_switch::KillSwitchError;
-                match e.downcast_ref::<KillSwitchError>() {
-                    Some(KillSwitchError::InvalidAdminToken) => {
-                        Status::unauthenticated(e.to_string())
-                    }
-                    // A valid token with a failed persistence write is an
-                    // internal/storage failure, never an authentication error.
-                    _ => Status::internal(e.to_string()),
-                }
-            })?;
+            .map_err(kill_switch_status)?;
         Ok(Response::new(Empty {}))
     }
 
@@ -100,17 +120,7 @@ impl PolicyService for GrpcPolicyService {
         let req = request.into_inner();
         self.engine
             .deactivate_kill_switch(&req.admin_token)
-            .map_err(|e| {
-                use crate::kill_switch::KillSwitchError;
-                match e.downcast_ref::<KillSwitchError>() {
-                    Some(KillSwitchError::InvalidAdminToken) => {
-                        Status::unauthenticated(e.to_string())
-                    }
-                    // A valid token with a failed persistence write is an
-                    // internal/storage failure, never an authentication error.
-                    _ => Status::internal(e.to_string()),
-                }
-            })?;
+            .map_err(kill_switch_status)?;
         Ok(Response::new(Empty {}))
     }
 }
@@ -425,7 +435,8 @@ mod tests {
     }
 
     /// The typed auth-vs-internal split must stay visible on the wire: a bad
-    /// token is `Unauthenticated`, never `Internal`.
+    /// token is `Unauthenticated`, never `Internal`. R5-B: the message is the
+    /// fixed phrase, so the presented token cannot be echoed back either.
     #[tokio::test]
     async fn kill_switch_activation_keeps_auth_error_mapping() {
         let service = test_service("grpc-kill-errors").await;
@@ -437,5 +448,59 @@ mod tests {
             .await
             .expect_err("bad admin token is rejected");
         assert_eq!(bad.code(), tonic::Code::Unauthenticated);
+        assert_eq!(bad.message(), INVALID_ADMIN_TOKEN_MESSAGE);
+        assert!(!bad.message().contains("wrong-token"));
+    }
+
+    /// R5-B: the deactivate RPC shares the same fixed auth mapping.
+    #[tokio::test]
+    async fn kill_switch_deactivation_keeps_auth_error_mapping() {
+        let service = test_service("grpc-kill-deauth-errors").await;
+        let bad = service
+            .deactivate_kill_switch(Request::new(DeactivateKillSwitchRequest {
+                admin_token: "wrong-token".into(),
+            }))
+            .await
+            .expect_err("bad admin token is rejected");
+        assert_eq!(bad.code(), tonic::Code::Unauthenticated);
+        assert_eq!(bad.message(), INVALID_ADMIN_TOKEN_MESSAGE);
+        assert!(!bad.message().contains("wrong-token"));
+    }
+
+    /// R5-B regression: error detail (state-file path and OS error) and any
+    /// free-form text must never be echoed into a gRPC status message. The
+    /// status codes and the two fixed phrases are the whole contract.
+    #[test]
+    fn kill_switch_status_messages_do_not_leak_detail() {
+        use crate::kill_switch::KillSwitchError;
+
+        const PATH: &str = "/home/koppe/.secret/kill-switch-state.json";
+        const OS_ERROR: &str = "permission denied (os error 13)";
+
+        let auth = kill_switch_status(KillSwitchError::InvalidAdminToken.into());
+        assert_eq!(auth.code(), tonic::Code::Unauthenticated);
+        assert_eq!(auth.message(), INVALID_ADMIN_TOKEN_MESSAGE);
+
+        let detail = format!("write {PATH}: {OS_ERROR}");
+        let err: anyhow::Error = KillSwitchError::Persistence { detail }.into();
+        let persistence = kill_switch_status(err);
+        assert_eq!(persistence.code(), tonic::Code::Internal);
+        assert_eq!(persistence.message(), KILL_SWITCH_INTERNAL_ERROR_MESSAGE);
+
+        // An untyped anyhow failure (e.g. an upstream context chain) falls
+        // back to the same fixed internal phrase.
+        let untyped = kill_switch_status(anyhow::anyhow!("secret at {PATH}"));
+        assert_eq!(untyped.code(), tonic::Code::Internal);
+        assert_eq!(untyped.message(), KILL_SWITCH_INTERNAL_ERROR_MESSAGE);
+
+        for status in [&auth, &persistence, &untyped] {
+            for sentinel in [PATH, OS_ERROR] {
+                assert!(
+                    !status.message().contains(sentinel),
+                    "status leaked {sentinel}: {}",
+                    status.message()
+                );
+            }
+        }
     }
 }
