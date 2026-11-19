@@ -542,7 +542,7 @@ generated:
   バックアップ timer の復元演習前に要修正。
 - [x] **`backup-local.sh --retain-days` に境界値検証がなく全バックアップを削除し得る**（2026-11-19 対応済み: 引数欠落・非整数・0以下を exit 2 で拒否。実機テスト5パターンすべて拒否、正常値 `7` の dry-run は通過、`bash -n` OK） — 根拠
   `infra/scripts/backup-local.sh:25` / R3-TQ3 / 重大度 high / confirmed。
-- [ ] **HTTP ツール実行面に認証がなく `admin_token` も効かない** — 根拠
+- [x] **HTTP ツール実行面に認証がなく `admin_token` も効かない**（2026-11-19 対応済み: `x-jarvis-admin-token` ミドルウェアを `/v1/execute` と `/mcp` に追加。トークン設定時のみ必須で未設定時は従来どおり（互換維持）。approval/grpc トークンとは別ヘッダで定数時間比較。回帰テスト4件 pass、full tests / clippy / ci-local exit 0） — 根拠
   `rust/jarvis-mcp-gw/src/http.rs:57-58` / R3-AU1 / 重大度 high /
   confirmed。gRPC 側だけ認証を導入したため `/v1/execute` と
   `/mcp` は無認証のまま。
@@ -567,7 +567,7 @@ generated:
   `rust/jarvis-policy/src/http.rs:73-79` / R5-DC1 / 重大度 high / confirmed。
   実装は `JARVIS_POLICY_REQUIRE_APPROVAL_API_TOKEN` 等だが
   コメントは `JARVIS_POLICY_APPROVAL_TOKEN` と書かれている。
-- [ ] **承認キュー枯渇が HTTP 200 の通常拒否として返る** — 根拠
+- [x] **承認キュー枯渇が HTTP 200 の通常拒否として返る**（2026-11-19 対応済み: `ApprovalError::QueueFull` を新設し HTTP `/v1/approval` では 503 を返す。通常 deny は従来どおり 200 decision。旧 `request()` は Denied 互換ラッパーとして維持。approval 8 tests / policy http 10 tests pass。**仕様書 `specs/test-policy-approval.md` の REQ-7 は旧記述のまま — 下記 follow-up を参照**） — 根拠
   `rust/jarvis-policy/src/approval.rs:109-113` / R5-VU1 / 重大度 high / confirmed。
 - [x] **kill switch の非常停止ログが永続化失敗後の実状態と矛盾**（2026-11-19 対応済み: `persist()` を `Result<()>` 化し全失敗経路で fail-closed の `arm()` を維持した上で Err を返す。`activate()` は未永続化時に「NOT PERSISTED」warn を出し、成功時のみ従来ログ。新規回帰テスト追加、kill_switch 関連 12 tests pass） — 根拠
   `rust/jarvis-policy/src/kill_switch.rs:61-65` / R5-VU1 / 重大度 high / confirmed。
@@ -600,13 +600,13 @@ generated:
 - [ ] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — `policy/src/policy.rs:101-107` / R2-ER1 / likely
 - [ ] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — `kill_switch.rs:133` / R2-FG1 / confirmed
 - [ ] Casbin `add_policy` / `remove_policy` が公開 API を持たず設定ファイル手編集に依存 — `policy.rs:190,205` / R2-FG1 / confirmed
-- [ ] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — `gateway.rs:11-16` / R2-FG1 / confirmed
+- [x] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — 2026-11-19 対応済み: module doc と execute doc を実態（低レベル実行 primitive、policy/allowlist/approval は `McpGateway::execute_tool` が担当）へ修正。コード・シグネチャ・テストは無変更 / `gateway.rs:11-16` / R2-FG1 / confirmed
 - [ ] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — `backup.rs:331` / R2-ER2 / confirmed
-- [ ] deploy がビナリ・スクリプト欠落を警告スキップして完了報告 — `deploy.rs:308-311` / R2-ER2 / confirmed
+- [x] deploy がビナリ・スクリプト欠落を警告スキップして完了報告 — 2026-11-19 対応済み: 実実行前に必須4バイナリを走査し欠落時は `bail!` で非ゼロ終了（SSH 前に停止）。回帰テスト3件 pass / `deploy.rs:308-311` / R2-ER2 / confirmed
 - [ ] gRPC EmitEvent が不正入力をデフォルト値に置換して success を返す — `event/src/grpc.rs:27-32` / R2-ER2 / confirmed
 - [x] WS 受信エラーに生メッセージ本文を埋め込みログへ流出 — 2026-11-19 対応済み: `decode_ha_message()` ヘルパでエラーを再構成し source/bytes/エラー分類のみを記録。回帰テストで本文・トークン様文字列の非漏洩を検証（テスト文字列は secret scanner に VALUE-LIKE と誤検出されない値へ調整） / `event/src/sources.rs:248-249` / R2-ER2 / likely
 - [ ] `restore.rs` の `restart_services` が systemctl start のみで再起動していない — `restore.rs:408` / R2-FG2 / confirmed
-- [ ] `deploy.rs --dry-run` がヘルスチェック未実行なのに healthy と報告 — `deploy.rs:164` / R2-FG2 / confirmed
+- [x] `deploy.rs --dry-run` がヘルスチェック未実行なのに healthy と報告 — 2026-11-19 対応済み: dry-run では curl を一切呼ばず `DRY RUN: health check skipped` のみを出力。実機 dry-run で当該ログを確認し `healthy` の出現0回を検証 / `deploy.rs:164` / R2-FG2 / confirmed
 - [ ] Cedar 認可コンテキストが生のツール引数で呼び出し元が ABAC 属性を捏造可能 — `mcp-gw/src/lib.rs:86-89` / R3-AU1 / likely
 - [ ] AllowList の `add_tool` / `remove_tool` が無認証・無永続化の公開ミューテーション API — `allowlist.rs:95-106` / R3-AU1 / confirmed
 - [ ] Qdrant の不正 point id が nil UUID にフォールバック — `builder.rs:305` / R1-ST2 / likely
@@ -620,7 +620,7 @@ generated:
 - [ ] upstream MCP ツールのエラー本文が API 応答とログへそのまま流出 — `gateway.rs:200-203` / R5-VU1 / confirmed
 - [ ] イベント処理失敗ログに `event_id` / `correlation_id` が欠落 — `normalizer.rs:64` / R5-VU2 / confirmed
 - [ ] トークン予算超過によるコンテキスト切り捨てが無観測 — `builder.rs:197-203` / R5-VU2 / confirmed
-- [ ] HTTP ハンドラが内部エラーの理由を 500 に変換して捨てる — `context/src/http.rs:120-123` / R5-VU2 / confirmed
+- [x] HTTP ハンドラが内部エラーの理由を 500 に変換して捨てる — 2026-11-19 対応済み: `log_internal_error()` で anyhow の context チェーンを `tracing::error!` に記録し、クライアント応答は裸の 500 を維持。`#[instrument]` から req を除外し生データ/PII をログに出さない。新規テストでチェーン記録を検証 / `context/src/http.rs:120-123` / R5-VU2 / confirmed
 - [ ] Qdrant スナップショット取得に HTTP タイムアウトがなくバックアップがハングし得る — `backup.rs:181` / R5-VU2 / likely
 
 ### メモ（要判断・却下）
@@ -683,3 +683,14 @@ generated:
   `docs/integration/local-restore-design.md:253-255` / 優先度 高。
   使い捨て DB / Qdrant コレクション / ディレクトリで全コンポーネントを
   復元し Runtime Proof を記録する。本番適用はユーザー承認後に実施。
+
+## follow-up（2026-11-19 Round 2 / R4 レビュー）
+
+- [ ] **仕様書 REQ-7 をキュー枯渇の 503 挙動へ同期** — 根拠
+  `specs/test-policy-approval.md:44,177` / R4 レビュー / 優先度 中。
+  - 現状は「max_pending 超過は approval queue full で即 Denied」とあり、
+    HTTP 層が 503 を返す実装と乖離している。
+  - 「ストア層 `request()` は Denied 互換を維持、`try_request()` は
+    `ApprovalError::QueueFull`、HTTP `/v1/approval` は 503」と明記する。
+  - 仕様変更後は `check-evidence.sh` のハッシュ一致エビデンスを再生成し、
+    `make check-evidence` で検証する。
