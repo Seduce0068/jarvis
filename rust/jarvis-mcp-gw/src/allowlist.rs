@@ -92,6 +92,13 @@ impl AllowList {
         tools
     }
 
+    /// Mutation helper retained for tests only. These change the live tool
+    /// inventory and principal grants in memory without authentication or
+    /// persistence, so they must not be reachable from production code or
+    /// from downstream crates. `#[cfg(test)]` removes them from release
+    /// builds entirely; keep the allowlist read-only at runtime and load
+    /// changes through the config file / restart path instead.
+    #[cfg(test)]
     pub fn add_tool(&self, tool: AllowedTool) {
         self.tools.write().unwrap().insert(tool.name.clone());
         self.tool_configs
@@ -100,6 +107,9 @@ impl AllowList {
             .insert(tool.name.clone(), tool);
     }
 
+    /// Test-only counterpart to `add_tool`. See its docs for why mutation is
+    /// not part of the production API.
+    #[cfg(test)]
     pub fn remove_tool(&self, tool: &str) {
         self.tools.write().unwrap().remove(tool);
         self.tool_configs.write().unwrap().remove(tool);
@@ -188,5 +198,32 @@ requires_approval = false
         // `carol` is granted tools but is not an admitted principal.
         assert!(names("carol").is_empty());
         assert!(names("nobody").is_empty());
+    }
+
+    /// The test-only mutation helpers must keep the name set and the config
+    /// map in sync, since the read APIs consult both.
+    #[test]
+    fn add_and_remove_tool_update_both_indexes() {
+        let allowlist = AllowList {
+            tools: std::sync::RwLock::new(HashSet::new()),
+            tool_configs: std::sync::RwLock::new(std::collections::HashMap::new()),
+            allowed_principals: std::sync::RwLock::new(HashSet::new()),
+        };
+        let tool = AllowedTool {
+            name: "new.tool".to_owned(),
+            description: "new".to_owned(),
+            allowed_principals: vec!["alice".to_owned()],
+            max_args_size: 1,
+            timeout_ms: 1,
+            requires_approval: false,
+        };
+
+        allowlist.add_tool(tool);
+        assert!(allowlist.check("new.tool").is_ok());
+        assert!(allowlist.get_config("new.tool").is_some());
+
+        allowlist.remove_tool("new.tool");
+        assert!(allowlist.check("new.tool").is_err());
+        assert!(allowlist.get_config("new.tool").is_none());
     }
 }
