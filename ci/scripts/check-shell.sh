@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Shell static analysis for all tracked *.sh files (P2-5).
-# bash -n is mandatory; shellcheck runs when available (CI runners may lack it).
+# bash -n and shellcheck are both mandatory gates: a missing shellcheck fails
+# closed instead of silently skipping static analysis on CI runners.
 # shfmt formatting is reported as a warning only, not a gate: the repository
 # has pre-existing formatting drift and auto-formatting would be out of scope.
 set -euo pipefail
@@ -30,7 +31,10 @@ while IFS= read -r f; do
   fi
 done <<< "$script_list"
 
-if command -v shellcheck >/dev/null 2>&1; then
+if ! command -v shellcheck >/dev/null 2>&1; then
+  echo "FAIL: shellcheck is not installed (required gate; install it in the CI runner / environment)" >&2
+  fail=$((fail+1))
+else
   mapfile -t scripts <<< "$script_list"
   if shellcheck "${scripts[@]}" >/tmp/check-shell-sc.out 2>&1; then
     echo "shellcheck: OK"
@@ -39,8 +43,6 @@ if command -v shellcheck >/dev/null 2>&1; then
     head -20 /tmp/check-shell-sc.out >&2
     fail=$((fail+1))
   fi
-else
-  echo "shellcheck: SKIP (not installed)"
 fi
 
 if command -v shfmt >/dev/null 2>&1; then
