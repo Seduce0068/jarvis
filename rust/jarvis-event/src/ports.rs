@@ -4,6 +4,11 @@
 //! delegate to the existing `jarvis_context` / `jarvis_policy` clients, so
 //! runtime behaviour stays unchanged; a later slice can replace an adapter
 //! with a sidecar client without touching the normalizer.
+//!
+//! The sidecar client now exists as
+//! [`crate::context_grpc::GrpcContextProvider`], selected only when
+//! `EventConfig::context_mode` opts into `grpc`; the default in-process route
+//! still uses [`DefaultContextProvider`], so slice-1 behavior is unchanged.
 
 use std::sync::Arc;
 

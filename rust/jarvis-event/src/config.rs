@@ -8,6 +8,25 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+/// Selects how `Normalizer` obtains context for an event.
+///
+/// `InProcess` is the default and keeps the slice-1 `DefaultContextProvider`
+/// route (an embedded `ContextBuilder`) byte-for-byte. `Grpc` is opt-in and
+/// routes through `GrpcContextProvider` to the context sidecar, which is what
+/// lets the additive `source` / `timestamp` fields survive the hop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMode {
+    #[default]
+    InProcess,
+    Grpc,
+}
+
+/// Default endpoint of the context sidecar (its existing gRPC listen port).
+fn default_context_grpc_addr() -> String {
+    "http://127.0.0.1:50054".to_string()
+}
+
 /// HTTP header and gRPC metadata key carrying the event admin token.
 pub(crate) const EVENT_TOKEN_HEADER: &str = "x-jarvis-event-token";
 
@@ -108,6 +127,16 @@ pub struct EventConfig {
     /// Unset/blank keeps the legacy unauthenticated loopback behavior.
     #[serde(default)]
     pub admin_token: Option<String>,
+    /// Context backend selection. Missing/legacy configs stay on `in_process`.
+    #[serde(default)]
+    pub context_mode: ContextMode,
+    /// gRPC endpoint of the context sidecar (only read in `grpc` mode).
+    #[serde(default = "default_context_grpc_addr")]
+    pub context_grpc_addr: String,
+    /// Optional `x-jarvis-context-token` value for `BuildContext` calls.
+    /// Blank/unset keeps the legacy unauthenticated loopback path.
+    #[serde(default)]
+    pub context_grpc_token: Option<String>,
 }
 
 impl EventConfig {
@@ -133,6 +162,14 @@ impl EventConfig {
             .map(str::trim)
             .filter(|token| !token.is_empty())
     }
+
+    /// Trimmed token for the context gRPC sidecar; blank means "no token".
+    pub fn context_grpc_token(&self) -> Option<&str> {
+        self.context_grpc_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+    }
 }
 
 /// Redacted `Debug`: a derived implementation would print `admin_token` (and
@@ -152,6 +189,9 @@ impl std::fmt::Debug for EventConfig {
             .field("opencode_password", &"<redacted>")
             .field("policy_grpc_addr", &self.policy_grpc_addr)
             .field("admin_token", &"<redacted>")
+            .field("context_mode", &self.context_mode)
+            .field("context_grpc_addr", &self.context_grpc_addr)
+            .field("context_grpc_token", &"<redacted>")
             .finish()
     }
 }
@@ -170,6 +210,9 @@ impl Default for EventConfig {
             opencode_password: None,
             policy_grpc_addr: "http://127.0.0.1:50051".into(),
             admin_token: None,
+            context_mode: ContextMode::InProcess,
+            context_grpc_addr: default_context_grpc_addr(),
+            context_grpc_token: None,
         }
     }
 }
@@ -265,5 +308,75 @@ policy_grpc_addr = "http://127.0.0.1:50051"
     fn ingress_token_snapshot_is_used_by_transports() {
         publish_admin_token(Some("snapshot-secret".into()));
         assert_eq!(ingress_admin_token().as_deref(), Some("snapshot-secret"));
+    }
+
+    /// I31-B: a legacy deployment with no new keys keeps the in-process route
+    /// and the canonical sidecar endpoint; no opt-in flag is implicitly on.
+    #[test]
+    fn default_context_mode_is_in_process() {
+        let default = EventConfig::default();
+        assert_eq!(default.context_mode, ContextMode::InProcess);
+        assert_eq!(default.context_grpc_addr, "http://127.0.0.1:50054");
+
+        let legacy: EventConfig = Figment::from(Toml::string(LEGACY_TOML))
+            .extract()
+            .expect("legacy config without context keys parses");
+        assert_eq!(legacy.context_mode, ContextMode::InProcess);
+        assert_eq!(legacy.context_grpc_addr, "http://127.0.0.1:50054");
+        assert!(legacy.context_grpc_token().is_none());
+    }
+
+    /// I31-B: the `grpc` mode and sidecar settings parse from TOML.
+    #[test]
+    fn context_grpc_mode_and_settings_from_toml() {
+        let toml = format!(
+            "{LEGACY_TOML}\ncontext_mode = \"grpc\"\n\
+             context_grpc_addr = \"http://127.0.0.1:50055\"\n\
+             context_grpc_token = \"ctx-secret\"\n"
+        );
+        let config: EventConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("context grpc config parses");
+        assert_eq!(config.context_mode, ContextMode::Grpc);
+        assert_eq!(config.context_grpc_addr, "http://127.0.0.1:50055");
+        assert_eq!(config.context_grpc_token(), Some("ctx-secret"));
+    }
+
+    /// I31-B: the figment `JARVIS_EVENT_` prefix maps the new keys to the same
+    /// flat snake_case fields (no OS env mutation, same chain as `load()`).
+    #[test]
+    fn context_grpc_env_keys_map_to_fields() {
+        let config: EventConfig = Figment::from(Toml::string(LEGACY_TOML))
+            .merge(Serialized::default("context_mode", "grpc"))
+            .merge(Serialized::default(
+                "context_grpc_addr",
+                "http://127.0.0.1:50056",
+            ))
+            .merge(Serialized::default("context_grpc_token", "env-ctx-secret"))
+            .extract()
+            .expect("env-style context keys merge");
+        assert_eq!(config.context_mode, ContextMode::Grpc);
+        assert_eq!(config.context_grpc_addr, "http://127.0.0.1:50056");
+        assert_eq!(config.context_grpc_token(), Some("env-ctx-secret"));
+    }
+
+    #[test]
+    fn blank_context_grpc_token_is_treated_as_unset() {
+        let toml = format!("{LEGACY_TOML}\ncontext_grpc_token = \"  \"\n");
+        let config: EventConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("blank token parses");
+        assert!(config.context_grpc_token().is_none());
+    }
+
+    #[test]
+    fn debug_output_never_contains_the_context_grpc_token() {
+        let config = EventConfig {
+            context_grpc_token: Some("ctx-top-secret".into()),
+            ..Default::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("ctx-top-secret"));
+        assert!(rendered.contains("context_grpc_token: \"<redacted>\""));
     }
 }

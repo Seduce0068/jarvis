@@ -2,7 +2,8 @@
 
 use crate::ContextBuilder;
 use crate::config::{CONTEXT_TOKEN_HEADER, token_matches};
-use jarvis_core::{MemoryEntry, UnifiedEvent};
+use chrono::{DateTime, Utc};
+use jarvis_core::{EventSource, MemoryEntry, UnifiedEvent};
 use tonic::{Request, Response, Status};
 
 pub mod proto {
@@ -102,6 +103,35 @@ fn to_proto_memory_entry(memory: MemoryEntry) -> ProtoMemoryEntry {
     }
 }
 
+/// Reassemble the event-identifying correlation fields from the additive proto
+/// fields (I31-B).
+///
+/// `source == ""` and `timestamp == 0` are the proto3 "unset" values: they keep
+/// the legacy `Manual` / `Utc::now()` behavior, so callers built against the old
+/// schema are unchanged. When set, a known source and an in-range Unix
+/// timestamp are preserved. An unknown source or an out-of-range timestamp
+/// degrades to the legacy value instead of failing `BuildContext`: context
+/// assembly is best-effort and an optional metadata field must not break an
+/// otherwise valid request.
+///
+/// Public so the event-side gRPC provider can exercise the encode -> wire ->
+/// decode contract in a unit test without opening a network connection.
+pub fn event_metadata_from_request(req: &BuildContextRequest) -> (EventSource, DateTime<Utc>) {
+    let source = if req.source.is_empty() {
+        EventSource::Manual
+    } else {
+        req.source
+            .parse::<EventSource>()
+            .unwrap_or(EventSource::Manual)
+    };
+    let timestamp = if req.timestamp == 0 {
+        Utc::now()
+    } else {
+        DateTime::from_timestamp(req.timestamp, 0).unwrap_or_else(Utc::now)
+    };
+    (source, timestamp)
+}
+
 #[tonic::async_trait]
 impl ContextService for GrpcContextService {
     async fn build_context(
@@ -110,13 +140,15 @@ impl ContextService for GrpcContextService {
     ) -> Result<Response<BuildContextResponse>, Status> {
         authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
-        // Convert proto event to UnifiedEvent (simplified)
+        // Convert proto event to UnifiedEvent; the additive fields carry the
+        // original source/timestamp, falling back to legacy values when unset.
+        let (source, timestamp) = event_metadata_from_request(&req);
         let event = UnifiedEvent {
             id: uuid::Uuid::parse_str(&req.event_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
-            source: jarvis_core::EventSource::Manual,
+            source,
             event_type: req.event_type,
             payload: serde_json::from_str(&req.payload).unwrap_or_default(),
-            timestamp: chrono::Utc::now(),
+            timestamp,
             correlation_id: req.correlation_id,
         };
         let context = self
@@ -172,7 +204,8 @@ pub async fn serve(builder: ContextBuilder, addr: std::net::SocketAddr) -> anyho
 #[cfg(test)]
 mod tests {
     use super::{
-        CONTEXT_TOKEN_HEADER, Request, StoreMemoryRequest, authorize, prepare_store_memory,
+        BuildContextRequest, CONTEXT_TOKEN_HEADER, DateTime, EventSource, Request,
+        StoreMemoryRequest, Utc, authorize, event_metadata_from_request, prepare_store_memory,
         to_proto_memory_entry,
     };
     use std::io::Write;
@@ -324,5 +357,57 @@ mod tests {
         memory.score = None;
         let unranked = to_proto_memory_entry(memory);
         assert_eq!(unranked.score, None);
+    }
+
+    fn build_context_request(source: &str, timestamp: i64) -> BuildContextRequest {
+        BuildContextRequest {
+            event_id: uuid::Uuid::from_u128(7).to_string(),
+            event_type: "state_changed".into(),
+            payload: r#"{"entity_id":"light.kitchen"}"#.into(),
+            correlation_id: "corr-7".into(),
+            source: source.into(),
+            timestamp,
+        }
+    }
+
+    /// I31-B: a caller built against the old schema leaves both additive fields
+    /// unset and must observe the exact legacy `Manual` / `now` behavior.
+    #[test]
+    fn build_context_without_additive_fields_keeps_legacy_metadata() {
+        let req = build_context_request("", 0);
+        let before = Utc::now();
+        let (source, timestamp) = event_metadata_from_request(&req);
+        let after = Utc::now();
+
+        assert_eq!(source, EventSource::Manual);
+        assert!(
+            timestamp >= before && timestamp <= after,
+            "unset timestamp must fall back to the current time"
+        );
+    }
+
+    /// I31-B: a known source and an in-range Unix timestamp are preserved when
+    /// the handler reassembles the `UnifiedEvent`.
+    #[test]
+    fn build_context_preserves_additive_source_and_timestamp() {
+        let req = build_context_request("home_assistant", 1_700_000_000);
+        let (source, timestamp) = event_metadata_from_request(&req);
+
+        let expected = DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp");
+        assert_eq!(source, EventSource::HomeAssistant);
+        assert_eq!(timestamp, expected);
+    }
+
+    /// I31-B: malformed optional metadata degrades to the legacy values rather
+    /// than panicking or failing the whole `BuildContext` request.
+    #[test]
+    fn build_context_invalid_additive_fields_degrade_without_panic() {
+        let req = build_context_request("telepathy", i64::MAX);
+        let before = Utc::now();
+        let (source, timestamp) = event_metadata_from_request(&req);
+        let after = Utc::now();
+
+        assert_eq!(source, EventSource::Manual);
+        assert!(timestamp >= before && timestamp <= after);
     }
 }

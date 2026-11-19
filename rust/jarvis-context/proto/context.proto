@@ -13,6 +13,11 @@ message BuildContextRequest {
   string event_type = 2;
   string payload = 3;
   string correlation_id = 4;
+  // Additive event correlation metadata (I31-B). Field numbers 1-4 and their
+  // types are unchanged; older clients leave these unset (""/0) and the
+  // handler keeps its legacy source=Manual / timestamp=now behavior.
+  string source = 5;
+  int64 timestamp = 6;
 }
 
 message BuildContextResponse {
