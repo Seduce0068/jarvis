@@ -674,7 +674,7 @@ generated:
 
 ## 残タスク（restore-local S8 / S9）
 
-- [ ] **S8: ドキュメントとレガシー整理** — 根拠
+- [x] **S8: ドキュメントとレガシー整理**（2026-11-19 対応済み: `index.md` 追記、runbook に相互リンクと3段の安全レベル例示、`restore.rs` に非推奨ヘッダ（**rust-script の cargo マニフェストブロックより後に配置** — 先頭に置くと依存が認識されず `--help` が失敗する）、`infra/README.md` に現行状態を追記。`rust-script --help` / rustfmt / ci-local exit 0、新規 markdownlint 違反なし（既存 baseline の MD013/MD028 は据え置き）） — 根拠
   `docs/integration/local-restore-design.md:250-252` / 優先度 中。
   `docs/integration/index.md` への追記、`backup-restore-runbook.md`
   からの相互リンク、`restore.rs` への非推奨ヘッダ、
