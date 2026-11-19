@@ -491,7 +491,7 @@ generated:
 - [ ] トークン予算ドキュメントが文字数とバイト数を混同 — `context/src/builder.rs:195-196` / R5-DC2 / confirmed
 - [ ] OpenCode クライアントのモジュール doc フロー図が実装の認可順序と不一致 — `event/src/opencode.rs:7-8` / R5-DC2 / likely
 - [x] Grafana README のクエリがダッシュボード JSON の実式と不一致 — 2026-11-19 対応済み: 4パネルのクエリを実式へ同期し、長行はコードブロックへ移動して markdownlint MD013 を解消。注意書きも「per scrape job」へ修正、lint 0 issues / `infra/grafana/README.md:14-17` / R5-DC3 / confirmed
-- [ ] OTel `SdkTracerProvider` が shutdown されずバッチスパンが失われる — `policy/src/main.rs:27-30` / R4-DP1 / confirmed
+- [x] OTel `SdkTracerProvider` が shutdown されずバッチスパンが失われる — 2026-11-19 対応済み: `TracerGuard`（Drop で shutdown）を追加し provider を main 全体へ延長。正常・エラー・早期リターンの全経路で flush、二重 shutdown も無害 / `policy/src/main.rs:27-30` / R4-DP1 / confirmed
 
 ### メモ（要判断・却下）
 
@@ -603,9 +603,9 @@ generated:
 - [x] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — 2026-11-19 対応済み: module doc と execute doc を実態（低レベル実行 primitive、policy/allowlist/approval は `McpGateway::execute_tool` が担当）へ修正。コード・シグネチャ・テストは無変更 / `gateway.rs:11-16` / R2-FG1 / confirmed
 - [x] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — 2026-11-19 対応済み: 削除結果を match し失敗は warn＋成功件数から除外。dry-run 抑制は維持。回帰テスト3件追加、backup rust-script 4 tests pass / `backup.rs:331` / R2-ER2 / confirmed
 - [x] deploy がビナリ・スクリプト欠落を警告スキップして完了報告 — 2026-11-19 対応済み: 実実行前に必須4バイナリを走査し欠落時は `bail!` で非ゼロ終了（SSH 前に停止）。回帰テスト3件 pass / `deploy.rs:308-311` / R2-ER2 / confirmed
-- [ ] gRPC EmitEvent が不正入力をデフォルト値に置換して success を返す — `event/src/grpc.rs:27-32` / R2-ER2 / confirmed
+- [x] gRPC EmitEvent が不正入力をデフォルト値に置換して success を返す — 2026-11-19 対応済み: `event_from_request()` を新設し不正 id/source/payload/timestamp を `INVALID_ARGUMENT` で拒否（timestamp 0 のみ未指定扱い）。回帰テスト7件追加、event 40 tests pass / `event/src/grpc.rs:27-32` / R2-ER2 / confirmed
 - [x] WS 受信エラーに生メッセージ本文を埋め込みログへ流出 — 2026-11-19 対応済み: `decode_ha_message()` ヘルパでエラーを再構成し source/bytes/エラー分類のみを記録。回帰テストで本文・トークン様文字列の非漏洩を検証（テスト文字列は secret scanner に VALUE-LIKE と誤検出されない値へ調整） / `event/src/sources.rs:248-249` / R2-ER2 / likely
-- [ ] `restore.rs` の `restart_services` が systemctl start のみで再起動していない — `restore.rs:408` / R2-FG2 / confirmed
+- [x] `restore.rs` の `restart_services` が systemctl start のみで再起動していない — 2026-11-19 対応済み: `systemctl restart` へ変更し `run_sudo` の終了ステータス検査を維持。dry-run ガードと対象一覧は不変、restore 5 tests pass / `restore.rs:408` / R2-FG2 / confirmed
 - [x] `deploy.rs --dry-run` がヘルスチェック未実行なのに healthy と報告 — 2026-11-19 対応済み: dry-run では curl を一切呼ばず `DRY RUN: health check skipped` のみを出力。実機 dry-run で当該ログを確認し `healthy` の出現0回を検証 / `deploy.rs:164` / R2-FG2 / confirmed
 - [x] Cedar 認可コンテキストが生のツール引数で呼び出し元が ABAC 属性を捏造可能 — 2026-11-19 対応済み: `policy_context()` で `{tool, principal, resource, requires_approval}` のみをサーバ生成し `is_allowed` に渡す。同梱 Cedar ポリシー/スキーマは context 属性を参照しないため条件は不変。回帰テスト追加 / `mcp-gw/src/lib.rs:86-89` / R3-AU1 / likely
 - [x] AllowList の `add_tool` / `remove_tool` が無認証・無永続化の公開ミューテーション API — 2026-11-19 対応済み: 呼び出し箇所がテスト以外に無いため `#[cfg(test)] pub fn` へ絞り本番バイナリから公開面を除去。同期検証テスト1件追加 / `allowlist.rs:95-106` / R3-AU1 / confirmed
@@ -616,8 +616,8 @@ generated:
 - [ ] Qdrant クライアントの互換性チェックが起動時に無効化 — `builder.rs:236` / R4-DP2 / confirmed
 - [ ] `deploy-mcp-gw-safe.sh` のロールバックが repo 側 allowlist 変更を戻さない — `infra/scripts/deploy-mcp-gw-safe.sh:65` / R4-DR3 / confirmed
 - [ ] `jarvis-mcp-gw.service` のベースディレクトリが開発環境の絶対パスに固定 — `infra/systemd/jarvis-mcp-gw.service:52` / R4-DR3 / confirmed
-- [ ] MCP プロトコルバージョン定数がスモークテストとドリフト検査で不一致 — `infra/scripts/smoke-mcp-gw.sh:101` / R4-DP3 / confirmed
-- [ ] upstream MCP ツールのエラー本文が API 応答とログへそのまま流出 — `gateway.rs:200-203` / R5-VU1 / confirmed
+- [x] MCP プロトコルバージョン定数がスモークテストとドリフト検査で不一致 — 2026-11-19 対応済み: smoke の protocolVersion を `2025-11-25` へ更新し drift 検査と同期。両方を揃える旨のコメント追加、bash -n OK / `infra/scripts/smoke-mcp-gw.sh:101` / R4-DP3 / confirmed
+- [x] upstream MCP ツールのエラー本文が API 応答とログへそのまま流出 — 2026-11-19 対応済み: `safe_error_summary()` で本文を完全に除外し構造メタデータのみの分類へ。トークン/パス/URL クエリが要約に出ない回帰テスト2件追加。子のテスト用偽シークレットが secret_scan に誤検出されたため親がリネーム / `gateway.rs:200-203` / R5-VU1 / confirmed
 - [x] イベント処理失敗ログに `event_id` / `correlation_id` が欠落 — 2026-11-19 対応済み: `process_event` を借用へ変更し `tracing::error!` に両フィールドを構造化追加。payload はログに渡さない。event 40 tests pass / `normalizer.rs:64` / R5-VU2 / confirmed
 - [ ] トークン予算超過によるコンテキスト切り捨てが無観測 — `builder.rs:197-203` / R5-VU2 / confirmed
 - [x] HTTP ハンドラが内部エラーの理由を 500 に変換して捨てる — 2026-11-19 対応済み: `log_internal_error()` で anyhow の context チェーンを `tracing::error!` に記録し、クライアント応答は裸の 500 を維持。`#[instrument]` から req を除外し生データ/PII をログに出さない。新規テストでチェーン記録を検証 / `context/src/http.rs:120-123` / R5-VU2 / confirmed
