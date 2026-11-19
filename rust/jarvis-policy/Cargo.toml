@@ -12,7 +12,7 @@ description = "JARVIS Policy Engine: Cedar/Casbin-based authorization, approval 
 # Workspace
 jarvis-core = { workspace = true }
 tokio = { workspace = true, features = ["full", "tracing"] }
-async-trait = { workspace = true }
+async-trait = { workspace = true } # object-safe ApprovalPersistence seam (I29-A)
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

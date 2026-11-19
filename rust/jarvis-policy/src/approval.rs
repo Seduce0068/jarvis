@@ -44,6 +44,83 @@ pub enum ApprovalError {
 /// [`ApprovalStore::try_request`] instead of comparing this string.
 pub const QUEUE_FULL_REASON: &str = "approval queue full";
 
+/// Persistence seam for approval requests and decisions (I29-A, 案A).
+///
+/// Slice 1 introduces the abstraction and a no-op default only: no database is
+/// contacted, no connection string is parsed, and the in-memory store remains
+/// authoritative. A PostgreSQL-backed implementation will be plugged in via
+/// [`ApprovalStore::with_persistence`] in a later slice.
+///
+/// Implementations must be `Send + Sync` because [`ApprovalStore`] is cloned
+/// across Tokio tasks. Errors are treated as best-effort by the store: they are
+/// observed by the backend owner but never change a policy decision.
+#[async_trait::async_trait]
+pub trait ApprovalPersistence: Send + Sync {
+    /// Persist a newly registered pending request with its authoritative
+    /// deadline (the same value the store enforces).
+    async fn record_request(
+        &self,
+        request: &ApprovalRequest,
+        deadline: DateTime<Utc>,
+    ) -> Result<(), ApprovalError>;
+
+    /// Persist the decision reached for `id`.
+    async fn record_decision(
+        &self,
+        id: Uuid,
+        decision: &ApprovalDecision,
+        decided_at: DateTime<Utc>,
+    ) -> Result<(), ApprovalError>;
+
+    /// Load requests that are still awaiting a decision.
+    ///
+    /// Reserved for slice 2: `list_pending` keeps using in-memory state so
+    /// existing behavior is unchanged.
+    async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError>;
+
+    /// Mark a pending request as expired at `expired_at` (timeout path).
+    async fn mark_expired(&self, id: Uuid, expired_at: DateTime<Utc>) -> Result<(), ApprovalError>;
+}
+
+/// Default [`ApprovalPersistence`]: does nothing.
+///
+/// This is what [`ApprovalStore::new`] and [`ApprovalStore::with_max_pending`]
+/// use, so their in-memory-only behavior is exactly unchanged.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopPersistence;
+
+#[async_trait::async_trait]
+impl ApprovalPersistence for NoopPersistence {
+    async fn record_request(
+        &self,
+        _request: &ApprovalRequest,
+        _deadline: DateTime<Utc>,
+    ) -> Result<(), ApprovalError> {
+        Ok(())
+    }
+
+    async fn record_decision(
+        &self,
+        _id: Uuid,
+        _decision: &ApprovalDecision,
+        _decided_at: DateTime<Utc>,
+    ) -> Result<(), ApprovalError> {
+        Ok(())
+    }
+
+    async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+        Ok(Vec::new())
+    }
+
+    async fn mark_expired(
+        &self,
+        _id: Uuid,
+        _expired_at: DateTime<Utc>,
+    ) -> Result<(), ApprovalError> {
+        Ok(())
+    }
+}
+
 struct Entry {
     request: ApprovalRequest,
     decision: Option<ApprovalDecision>,
@@ -60,6 +137,8 @@ struct Inner {
     timeout: Duration,
     max_pending: usize,
     entries: RwLock<HashMap<Uuid, Entry>>,
+    /// Additive seam handle. In slice 1 this is always [`NoopPersistence`].
+    persistence: Arc<dyn ApprovalPersistence>,
 }
 
 #[derive(Clone)]
@@ -81,11 +160,26 @@ impl ApprovalStore {
     /// Constructor with an explicit pending-request cap (used by tests and
     /// operators that need a different bound).
     pub fn with_max_pending(timeout: Duration, max_pending: usize) -> Self {
+        Self::with_persistence(timeout, max_pending, Arc::new(NoopPersistence))
+    }
+
+    /// Additive constructor that installs an [`ApprovalPersistence`] backend.
+    ///
+    /// The in-memory workflow stays authoritative; the backend only receives
+    /// observations through the trait hooks. Passing [`NoopPersistence`]
+    /// reproduces the default store exactly, and no implementation in this
+    /// slice opens a connection or performs external I/O.
+    pub fn with_persistence(
+        timeout: Duration,
+        max_pending: usize,
+        persistence: Arc<dyn ApprovalPersistence>,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 timeout,
                 max_pending,
                 entries: RwLock::new(HashMap::new()),
+                persistence,
             }),
         }
     }
@@ -175,7 +269,7 @@ impl ApprovalStore {
             entries.insert(
                 id,
                 Entry {
-                    request,
+                    request: request.clone(),
                     decision: None,
                     decided_at: None,
                     deadline,
@@ -183,6 +277,14 @@ impl ApprovalStore {
                 },
             );
         }
+
+        // Best-effort seam: `NoopPersistence` is a no-op, so the default store
+        // stays memory-only and its observable behavior is unchanged.
+        let _ = self
+            .inner
+            .persistence
+            .record_request(&request, deadline)
+            .await;
 
         let remaining = (deadline - Utc::now()).to_std().unwrap_or(Duration::ZERO);
         let wait = async {
@@ -211,13 +313,21 @@ impl ApprovalStore {
             Some(decision) => decision,
             None => {
                 // Re-check under the lock: a decision may have raced the timeout.
-                let mut entries = self.inner.entries.write().await;
-                if let Some(entry) = entries.get_mut(&id) {
-                    if let Some(decision) = &entry.decision {
-                        return Ok(decision.clone());
+                let expired_at = Utc::now();
+                let mut marked = false;
+                {
+                    let mut entries = self.inner.entries.write().await;
+                    if let Some(entry) = entries.get_mut(&id) {
+                        if let Some(decision) = &entry.decision {
+                            return Ok(decision.clone());
+                        }
+                        entry.decision = Some(ApprovalDecision::Expired);
+                        entry.decided_at = Some(expired_at);
+                        marked = true;
                     }
-                    entry.decision = Some(ApprovalDecision::Expired);
-                    entry.decided_at = Some(Utc::now());
+                }
+                if marked {
+                    let _ = self.inner.persistence.mark_expired(id, expired_at).await;
                 }
                 ApprovalDecision::Expired
             }
@@ -227,14 +337,22 @@ impl ApprovalStore {
 
     /// Record `decision` for a pending request and wake its waiter.
     pub async fn decide(&self, id: Uuid, decision: ApprovalDecision) -> Result<(), ApprovalError> {
-        let mut entries = self.inner.entries.write().await;
-        let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
-        if entry.decision.is_some() {
-            return Err(ApprovalError::AlreadyDecided(id));
+        let decided_at = Utc::now();
+        {
+            let mut entries = self.inner.entries.write().await;
+            let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
+            if entry.decision.is_some() {
+                return Err(ApprovalError::AlreadyDecided(id));
+            }
+            entry.decision = Some(decision.clone());
+            entry.decided_at = Some(decided_at);
+            let _ = entry.tx.send(Some(decision.clone()));
         }
-        entry.decision = Some(decision.clone());
-        entry.decided_at = Some(Utc::now());
-        let _ = entry.tx.send(Some(decision));
+        let _ = self
+            .inner
+            .persistence
+            .record_decision(id, &decision, decided_at)
+            .await;
         Ok(())
     }
 
@@ -665,5 +783,169 @@ mod tests {
                 .expect("stale entry is still stored"),
             ApprovalDecision::Pending
         ));
+    }
+
+    // ---- I29-A persistence seam regression tests -------------------------
+
+    #[tokio::test]
+    async fn noop_persistence_is_a_no_op() {
+        let noop = NoopPersistence;
+        let request = make_request();
+        noop.record_request(&request, Utc::now())
+            .await
+            .expect("noop record_request succeeds");
+        noop.record_decision(request.id, &approved(), Utc::now())
+            .await
+            .expect("noop record_decision succeeds");
+        let pending = noop.load_pending().await.expect("noop load_pending");
+        assert!(
+            pending.is_empty(),
+            "noop backend reports no durable pending requests"
+        );
+        noop.mark_expired(request.id, Utc::now())
+            .await
+            .expect("noop mark_expired succeeds");
+    }
+
+    /// `with_persistence(NoopPersistence)` must be behaviorally identical to
+    /// the legacy constructors: same registration, decision and waiter result.
+    #[tokio::test]
+    async fn noop_persistence_matches_default_behavior() {
+        let timeout = Duration::from_secs(5);
+        let default_store = ApprovalStore::new(timeout);
+        let noop_store = ApprovalStore::with_persistence(
+            timeout,
+            DEFAULT_MAX_PENDING,
+            Arc::new(NoopPersistence),
+        );
+
+        let request = make_request();
+        let id = request.id;
+        let noop_request = request.clone();
+        let default_waiter = {
+            let store = default_store.clone();
+            tokio::spawn(async move { store.request(request).await })
+        };
+        let noop_waiter = {
+            let store = noop_store.clone();
+            tokio::spawn(async move { store.request(noop_request).await })
+        };
+
+        for _ in 0..200 {
+            if default_store.status(id).await.is_ok() && noop_store.status(id).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(matches!(
+            default_store.status(id).await,
+            Ok(ApprovalDecision::Pending)
+        ));
+        assert!(matches!(
+            noop_store.status(id).await,
+            Ok(ApprovalDecision::Pending)
+        ));
+
+        noop_store
+            .decide(id, approved())
+            .await
+            .expect("noop decide");
+        default_store
+            .decide(id, approved())
+            .await
+            .expect("default decide");
+
+        assert!(matches!(
+            default_waiter.await.expect("default waiter"),
+            ApprovalDecision::Approved { .. }
+        ));
+        assert!(matches!(
+            noop_waiter.await.expect("noop waiter"),
+            ApprovalDecision::Approved { .. }
+        ));
+    }
+
+    /// Test double proving the seam hooks actually fire without any I/O.
+    #[derive(Debug, Default)]
+    struct RecordingPersistence {
+        requests: tokio::sync::Mutex<Vec<Uuid>>,
+        decisions: tokio::sync::Mutex<Vec<Uuid>>,
+        expired: tokio::sync::Mutex<Vec<Uuid>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for RecordingPersistence {
+        async fn record_request(
+            &self,
+            request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.requests.lock().await.push(request.id);
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.decisions.lock().await.push(id);
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.expired.lock().await.push(id);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn persistence_hooks_record_request_and_decision() {
+        let recorder = Arc::new(RecordingPersistence::default());
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            recorder.clone(),
+        );
+
+        let request = make_request();
+        let id = request.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(request).await });
+        decide_after_registration(&store, id, approved()).await;
+        let decision = waiter.await.expect("waiter");
+        assert!(matches!(decision, ApprovalDecision::Approved { .. }));
+
+        assert_eq!(*recorder.requests.lock().await, vec![id]);
+        assert_eq!(*recorder.decisions.lock().await, vec![id]);
+        assert!(recorder.expired.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persistence_hook_records_timeout_as_expired() {
+        let recorder = Arc::new(RecordingPersistence::default());
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(50),
+            DEFAULT_MAX_PENDING,
+            recorder.clone(),
+        );
+
+        let request = make_request();
+        let id = request.id;
+        assert!(matches!(
+            store.request(request).await,
+            ApprovalDecision::Expired
+        ));
+        assert_eq!(*recorder.expired.lock().await, vec![id]);
+        assert!(recorder.decisions.lock().await.is_empty());
     }
 }

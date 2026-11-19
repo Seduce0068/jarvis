@@ -90,6 +90,16 @@ pub struct PolicyConfig {
     /// resume. Default false keeps the legacy in-memory + warn behavior.
     #[serde(default)]
     pub require_kill_switch_state_path: bool,
+    /// Optional PostgreSQL connection URL for durable approval persistence
+    /// (I29-A, 案A). Slice 1 only defines the config surface: no connection is
+    /// opened and no URL is parsed here.
+    #[serde(default)]
+    pub pg_url: Option<String>,
+    /// Opt-in guard: when true, startup fails closed if `pg_url` is unset (or
+    /// blank), because approval decisions would otherwise be lost on restart.
+    /// Default false keeps the legacy in-memory + warn-only behavior.
+    #[serde(default)]
+    pub require_approval_persistence: bool,
     pub default_deny: bool,
 }
 
@@ -122,6 +132,11 @@ impl PolicyConfig {
         // required but missing.
         config.validate_kill_switch_state_path()?;
         config.validate_kill_switch_admin_token()?;
+        // R4-A: a configured-but-blank approval token would let an empty
+        // `X-Jarvis-Approval-Token` header match through `constant_time_eq`,
+        // opening approve/deny to any caller. Fail closed at startup.
+        config.validate_approval_tokens()?;
+        config.validate_approval_persistence()?;
         if config
             .kill_switch_state_path
             .as_deref()
@@ -129,6 +144,16 @@ impl PolicyConfig {
         {
             tracing::warn!(
                 "kill_switch_state_path is unset; kill switch state is \
+                 in-memory only and will not survive a restart"
+            );
+        }
+        if config
+            .pg_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+        {
+            tracing::warn!(
+                "pg_url is unset; approval requests and decisions are \
                  in-memory only and will not survive a restart"
             );
         }
@@ -154,6 +179,8 @@ impl Default for PolicyConfig {
             require_approval_api_token: false,
             require_kill_switch_admin_token: false,
             require_kill_switch_state_path: false,
+            pg_url: None,
+            require_approval_persistence: false,
             default_deny: true,
         }
     }
@@ -202,6 +229,42 @@ impl PolicyConfig {
         Ok(())
     }
 
+    /// Fail-closed startup validation of the optional approval tokens (R4-A).
+    ///
+    /// A token that is present but blank (empty or whitespace-only) is
+    /// rejected unconditionally: the HTTP `require_approval_token` gate would
+    /// otherwise compare a blank presented header against a blank configured
+    /// value and let any caller decide approval requests. `None` (unset) stays
+    /// valid and keeps the legacy loopback-only behavior.
+    ///
+    /// Both errors are fixed literals: no configured token value is ever
+    /// interpolated, so secrets cannot reach startup logs.
+    pub fn validate_approval_tokens(&self) -> Result<()> {
+        if self
+            .approval_api_token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            anyhow::bail!(
+                "approval_api_token is set but blank; set \
+                 JARVIS_POLICY_APPROVAL_API_TOKEN to a non-empty secret or \
+                 unset it before starting the policy service"
+            );
+        }
+        if self
+            .approval_admin_token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            anyhow::bail!(
+                "approval_admin_token is set but blank; set \
+                 JARVIS_POLICY_APPROVAL_ADMIN_TOKEN to a non-empty secret or \
+                 unset it before starting the policy service"
+            );
+        }
+        Ok(())
+    }
+
     /// Fail-closed startup validation for the I8-E guard.
     ///
     /// When `require_kill_switch_state_path` is enabled, a missing or blank
@@ -222,6 +285,31 @@ impl PolicyConfig {
                  require_kill_switch_state_path = true; set \
                  JARVIS_POLICY_KILL_SWITCH_STATE_PATH so an emergency stop \
                  survives a restart"
+            );
+        }
+        Ok(())
+    }
+
+    /// Fail-closed startup validation for approval persistence (I29-A).
+    ///
+    /// When `require_approval_persistence` is enabled, a missing or blank
+    /// `pg_url` aborts startup: decisions would otherwise be lost on restart
+    /// while the operator believes they are durable. With the guard off this
+    /// is a no-op, preserving the legacy in-memory + warn-only behavior.
+    ///
+    /// This only validates configuration — no connection is attempted, so the
+    /// seam stays free of external I/O until slice 2. Kept public so callers
+    /// that build a `PolicyConfig` programmatically can enforce the same
+    /// guard before constructing a `PolicyEngine`.
+    pub fn validate_approval_persistence(&self) -> Result<()> {
+        let url_missing = self
+            .pg_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty());
+        if self.require_approval_persistence && url_missing {
+            anyhow::bail!(
+                "pg_url is unset but require_approval_persistence = true; set \
+                 JARVIS_POLICY_PG_URL so approval decisions survive a restart"
             );
         }
         Ok(())
@@ -716,12 +804,13 @@ default_deny = true
         assert_eq!(field, "config_path");
     }
 
-    /// Run the same two startup validations that `load_from_path` invokes, so
+    /// Run the same startup validations that `load_from_path` invokes, so
     /// tests can assert on their combined error without touching the process
     /// environment or the filesystem.
     fn validate_startup(config: &PolicyConfig) -> Result<()> {
         config.validate_kill_switch_state_path()?;
-        config.validate_kill_switch_admin_token()
+        config.validate_kill_switch_admin_token()?;
+        config.validate_approval_tokens()
     }
 
     /// An unset/blank admin token must abort startup regardless of the opt-in
@@ -814,5 +903,222 @@ default_deny = true
             .expect("blank token parses as an empty string");
         assert_eq!(config.kill_switch_admin_token(), "");
         assert!(config.validate_kill_switch_admin_token().is_err());
+    }
+
+    // ---- I29-A approval persistence config seam --------------------------
+
+    /// New fields are additive: legacy configs and `Default` leave them at
+    /// `None` / `false`, and validation stays a no-op.
+    #[test]
+    fn approval_persistence_defaults_are_backward_compatible() {
+        assert!(PolicyConfig::default().pg_url.is_none());
+        assert!(!PolicyConfig::default().require_approval_persistence);
+
+        let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
+            .extract()
+            .expect("legacy config parses");
+        assert!(config.pg_url.is_none());
+        assert!(!config.require_approval_persistence);
+        config
+            .validate_approval_persistence()
+            .expect("guard off is a no-op");
+    }
+
+    /// With the guard on, a missing or blank `pg_url` must fail closed.
+    #[test]
+    fn approval_persistence_guard_rejects_missing_pg_url() {
+        for url in [None, Some(String::new()), Some("   ".to_string())] {
+            let config = PolicyConfig {
+                pg_url: url,
+                require_approval_persistence: true,
+                ..Default::default()
+            };
+            let error = config
+                .validate_approval_persistence()
+                .expect_err("missing pg_url must fail closed");
+            let message = error.to_string();
+            assert!(
+                message.contains("require_approval_persistence"),
+                "error names the opt-in flag: {message}"
+            );
+            assert!(
+                message.contains("JARVIS_POLICY_PG_URL"),
+                "error names the env override: {message}"
+            );
+        }
+    }
+
+    /// A figment-parsed config with the flag on and no URL fails closed too.
+    #[test]
+    fn toml_persistence_guard_without_url_fails_closed() {
+        let toml = format!("{}\nrequire_approval_persistence = true\n", base_toml());
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("config parses");
+        assert!(config.require_approval_persistence);
+        assert!(
+            config.validate_approval_persistence().is_err(),
+            "guard=true with no pg_url must fail closed"
+        );
+    }
+
+    /// A configured URL satisfies the guard; no connection is attempted.
+    #[test]
+    fn approval_persistence_guard_accepts_configured_pg_url() {
+        let toml = format!(
+            "{}\npg_url = \"postgres://127.0.0.1:5432/jarvis\"\nrequire_approval_persistence = true\n",
+            base_toml()
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("config parses");
+        assert_eq!(
+            config.pg_url.as_deref(),
+            Some("postgres://127.0.0.1:5432/jarvis")
+        );
+        assert!(config.require_approval_persistence);
+        config
+            .validate_approval_persistence()
+            .expect("configured pg_url satisfies the guard");
+    }
+
+    /// `JARVIS_POLICY_PG_URL` maps to `pg_url` via the same env chain as
+    /// `load()`. No OS env var is mutated; a `Serialized` value is merged last.
+    #[test]
+    fn env_key_maps_to_pg_url_field() {
+        const PREFIX: &str = "JARVIS_POLICY_";
+        const ENV_KEY: &str = "JARVIS_POLICY_PG_URL";
+
+        let field = ENV_KEY
+            .strip_prefix(PREFIX)
+            .expect("key uses the policy env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "pg_url");
+
+        let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
+            .merge(Env::prefixed(PREFIX).only(&[field.as_str()]))
+            .merge(Serialized::default(
+                field.as_str(),
+                "postgres://127.0.0.1:5432/jarvis",
+            ))
+            .extract()
+            .expect("env-style key merges into the pg_url field");
+        assert_eq!(
+            config.pg_url.as_deref(),
+            Some("postgres://127.0.0.1:5432/jarvis")
+        );
+    }
+
+    // ---- R4-A: configured-but-blank approval tokens ----------------------
+
+    /// A token that is set but empty/whitespace-only must fail closed for both
+    /// the API and the admin field. A blank presented header would otherwise
+    /// equal a blank configured value in `constant_time_eq`.
+    #[test]
+    fn blank_approval_tokens_fail_closed() {
+        for blank in ["", "   ", "\t\n"] {
+            let api = PolicyConfig {
+                approval_api_token: Some(blank.into()),
+                ..Default::default()
+            };
+            let message = api
+                .validate_approval_tokens()
+                .expect_err("blank api token must fail closed")
+                .to_string();
+            assert!(message.contains("JARVIS_POLICY_APPROVAL_API_TOKEN"));
+            assert!(message.contains("blank"));
+            validate_startup(&api).expect_err("startup chain also fails closed");
+
+            let admin = PolicyConfig {
+                approval_admin_token: Some(blank.into()),
+                ..Default::default()
+            };
+            let message = admin
+                .validate_approval_tokens()
+                .expect_err("blank admin token must fail closed")
+                .to_string();
+            assert!(message.contains("JARVIS_POLICY_APPROVAL_ADMIN_TOKEN"));
+            assert!(message.contains("blank"));
+            validate_startup(&admin).expect_err("startup chain also fails closed");
+        }
+    }
+
+    /// The errors are fixed literals: no configured token value is ever echoed
+    /// into startup logs. `\t\n` is non-empty but blank after `trim`.
+    #[test]
+    fn blank_approval_token_errors_never_echo_the_value() {
+        let blank = "\t\n";
+        let api = PolicyConfig {
+            approval_api_token: Some(blank.into()),
+            ..Default::default()
+        };
+        let api_result = api.validate_approval_tokens();
+        assert_eq!(
+            api_result.expect_err("blank").to_string(),
+            "approval_api_token is set but blank; set \
+             JARVIS_POLICY_APPROVAL_API_TOKEN to a non-empty secret or \
+             unset it before starting the policy service"
+        );
+
+        let admin = PolicyConfig {
+            approval_admin_token: Some(blank.into()),
+            ..Default::default()
+        };
+        let admin_result = admin.validate_approval_tokens();
+        assert_eq!(
+            admin_result.expect_err("blank").to_string(),
+            "approval_admin_token is set but blank; set \
+             JARVIS_POLICY_APPROVAL_ADMIN_TOKEN to a non-empty secret or \
+             unset it before starting the policy service"
+        );
+    }
+
+    /// Unset tokens keep the legacy behavior; real tokens still pass.
+    #[test]
+    fn unset_and_nonblank_approval_tokens_pass_validation() {
+        let legacy = PolicyConfig::default();
+        assert!(legacy.approval_api_token.is_none());
+        assert!(legacy.approval_admin_token.is_none());
+        legacy
+            .validate_approval_tokens()
+            .expect("unset tokens keep the legacy behavior");
+        validate_startup(&legacy).expect("startup chain is unchanged for legacy configs");
+
+        let configured = PolicyConfig {
+            approval_api_token: Some("api-secret".into()),
+            approval_admin_token: Some("admin-secret".into()),
+            ..Default::default()
+        };
+        configured
+            .validate_approval_tokens()
+            .expect("non-blank tokens pass");
+        validate_startup(&configured).expect("startup chain passes");
+    }
+
+    /// The guard is wired into `load_from_path`: a config file with a blank
+    /// token aborts startup before any service is constructed.
+    #[test]
+    fn load_from_path_rejects_blank_approval_token() {
+        for (key, env_key) in [
+            ("approval_api_token", "JARVIS_POLICY_APPROVAL_API_TOKEN"),
+            ("approval_admin_token", "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN"),
+        ] {
+            // Ambient env overrides are merged on top of TOML by
+            // `load_from_path`; skip when the runner injects this token.
+            if std::env::var_os(env_key).is_some() {
+                continue;
+            }
+            let toml = format!("{}\n{key} = \"\"\n", base_toml());
+            let file_name = format!("jarvis-policy-r4a-{key}.toml");
+            let path = std::env::temp_dir().join(&file_name);
+            std::fs::write(&path, &toml).expect("write temp config");
+            let error = PolicyConfig::load_from_path(path.to_str().expect("utf8 temp path"))
+                .expect_err("blank approval token must abort startup");
+            assert!(
+                error.to_string().contains(env_key),
+                "error names the env override: {error}"
+            );
+            std::fs::remove_file(&path).expect("clean temp config");
+        }
     }
 }
