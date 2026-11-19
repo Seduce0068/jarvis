@@ -7,6 +7,9 @@ Safety properties:
   a classification only.
 - Known-safe matches (placeholders, documented examples, and the repo's own
   PII-detection regex definitions) are classified as such, not as findings.
+  Documentation under docs/ is NOT a blanket safe path (I7-B): placeholder
+  examples there are recognised via PLACEHOLDER, but a value-like literal in
+  documentation fails the gate just like one in source code.
 
 Usage: python3 ci/scripts/secret_scan.py
 Exit 0 only when no value-like credentials are found and every tracked file
@@ -26,17 +29,19 @@ ASSIGNMENT = re.compile(
 )
 PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
 PLACEHOLDER = re.compile(
-    r"(?i)(changeme|your[_-]|xxx+|<[^>]+>|\$\{|op://|example|placeholder|"
+    r"(?i)(changeme|replace[_-]?me|your[_-]|xxx+|<[^>]+>|\$\{|op://|example|placeholder|"
     r"dummy|redact|template|none|null|todo|tbd|^\s*['\"]?\s*['\"]?\s*$)"
 )
 # These files define detection regexes or document credential NAMES, not values.
+# docs/ is intentionally NOT a safe path (I7-B): placeholder examples in docs
+# are recognised via PLACEHOLDER, but a value-like literal in documentation
+# must fail the gate just like one in source code.
 SAFE_PATHS = (
     # Scanners/pattern definitions legitimately contain credential-shaped
     # literals (e.g. `PRIVATE_KEY = re.compile(...)`); treat as review-only.
     "ci/scripts/secret_scan.py",
     "infra/config/pii_patterns.toml",
     "AGENTS.md",
-    "docs/",
     "ci/review-gate.yml",
     "infra/README.md",
 )
