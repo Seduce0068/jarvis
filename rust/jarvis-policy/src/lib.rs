@@ -83,6 +83,14 @@ impl PolicyEngine {
         // so existing (and all test) deployments are behaviorally unchanged.
         // The URL itself is never logged: it may carry credentials.
         let approval_timeout = std::time::Duration::from_secs(config.approval_timeout_secs);
+        // R5-D: the commit side re-reads the authoritative kill-switch flag at
+        // both decision commit boundaries. The gate captures an Arc to the
+        // very same KillSwitch the transports arm/disarm, so no mirror can
+        // drift and no activation can slip between the transport pre-check
+        // and the durable commit unnoticed.
+        let kill_switch_for_gate = Arc::clone(&kill_switch);
+        let commit_gate: Arc<dyn Fn() -> bool + Send + Sync> =
+            Arc::new(move || kill_switch_for_gate.is_activated());
         let approvals = match config
             .pg_url
             .as_deref()
@@ -91,15 +99,18 @@ impl PolicyEngine {
             Some(pg_url) => {
                 tracing::info!("approval persistence enabled: PostgreSQL");
                 let persistence = Arc::new(PgApprovalPersistence::connect(pg_url).await?);
-                approval::ApprovalStore::with_persistence(
+                approval::ApprovalStore::with_commit_gate(
                     approval_timeout,
                     config.approval_max_pending,
                     persistence,
+                    Some(Arc::clone(&commit_gate)),
                 )
             }
-            None => approval::ApprovalStore::with_max_pending(
+            None => approval::ApprovalStore::with_commit_gate(
                 approval_timeout,
                 config.approval_max_pending,
+                Arc::new(approval::NoopPersistence),
+                Some(commit_gate),
             ),
         };
 
@@ -184,6 +195,9 @@ impl PolicyEngine {
         // P0-4: the emergency stop must also block human decisions, not just
         // tool execution. Otherwise an operator could approve work that is
         // immediately denied, while the UI reports a successful decision.
+        // R5-D: this is only the fast-path check; `ApprovalStore::decide`
+        // re-reads the same authoritative flag at its commit boundaries so an
+        // activation landing after this check cannot commit the decision.
         if self.kill_switch.is_activated() {
             return Err(approval::ApprovalError::KillSwitchActivated);
         }
@@ -201,6 +215,8 @@ impl PolicyEngine {
         id: uuid::Uuid,
         reason: &str,
     ) -> std::result::Result<policy::ApprovalDecision, approval::ApprovalError> {
+        // R5-D: fast-path check; the authoritative re-check lives in
+        // `ApprovalStore::decide` so a stop landing here still blocks the commit.
         if self.kill_switch.is_activated() {
             return Err(approval::ApprovalError::KillSwitchActivated);
         }
@@ -452,6 +468,251 @@ mod tests {
         PolicyEngine::new(config)
             .await
             .expect("placeholder token is allowed when the strict guard is off");
+
+        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+    }
+
+    // ---- R5-D TOCTOU: activation between the pre-check and the commit -------
+
+    /// No-I/O persistence double: records durable commits and can fire a hook
+    /// from inside `record_decision` to control the kill-switch race. The
+    /// optional third argument of `with_commit_gate` is what the tests use to
+    /// flip the authoritative flag at an exact point in the ordering.
+    #[derive(Default)]
+    struct CommitRecorder {
+        decisions: tokio::sync::Mutex<Vec<uuid::Uuid>>,
+        on_commit: Option<Arc<dyn Fn() + Send + Sync>>,
+    }
+
+    #[async_trait::async_trait]
+    impl approval::ApprovalPersistence for CommitRecorder {
+        async fn record_request(
+            &self,
+            _request: &policy::ApprovalRequest,
+            _deadline: chrono::DateTime<chrono::Utc>,
+        ) -> std::result::Result<(), approval::ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            id: uuid::Uuid,
+            _decision: &policy::ApprovalDecision,
+            _decided_at: chrono::DateTime<chrono::Utc>,
+        ) -> std::result::Result<(), approval::ApprovalError> {
+            if let Some(hook) = &self.on_commit {
+                hook();
+            }
+            self.decisions.lock().await.push(id);
+            Ok(())
+        }
+
+        async fn load_pending(
+            &self,
+        ) -> std::result::Result<Vec<policy::ApprovalRequest>, approval::ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_expired(
+            &self,
+            _id: uuid::Uuid,
+            _expired_at: chrono::DateTime<chrono::Utc>,
+        ) -> std::result::Result<(), approval::ApprovalError> {
+            Ok(())
+        }
+    }
+
+    /// Engine whose commit gate arms the real kill switch on its first read.
+    /// That read happens inside `ApprovalStore::decide`, after
+    /// `PolicyEngine::approve/deny` already passed their pre-check: precisely
+    /// the "check -> activation -> commit" ordering of the confirmed finding.
+    async fn engine_with_toctou_gate(label: &str) -> (PolicyEngine, Arc<CommitRecorder>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let base = test_engine(label).await;
+        let switch = Arc::clone(&base.kill_switch);
+        let hits = Arc::new(AtomicUsize::new(0));
+        let gate: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+            if hits.fetch_add(1, Ordering::SeqCst) == 0 {
+                switch.activate("regression: stop after pre-check".into());
+            }
+            switch.is_activated()
+        });
+        let recorder = Arc::new(CommitRecorder::default());
+        let approvals = approval::ApprovalStore::with_commit_gate(
+            std::time::Duration::from_secs(30),
+            approval::DEFAULT_MAX_PENDING,
+            recorder.clone(),
+            Some(gate),
+        );
+        (PolicyEngine { approvals, ..base }, recorder)
+    }
+
+    async fn register_pending(
+        engine: &PolicyEngine,
+    ) -> (
+        uuid::Uuid,
+        tokio::task::JoinHandle<policy::ApprovalDecision>,
+    ) {
+        let request = sample_request();
+        let id = request.id;
+        let engine_for_waiter = engine.clone();
+        let waiter = tokio::spawn(async move {
+            engine_for_waiter
+                .request_approval(request)
+                .await
+                .expect("approval request accepted")
+        });
+        for _ in 0..200 {
+            if matches!(
+                engine.approval_status(id).await,
+                Ok(policy::ApprovalDecision::Pending)
+            ) {
+                return (id, waiter);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("request never became pending");
+    }
+
+    /// Regression: a stop landing after the pre-check but before the commit
+    /// must reject `approve` with the fixed-vocabulary error, never call the
+    /// persistence backend, and leave the request Pending for a later retry.
+    #[tokio::test]
+    async fn kill_switch_between_check_and_commit_blocks_approve() {
+        let label = "toctou-approve";
+        let (engine, recorder) = engine_with_toctou_gate(label).await;
+        let (id, waiter) = register_pending(&engine).await;
+
+        assert!(
+            !engine.kill_switch_status().activated,
+            "precondition: the stop has not landed yet"
+        );
+
+        let error = engine
+            .approve(id, "koppe")
+            .await
+            .expect_err("the commit boundary must block the decision");
+        assert!(
+            matches!(error, approval::ApprovalError::KillSwitchActivated),
+            "fixed-vocabulary error expected: {error:?}"
+        );
+        assert!(
+            recorder.decisions.lock().await.is_empty(),
+            "record_decision must never be reached after the stop"
+        );
+        assert!(matches!(
+            engine.approval_status(id).await,
+            Ok(policy::ApprovalDecision::Pending)
+        ));
+        assert!(
+            !waiter.is_finished(),
+            "the waiter must not observe a blocked decision"
+        );
+
+        engine
+            .deactivate_kill_switch("test-admin-token")
+            .expect("deactivate");
+        engine
+            .approve(id, "koppe")
+            .await
+            .expect("decision succeeds once the stop is lifted");
+        assert!(matches!(
+            waiter.await.expect("waiter task"),
+            policy::ApprovalDecision::Approved { .. }
+        ));
+
+        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+    }
+
+    /// Same ordering for `deny`: a human denial is also a decision and must be
+    /// blocked by the emergency stop at the commit boundary.
+    #[tokio::test]
+    async fn kill_switch_between_check_and_commit_blocks_deny() {
+        let label = "toctou-deny";
+        let (engine, recorder) = engine_with_toctou_gate(label).await;
+        let (id, waiter) = register_pending(&engine).await;
+
+        let error = engine
+            .deny(id, "no")
+            .await
+            .expect_err("the commit boundary must block the denial");
+        assert!(
+            matches!(error, approval::ApprovalError::KillSwitchActivated),
+            "fixed-vocabulary error expected: {error:?}"
+        );
+        assert!(
+            recorder.decisions.lock().await.is_empty(),
+            "record_decision must never be reached after the stop"
+        );
+        assert!(matches!(
+            engine.approval_status(id).await,
+            Ok(policy::ApprovalDecision::Pending)
+        ));
+
+        engine
+            .deactivate_kill_switch("test-admin-token")
+            .expect("deactivate");
+        engine
+            .deny(id, "no")
+            .await
+            .expect("deny after deactivation");
+        assert!(matches!(
+            waiter.await.expect("waiter task"),
+            policy::ApprovalDecision::Denied { .. }
+        ));
+
+        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+    }
+
+    /// Defense in depth: when the stop lands *while* the durable commit is in
+    /// flight, the authority is re-read once more before finalization so the
+    /// decision is never published to the waiter or the UI.
+    #[tokio::test]
+    async fn kill_switch_during_commit_is_not_published() {
+        let label = "toctou-during-commit";
+        let base = test_engine(label).await;
+        let switch = Arc::clone(&base.kill_switch);
+        let recorder = Arc::new(CommitRecorder {
+            on_commit: Some(Arc::new(move || {
+                switch.activate("regression: stop during commit".into());
+            })),
+            ..Default::default()
+        });
+        let commit_gate: Arc<dyn Fn() -> bool + Send + Sync> = {
+            let switch = Arc::clone(&base.kill_switch);
+            Arc::new(move || switch.is_activated())
+        };
+        let approvals = approval::ApprovalStore::with_commit_gate(
+            std::time::Duration::from_secs(30),
+            approval::DEFAULT_MAX_PENDING,
+            recorder.clone(),
+            Some(commit_gate),
+        );
+        let engine = PolicyEngine { approvals, ..base };
+        let (id, waiter) = register_pending(&engine).await;
+
+        let error = engine
+            .approve(id, "koppe")
+            .await
+            .expect_err("publication must be blocked after the stop lands");
+        assert!(
+            matches!(error, approval::ApprovalError::KillSwitchActivated),
+            "fixed-vocabulary error expected: {error:?}"
+        );
+        assert_eq!(
+            recorder.decisions.lock().await.len(),
+            1,
+            "the backend commit was already in flight when the stop landed"
+        );
+        assert!(matches!(
+            engine.approval_status(id).await,
+            Ok(policy::ApprovalDecision::Pending)
+        ));
+        assert!(
+            !waiter.is_finished(),
+            "a blocked decision is never published"
+        );
 
         std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
     }
