@@ -85,6 +85,16 @@ pub struct McpGatewayConfig {
     /// `JARVIS_MCP_GW_UPSTREAMS='[{name="fs",command=["/usr/bin/mcp-fs"]}]'`.
     #[serde(default)]
     pub upstreams: Vec<UpstreamConfig>,
+    /// Comma-separated host patterns allowed as `web.fetch` destinations,
+    /// e.g. `example.com,*.trusted.org`. Read from TOML `egress_allowlist` or
+    /// `JARVIS_MCP_GW_EGRESS_ALLOWLIST` (Figment maps both to this field).
+    ///
+    /// There is no "unset means unrestricted" fallback: an empty, blank or
+    /// malformed value normalizes to no hosts, and the sandbox denies every
+    /// fetch (fail-closed). Only validated host patterns are logged at load
+    /// time; credential-bearing config values are never emitted.
+    #[serde(default)]
+    pub egress_allowlist: String,
 }
 
 impl McpGatewayConfig {
@@ -112,7 +122,24 @@ impl McpGatewayConfig {
             .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
             .extract()?;
         config.warn_if_legacy_sandbox_settings_are_ignored();
+        config.log_egress_allowlist();
         Ok(config)
+    }
+
+    /// Emit the effective egress allowlist at startup so an operator can see
+    /// which hosts `web.fetch` may reach. Only normalized host patterns are
+    /// logged; tokens and other secret config values are never included.
+    fn log_egress_allowlist(&self) {
+        match parse_egress_allowlist(&self.egress_allowlist) {
+            Some(hosts) => tracing::info!(
+                egress_allowlist = %hosts.join(","),
+                host_count = hosts.len(),
+                "web.fetch egress allowlist (effective)"
+            ),
+            None => tracing::warn!(
+                "web.fetch egress allowlist is empty or invalid: every fetch is denied (fail-closed)"
+            ),
+        }
     }
 
     /// True when legacy sandbox keys carry non-default values that an
@@ -144,6 +171,49 @@ fn default_policy_http_addr() -> String {
     "http://127.0.0.1:8081".to_string()
 }
 
+/// Normalize a comma-separated egress allowlist into comparable host patterns.
+///
+/// Both the TOML key and `JARVIS_MCP_GW_EGRESS_ALLOWLIST` supply this value as
+/// a string. Blank input and any malformed entry return `None`, which the
+/// sandbox enforces as deny-all; there is deliberately no unrestricted
+/// fallback for a missing or broken configuration.
+pub(crate) fn parse_egress_allowlist(raw: &str) -> Option<Vec<String>> {
+    let mut hosts = Vec::new();
+    for entry in raw.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        if !is_valid_host_pattern(entry) {
+            return None;
+        }
+        let normalized = entry.to_ascii_lowercase();
+        if !hosts.contains(&normalized) {
+            hosts.push(normalized);
+        }
+    }
+    (!hosts.is_empty()).then_some(hosts)
+}
+
+/// A bare DNS name or `*.` followed by a DNS name. Schemes, ports, paths,
+/// whitespace and wildcard forms other than a leading `*.` are rejected so a
+/// malformed entry cannot silently widen the allowlist.
+fn is_valid_host_pattern(entry: &str) -> bool {
+    let host = entry.strip_prefix("*.").unwrap_or(entry);
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
+}
+
 impl Default for McpGatewayConfig {
     fn default() -> Self {
         Self {
@@ -159,6 +229,8 @@ impl Default for McpGatewayConfig {
             mcp_principal: "opencode".into(),
             require_server_side_principal: false,
             upstreams: Vec::new(),
+            // Unset means deny-all in the fetch path, never unrestricted.
+            egress_allowlist: String::new(),
         }
     }
 }
@@ -484,5 +556,101 @@ mcp_principal = "opencode"
         let config: McpGatewayConfig = toml::from_str(&toml).expect("legacy config parses");
         assert!(matches!(config.sandbox_type, SandboxType::Firejail));
         assert!(config.has_effective_legacy_sandbox_settings());
+    }
+
+    /// The new key must be a first-class TOML field rather than an ignored
+    /// unknown key, and its value must normalize to enforced host patterns.
+    #[test]
+    fn egress_allowlist_from_toml_is_honoured() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+mcp_principal = "opencode"
+egress_allowlist = "example.com, *.trusted.org"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
+        assert_eq!(config.egress_allowlist, "example.com, *.trusted.org");
+        assert_eq!(
+            parse_egress_allowlist(&config.egress_allowlist),
+            Some(vec!["example.com".to_string(), "*.trusted.org".to_string()])
+        );
+    }
+
+    /// Figment maps `JARVIS_MCP_GW_EGRESS_ALLOWLIST` to the same snake_case
+    /// field; `Serialized` reproduces the env-style value shape without
+    /// mutating process-wide environment variables.
+    #[test]
+    fn egress_allowlist_from_env_style_value_is_honoured() {
+        let env_value = serde_json::json!({
+            "grpc_addr": "127.0.0.1:50052",
+            "http_addr": "127.0.0.1:8082",
+            "allowlist_path": "/etc/jarvis/mcp_allowlist.toml",
+            "sandbox_type": "none",
+            "sandbox_config": {},
+            "policy_grpc_addr": "http://127.0.0.1:50051",
+            "mcp_principal": "opencode",
+            "egress_allowlist": " EXAMPLE.com , *.Trusted.ORG ",
+        });
+        let config: McpGatewayConfig = Figment::from(Serialized::defaults(env_value))
+            .extract()
+            .expect("env-style value parses");
+        assert_eq!(config.egress_allowlist, " EXAMPLE.com , *.Trusted.ORG ");
+        assert_eq!(
+            parse_egress_allowlist(&config.egress_allowlist),
+            Some(vec!["example.com".to_string(), "*.trusted.org".to_string()])
+        );
+    }
+
+    /// A legacy config without the key still parses, but the effective value
+    /// is deny-all rather than the old silent unrestricted fallback.
+    #[test]
+    fn legacy_config_without_egress_allowlist_is_fail_closed() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+mcp_principal = "opencode"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
+        assert_eq!(config.egress_allowlist, "");
+        assert_eq!(parse_egress_allowlist(&config.egress_allowlist), None);
+        assert_eq!(
+            parse_egress_allowlist(&McpGatewayConfig::default().egress_allowlist),
+            None
+        );
+    }
+
+    #[test]
+    fn egress_allowlist_empty_or_invalid_is_fail_closed() {
+        for raw in ["", "   ", ",", " , , "] {
+            assert_eq!(parse_egress_allowlist(raw), None, "{raw:?}");
+        }
+        for raw in [
+            "http://example.com",
+            "example.com:443",
+            "foo bar",
+            "*",
+            "*.",
+            "-bad.example",
+            "bad..example",
+            "*.*.example.com",
+        ] {
+            assert_eq!(parse_egress_allowlist(raw), None, "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn egress_allowlist_normalizes_case_and_dedupes() {
+        assert_eq!(
+            parse_egress_allowlist(" EXAMPLE.com, *.Trusted.ORG , example.com"),
+            Some(vec!["example.com".to_string(), "*.trusted.org".to_string()])
+        );
     }
 }

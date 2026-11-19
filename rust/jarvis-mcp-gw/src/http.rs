@@ -494,6 +494,76 @@ requires_approval = true
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    /// Regression (I23-C): every caller-input failure that the sandbox now
+    /// types as `ClientError` must keep mapping to HTTP 400, while untyped
+    /// internal failures stay 500. The message is checked only as the body.
+    #[test]
+    fn typed_sandbox_failure_messages_map_to_400() {
+        use crate::error::McpGatewayError;
+
+        for message in [
+            "too many redirects (> 3)",
+            "unsupported content type: 'application/octet-stream'",
+            "response too large (4096 bytes > 1024)",
+            "file too large to read (1048577 bytes)",
+            "stat /tmp/notes.txt: No such file or directory",
+            "read /tmp/notes.txt: permission denied",
+            "read_dir /tmp/notes: No such file or directory",
+            "dns lookup failed: missing.invalid",
+            "dns lookup returned no addresses for missing.invalid",
+            "host 'attacker.example' is not in the egress allowlist",
+            "host 'example.com' is denied: egress allowlist is empty or invalid",
+        ] {
+            let error: anyhow::Error = McpGatewayError::ClientError(message.to_owned()).into();
+            let (status, body) = http_error(error);
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{message}");
+            assert_eq!(body.0["error"].as_str().unwrap(), message);
+        }
+
+        for message in [
+            "build http client: invalid configuration",
+            "build pinned http client: invalid configuration",
+            "canonicalize base /home/koppe: permission denied",
+        ] {
+            let (status, _) = http_error(anyhow::anyhow!(message));
+            assert_eq!(
+                status,
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "{message}"
+            );
+        }
+    }
+
+    /// End-to-end status check: an argument rejected inside the native
+    /// `web.fetch` handler reaches the HTTP adapter as a typed 400, not 500.
+    #[tokio::test]
+    async fn sandbox_client_errors_map_to_http_400() {
+        let sandbox = crate::sandbox::Sandbox::new(&McpGatewayConfig::default())
+            .await
+            .expect("sandbox starts");
+        let tool = crate::allowlist::AllowedTool {
+            name: "web.fetch".to_string(),
+            description: String::new(),
+            allowed_principals: vec!["opencode".to_string()],
+            max_args_size: 65536,
+            timeout_ms: 2_000,
+            requires_approval: false,
+        };
+        for args in [
+            json!({}),
+            json!({ "url": "file:///etc/passwd" }),
+            json!({ "url": "https://user:pass@example.com" }),
+        ] {
+            let error = sandbox
+                .execute("web.fetch", args.clone(), &tool)
+                .await
+                .expect_err("invalid fetch arguments are rejected");
+            let (status, body) = http_error(error);
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{args}");
+            assert!(body.0["error"].is_string());
+        }
+    }
+
     /// When an admin token is configured, `/v1/execute` requires it in
     /// `x-jarvis-admin-token`. Missing/wrong values are rejected before any
     /// tool work, and neither the approval-token nor the gRPC-token header

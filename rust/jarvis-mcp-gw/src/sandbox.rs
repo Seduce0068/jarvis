@@ -7,7 +7,7 @@
 //! `opencode` CLI were removed (ADR-0002).
 
 use crate::error::McpGatewayError;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -34,14 +34,31 @@ fn client_context<T, E>(result: std::result::Result<T, E>, context: String) -> R
 where
     E: std::error::Error + Send + Sync + 'static,
 {
-    result
-        .with_context(|| context)
-        .map_err(|err| client_error(err.to_string()))
+    result.map_err(|err| client_context_error(err, context))
+}
+
+/// Same as [`client_context`] for an error that is already unwrapped. Using
+/// `anyhow`'s context renderer keeps the exact message the former bare
+/// `.context(..)` produced while stamping the error as a `ClientError`.
+fn client_context_error<E>(error: E, context: impl Into<String>) -> anyhow::Error
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    client_error(
+        anyhow::Error::new(error)
+            .context(context.into())
+            .to_string(),
+    )
 }
 
 #[derive(Clone)]
 pub struct Sandbox {
     base_dir: PathBuf,
+    /// Hosts enforced on every `web.fetch` hop, derived from the gateway
+    /// config (TOML key or env override). An unset/invalid value becomes
+    /// `DenyAll`, so no configuration path can silently restore unlimited
+    /// egress.
+    egress_allowlist: EgressAllowlist,
 }
 
 impl Sandbox {
@@ -51,15 +68,23 @@ impl Sandbox {
         // `config.sandbox_config` is kept in the gateway config for
         // compatibility; the sandbox itself no longer shells out (ADR-0002).
         let _ = &config.sandbox_config;
+        let egress_allowlist = EgressAllowlist::from_config(&config.egress_allowlist);
         Ok(Self {
             base_dir: PathBuf::from(base_dir),
+            egress_allowlist,
         })
     }
 
-    /// Test/embedding constructor with an explicit workspace root.
+    /// Test/embedding constructor with an explicit workspace root. The
+    /// `Unrestricted` value is a deliberate test-only bypass so direct
+    /// handler tests need no config; production always goes through
+    /// [`Self::new`] with fail-closed config parsing.
     #[allow(dead_code)]
     fn with_base(base: PathBuf) -> Self {
-        Self { base_dir: base }
+        Self {
+            base_dir: base,
+            egress_allowlist: EgressAllowlist::Unrestricted,
+        }
     }
 
     pub async fn execute(
@@ -117,7 +142,7 @@ impl Sandbox {
             .and_then(Value::as_str)
             .ok_or_else(|| client_error("missing 'url' argument"))?;
         let mut url = validate_http_url(raw)?;
-        let allowlist = EgressAllowlist::from_env();
+        let allowlist = &self.egress_allowlist;
         let max_bytes = web_max_bytes(args);
         let timeout_ms = tool_config.timeout_ms.clamp(1_000, 15_000);
         let client = reqwest::Client::builder()
@@ -133,10 +158,10 @@ impl Sandbox {
         loop {
             let dest = ensure_public_host(&url).await?;
             // Applied on every hop, so a redirect cannot escape the allowlist.
-            ensure_host_allowed(&url, &allowlist)?;
+            ensure_host_allowed(&url, allowlist)?;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                bail!("web.fetch timed out");
+                return Err(client_error("web.fetch timed out"));
             }
             // Pin the TCP connection to the addresses validated above. Without
             // this, reqwest resolves the DNS name a second time and a rebinding
@@ -146,10 +171,11 @@ impl Sandbox {
             // real host; rewriting the URL host to an IP would break TLS.
             // IP literals need no pinning (reqwest never re-resolves them).
             let hop_client = fetch_client_for_dest(&dest, &client)?;
-            let resp = tokio::time::timeout(remaining, hop_client.get(url.clone()).send())
-                .await
-                .context("web.fetch request timed out")?
-                .with_context(|| format!("GET {url}"))?;
+            let resp = client_context(
+                tokio::time::timeout(remaining, hop_client.get(url.clone()).send()).await,
+                "web.fetch request timed out".to_string(),
+            )?;
+            let resp = client_context(resp, format!("GET {url}"))?;
             let status = resp.status();
             // A redirect must always carry a usable Location. Letting a 3xx
             // without one fall through would return the intermediate body as
@@ -163,7 +189,9 @@ impl Sandbox {
                 let next = redirect_target(&url, location)?;
                 redirects += 1;
                 if redirects > WEB_FETCH_MAX_REDIRECTS {
-                    bail!("too many redirects (> {WEB_FETCH_MAX_REDIRECTS})");
+                    return Err(client_error(format!(
+                        "too many redirects (> {WEB_FETCH_MAX_REDIRECTS})"
+                    )));
                 }
                 url = next;
                 continue;
@@ -175,12 +203,14 @@ impl Sandbox {
                 .unwrap_or("")
                 .to_string();
             if !is_textual_content_type(&content_type) {
-                bail!("unsupported content type: '{content_type}'");
+                let message = format!("unsupported content type: '{content_type}'");
+                return Err(client_error(message));
             }
             if let Some(len) = resp.content_length()
                 && len as usize > max_bytes
             {
-                bail!("response too large ({len} bytes > {max_bytes})");
+                let message = format!("response too large ({len} bytes > {max_bytes})");
+                return Err(client_error(message));
             }
             let mut resp = resp;
             let mut body: Vec<u8> = Vec::new();
@@ -188,11 +218,11 @@ impl Sandbox {
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    bail!("web.fetch body timed out");
+                    return Err(client_error("web.fetch body timed out"));
                 }
                 match tokio::time::timeout(remaining, resp.chunk()).await {
-                    Err(_) => bail!("web.fetch body timed out"),
-                    Ok(Err(err)) => return Err(err).context("read response body"),
+                    Err(_) => return Err(client_error("web.fetch body timed out")),
+                    Ok(Err(err)) => return Err(client_context_error(err, "read response body")),
                     Ok(Ok(None)) => break,
                     Ok(Ok(Some(chunk))) => {
                         if body.len() + chunk.len() > max_bytes {
@@ -218,27 +248,33 @@ impl Sandbox {
 
     fn native_read(&self, args: &Value) -> Result<Value> {
         let path = self.resolve_path(args)?;
-        let meta = std::fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
+        let path_display = path.display().to_string();
+        let meta = client_context(std::fs::metadata(&path), format!("stat {path_display}"))?;
         if meta.is_dir() {
-            let message = format!("path is a directory: {}", path.display());
+            let message = format!("path is a directory: {path_display}");
             return Err(client_error(message));
         }
         if meta.len() > NATIVE_MAX_OUTPUT as u64 {
-            bail!("file too large to read ({} bytes)", meta.len());
+            let message = format!("file too large to read ({} bytes)", meta.len());
+            return Err(client_error(message));
         }
-        let content =
-            std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-        Ok(json!({"path": path.display().to_string(), "content": content}))
+        let content = client_context(
+            std::fs::read_to_string(&path),
+            format!("read {path_display}"),
+        )?;
+        Ok(json!({"path": path_display, "content": content}))
     }
 
     fn native_list(&self, args: &Value) -> Result<Value> {
         let path = self.resolve_path(args)?;
+        let path_display = path.display().to_string();
         let mut entries = Vec::new();
-        for entry in
-            std::fs::read_dir(&path).with_context(|| format!("read_dir {}", path.display()))?
-        {
-            let entry = entry?;
-            let file_type = entry.file_type()?;
+        let dir = client_context(std::fs::read_dir(&path), format!("read_dir {path_display}"))?;
+        for entry in dir {
+            let entry = entry.map_err(|err| client_error(err.to_string()))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|err| client_error(err.to_string()))?;
             entries.push(json!({
                 "name": entry.file_name().to_string_lossy(),
                 "type": if file_type.is_dir() { "dir" } else { "file" },
@@ -250,7 +286,7 @@ impl Sandbox {
                 .unwrap_or("")
                 .cmp(b["name"].as_str().unwrap_or(""))
         });
-        Ok(json!({"path": path.display().to_string(), "entries": entries}))
+        Ok(json!({"path": path_display, "entries": entries}))
     }
 
     async fn native_git(
@@ -265,18 +301,24 @@ impl Sandbox {
         cmd.arg("-C").arg(&path).args(git_args);
         // P0-5: do not leak service secrets (BWS_ACCESS_TOKEN) to children.
         crate::subprocess::apply_minimal_env(&mut cmd);
-        let output = tokio::time::timeout(timeout, cmd.output())
-            .await
-            .context("git timed out")??;
+        // A timeout follows from the caller's path/tool config, so it is a
+        // client error. A git spawn failure stays an untyped internal error.
+        let output = client_context(
+            tokio::time::timeout(timeout, cmd.output()).await,
+            "git timed out".to_string(),
+        )??;
         if !output.status.success() {
-            bail!(
+            return Err(client_error(format!(
                 "git {:?} failed: {}",
                 git_args,
                 String::from_utf8_lossy(&output.stderr)
-            );
+            )));
         }
         if output.stdout.len() > NATIVE_MAX_OUTPUT {
-            bail!("git output too large ({} bytes)", output.stdout.len());
+            return Err(client_error(format!(
+                "git output too large ({} bytes)",
+                output.stdout.len()
+            )));
         }
         Ok(json!({
             "path": path.display().to_string(),
@@ -364,24 +406,38 @@ fn web_max_bytes(args: &Value) -> usize {
     usize::try_from(clamped).unwrap_or(WEB_FETCH_HARD_MAX_BYTES)
 }
 
-/// Destination host allowlist for `web.fetch`, sourced from
-/// `JARVIS_MCP_GW_EGRESS_ALLOWLIST` (comma-separated hostnames, e.g.
-/// `example.com,*.trusted.org`). Unset or blank keeps the historical
-/// unrestricted behaviour, so existing deployments are unaffected.
+/// Destination host allowlist for `web.fetch`.
+///
+/// Production values come from
+/// [`crate::config::McpGatewayConfig::egress_allowlist`] (TOML key or the
+/// `JARVIS_MCP_GW_EGRESS_ALLOWLIST` env override). An unset, blank or invalid
+/// value becomes `DenyAll`: every fetch is refused instead of silently
+/// reverting to unrestricted egress.
 #[derive(Clone, Debug)]
 enum EgressAllowlist {
+    /// Explicit test-only bypass used by [`Sandbox::with_base`]. The config
+    /// path never derives this variant from an empty value.
     Unrestricted,
+    /// No valid host patterns: all destinations are refused.
+    DenyAll,
     Hosts(Vec<String>),
 }
 
 impl EgressAllowlist {
-    fn from_env() -> Self {
-        match std::env::var("JARVIS_MCP_GW_EGRESS_ALLOWLIST") {
-            Ok(raw) => Self::parse(&raw),
-            Err(_) => Self::Unrestricted,
+    /// Build from the config field. Parsing and validation live in
+    /// [`crate::config::parse_egress_allowlist`] so TOML and env share one
+    /// fail-closed representation.
+    fn from_config(raw: &str) -> Self {
+        match crate::config::parse_egress_allowlist(raw) {
+            Some(hosts) => Self::Hosts(hosts),
+            None => Self::DenyAll,
         }
     }
 
+    /// Legacy helper retained for the direct pattern-matching unit tests. It
+    /// keeps the historical "blank means unrestricted" semantics; the
+    /// production path uses [`Self::from_config`] instead.
+    #[cfg(test)]
     fn parse(raw: &str) -> Self {
         let hosts: Vec<String> = raw
             .split(',')
@@ -399,6 +455,7 @@ impl EgressAllowlist {
     fn allows(&self, host: &str) -> bool {
         match self {
             Self::Unrestricted => true,
+            Self::DenyAll => false,
             Self::Hosts(entries) => {
                 let host = host.trim().to_ascii_lowercase();
                 entries.iter().any(|entry| match entry.strip_prefix("*.") {
@@ -415,14 +472,20 @@ impl EgressAllowlist {
 }
 
 /// Enforce the egress allowlist on the URL host, in addition to the existing
-/// public-IP/SSRF checks. With no allowlist configured this is a no-op.
+/// public-IP/SSRF checks. Config-sourced empty/invalid values are `DenyAll`,
+/// so only the explicit test-only `Unrestricted` variant is a no-op.
 fn ensure_host_allowed(url: &reqwest::Url, allowlist: &EgressAllowlist) -> Result<()> {
-    if matches!(allowlist, EgressAllowlist::Unrestricted) {
-        return Ok(());
-    }
     let host = url
         .host_str()
         .ok_or_else(|| client_error("url has no host"))?;
+    if matches!(allowlist, EgressAllowlist::Unrestricted) {
+        return Ok(());
+    }
+    if matches!(allowlist, EgressAllowlist::DenyAll) {
+        return Err(client_error(format!(
+            "host '{host}' is denied: egress allowlist is empty or invalid"
+        )));
+    }
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     // DNS names only: an IP literal cannot be named in the allowlist, so
     // reject it outright rather than trying to match it as a hostname.
@@ -540,12 +603,16 @@ async fn ensure_public_host(url: &reqwest::Url) -> Result<ValidatedDest> {
         }
         return Ok(ValidatedDest::Literal);
     }
-    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((bare, port))
-        .await
-        .with_context(|| format!("dns lookup failed: {host}"))?
-        .collect();
+    // The host came from caller input, so resolution failures are client
+    // errors (400), not gateway-internal failures (500).
+    let resolved = client_context(
+        tokio::net::lookup_host((bare, port)).await,
+        format!("dns lookup failed: {host}"),
+    )?;
+    let addrs: Vec<std::net::SocketAddr> = resolved.collect();
     if addrs.is_empty() {
-        bail!("dns lookup returned no addresses for {host}");
+        let message = format!("dns lookup returned no addresses for {host}");
+        return Err(client_error(message));
     }
     for addr in &addrs {
         if !is_public_ip(&addr.ip()) {
@@ -789,6 +856,86 @@ mod tests {
         // that the fetch loop applies on every hop.
         let outside = resolve_redirect(&base, "https://attacker.example/x").unwrap();
         assert!(ensure_host_allowed(&outside, &list).is_err());
+    }
+
+    fn assert_client_error(error: &anyhow::Error) {
+        assert!(
+            matches!(
+                error.downcast_ref::<McpGatewayError>(),
+                Some(McpGatewayError::ClientError(_))
+            ),
+            "expected a typed ClientError (HTTP 400), got: {error:?}"
+        );
+    }
+
+    #[test]
+    fn caller_input_errors_are_typed_client_errors() {
+        for raw in [
+            "file:///etc/passwd",
+            "not a url",
+            "https://user:pass@example.com",
+        ] {
+            let err = validate_http_url(raw).unwrap_err();
+            assert_client_error(&err);
+        }
+        let base = validate_http_url("https://example.com/a").unwrap();
+        assert_client_error(&redirect_target(&base, None).unwrap_err());
+        assert_client_error(&resolve_redirect(&base, "http://[invalid").unwrap_err());
+    }
+
+    #[test]
+    fn file_too_large_is_typed_client_error() {
+        let (base, sandbox) = fixture();
+        let big = base.join("big.bin");
+        std::fs::write(&big, vec![b'x'; NATIVE_MAX_OUTPUT + 1]).unwrap();
+        let err = sandbox
+            .native_read(&json!({ "path": "big.bin" }))
+            .unwrap_err();
+        assert!(err.to_string().contains("file too large"), "{err}");
+        assert_client_error(&err);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn egress_allowlist_from_config_is_fail_closed() {
+        let url = validate_http_url("https://example.com/").unwrap();
+        for raw in ["", "   ", ",", "http://example.com", "bad host", "*."] {
+            let list = EgressAllowlist::from_config(raw);
+            let err = ensure_host_allowed(&url, &list).unwrap_err();
+            assert!(err.to_string().contains("egress allowlist"), "{err}");
+            assert_client_error(&err);
+        }
+    }
+
+    #[test]
+    fn egress_allowlist_from_config_is_enforced() {
+        let list = EgressAllowlist::from_config(" example.com , *.trusted.org ");
+        let allowed = validate_http_url("https://api.trusted.org/x").unwrap();
+        assert!(ensure_host_allowed(&allowed, &list).is_ok());
+        let denied = validate_http_url("https://attacker.example/").unwrap();
+        let err = ensure_host_allowed(&denied, &list).unwrap_err();
+        assert!(err.to_string().contains("egress allowlist"), "{err}");
+        assert_client_error(&err);
+    }
+
+    #[tokio::test]
+    async fn sandbox_wires_config_egress_allowlist() {
+        let config = crate::config::McpGatewayConfig {
+            egress_allowlist: "example.com".to_string(),
+            ..Default::default()
+        };
+        let sandbox = Sandbox::new(&config).await.expect("sandbox starts");
+        match sandbox.egress_allowlist {
+            EgressAllowlist::Hosts(ref hosts) => {
+                assert_eq!(hosts.len(), 1);
+                assert_eq!(hosts[0], "example.com");
+            }
+            other => panic!("unexpected allowlist: {other:?}"),
+        }
+        let empty = Sandbox::new(&crate::config::McpGatewayConfig::default())
+            .await
+            .expect("sandbox starts");
+        assert!(matches!(empty.egress_allowlist, EgressAllowlist::DenyAll));
     }
 
     /// 実ネットワーク検証（CIでは実行しない）: cargo test -p jarvis-mcp-gw --lib -- --ignored
