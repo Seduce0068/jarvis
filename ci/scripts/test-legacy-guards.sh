@@ -107,11 +107,12 @@ cp "$repo/specs/index.md" "$evidence_tmp/specs/index.md"
 cp "$repo/evidence/index.md" "$evidence_tmp/evidence/index.md"
 cp "$repo/todo.md" "$evidence_tmp/todo.md"
 
-tamper_evidence() { # src dst mode
-  python3 - "$1" "$2" "$3" <<'PY'
-import json, sys
+tamper_evidence() { # src dst mode [index_dst]
+  python3 - "$1" "$2" "$3" "${4:-}" <<'PY'
+import json, os, re, sys
 
 src, dst, mode = sys.argv[1:4]
+index_dst = sys.argv[4] or None
 with open(src, encoding='utf-8') as fh:
     data = json.load(fh)
 if mode == 'hash':
@@ -138,6 +139,55 @@ elif mode in ('notes_count_conflict', 'notes_passed_conflict'):
     notes = data.get('notes', '')
     data['notes'] = (notes + ' ' + str(conflict) + ' ' + suffix + '.') \
         if isinstance(notes, str) else (str(conflict) + ' ' + suffix + '.')
+elif mode == 'bad_notes_type':
+    # notes must be a str. A dict previously turned both the skipped
+    # justification and the notes-consistency checks into no-ops. Only the
+    # BAD_NOTES_TYPE gate can reject this (caller picks a skipped=0 source).
+    data['notes'] = {'count': data['results']['passed']}
+elif mode == 'bad_results_type':
+    # skipped must be a strict non-negative int. A negative value trips only
+    # the BAD_RESULTS_TYPE gate when the source has skipped=0 and notes with
+    # no "ignored" phrase (chosen by the caller), so a disabled type gate is
+    # detectable instead of being masked by a notes/index error.
+    data['results']['skipped'] = -1
+elif mode == 'scenario_shortfall':
+    # Report fewer executions than the spec declares while keeping results,
+    # notes and the index entry mutually consistent. Only the Scenario gate
+    # can reject this copy, so disabling it makes the tamper accepted.
+    spec_rel = data['test_basis_ref']['spec_path']
+    spec_abs = os.path.join(os.path.dirname(os.path.dirname(src)), spec_rel)
+    with open(spec_abs, encoding='utf-8') as fh:
+        spec_text = fh.read()
+    scenario_total = len(re.findall(r'^[ \t]*Scenario[ \t]*:', spec_text, re.MULTILINE))
+    short = max(1, scenario_total - 1)
+    data['results']['passed'] = short
+    data['results']['failed'] = 0
+    data['results']['skipped'] = 0
+    data['notes'] = '実測結果 ' + str(short) + ' 件。'
+    if not index_dst:
+        raise SystemExit('scenario_shortfall needs index_dst')
+    json_name = os.path.basename(src)
+    with open(index_dst, encoding='utf-8') as fh:
+        idx = fh.read()
+    label_match = re.search(
+        r'^\[([^\]]+)\]:\s*' + re.escape(json_name) + r'\s*$', idx, re.MULTILINE)
+    if not label_match:
+        raise SystemExit('index REF_DEF not found for ' + json_name)
+    label = label_match.group(1)
+    starts = [m.start() for m in re.finditer(r'^[ \t]*-[ \t]+\[', idx, re.MULTILINE)]
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(idx)
+        block = idx[start:end]
+        if '][' + label + ']' not in block:
+            continue
+        new_block, n = re.subn(
+            r'\d+([ \t]+passed)', lambda m: str(short) + m.group(1), block, count=1)
+        if n != 1:
+            raise SystemExit('passed count not found in index entry for ' + label)
+        idx = idx[:start] + new_block + idx[end:]
+        break
+    with open(index_dst, 'w', encoding='utf-8') as fh:
+        fh.write(idx)
 else:
     raise SystemExit('unknown tamper mode: ' + mode)
 with open(dst, 'w', encoding='utf-8') as fh:
@@ -235,6 +285,95 @@ else
   echo "  FAIL: check-evidence.sh accepted an unlinked spec (exit $code)"
   printf '%s\n' "$out" | head -3 >&2
   fail=$((fail+1))
+fi
+
+# R4-A: index headline counts, type fail-closed gates and Scenario coverage.
+# Build one more temporary tree so the real specs/ and evidence/ are untouched.
+gate_tmp="$tmp/gate_negative"
+mkdir -p "$gate_tmp/ci/scripts" "$gate_tmp/evidence" "$gate_tmp/specs"
+gate="$gate_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/ci/scripts/check-evidence.sh" "$gate"
+cp "$repo/specs/index.md" "$gate_tmp/specs/index.md"
+cp "$repo/todo.md" "$gate_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$gate_tmp/evidence/"
+for spec in "${spec_files[@]}"; do
+  ln -s "$spec" "$gate_tmp/specs/$(basename "$spec")"
+done
+
+# Pick a source with skipped=0 and no "ignored" phrase in notes: this keeps the
+# type-gate tamper modes isolated from the skipped-justification, notes-count
+# and index-count gates, so a no-op'd type gate is actually detectable.
+type_source=$(python3 - "${evidence_files[@]}" <<'PY'
+import json, sys
+for path in sys.argv[1:]:
+    d = json.load(open(path, encoding='utf-8'))
+    if d['results']['skipped'] == 0 and 'ignored' not in str(d.get('notes', '')).lower():
+        print(path)
+        break
+PY
+)
+if [ -z "$type_source" ]; then
+  echo "  FAIL: no suitable source evidence for type-gate tamper"
+  fail=$((fail+1))
+else
+  type_copy="$gate_tmp/evidence/$(basename "$type_source")"
+  # Each mode starts from a pristine JSON and index; scenario_shortfall also
+  # rewrites the index count, so restore both before every iteration.
+  for mode in bad_notes_type bad_results_type scenario_shortfall; do
+    cp "$repo/evidence/index.md" "$gate_tmp/evidence/index.md"
+    cp "$type_source" "$type_copy"
+    if ! tamper_evidence "$type_source" "$type_copy" "$mode" \
+                         "$gate_tmp/evidence/index.md"; then
+      echo "  FAIL: could not prepare tampered evidence ($mode)"
+      fail=$((fail+1))
+      continue
+    fi
+    out=$(bash "$gate" 2>&1); code=$?
+    case "$mode" in
+      bad_notes_type) pattern='BAD_NOTES_TYPE' ;;
+      bad_results_type) pattern='BAD_RESULTS_TYPE' ;;
+      scenario_shortfall) pattern='SCENARIO_COUNT_MISMATCH' ;;
+    esac
+    if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
+      echo "  PASS: check-evidence.sh rejects tampered $mode"
+      ok=$((ok+1))
+    else
+      echo "  FAIL: check-evidence.sh accepted tampered $mode (exit $code)"
+      printf '%s\n' "$out" | head -3 >&2
+      fail=$((fail+1))
+    fi
+  done
+
+  # Index passed count rewritten to 0 while the JSON still records the real
+  # total: the index-vs-results gate must reject with INDEX_RESULT_MISMATCH.
+  cp "$repo/evidence/index.md" "$gate_tmp/evidence/index.md"
+  cp "$type_source" "$type_copy"
+  if python3 - "$repo/evidence/index.md" "$gate_tmp/evidence/index.md" <<'PY'
+import re, sys
+
+src, dst = sys.argv[1:3]
+with open(src, encoding='utf-8') as fh:
+    text = fh.read()
+text, changed = re.subn(r'\d+([ \t]+passed)', r'0\1', text, count=1)
+if changed != 1:
+    raise SystemExit('no passed count found in evidence index')
+with open(dst, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+  then
+    out=$(bash "$gate" 2>&1); code=$?
+    if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'INDEX_RESULT_MISMATCH'; then
+      echo "  PASS: check-evidence.sh rejects tampered index passed count"
+      ok=$((ok+1))
+    else
+      echo "  FAIL: check-evidence.sh accepted tampered index passed count (exit $code)"
+      printf '%s\n' "$out" | head -3 >&2
+      fail=$((fail+1))
+    fi
+  else
+    echo "  FAIL: could not prepare tampered index passed count"
+    fail=$((fail+1))
+  fi
 fi
 
 # secret_scan.py must fail closed on a value-like credential and must never

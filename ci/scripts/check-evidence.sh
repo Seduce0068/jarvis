@@ -16,8 +16,11 @@
 # results.passed/failed/skipped, so a multi-gate claim cannot drift away from
 # the single aggregated total. The executed total must also cover every
 # `Scenario:` declared by the referenced spec, so a run that executes
-# only part of a specification cannot pass. Values are withheld from error
-# output; no secret values are read.
+# only part of a specification cannot pass. Index entry counts
+# ("N passed / N failed / N skipped") are resolved through reference-style link
+# definitions and must agree with the referenced JSON results, so tampering a
+# headline count cannot hide a failure. Values are withheld from error output;
+# no secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -250,6 +253,38 @@ def index_targets(index_path):
             continue
         yield os.path.normpath(os.path.join(base, target))
 
+# Index result claims (review R4-A). Each evidence index entry cites a JSON
+# through a reference-style link ("[text][label]" plus a "[label]: file.json"
+# definition) and states "N passed / N failed / N skipped". Resolve the label
+# through REF_DEF, load that JSON and compare every stated field against its
+# results. Only fields actually printed in the entry are compared (many entries
+# omit skipped). Values are withheld: the error is value-less.
+ENTRY_START = re.compile(r'^[ \t]*-[ \t]+\[', re.MULTILINE)
+REF_USAGE = re.compile(r'\]\[([^\]]+)\]')
+
+def index_result_entries(index_path):
+    with open(index_path, encoding="utf-8") as fh:
+        text = fh.read()
+    ref_defs = {m.group(1): m.group(2) for m in REF_DEF.finditer(text)}
+    starts = [m.start() for m in ENTRY_START.finditer(text)]
+    base = os.path.dirname(index_path)
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        block = text[start:end]
+        usage = REF_USAGE.search(block)
+        if not usage:
+            continue
+        target = ref_defs.get(usage.group(1))
+        if not target:
+            continue
+        json_path = os.path.normpath(os.path.join(base, unquote(target.strip())))
+        found = {}
+        for key in ("passed", "failed", "skipped"):
+            m = re.search(r'(\d+)[ \t]+' + key + r'\b', block, re.IGNORECASE)
+            if m:
+                found[key] = int(m.group(1))
+        yield json_path, found
+
 for index_path, artifacts, kind in (
     ("specs/index.md", spec_files, "SPEC"),
     ("evidence/index.md", evidence_files, "EVIDENCE"),
@@ -264,6 +299,25 @@ for index_path, artifacts, kind in (
     for target in sorted(linked):
         if not os.path.exists(target):
             errors.append(f"INDEX_BROKEN_LINK:{index_path}:{target}")
+    # Every stated count must match the referenced evidence JSON. A tampered
+    # index that lowers passed to 0 while the JSON still records a positive
+    # count must fail closed. A missing/unreadable target is already reported
+    # above as a broken link, so only well-formed JSON is compared here.
+    for json_path, found in index_result_entries(index_path):
+        if not found or not os.path.isfile(json_path):
+            continue
+        try:
+            with open(json_path, encoding="utf-8") as fh:
+                res = json.load(fh).get("results", {})
+        except Exception:
+            continue
+        if not isinstance(res, dict):
+            continue
+        for key, claimed in found.items():
+            actual = res.get(key)
+            if type(actual) is not int or actual != claimed:
+                errors.append(f"INDEX_RESULT_MISMATCH:{index_path}")
+                break
 
 print(f"ok={ok} errors={len(errors)}")
 for e in errors:
