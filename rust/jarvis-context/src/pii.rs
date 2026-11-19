@@ -3,9 +3,14 @@
 use anyhow::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashMap;
 use tracing::warn;
+
+/// Upper bound on the value walker's recursion. `serde_json` already caps
+/// deserialized input at this depth; the guard protects programmatically
+/// built trees from exhausting the stack.
+const MAX_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PiiConfig {
@@ -110,26 +115,52 @@ impl PiiFilter {
         if !self.enabled {
             return Ok(value);
         }
-        self.filter_value(&mut value);
+        self.filter_value(&mut value, 0);
         Ok(value)
     }
 
-    fn filter_value(&self, value: &mut Value) {
+    /// True when any configured pattern matches part of `s`. Used to decide
+    /// whether an object key must be redacted.
+    fn is_pii(&self, s: &str) -> bool {
+        self.patterns.iter().any(|(_, re)| re.is_match(s))
+    }
+
+    /// Apply every configured pattern to `s`, replacing matches with the
+    /// configured redaction string. Shared by string values and object keys.
+    fn redact_string(&self, s: &str) -> String {
+        let mut out = s.to_owned();
+        for (_, re) in &self.patterns {
+            out = re.replace_all(&out, &self.replacement).into_owned();
+        }
+        out
+    }
+
+    fn filter_value(&self, value: &mut Value, depth: usize) {
+        if depth > MAX_DEPTH {
+            return;
+        }
         match value {
-            Value::String(s) => {
-                for (_, re) in &self.patterns {
-                    *s = re.replace_all(s, &self.replacement).to_string();
-                }
-            }
+            Value::String(s) => *s = self.redact_string(s),
             Value::Array(arr) => {
                 for item in arr {
-                    self.filter_value(item);
+                    self.filter_value(item, depth + 1);
                 }
             }
             Value::Object(obj) => {
-                for (_, v) in obj {
-                    self.filter_value(v);
+                // Keys cannot be renamed in place, so rebuild the map. A key
+                // matching a PII pattern is redacted with the same rules as a
+                // value; ordinary keys are copied through unchanged.
+                let mut rebuilt = Map::new();
+                for (key, mut v) in std::mem::take(obj) {
+                    let new_key = if self.is_pii(&key) {
+                        self.redact_string(&key)
+                    } else {
+                        key
+                    };
+                    self.filter_value(&mut v, depth + 1);
+                    rebuilt.insert(new_key, v);
                 }
+                *obj = rebuilt;
             }
             _ => {}
         }
@@ -232,25 +263,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).expect("clean temp dir");
     }
 
-    /// A-M19 scope boundary: only string values are scanned. Object keys stay
-    /// untouched so the JSON structure is preserved; redacting keys would
-    /// change field names and is a separate, still-open design decision.
+    /// I12-E: ordinary object keys are preserved unchanged; only string
+    /// values are redacted. Keys that themselves contain PII are covered by
+    /// `pii_matching_object_keys_are_redacted`.
     #[test]
     fn object_keys_are_preserved_and_only_values_are_redacted() {
         let value = json!({
-            "user@example.com": "contact user@example.com",
-            "nested": { "owner@corp.example": "a@b.co" }
+            "user_id": "contact user@example.com",
+            "nested": { "owner_name": "a@b.co" }
         });
         let out = filter(true).filter(value).expect("filter runs");
 
         let obj = out.as_object().expect("top-level object");
-        assert!(obj.contains_key("user@example.com"), "key is not redacted");
+        assert!(obj.contains_key("user_id"), "ordinary key is preserved");
         assert!(!obj.contains_key("[REDACTED]"), "no key was renamed");
-        assert_eq!(out["user@example.com"], "contact [REDACTED]");
+        assert_eq!(out["user_id"], "contact [REDACTED]");
 
         let nested = out["nested"].as_object().expect("nested object");
-        assert!(nested.contains_key("owner@corp.example"));
-        assert_eq!(out["nested"]["owner@corp.example"], "[REDACTED]");
+        assert!(nested.contains_key("owner_name"));
+        assert_eq!(out["nested"]["owner_name"], "[REDACTED]");
     }
 
     /// A-M19 scope boundary: non-string scalars (numbers, booleans, null)
@@ -286,5 +317,73 @@ mod tests {
         expected["email"] = json!("[REDACTED]");
         expected["array"][4] = json!("[REDACTED]");
         assert_eq!(out, expected);
+    }
+
+    /// I12-E regression: a key whose name matches a PII pattern is redacted at
+    /// every depth, including inside arrays, while non-matching siblings stay
+    /// intact.
+    #[test]
+    fn pii_matching_object_keys_are_redacted() {
+        let value = json!({
+            "user@example.com": "safe value",
+            "nested": {
+                "owner@corp.example": "a@b.co",
+                "keep_me": "plain"
+            },
+            "items": [
+                { "contact@example.org": "x" },
+                "plain string"
+            ]
+        });
+        let out = filter(true).filter(value).expect("filter runs");
+
+        let obj = out.as_object().expect("top-level object");
+        assert!(!obj.contains_key("user@example.com"), "PII key was renamed");
+        assert_eq!(out["[REDACTED]"], "safe value");
+
+        let nested = out["nested"].as_object().expect("nested object");
+        assert!(!nested.contains_key("owner@corp.example"));
+        assert_eq!(nested["[REDACTED]"], "[REDACTED]");
+        assert_eq!(nested["keep_me"], "plain");
+
+        let items = out["items"].as_array().expect("items array");
+        assert_eq!(items[0]["[REDACTED]"], "x");
+        assert_eq!(items[1], "plain string");
+    }
+
+    /// I12-E: disabling the filter leaves PII-bearing keys untouched.
+    #[test]
+    fn disabled_filter_preserves_pii_keys() {
+        let value = json!({ "user@example.com": "a@b.co" });
+        let out = filter(false).filter(value.clone()).expect("filter runs");
+        assert_eq!(out, value);
+    }
+
+    /// I12-E: when a pattern matches only part of a key, the matching substring
+    /// is replaced and the surrounding text is preserved.
+    #[test]
+    fn pii_substring_in_key_is_redacted() {
+        let value = json!({ "id=user@example.com": "ok" });
+        let out = filter(true).filter(value).expect("filter runs");
+        let obj = out.as_object().expect("object");
+        assert!(!obj.contains_key("id=user@example.com"));
+        assert!(obj.contains_key("id=[REDACTED]"));
+        assert_eq!(out["id=[REDACTED]"], "ok");
+    }
+
+    /// I12-E: the depth guard prevents stack exhaustion on programmatically
+    /// built trees deeper than serde_json's own parse limit; shallow redaction
+    /// must still work.
+    #[test]
+    fn deeply_nested_value_does_not_overflow_stack() {
+        let mut deep = json!("user@example.com");
+        for _ in 0..MAX_DEPTH + 16 {
+            deep = json!({ "nested": deep });
+        }
+        let value = json!({ "email": "user@example.com", "deep": deep });
+        let out = filter(true).filter(value).expect("filter runs");
+
+        assert_eq!(out["email"], "[REDACTED]");
+        assert!(out["deep"].is_object());
     }
 }
