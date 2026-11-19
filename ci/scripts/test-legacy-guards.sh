@@ -544,6 +544,75 @@ PY
   fi
 done
 
+# I62-A: every count match and every reference link in an evidence index entry
+# is validated. The old gate used re.search for counts and REF_USAGE.search for
+# links, so a second contradictory count or a second link to a different JSON
+# was invisible. Both must now fail closed.
+i62_tmp="$tmp/i62_negative"
+mkdir -p "$i62_tmp/ci/scripts" "$i62_tmp/evidence" "$i62_tmp/specs"
+i62_gate="$i62_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/ci/scripts/check-evidence.sh" "$i62_gate"
+cp "$repo/specs/index.md" "$i62_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$i62_tmp/evidence/index.md"
+cp "$repo/todo.md" "$i62_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$i62_tmp/evidence/"
+for spec in "${spec_files[@]}"; do
+  ln -s "$spec" "$i62_tmp/specs/$(basename "$spec")"
+done
+
+if bash "$i62_gate" >/dev/null 2>&1; then
+  echo "  PASS: I62-A pristine evidence index accepted"
+  ok=$((ok+1))
+else
+  echo "  FAIL: I62-A pristine evidence index rejected"
+  fail=$((fail+1))
+fi
+
+for mode in duplicate_count second_reference; do
+  cp "$repo/evidence/index.md" "$i62_tmp/evidence/index.md"
+  cp "$repo"/evidence/test-run-*.json "$i62_tmp/evidence/"
+  if ! python3 - "$repo/evidence/index.md" "$i62_tmp/evidence/index.md" "$mode" <<'PY'
+import re, sys
+
+src, dst, mode = sys.argv[1:4]
+with open(src, encoding='utf-8') as fh:
+    text = fh.read()
+if mode == 'duplicate_count':
+    # Keep the correct count and append a contradictory second one. re.search
+    # saw only the first; the fixed gate validates every match.
+    text, changed = re.subn(
+        r'^([ \t]*\d+[ \t]+passed[^\n]*)$', r'\1 0 passed。',
+        text, count=1, flags=re.MULTILINE)
+elif mode == 'second_reference':
+    # Add a second reference-style link inside the first evidence entry. The
+    # appended label resolves to a different evidence JSON whose passed count
+    # differs; REF_USAGE.search missed it, finditer must validate it.
+    text, changed = re.subn(
+        r'^([ \t]*-[ \t]+\[[^\]]*\]\[run-policy\])',
+        r'\1 [second][run-mcp]', text, count=1, flags=re.MULTILINE)
+else:
+    raise SystemExit('unknown I62-A mode: ' + mode)
+if changed != 1:
+    raise SystemExit(mode + ' index fixture not found')
+with open(dst, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+  then
+    echo "  FAIL: could not prepare I62-A index variant $mode"
+    fail=$((fail+1))
+    continue
+  fi
+  out=$(bash "$i62_gate" 2>&1); code=$?
+  if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'INDEX_RESULT_MISMATCH'; then
+    echo "  PASS: check-evidence.sh rejects I62-A $mode index entry"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: check-evidence.sh accepted I62-A $mode index entry (exit $code)"
+    printf '%s\n' "$out" | head -3 >&2
+    fail=$((fail+1))
+  fi
+done
+
 # I59-A: two evidence files citing the same spec must BOTH have their
 # requirements checked. The old dict keyed by spec kept only the last entry,
 # so tampering the earlier (lexicographically first) copy went unnoticed. The

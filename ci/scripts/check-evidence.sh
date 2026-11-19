@@ -26,8 +26,9 @@
 # results.skipped; the bare substring "ignored" is not sufficient. Index entry
 # counts ("N passed / N failed / N skipped") are resolved through both
 # reference-style definitions and inline links, must state at least passed and
-# failed, and must agree with the referenced JSON results, so changing the link
-# format or deleting a headline count cannot hide a failure. Values are withheld
+# failed, and must agree with the referenced JSON results. Every count match and
+# every reference link in an entry is checked, so a second contradictory count
+# or a second link to a different JSON cannot hide a failure. Values are withheld
 # from error output; no secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -341,14 +342,15 @@ def index_result_entries(index_path):
     for i, start in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else len(text)
         block = text[start:end]
-        # A block may hold both forms (the continuation line links the spec
-        # .md). Collect all candidates and prefer one resolving to JSON.
+        # A block may hold both forms and several reference links (the
+        # continuation line links the spec .md). Resolve EVERY reference link
+        # and inline link; a second link to a different JSON must be validated
+        # too instead of hiding behind the first one.
         candidates = []
-        usage = REF_USAGE.search(block)
-        if usage:
+        for usage in REF_USAGE.finditer(block):
             candidates.append(ref_defs.get(usage.group(1), ""))
         candidates.extend(m.group(1) for m in INLINE_LINK.finditer(block))
-        json_path = None
+        json_paths = []
         evidence_entry = False
         for item in candidates:
             raw = unquote(item.strip()).split('#', 1)[0]
@@ -358,18 +360,22 @@ def index_result_entries(index_path):
                 continue
             evidence_entry = True
             resolved = os.path.normpath(os.path.join(base, raw))
-            if resolved.endswith('.json'):
-                json_path = resolved
-                break
+            if resolved.endswith('.json') and resolved not in json_paths:
+                json_paths.append(resolved)
         if not evidence_entry:
             continue
-        # None marks an evidence entry whose JSON target cannot be resolved.
+        # Collect EVERY "N passed/failed/skipped" claim in the entry. re.search
+        # kept only the first match, so a second, contradictory count was
+        # invisible. All claims are checked against the JSON below.
         found = {}
         for key in ("passed", "failed", "skipped"):
-            m = re.search(r'(\d+)[ \t]+' + key + r'\b', block, re.IGNORECASE)
-            if m:
-                found[key] = int(m.group(1))
-        yield json_path, found
+            claims = [int(m.group(1)) for m in re.finditer(
+                r'(\d+)[ \t]+' + key + r'\b', block, re.IGNORECASE)]
+            if claims:
+                found[key] = claims
+        # None marks an evidence entry whose JSON target cannot be resolved.
+        for json_path in json_paths or [None]:
+            yield json_path, found
 
 for index_path, artifacts, kind in (
     ("specs/index.md", spec_files, "SPEC"),
@@ -385,10 +391,11 @@ for index_path, artifacts, kind in (
     for target in sorted(linked):
         if not os.path.exists(target):
             errors.append(f"INDEX_BROKEN_LINK:{index_path}:{target}")
-    # Every stated count must match the referenced evidence JSON. A tampered
-    # index that lowers passed to 0 while the JSON still records a positive
-    # count must fail closed. Missing claims are reported as INDEX_RESULT_MISSING;
-    # a broken file link is already reported by the link check above.
+    # Every stated count must match every referenced evidence JSON. A tampered
+    # index that lowers passed to 0, appends a second contradictory count, or
+    # adds a second reference link to a different JSON must fail closed. Missing
+    # claims are reported as INDEX_RESULT_MISSING; a broken file link is already
+    # reported by the link check above.
     for json_path, found in index_result_entries(index_path):
         # Mandatory claims: an evidence entry without passed/failed, or one
         # whose JSON target is unresolvable, fails closed. Previously such an
@@ -405,9 +412,12 @@ for index_path, artifacts, kind in (
             continue
         if not isinstance(res, dict):
             continue
-        for key, claimed in found.items():
+        for key, claims in found.items():
             actual = res.get(key)
-            if type(actual) is not int or actual != claimed:
+            # Check every stated count, not just the first one. A second,
+            # contradictory count must not hide behind a matching first one
+            # (which is exactly what re.search did).
+            if type(actual) is not int or any(c != actual for c in claims):
                 errors.append(f"INDEX_RESULT_MISMATCH:{index_path}")
                 break
 
