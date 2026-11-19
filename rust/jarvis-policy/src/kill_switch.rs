@@ -26,6 +26,52 @@ const CLOCK_FAILURE_REASON: &str = "system clock is before UNIX_EPOCH; failing c
 const PERSIST_ERROR_CONTEXT: &str =
     "kill switch persistence failed (internal storage error, NOT an authentication failure)";
 
+/// Metadata key used by every transport to carry the dedicated kill-switch
+/// admin token on the read-only status surface. Keeping the name in this crate
+/// module lets HTTP and gRPC agree without changing the protobuf schema.
+pub(crate) const KILL_SWITCH_TOKEN_HEADER: &str = "x-jarvis-kill-switch-token";
+
+/// Closed vocabulary returned in place of the free-form `reason` / `activated_by`
+/// strings by the status surfaces. Internal callers still see the raw values
+/// (audit log, persistence); only the wire projections use these literals.
+pub(crate) mod status_vocabulary {
+    pub const REASON_LOCK_POISONED: &str = "lock_poisoned";
+    pub const REASON_PERSISTENCE_FAILURE: &str = "persistence_failure";
+    pub const REASON_CLOCK_FAILURE: &str = "clock_failure";
+    pub const REASON_STATE_UNREADABLE: &str = "state_unreadable";
+    pub const REASON_OPERATOR_DEFINED: &str = "operator_defined";
+    pub const ACTOR_SYSTEM: &str = "system";
+    pub const ACTOR_OPERATOR: &str = "operator";
+}
+
+/// Compare two tokens without an early exit on the first mismatch.
+///
+/// This is the crate-wide helper for every token gate: the HTTP approval token
+/// middleware, kill-switch activation/deactivation, and both read-only status
+/// surfaces all call this function. The loop always covers the longer input and
+/// pads the shorter one, so neither a content mismatch nor a length mismatch
+/// short-circuits. No `unsafe` code and no extra dependency are involved.
+///
+/// Kept `pub(crate)` here (rather than in a new top-level module) because only
+/// the four policy transport/state files are in scope for this change; the
+/// module placement does not affect visibility across the crate.
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let max = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for (x, y) in a
+        .iter()
+        .map(Some)
+        .chain(std::iter::repeat(None))
+        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
+        .take(max)
+    {
+        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
+    }
+    diff == 0
+}
+
 /// Error categories for the token-gated kill switch operations.
 ///
 /// [`KillSwitchError::InvalidAdminToken`] is the only authentication failure.
@@ -61,6 +107,46 @@ pub struct KillSwitchStatus {
     pub activated_by: Option<String>,
 }
 
+impl KillSwitchStatus {
+    /// Transport-safe projection of the status.
+    ///
+    /// `reason` and `activated_by` are free-form strings: an operator may put
+    /// arbitrary text in a reason, and a persisted state file can contain
+    /// attacker-controlled data. Even after the status surface is admin-gated,
+    /// returning those strings verbatim would let an authenticated reader (or
+    /// a log/forwarder downstream) turn the field into an exfiltration channel.
+    /// Collapse them to a fixed vocabulary; the raw values remain available to
+    /// internal audit code via [`KillSwitch::status`].
+    pub fn redacted(&self) -> Self {
+        let reason = self.reason.as_deref().map(|reason| {
+            if reason == POISONED_LOCK_REASON {
+                status_vocabulary::REASON_LOCK_POISONED
+            } else if reason == PERSIST_FAILURE_REASON {
+                status_vocabulary::REASON_PERSISTENCE_FAILURE
+            } else if reason.starts_with(CLOCK_FAILURE_REASON) {
+                status_vocabulary::REASON_CLOCK_FAILURE
+            } else if reason.starts_with("unreadable kill switch state") {
+                status_vocabulary::REASON_STATE_UNREADABLE
+            } else {
+                status_vocabulary::REASON_OPERATOR_DEFINED
+            }
+        });
+        let activated_by = self.activated_by.as_deref().map(|actor| {
+            if actor == status_vocabulary::ACTOR_SYSTEM {
+                status_vocabulary::ACTOR_SYSTEM
+            } else {
+                status_vocabulary::ACTOR_OPERATOR
+            }
+        });
+        Self {
+            activated: self.activated,
+            activated_at: self.activated_at,
+            reason: reason.map(str::to_owned),
+            activated_by: activated_by.map(str::to_owned),
+        }
+    }
+}
+
 /// JSON shape written to the state file.
 #[derive(Debug, Serialize, Deserialize)]
 struct PersistedState {
@@ -93,6 +179,22 @@ impl KillSwitch {
         };
         switch.restore();
         switch
+    }
+
+    /// Hash the presented token and compare it with the stored digest using
+    /// the crate-wide constant-time helper. A plain `!=` here leaked the match
+    /// position through timing and diverged from the other token gates.
+    fn hash_matches(&self, token: &str) -> bool {
+        constant_time_eq(&Self::hash_token(token), &self.admin_token_hash)
+    }
+
+    /// Verify the dedicated admin token for the read-only status surfaces.
+    ///
+    /// Both transports call this instead of reading the raw configured token,
+    /// so the status gate and the activate/deactivate gates share one
+    /// comparison implementation.
+    pub fn verify_admin_token(&self, token: &str) -> bool {
+        self.hash_matches(token)
     }
 
     /// Activate with the historical `"system"` actor. Kept as a compatibility
@@ -132,7 +234,7 @@ impl KillSwitch {
     /// (restore, tests); every external surface must use this method so a
     /// local process cannot stop the system unilaterally.
     pub fn activate_with_token(&self, reason: String, admin_token: &str) -> Result<()> {
-        if Self::hash_token(admin_token) != self.admin_token_hash {
+        if !self.hash_matches(admin_token) {
             return Err(KillSwitchError::InvalidAdminToken.into());
         }
         self.activate(reason);
@@ -214,7 +316,7 @@ impl KillSwitch {
     }
 
     pub fn deactivate(&self, admin_token: &str) -> Result<()> {
-        if Self::hash_token(admin_token) != self.admin_token_hash {
+        if !self.hash_matches(admin_token) {
             return Err(KillSwitchError::InvalidAdminToken.into());
         }
         self.activated.store(false, Ordering::SeqCst);
@@ -351,6 +453,18 @@ impl KillSwitch {
         let mut hasher = Sha256::new();
         hasher.update(token.as_bytes());
         hex::encode(hasher.finalize())
+    }
+}
+
+impl crate::PolicyEngine {
+    /// Gate the read-only kill-switch status surfaces with the same dedicated
+    /// admin token that guards activation/deactivation.
+    ///
+    /// Defined here (instead of `lib.rs`) because only this file and the two
+    /// transport files are in scope for this change; the method is additive and
+    /// keeps the raw configured token out of both transport modules.
+    pub(crate) fn verify_kill_switch_admin_token(&self, token: &str) -> bool {
+        self.kill_switch.verify_admin_token(token)
     }
 }
 
@@ -625,5 +739,96 @@ mod tests {
         assert!(switch.is_activated(), "fail-closed must be preserved");
 
         std::fs::remove_file(parent).expect("clean blocker file");
+    }
+
+    /// The shared helper must reject both a content mismatch and a length
+    /// mismatch, and must accept an empty token only when both sides are empty.
+    #[test]
+    fn shared_constant_time_eq_helper_covers_content_and_length() {
+        assert!(constant_time_eq("admin-token", "admin-token"));
+        assert!(!constant_time_eq("admin-token", "admin-tokel"));
+        assert!(!constant_time_eq("admin-token", "admin-token-extra"));
+        assert!(!constant_time_eq("", "non-empty"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    /// Every token gate must go through the shared helper. The observable part
+    /// is that both the valid and the invalid token are decided by the same
+    /// hash comparison used by `activate_with_token` / `deactivate`.
+    #[test]
+    fn status_token_verification_matches_the_gates_comparison() {
+        let switch = KillSwitch::new("admin-token", None);
+        assert!(switch.verify_admin_token("admin-token"));
+        assert!(!switch.verify_admin_token("admin-tokel"));
+        assert!(!switch.verify_admin_token(""));
+        assert!(!switch.verify_admin_token("admin-token-extra"));
+    }
+
+    /// The wire projection must never carry a caller-supplied reason or actor.
+    /// Keep the raw status unchanged for internal audit consumers.
+    #[test]
+    fn redacted_status_uses_a_fixed_vocabulary() {
+        let switch = KillSwitch::new("admin-token", None);
+        switch.activate_with_actor(
+            "SENTINEL-REASON-DO-NOT-LEAK".into(),
+            "SENTINEL-ACTOR-DO-NOT-LEAK".into(),
+        );
+        let raw = switch.status();
+        assert_eq!(raw.reason.as_deref(), Some("SENTINEL-REASON-DO-NOT-LEAK"));
+        assert_eq!(
+            raw.activated_by.as_deref(),
+            Some("SENTINEL-ACTOR-DO-NOT-LEAK")
+        );
+
+        let view = raw.redacted();
+        assert!(view.activated);
+        assert_eq!(view.activated_at, raw.activated_at);
+        assert_eq!(
+            view.reason.as_deref(),
+            Some(status_vocabulary::REASON_OPERATOR_DEFINED)
+        );
+        assert_eq!(
+            view.activated_by.as_deref(),
+            Some(status_vocabulary::ACTOR_OPERATOR)
+        );
+        for field in [view.reason.as_deref(), view.activated_by.as_deref()] {
+            let field = field.expect("activated status carries metadata");
+            assert!(!field.contains("SENTINEL"));
+        }
+    }
+
+    /// Internal failure categories stay distinguishable through the fixed
+    /// vocabulary; only free-form text is collapsed.
+    #[test]
+    fn redacted_status_classifies_internal_failure_reasons() {
+        let switch = KillSwitch::new("admin-token", None);
+        switch.arm(POISONED_LOCK_REASON.into());
+        assert_eq!(
+            switch.status().redacted().reason.as_deref(),
+            Some(status_vocabulary::REASON_LOCK_POISONED)
+        );
+
+        switch.arm(PERSIST_FAILURE_REASON.into());
+        assert_eq!(
+            switch.status().redacted().reason.as_deref(),
+            Some(status_vocabulary::REASON_PERSISTENCE_FAILURE)
+        );
+
+        switch.arm(CLOCK_FAILURE_REASON.into());
+        assert_eq!(
+            switch.status().redacted().reason.as_deref(),
+            Some(status_vocabulary::REASON_CLOCK_FAILURE)
+        );
+
+        switch.arm("unreadable kill switch state: detail".into());
+        let view = switch.status().redacted();
+        assert_eq!(
+            view.reason.as_deref(),
+            Some(status_vocabulary::REASON_STATE_UNREADABLE)
+        );
+        assert_eq!(
+            view.activated_by.as_deref(),
+            Some(status_vocabulary::ACTOR_SYSTEM)
+        );
     }
 }

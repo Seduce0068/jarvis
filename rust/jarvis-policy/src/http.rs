@@ -1,6 +1,7 @@
 //! HTTP/REST + Metrics endpoint for Policy Engine
 
 use crate::PolicyEngine;
+use crate::kill_switch::{KILL_SWITCH_TOKEN_HEADER, constant_time_eq};
 use crate::policy::{ApprovalDecision, ApprovalRequest};
 use axum::{
     Json, Router,
@@ -238,6 +239,8 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
                 require_approval_token,
             )),
         )
+        // Read-only status is admin-gated inside the handler: unlike /health
+        // it exposes kill-switch metadata, so it must not be a public probe.
         .route("/v1/kill-switch", get(kill_switch_status))
         .route("/v1/kill-switch/activate", post(activate_kill_switch))
         .route("/v1/kill-switch/deactivate", post(deactivate_kill_switch))
@@ -284,28 +287,6 @@ async fn require_approval_token(
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
-}
-
-/// Compare two tokens without an early exit on the first mismatch.
-///
-/// The loop always covers the longer input and pads the shorter one, so
-/// neither a content mismatch nor a length mismatch short-circuits. No
-/// additional crate is needed and no `unsafe` code is involved.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    let max = a.len().max(b.len());
-    let mut diff = a.len() ^ b.len();
-    for (x, y) in a
-        .iter()
-        .map(Some)
-        .chain(std::iter::repeat(None))
-        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
-        .take(max)
-    {
-        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
-    }
-    diff == 0
 }
 
 /// Count every HTTP request so `/metrics` exposes more than an empty page
@@ -644,10 +625,24 @@ fn approval_error_status(error: crate::approval::ApprovalError) -> axum::http::S
     }
 }
 
+/// Read-only kill-switch status, gated by the dedicated admin token.
+///
+/// The token is supplied in `x-jarvis-kill-switch-token` (the same metadata key
+/// the gRPC surface uses), never in the URL so it is not copied into access
+/// logs. A missing/wrong token is a plain 401; there is no internal error path
+/// here, while activate/deactivate keep their 401 vs 5xx distinction below.
+/// Even an authenticated caller receives only the fixed status vocabulary.
 async fn kill_switch_status(
     State(engine): State<Arc<PolicyEngine>>,
-) -> Json<crate::kill_switch::KillSwitchStatus> {
-    Json(engine.kill_switch_status())
+    headers: axum::http::HeaderMap,
+) -> Result<Json<crate::kill_switch::KillSwitchStatus>, axum::http::StatusCode> {
+    let provided = headers
+        .get(KILL_SWITCH_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if !provided.is_some_and(|token| engine.verify_kill_switch_admin_token(token)) {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    Ok(Json(engine.kill_switch_status().redacted()))
 }
 
 #[derive(Deserialize, Debug)]
@@ -2001,6 +1996,63 @@ mod tests {
         )
         .expect("expires_at is RFC 3339");
         assert_eq!(expires_at.timestamp(), stored_expires_at.timestamp());
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I23-E: the read-only status surface needs the dedicated admin token and
+    /// never returns the free-form reason/actor strings, even to a reader that
+    /// presents the correct token.
+    #[tokio::test]
+    async fn kill_switch_status_requires_admin_token_and_redacts_details() {
+        let (engine, dir) = test_engine("http-kill-switch-status").await;
+        let sentinel = "SENTINEL-KILL-STATUS-REASON-DO-NOT-LEAK";
+        engine
+            .activate_kill_switch(sentinel.to_string(), "test-admin-token")
+            .expect("activate kill switch");
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        // No header and a wrong header are both plain authentication failures.
+        let missing = client
+            .get(format!("{base}/v1/kill-switch"))
+            .send()
+            .await
+            .expect("status request");
+        assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert!(!missing.text().await.expect("body").contains(sentinel));
+
+        let wrong = client
+            .get(format!("{base}/v1/kill-switch"))
+            .header(KILL_SWITCH_TOKEN_HEADER, "wrong-token")
+            .send()
+            .await
+            .expect("status request");
+        assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert!(!wrong.text().await.expect("body").contains(sentinel));
+
+        let response = client
+            .get(format!("{base}/v1/kill-switch"))
+            .header(KILL_SWITCH_TOKEN_HEADER, "test-admin-token")
+            .send()
+            .await
+            .expect("status request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body = response.text().await.expect("status body");
+        assert!(
+            !body.contains(sentinel),
+            "free-form reason must not reach the wire: {body}"
+        );
+        let status: Value = serde_json::from_str(&body).expect("status is JSON");
+        assert_eq!(status["activated"], true);
+        assert_eq!(
+            status["reason"],
+            crate::kill_switch::status_vocabulary::REASON_OPERATOR_DEFINED
+        );
+        assert_eq!(
+            status["activated_by"],
+            crate::kill_switch::status_vocabulary::ACTOR_SYSTEM
+        );
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");
     }

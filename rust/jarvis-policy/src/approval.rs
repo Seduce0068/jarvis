@@ -245,12 +245,20 @@ impl ApprovalStore {
         Ok(entry.decision.clone().unwrap_or(ApprovalDecision::Pending))
     }
 
-    /// Requests still awaiting a decision.
+    /// Requests still awaiting a decision within their deadline.
+    ///
+    /// `prune()` reclaims abandoned pending entries only when a new request is
+    /// registered, so a read in between can still see entries whose waiter was
+    /// cancelled and whose `deadline` has passed. They can no longer produce a
+    /// real decision, so hide them here as well. This is the list consumed by
+    /// `PolicyEngine::pending_approvals()` and the `/metrics` pending gauge,
+    /// which would otherwise over-report outstanding approvals.
     pub async fn list_pending(&self) -> Vec<ApprovalRequest> {
         let entries = self.inner.entries.read().await;
+        let now = Utc::now();
         entries
             .values()
-            .filter(|entry| entry.decision.is_none())
+            .filter(|entry| entry.decision.is_none() && now <= entry.deadline)
             .map(|entry| entry.request.clone())
             .collect()
     }
@@ -607,5 +615,55 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "deadline must follow the configured timeout, not the caller hint"
         );
+    }
+
+    /// I23-E: an abandoned pending entry whose deadline has passed must not be
+    /// reported by `list_pending()` (and therefore must not inflate the
+    /// `/metrics` pending gauge). The entry is still present in the store until
+    /// the next `try_request()` calls `prune()`, which is why `status()` still
+    /// sees `Pending` here.
+    #[tokio::test]
+    async fn list_pending_hides_entries_past_their_deadline() {
+        let store = ApprovalStore::with_max_pending(Duration::from_secs(60), 10);
+        let active = make_request();
+        let stale = make_request();
+        let (active_tx, _active_rx) = watch::channel(None);
+        let (stale_tx, _stale_rx) = watch::channel(None);
+        let now = Utc::now();
+
+        {
+            let mut entries = store.inner.entries.write().await;
+            entries.insert(
+                active.id,
+                Entry {
+                    request: active.clone(),
+                    decision: None,
+                    decided_at: None,
+                    deadline: now + chrono::Duration::seconds(30),
+                    tx: active_tx,
+                },
+            );
+            entries.insert(
+                stale.id,
+                Entry {
+                    request: stale.clone(),
+                    decision: None,
+                    decided_at: None,
+                    deadline: now - chrono::Duration::seconds(1),
+                    tx: stale_tx,
+                },
+            );
+        }
+
+        let pending = store.list_pending().await;
+        assert_eq!(pending.len(), 1, "only the live request is outstanding");
+        assert_eq!(pending[0].id, active.id);
+        assert!(matches!(
+            store
+                .status(stale.id)
+                .await
+                .expect("stale entry is still stored"),
+            ApprovalDecision::Pending
+        ));
     }
 }

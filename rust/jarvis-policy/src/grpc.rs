@@ -49,9 +49,21 @@ impl PolicyService for GrpcPolicyService {
 
     async fn get_kill_switch_status(
         &self,
-        _request: Request<Empty>,
+        request: Request<Empty>,
     ) -> Result<Response<KillSwitchStatusResponse>, Status> {
-        let status = self.engine.kill_switch_status();
+        // The protobuf request is `Empty`, so the dedicated admin token rides
+        // in metadata (the same key the HTTP endpoint uses). No proto/schema
+        // change is required, and the token never appears in a log message.
+        let token = request
+            .metadata()
+            .get(crate::kill_switch::KILL_SWITCH_TOKEN_HEADER)
+            .and_then(|value| value.to_str().ok());
+        if !token.is_some_and(|token| self.engine.verify_kill_switch_admin_token(token)) {
+            return Err(Status::unauthenticated("Invalid admin token"));
+        }
+        // The status fields are free-form strings; return the same fixed
+        // vocabulary the HTTP endpoint exposes, even to an authenticated caller.
+        let status = self.engine.kill_switch_status().redacted();
         Ok(Response::new(KillSwitchStatusResponse {
             activated: status.activated,
             activated_at: status.activated_at.unwrap_or(0) as i64,
@@ -359,5 +371,71 @@ mod tests {
             .into_inner();
         assert!(!response.allowed);
         assert_eq!(response.reason, "cedar_denied");
+    }
+
+    /// I23-E: GetKillSwitchStatus must reject callers without the dedicated
+    /// admin token and must return only the fixed status vocabulary on the
+    /// success path.
+    #[tokio::test]
+    async fn get_kill_switch_status_requires_token_and_redacts_details() {
+        let service = test_service("grpc-kill-status").await;
+        let sentinel = "SENTINEL-GRPC-KILL-STATUS-DO-NOT-LEAK";
+        service
+            .engine
+            .activate_kill_switch(sentinel.to_string(), "test-admin-token")
+            .expect("activate kill switch");
+
+        let missing = service
+            .get_kill_switch_status(Request::new(Empty {}))
+            .await
+            .expect_err("status requires the admin token");
+        assert_eq!(missing.code(), tonic::Code::Unauthenticated);
+
+        let mut wrong = Request::new(Empty {});
+        wrong.metadata_mut().insert(
+            crate::kill_switch::KILL_SWITCH_TOKEN_HEADER,
+            tonic::metadata::MetadataValue::from_static("wrong-token"),
+        );
+        let wrong = service
+            .get_kill_switch_status(wrong)
+            .await
+            .expect_err("wrong token is rejected");
+        assert_eq!(wrong.code(), tonic::Code::Unauthenticated);
+
+        let mut authorized = Request::new(Empty {});
+        authorized.metadata_mut().insert(
+            crate::kill_switch::KILL_SWITCH_TOKEN_HEADER,
+            tonic::metadata::MetadataValue::from_static("test-admin-token"),
+        );
+        let status = service
+            .get_kill_switch_status(authorized)
+            .await
+            .expect("admin token unlocks status")
+            .into_inner();
+        assert!(status.activated);
+        assert_ne!(status.reason, sentinel);
+        assert_eq!(
+            status.reason,
+            crate::kill_switch::status_vocabulary::REASON_OPERATOR_DEFINED
+        );
+        assert_eq!(
+            status.activated_by,
+            crate::kill_switch::status_vocabulary::ACTOR_SYSTEM
+        );
+    }
+
+    /// The typed auth-vs-internal split must stay visible on the wire: a bad
+    /// token is `Unauthenticated`, never `Internal`.
+    #[tokio::test]
+    async fn kill_switch_activation_keeps_auth_error_mapping() {
+        let service = test_service("grpc-kill-errors").await;
+        let bad = service
+            .activate_kill_switch(Request::new(ActivateKillSwitchRequest {
+                reason: "test".into(),
+                admin_token: "wrong-token".into(),
+            }))
+            .await
+            .expect_err("bad admin token is rejected");
+        assert_eq!(bad.code(), tonic::Code::Unauthenticated);
     }
 }
