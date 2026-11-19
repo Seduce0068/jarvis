@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:a18d47250ed9c698066bbd128df7a10b8ae307f615f51585391825c768dd9aa2",
-  "timestamp": "2026-11-19T22:41:43+09:00",
+  "spec_hash": "sha256:08d29d5546cb814e77ed5bee79233eafeeec10bb05e672072ed9baff6bf3806e",
+  "timestamp": "2026-11-20T05:26:08+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test --offline (working directory: ui)",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 36,
+    "passed": 64,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 600,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-ui.md",
-    "spec_hash": "sha256:a18d47250ed9c698066bbd128df7a10b8ae307f615f51585391825c768dd9aa2",
+    "spec_hash": "sha256:08d29d5546cb814e77ed5bee79233eafeeec10bb05e672072ed9baff6bf3806e",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -186,5 +186,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "UI の 36 テスト再実行結果。REQ-11 を API/admin の 2-scope 送信へ更新し、REQ-19（未設定 scope ではヘッダを送らない）と REQ-20（admin 未設定時は API へフォールバック、レガシー ENV は警告付き）を追加。カバレッジ・ミューテーションは未測定。"
+  "notes": "UI の 64 テスト再実行結果。REQ-11 を API/admin の 2-scope 送信へ更新し、REQ-19（未設定 scope ではヘッダを送らない）と REQ-20（admin 未設定時は API へフォールバック、レガシー ENV は警告付き）を追加。カバレッジ・ミューテーションは未測定。"
 }
