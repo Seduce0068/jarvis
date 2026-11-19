@@ -60,8 +60,19 @@ impl KillSwitch {
 
     pub fn activate(&self, reason: String) {
         self.arm(reason.clone());
-        self.persist();
-        warn!("KILL SWITCH ACTIVATED: {}", reason);
+        if let Err(error) = self.persist() {
+            // `persist()` re-arms the switch fail-closed, so the in-memory
+            // state stays activated. The state file was NOT written though:
+            // never log a durable "KILL SWITCH ACTIVATED" that contradicts
+            // the post-restart reality (the switch would be disarmed again).
+            warn!(
+                "KILL SWITCH ACTIVATED IN MEMORY ONLY (NOT PERSISTED): requested reason '{}'; \
+                 state will not survive restart: {error}",
+                reason
+            );
+        } else {
+            warn!("KILL SWITCH ACTIVATED: {}", reason);
+        }
     }
 
     /// Activate after verifying the admin token.
@@ -141,10 +152,10 @@ impl KillSwitch {
         self.activated_at.store(0, Ordering::SeqCst);
         Self::write_slot(&self.reason, None);
         Self::write_slot(&self.activated_by, None);
-        self.persist();
+        let persist_result = self.persist();
         // A persist failure fails closed by re-arming the switch. Never tell
         // the operator the deactivation succeeded when it did not stick.
-        if self.is_activated() {
+        if persist_result.is_err() || self.is_activated() {
             return Err(anyhow::anyhow!(
                 "kill switch state could not be persisted; switch remains activated"
             ));
@@ -193,9 +204,16 @@ impl KillSwitch {
         }
     }
 
-    fn persist(&self) {
+    /// Persist the current state when a path is configured.
+    ///
+    /// Returns `Ok(())` when the write succeeded, or when no path is
+    /// configured (in-memory operation only). Returns `Err` when a configured
+    /// path could not be written; every failure path re-arms the switch
+    /// fail-closed via [`Self::arm`] with [`PERSIST_FAILURE_REASON`]. Callers
+    /// must therefore treat `Err` as "activated but degraded (not durable)".
+    fn persist(&self) -> Result<()> {
         let Some(path) = &self.state_path else {
-            return;
+            return Ok(());
         };
         let (reason, activated_by) = self.read_state_slots();
         let state = PersistedState {
@@ -209,7 +227,9 @@ impl KillSwitch {
             Err(error) => {
                 warn!("Failed to serialize kill switch state: {error}");
                 self.arm(PERSIST_FAILURE_REASON.into());
-                return;
+                return Err(anyhow::anyhow!(
+                    "failed to serialize kill switch state: {error}"
+                ));
             }
         };
         if let Some(parent) = path.parent()
@@ -217,7 +237,10 @@ impl KillSwitch {
         {
             warn!("Failed to create {}: {error}", parent.display());
             self.arm(PERSIST_FAILURE_REASON.into());
-            return;
+            return Err(anyhow::anyhow!(
+                "failed to create {}: {error}",
+                parent.display()
+            ));
         }
         if let Err(error) = std::fs::write(path, bytes) {
             warn!(
@@ -226,7 +249,12 @@ impl KillSwitch {
             );
             // `arm` never calls `persist`, so this cannot recurse.
             self.arm(PERSIST_FAILURE_REASON.into());
+            return Err(anyhow::anyhow!(
+                "failed to persist kill switch state to {}: {error}",
+                path.display()
+            ));
         }
+        Ok(())
     }
 
     pub fn is_activated(&self) -> bool {
@@ -370,6 +398,41 @@ mod tests {
         assert!(error.to_string().contains("remains activated"));
         assert!(switch.is_activated());
         assert_eq!(status.activated_by.as_deref(), Some("system"));
+
+        std::fs::remove_file(parent).expect("clean blocker file");
+    }
+
+    /// Regression for the `activate()` path: when persistence fails, the
+    /// switch must stay armed and the degradation must be recorded in state
+    /// rather than being reported as a durable activation. `activate()` also
+    /// emits a distinct Warn in this case; capturing it would require a
+    /// tracing subscriber, so this test asserts the observable in-memory
+    /// state that the log must agree with.
+    #[test]
+    fn activate_on_persist_failure_stays_activated_and_records_degradation() {
+        let path = temp_path("activate-persist-fail");
+        // Build the switch while the state file is still absent (normal first
+        // start), then make the configured parent unwritable so persist()
+        // fails.
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+        assert!(!switch.is_activated());
+
+        let parent = path.parent().expect("state path has a parent");
+        std::fs::remove_dir_all(parent).expect("remove temp dir");
+        std::fs::write(parent, b"blocker").expect("create blocker file");
+
+        switch.activate("operator-requested-reason".into());
+
+        let status = switch.status();
+        assert!(
+            status.activated,
+            "failed persist must leave the switch armed (fail-closed)"
+        );
+        assert_eq!(
+            status.reason.as_deref(),
+            Some(PERSIST_FAILURE_REASON),
+            "degradation must be recorded instead of the caller's reason"
+        );
 
         std::fs::remove_file(parent).expect("clean blocker file");
     }
