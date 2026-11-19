@@ -100,7 +100,11 @@ fi
 echo "  manual run: OK"
 
 # Verify the newly produced backup set integrity (read-only).
-if command -v jq >/dev/null 2>&1 && [ -f "$repo/infra/scripts/verify-backup.sh" ]; then
+# jq is mandatory for manifest verification: without it we cannot claim the
+# backup was verified. Fail loudly (rollback + exit) instead of silently
+# skipping verification and still printing the "verified" DONE message.
+command -v jq >/dev/null 2>&1 || fail "jq is required for backup integrity verification"
+if [ -f "$repo/infra/scripts/verify-backup.sh" ]; then
   verify_src="$repo/infra/scripts/verify-backup.sh"
   verify_dst="/opt/jarvis/scripts/verify-backup.sh"
   install -o root -g root -m 0755 "$verify_src" "$verify_dst"
