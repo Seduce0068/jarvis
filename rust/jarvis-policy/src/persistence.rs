@@ -33,9 +33,10 @@
 //! returning `Persistence` on the final attempt without ever opening a fresh
 //! connection generation. The post-error read-back now runs on every attempt
 //! (including the last) — on a fresh generation while the shared budget allows
-//! (I41-D), and on the current generation otherwise — and a failed reconnect is
-//! not fatal to the probe. A genuine inability to read the durable state still
-//! ends in `Persistence`.
+//! (I41-D), and on the current generation otherwise, except that the final
+//! attempt's one-shot retry keeps a reserved slot for a fresh generation
+//! (I42-C) — and a failed reconnect is not fatal to the probe. A genuine
+//! inability to read the durable state still ends in `Persistence`.
 //!
 //! I38-A: the read-back used to loop [`MAX_DB_ATTEMPTS`] generations *inside*
 //! each of the `MAX_DB_ATTEMPTS` transaction attempts (up to nine TCP
@@ -54,11 +55,17 @@
 //! its socket, without raising the [`MAX_DB_ATTEMPTS`] cap.
 //!
 //! I41-D: the shared budget is now explicit ([`GenerationBudget`]) and also
-//! covers reconnects *requested by the probes*. A failing attempt's probe spends
-//! a slot before the next attempt starts, so by the final attempt no slot is
-//! left: its probe and the I40-A one-shot retry run on the current generation
-//! instead of opening fresh ones. A fully dead DB therefore touches at most
-//! `MAX_DB_ATTEMPTS` generations, not `MAX_DB_ATTEMPTS + 2`.
+//! covers reconnects *requested by the probes*. A failing attempt's probe may
+//! spend a slot before the next attempt starts, but never the last one: a
+//! single reconnect stays reserved for the final attempt. A fully dead DB
+//! therefore touches at most `MAX_DB_ATTEMPTS` generations, not
+//! `MAX_DB_ATTEMPTS + 2`.
+//!
+//! I42-C: the reserved slot is spent *only* by the final attempt's one-shot
+//! retry. That retry now probes a different connection generation than the
+//! first (transport-failed) probe, so a dead DB can no longer hide our commit
+//! behind two probes on the same broken socket and degrade a lost ack into
+//! `Persistence`/503. The total generation cap is unchanged.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -81,13 +88,15 @@ fn should_retry(attempt_no: usize, max_attempts: usize) -> bool {
 }
 
 /// Shared, pure accounting of a single operation's connection-generation
-/// budget (I41-D). The initial generation is already open when the operation
-/// starts, so only `total_generations - 1` reconnects may be granted. Every
-/// reconnect request — whether it refreshes the generation for a transaction or
-/// for a read-back probe — draws from this one counter, which is what keeps the
-/// whole operation within [`MAX_DB_ATTEMPTS`] generations. A failed connect
-/// still consumes a slot: a dead DB must not turn into an unbounded sequence of
-/// connection attempts.
+/// budget (I41-D, I42-C). The initial generation is already open when the
+/// operation starts, so only `total_generations - 1` reconnects may be granted.
+/// Every reconnect request — whether it refreshes the generation for a
+/// transaction, for a read-back probe, or for the final attempt's one-shot
+/// retry — draws from this one counter, which is what keeps the whole operation
+/// within [`MAX_DB_ATTEMPTS`] generations. One slot is held back from ordinary
+/// probes so the final retry can always reach a different generation; a failed
+/// connect still consumes a slot, so a dead DB cannot turn into an unbounded
+/// sequence of connection attempts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GenerationBudget {
     remaining_reconnects: usize,
@@ -101,15 +110,31 @@ impl GenerationBudget {
         }
     }
 
-    /// Grant one reconnect slot, or return `false` when the budget is spent.
-    /// The caller uses this to decide whether a fresh generation may be opened;
-    /// `false` means "probe/retry on the current generation instead".
+    /// Spend any remaining slot, including the one held in reserve for the
+    /// final attempt's one-shot retry (I42-C). Only that retry should call this;
+    /// ordinary probes call [`Self::take_for_probe`] so the reserved slot is
+    /// still available when the final attempt needs it.
     fn take(&mut self) -> bool {
         if self.remaining_reconnects == 0 {
             false
         } else {
             self.remaining_reconnects -= 1;
             true
+        }
+    }
+
+    /// Grant a reconnect slot for an ordinary read-back probe while keeping one
+    /// slot in reserve for the final attempt's one-shot retry (I42-C).
+    ///
+    /// Spending the last slot here would leave the final retry probing the same
+    /// broken generation that just failed — the exact lost-ack regression this
+    /// method prevents — so the last slot is never granted to a probe.
+    fn take_for_probe(&mut self) -> bool {
+        if self.remaining_reconnects > 1 {
+            self.remaining_reconnects -= 1;
+            true
+        } else {
+            false
         }
     }
 }
@@ -372,27 +397,26 @@ impl PgApprovalPersistence {
 
     /// Resolve one ambiguous transaction outcome with durable reads, using a
     /// fresh generation only while the shared budget allows (I38-A, I40-A,
-    /// tightened by I41-D).
+    /// tightened by I41-D and corrected by I42-C).
     ///
     /// `commit_decision` calls this at most once per transaction attempt and
     /// threads one [`GenerationBudget`] through every call, so the reconnect
     /// budget is the *same* [`MAX_DB_ATTEMPTS`] as the transaction retries —
     /// there is no nested probe loop that could multiply TCP connections before
-    /// returning 503. A failing attempt's probe spends one slot to refresh the
-    /// generation; by the final attempt that slot is gone, so its probe (and the
-    /// I40-A one-shot retry) run on the current generation instead of opening
-    /// another one. A failed reconnect is *not* fatal to the probe: probing
-    /// still runs on the current (possibly stale) generation (I36-B). A probe
-    /// transport error is reported as `Undecided`, which lets the caller retry
-    /// the transaction (whose zero-row CAS then detects our own lost commit) or
-    /// fail closed on the last try.
+    /// returning 503. A failing attempt's probe may refresh the generation, but
+    /// never spends the last slot: that slot is reserved for the final attempt.
+    /// A failed reconnect is *not* fatal to the probe: probing still runs on the
+    /// current (possibly stale) generation (I36-B). A probe transport error is
+    /// reported as `Undecided`, which lets the caller retry the transaction
+    /// (whose zero-row CAS then detects our own lost commit) or fail closed on
+    /// the last try.
     ///
-    /// On the final attempt only, `retry_on_transport_error` still spends one
+    /// On the final attempt only, `retry_on_transport_error` spends one
     /// dedicated extra probe when the first probe hit a transport error. That
-    /// keeps the I36-B contract — a lost commit acknowledgement is reported as
-    /// success — without raising [`MAX_DB_ATTEMPTS`] or the generation count:
-    /// when no slot remains the retry simply re-runs the probe on the current
-    /// generation.
+    /// retry uses the reserved slot to open a *different* generation than the
+    /// failed first probe, so a lost commit acknowledgement is still reported as
+    /// success even when every earlier generation's socket is broken. The
+    /// `MAX_DB_ATTEMPTS` generation cap is unchanged (I42-C).
     ///
     /// No URL, SQL, decision label or payload is logged: a probe error is
     /// discarded and a reconnect failure is logged generically inside
@@ -410,11 +434,13 @@ impl PgApprovalPersistence {
         reason: Option<&str>,
         retry_on_transport_error: bool,
     ) -> DurableResolution {
-        // Refresh the generation for this probe only while a shared slot
-        // remains. On the final attempt the budget is exhausted, so the probe
-        // deliberately runs on the current generation (I41-D). Never propagate
-        // the reconnect error here: probing must still run (I36-B).
-        if budget.take() {
+        // Refresh the generation for this ordinary probe only while a slot
+        // beyond the reserved one remains (I42-C). By the final attempt only
+        // the reserved slot is left, so this first probe deliberately runs on
+        // the current generation and the one-shot retry below opens a different
+        // one. Never propagate the reconnect error here: probing must still run
+        // (I36-B).
+        if budget.take_for_probe() {
             let _ = guard.reconnect(&self.pg_url).await;
         }
 
@@ -423,9 +449,13 @@ impl PgApprovalPersistence {
             .map_err(|_| ());
         // Spend the extra probe budget only for a transport error. A definitive
         // `Ok(None)` already proved there is no committed row; another read
-        // could not reveal one. When no slot remains the retry re-runs the probe
-        // on the current generation, preserving I40-A's one-extra-probe
-        // contract without growing the generation count (I41-D).
+        // could not reveal one. The retry consumes the slot held back by
+        // `take_for_probe`, so it probes a different generation from the failed
+        // first probe — the exact loss this bug used to hide (I42-C) — without
+        // growing the generation count. With a degenerate budget of zero slots
+        // there is nothing to reserve: the retry then re-runs on the current
+        // generation and the "no new generation on the final attempt" contract
+        // applies verbatim instead of being hidden.
         let retry = if retry_on_transport_error
             && probe_iteration_resolution(&first, decision_label, decided_by, reason).is_none()
         {
@@ -465,13 +495,14 @@ impl PgApprovalPersistence {
     /// A failed transaction (or a broken connection at `transaction()` time) is
     /// retried up to [`MAX_DB_ATTEMPTS`] times; the whole transaction is redone
     /// because the failed one was rolled back. Transaction attempts and their
-    /// read-back probes share one [`GenerationBudget`] (I41-D): each failing
-    /// attempt's probe spends one reconnect slot, so by the final attempt the
-    /// slot is gone and its probe plus the I40-A one-shot retry run on the
-    /// current generation. The operation therefore never opens more than
-    /// [`MAX_DB_ATTEMPTS`] generations. A commit whose acknowledgement was lost
-    /// is still reported as success instead of degrading into
-    /// `AlreadyDecided` / `Expired` split brain or a spurious `Persistence`.
+    /// read-back probes share one [`GenerationBudget`] (I41-D, I42-C): each
+    /// failing attempt's probe may spend a reconnect slot, but one slot stays
+    /// reserved so the final attempt's I40-A one-shot retry can probe on a
+    /// fresh generation instead of reusing the broken one. The operation never
+    /// opens more than [`MAX_DB_ATTEMPTS`] generations. A commit whose
+    /// acknowledgement was lost is still reported as success instead of
+    /// degrading into `AlreadyDecided` / `Expired` split brain or a spurious
+    /// `Persistence`.
     async fn commit_decision(
         &self,
         id: Uuid,
@@ -589,9 +620,9 @@ impl PgApprovalPersistence {
                     // the final attempt if that probe hit a transport error
                     // (I40-A (a)). Probe and transaction share one
                     // [`GenerationBudget`] capped at MAX_DB_ATTEMPTS generations:
-                    // the first two probes spend the reconnect slots, so the
-                    // final probe and its retry run on the current generation
-                    // (I41-D). A real outage ends in Persistence after at most
+                    // ordinary probes never spend the last slot, so the final
+                    // retry can open a different generation (I42-C). A real
+                    // outage still ends in Persistence after at most
                     // MAX_DB_ATTEMPTS generations, never MAX_DB_ATTEMPTS + 2. A
                     // failed reconnect does not skip the probe (I36-B).
                     let resolution = self
@@ -1161,9 +1192,9 @@ mod tests {
 
     /// A probe transport error on the final attempt must not degrade a lost
     /// commit acknowledgement into `Persistence`. The dedicated one-shot retry
-    /// finds our committed row and reports success; when the shared generation
-    /// budget is exhausted it re-runs the probe on the current generation
-    /// (I41-D), which this pure resolution test is agnostic to.
+    /// finds our committed row and reports success; it uses the reserved slot to
+    /// probe a different generation (I42-C), which this pure resolution test is
+    /// agnostic to.
     #[test]
     fn final_attempt_probe_transport_error_retry_detects_our_commit() {
         let committed = Some(RecordedDecision {
@@ -1213,8 +1244,11 @@ mod tests {
     // ---- I41-D shared connection-generation budget (pure, no real DB) -----
 
     /// The budget starts with the already-open generation, so a cap of N grants
-    /// at most N-1 reconnects. A failed connect still consumes a slot: that is
-    /// what bounds connection attempts against a dead DB.
+    /// at most N-1 reconnects through `take`. Ordinary probes use
+    /// `take_for_probe`, which never grants the last slot, so one reconnect
+    /// stays available for the final attempt's retry (I42-C). A failed connect
+    /// still consumes a slot: that is what bounds connection attempts against a
+    /// dead DB.
     #[test]
     fn generation_budget_grants_exactly_cap_minus_one_reconnects() {
         let mut budget = GenerationBudget::new(MAX_DB_ATTEMPTS);
@@ -1227,9 +1261,10 @@ mod tests {
     }
 
     /// Pure model of the whole `commit_decision` generation usage: one initial
-    /// generation plus one reconnect request per failing attempt's probe and,
-    /// on the final attempt, one extra request for the I40-A retry. It mirrors
-    /// the real control flow without I/O so the connection budget is regression
+    /// generation plus a reconnect per granted probe refresh (which never
+    /// spends the reserved slot) and, on the final attempt, one extra request
+    /// for the I40-A retry that does spend it (I42-C). It mirrors the real
+    /// control flow without I/O so the connection budget stays regression
     /// testable without a database.
     fn operation_generations(
         max_attempts: usize,
@@ -1239,10 +1274,12 @@ mod tests {
         let mut budget = GenerationBudget::new(max_attempts);
         let mut generations = 1usize; // generation opened at connect time
         for _ in 0..probe_requests {
-            if budget.take() {
+            if budget.take_for_probe() {
                 generations += 1;
             }
         }
+        // The final-attempt retry is the only caller allowed to spend the
+        // reserved slot (I42-C).
         if final_retry_requested && budget.take() {
             generations += 1;
         }
@@ -1252,7 +1289,8 @@ mod tests {
     /// Worst case for a dead DB: every transaction attempt fails, every probe
     /// asks for a fresh generation and the final attempt asks for the I40-A
     /// retry too. The operation must touch at most MAX_DB_ATTEMPTS generations,
-    /// not MAX_DB_ATTEMPTS + 2 as the pre-I41-D code did.
+    /// not MAX_DB_ATTEMPTS + 2 as the pre-I41-D code did; the reserved retry slot
+    /// is the last of those generations (I42-C).
     #[test]
     fn dead_db_never_exceeds_the_generation_budget() {
         let generations = operation_generations(MAX_DB_ATTEMPTS, MAX_DB_ATTEMPTS, true);
@@ -1277,18 +1315,78 @@ mod tests {
         }
     }
 
-    /// With all MAX_DB_ATTEMPTS attempts failing, the first two probes spend
-    /// both reconnect slots, so the final probe and its I40-A retry get none:
-    /// they run on the current generation. This is the exact off-by-two I41-D
-    /// fixes while keeping the one-extra-probe contract intact.
+    /// With all MAX_DB_ATTEMPTS attempts failing, an ordinary probe may refresh
+    /// the generation once, but the last slot is held back so the final
+    /// attempt's I40-A retry still opens a fresh generation (I42-C). The total
+    /// stays at MAX_DB_ATTEMPTS — the off-by-two I41-D fixed is preserved.
     #[test]
-    fn final_attempt_probe_and_retry_get_no_fresh_generation() {
+    fn final_attempt_retry_reserves_a_fresh_generation() {
         let mut budget = GenerationBudget::new(MAX_DB_ATTEMPTS);
-        // Attempts 1 and 2 refresh the generation for their probes.
+        // Attempt 1's probe may refresh the generation.
+        assert!(budget.take_for_probe());
+        // Attempt 2's probe and the final attempt's first probe leave the
+        // reserved slot untouched, so both run on the current generation.
+        assert!(!budget.take_for_probe());
+        assert!(!budget.take_for_probe());
+        // The final attempt's one-shot retry spends exactly that reserved slot.
         assert!(budget.take());
+        assert!(!budget.take());
+    }
+
+    // ---- I42-C final-attempt retry on a different generation (pure, no DB) -
+
+    /// The exact I42-C regression on a fully broken connection: the final
+    /// attempt's first probe and its one-shot retry must not land on the same
+    /// generation. The first probe stays on the current one, the retry spends
+    /// the reserved slot to reach a different one, and the total still respects
+    /// the cap — so a lost ack is detected instead of degrading into 503.
+    #[test]
+    fn final_retry_probes_a_different_generation_within_the_cap() {
+        let mut budget = GenerationBudget::new(MAX_DB_ATTEMPTS);
+        let mut current_generation = 1usize; // already open at call time
+
+        // Attempt 1: a transport error refreshes the generation for its probe.
+        assert!(budget.take_for_probe());
+        current_generation += 1;
+
+        // Attempt 2: transport error, but no slot may be spent here.
+        assert!(!budget.take_for_probe());
+
+        // Final attempt: the first probe stays on the current generation ...
+        let first_probe_generation = current_generation;
+        assert!(!budget.take_for_probe());
+
+        // ... and the one-shot retry opens the reserved, different generation.
         assert!(budget.take());
-        // Attempt 3 (final) probe and its retry stay on the current generation.
-        assert!(!budget.take());
-        assert!(!budget.take());
+        let retry_generation = current_generation + 1;
+
+        assert_ne!(retry_generation, first_probe_generation);
+        assert!(retry_generation <= MAX_DB_ATTEMPTS);
+    }
+
+    /// A transport-failed first probe on the final attempt must still resolve
+    /// to `OurCommit` through the reserved-slot retry. This is the resolution
+    /// half of I42-C; the budget half is covered by the test above.
+    #[test]
+    fn final_retry_on_fresh_generation_recovers_lost_ack() {
+        let committed = Some(RecordedDecision {
+            decision: "approved".into(),
+            decided_by: Some("operator".into()),
+            reason: None,
+        });
+        // Both probes run on the same broken generation pre-fix; the reserved
+        // slot guarantees the retry sees a different one and reads the row.
+        let first = Err(());
+        let retry = Ok(committed);
+        assert_eq!(
+            probe_with_final_retry_resolution(
+                &first,
+                Some(&retry),
+                "approved",
+                Some("operator"),
+                None
+            ),
+            Some(DurableResolution::OurCommit)
+        );
     }
 }
