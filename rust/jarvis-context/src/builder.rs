@@ -160,6 +160,39 @@ fn entries_from_raw_points(points: Vec<(Option<String>, QdrantPayload)>) -> Vec<
 /// is drained over successive starts instead of blocking startup indefinitely.
 const RECONCILE_BATCH_LIMIT: usize = 100;
 
+/// Upper bound on the delay between two reconcile attempts for a single row.
+const MAX_RETRY_BACKOFF_MINUTES: i64 = 60 * 24; // 24 h
+
+/// Exponential backoff after `attempts` failures: `2^attempts` minutes, capped
+/// at [`MAX_RETRY_BACKOFF_MINUTES`]. The exponent is clamped before shifting so
+/// even a hostile/corrupt attempt count cannot overflow. Pure, so the policy is
+/// directly testable without a database or a clock.
+fn retry_backoff(attempts: i32) -> chrono::Duration {
+    let exponent = attempts.clamp(0, 32) as u32;
+    let minutes = 1_i64
+        .checked_shl(exponent)
+        .unwrap_or(i64::MAX)
+        .min(MAX_RETRY_BACKOFF_MINUTES);
+    chrono::Duration::minutes(minutes)
+}
+
+/// State to persist after a failed reconcile attempt: the incremented attempt
+/// count and the next eligible instant (`now + backoff`). Pure for tests.
+fn next_retry_state(attempts: i32, now: DateTime<Utc>) -> (i32, DateTime<Utc>) {
+    let attempts = attempts.saturating_add(1);
+    (attempts, now + retry_backoff(attempts))
+}
+
+/// Whether an outbox row is due for a retry at `now`. `None` (never deferred)
+/// is always due. This mirrors the SQL gate
+/// `next_retry_at IS NULL OR next_retry_at <= NOW()` and is reused by the
+/// in-memory store in tests so the head-of-line regression is testable without
+/// a live PostgreSQL connection.
+#[cfg(test)]
+fn is_retry_due(next_retry_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    next_retry_at.is_none_or(|at| at <= now)
+}
+
 /// One queued vector upsert (P1-2).
 ///
 /// Only the fields Qdrant needs are persisted. The full row already lives in
@@ -171,6 +204,13 @@ struct PendingEmbedding {
     content: String,
     metadata: Value,
     embedding: Vec<f32>,
+    /// Number of failed reconcile attempts so far; drives exponential backoff.
+    attempts: i32,
+    /// Earliest UTC instant at which this row may be retried. `None` means the
+    /// row has never been deferred and is due immediately.
+    // Mirrored for the in-memory test store; production due-checks run in SQL.
+    #[allow(dead_code)]
+    next_retry_at: Option<DateTime<Utc>>,
 }
 
 /// Qdrant upsert seam. A trait keeps the outbox/reconcile decision testable
@@ -186,6 +226,14 @@ trait PendingStore: Send + Sync {
     async fn record(&self, memory: &MemoryEntry, embedding: &[f32]) -> Result<()>;
     async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>>;
     async fn remove(&self, id: Uuid) -> Result<()>;
+    /// Record a failed reconcile attempt: bump `attempts` and defer the row
+    /// until `next_retry_at` so it stops blocking the head of the queue.
+    async fn mark_failed(
+        &self,
+        id: Uuid,
+        attempts: i32,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<()>;
 }
 
 struct QdrantVectorSink {
@@ -218,7 +266,10 @@ impl PendingStore for PgPendingStore {
                      content = EXCLUDED.content,
                      metadata = EXCLUDED.metadata,
                      embedding = EXCLUDED.embedding,
-                     created_at = NOW()",
+                     created_at = NOW(),
+                     -- A fresh failure restarts the backoff: this row is due now.
+                     attempts = 0,
+                     next_retry_at = NULL",
                 &[
                     &memory.id,
                     &memory.content,
@@ -232,9 +283,14 @@ impl PendingStore for PgPendingStore {
 
     async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
         let client = self.pool.get().await?;
+        // Only rows that are due are selected. A permanently-failing row that
+        // was deferred with a future `next_retry_at` drops out of the head of
+        // the batch, so later rows are no longer starved (I30-C).
         let rows = client
             .query(
-                "SELECT id, content, metadata, embedding FROM pending_embeddings
+                "SELECT id, content, metadata, embedding, attempts, next_retry_at
+                 FROM pending_embeddings
+                 WHERE next_retry_at IS NULL OR next_retry_at <= NOW()
                  ORDER BY created_at ASC LIMIT $1",
                 &[&(limit as i64)],
             )
@@ -249,6 +305,8 @@ impl PendingStore for PgPendingStore {
                     content: row.get(1),
                     metadata: row.get(2),
                     embedding,
+                    attempts: row.get(4),
+                    next_retry_at: row.get(5),
                 })
             })
             .collect()
@@ -258,6 +316,22 @@ impl PendingStore for PgPendingStore {
         let client = self.pool.get().await?;
         client
             .execute("DELETE FROM pending_embeddings WHERE id = $1", &[&id])
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_failed(
+        &self,
+        id: Uuid,
+        attempts: i32,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE pending_embeddings SET attempts = $2, next_retry_at = $3 WHERE id = $1",
+                &[&id, &attempts, &next_retry_at],
+            )
             .await?;
         Ok(())
     }
@@ -336,9 +410,26 @@ async fn vector_for_pending(
     Ok(vector)
 }
 
+/// Persist a failed reconcile attempt so the row is deferred out of the head
+/// of the queue (I30-C). Backoff bookkeeping is best-effort: if it cannot be
+/// written the row stays queued and will simply be retried on the next pass,
+/// which is safe (no worse than the pre-fix behaviour).
+async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
+    let (attempts, next_retry_at) = next_retry_state(attempts, Utc::now());
+    if let Err(error) = outbox.mark_failed(id, attempts, next_retry_at).await {
+        warn!(
+            id = %id,
+            error = %format!("{error:#}"),
+            "could not record a deferred retry for a pending memory"
+        );
+    }
+}
+
 /// Startup reconcile of queued vector upserts (P1-2). Never fails the whole
 /// startup: a transient Qdrant/embedding failure leaves the row queued with a
-/// warning so the next startup retries it.
+/// warning so the next startup retries it. Every failure bumps `attempts` and
+/// sets a future `next_retry_at`, so a permanently-failing row is filtered out
+/// of the next batch instead of starving later rows (I30-C).
 async fn reconcile_pending(
     outbox: &dyn PendingStore,
     sink: &dyn VectorSink,
@@ -357,14 +448,18 @@ async fn reconcile_pending(
     };
 
     for item in pending {
+        // Copy before the partial move of `item.content` / `item.metadata`
+        // below, so the failure path can still defer this row.
+        let attempts = item.attempts;
         let vector = match vector_for_pending(&item, embedder, embedding_dim).await {
             Ok(vector) => vector,
             Err(error) => {
                 warn!(
                     id = %item.id,
                     error = %format!("{error:#}"),
-                    "could not produce a vector for a pending memory; leaving it queued"
+                    "could not produce a vector for a pending memory; deferring this row"
                 );
+                defer_failed(outbox, item.id, attempts).await;
                 continue;
             }
         };
@@ -395,8 +490,9 @@ async fn reconcile_pending(
                 warn!(
                     id = %memory.id,
                     error = %format!("{error:#}"),
-                    "reconciled Qdrant upsert failed; keeping the row for the next startup"
+                    "reconciled Qdrant upsert failed; deferring the row to a later pass"
                 );
+                defer_failed(outbox, memory.id, attempts).await;
             }
         }
     }
@@ -1411,20 +1507,40 @@ mod tests {
     }
 
     /// In-memory stand-in for the `pending_embeddings` table.
+    ///
+    /// `respect_backoff` selects whether `list` applies the same
+    /// `next_retry_at IS NULL OR next_retry_at <= NOW()` gate as the production
+    /// SQL. The pre-existing reconcile tests deliberately keep it off: they
+    /// assert the retry/removal mechanics and immediately run a second pass,
+    /// which would not be due under a real clock. The head-of-line regression
+    /// test turns it on to exercise the actual selection policy.
     #[derive(Default)]
     struct MemoryOutbox {
         rows: std::sync::Mutex<Vec<PendingEmbedding>>,
+        respect_backoff: bool,
     }
 
     impl MemoryOutbox {
         fn with_rows(rows: Vec<PendingEmbedding>) -> Self {
             Self {
                 rows: std::sync::Mutex::new(rows),
+                respect_backoff: false,
+            }
+        }
+
+        fn with_backoff_filter(rows: Vec<PendingEmbedding>) -> Self {
+            Self {
+                rows: std::sync::Mutex::new(rows),
+                respect_backoff: true,
             }
         }
 
         fn count(&self) -> usize {
             self.rows.lock().expect("outbox lock").len()
+        }
+
+        fn snapshot(&self) -> Vec<PendingEmbedding> {
+            self.rows.lock().expect("outbox lock").clone()
         }
     }
 
@@ -1439,16 +1555,20 @@ mod tests {
                     content: memory.content.clone(),
                     metadata: memory.metadata.clone(),
                     embedding: embedding.to_vec(),
+                    attempts: 0,
+                    next_retry_at: None,
                 });
             Ok(())
         }
 
         async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
+            let now = Utc::now();
             Ok(self
                 .rows
                 .lock()
                 .expect("outbox lock")
                 .iter()
+                .filter(|row| !self.respect_backoff || is_retry_due(row.next_retry_at, now))
                 .take(limit)
                 .cloned()
                 .collect())
@@ -1461,6 +1581,20 @@ mod tests {
                 .retain(|row| row.id != id);
             Ok(())
         }
+
+        async fn mark_failed(
+            &self,
+            id: Uuid,
+            attempts: i32,
+            next_retry_at: DateTime<Utc>,
+        ) -> Result<()> {
+            let mut rows = self.rows.lock().expect("outbox lock");
+            if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                row.attempts = attempts;
+                row.next_retry_at = Some(next_retry_at);
+            }
+            Ok(())
+        }
     }
 
     fn pending_entry() -> PendingEmbedding {
@@ -1469,6 +1603,8 @@ mod tests {
             content: "queued after a Qdrant failure".into(),
             metadata: json!({ "kind": "outbox-regression" }),
             embedding: vec![0.1; 384],
+            attempts: 0,
+            next_retry_at: None,
         }
     }
 
@@ -1562,12 +1698,149 @@ mod tests {
             content: memory.content.clone(),
             metadata: memory.metadata.clone(),
             embedding: Vec::new(),
+            attempts: 0,
+            next_retry_at: None,
         }]);
 
         store_memory_with_sinks(&memory, &ScriptedSink::new(vec![true]), &outbox)
             .await
             .expect("upsert succeeds");
         assert_eq!(outbox.count(), 0, "a stale queued row must be cleared");
+    }
+
+    // --- I30-C: retry backoff / head-of-line blocking (pure, no live services) ---
+
+    #[test]
+    fn retry_backoff_doubles_and_is_capped() {
+        assert_eq!(retry_backoff(1).num_minutes(), 2);
+        assert_eq!(retry_backoff(2).num_minutes(), 4);
+        assert_eq!(retry_backoff(3).num_minutes(), 8);
+        assert_eq!(retry_backoff(64).num_minutes(), MAX_RETRY_BACKOFF_MINUTES);
+        // A hostile/corrupt attempt count must not panic or overflow.
+        assert_eq!(
+            retry_backoff(i32::MAX).num_minutes(),
+            MAX_RETRY_BACKOFF_MINUTES
+        );
+    }
+
+    #[test]
+    fn next_retry_state_bumps_attempts_and_defers_into_the_future() {
+        let now = fixed_now();
+        let (attempts, next) = next_retry_state(0, now);
+        assert_eq!(attempts, 1);
+        assert_eq!(next, now + chrono::Duration::minutes(2));
+
+        let (attempts, next) = next_retry_state(attempts, now);
+        assert_eq!(attempts, 2);
+        assert_eq!(next, now + chrono::Duration::minutes(4));
+    }
+
+    #[test]
+    fn is_retry_due_respects_the_backoff_boundary() {
+        let now = fixed_now();
+        let past = Some(now - chrono::Duration::seconds(1));
+        let future = Some(now + chrono::Duration::seconds(1));
+        assert!(is_retry_due(None, now), "never failed is due");
+        assert!(is_retry_due(Some(now), now), "due at the boundary");
+        assert!(is_retry_due(past, now));
+        assert!(!is_retry_due(future, now));
+    }
+
+    /// A failed retry records one attempt and defers the row, so the next
+    /// selection pass can skip it. Pure: no clock injection or DB involved
+    /// beyond the in-memory store and a future `next_retry_at`.
+    #[tokio::test]
+    async fn failed_retry_records_attempts_and_defers_the_row() {
+        let pending = pending_entry();
+        let outbox = MemoryOutbox::with_backoff_filter(vec![pending.clone()]);
+        let embedder = disabled_embedder();
+        let dim = pending.embedding.len();
+
+        reconcile_pending(
+            &outbox,
+            &ScriptedSink::new(vec![false]),
+            Some(&embedder),
+            dim,
+        )
+        .await;
+
+        let rows = outbox.snapshot();
+        assert_eq!(rows.len(), 1, "a failed retry must not be deleted");
+        assert_eq!(rows[0].attempts, 1, "the failure must be counted");
+        assert!(
+            rows[0].next_retry_at.is_some_and(|at| at > Utc::now()),
+            "the row must be deferred into the future"
+        );
+    }
+
+    /// Head-of-line blocking regression (I30-C): a full batch of permanently
+    /// failing rows (old-dimension vector + no embedder) must not starve a
+    /// later, retryable row across successive startup passes. The in-memory
+    /// store applies the same due-time gate as the production SQL query; no
+    /// PostgreSQL or Qdrant connection is involved.
+    #[tokio::test]
+    async fn reconcile_does_not_head_of_line_block_on_permanently_failing_rows() {
+        let mut rows: Vec<PendingEmbedding> = (0..RECONCILE_BATCH_LIMIT)
+            .map(|_| {
+                let mut row = pending_entry();
+                row.embedding.clear(); // stale/old-dimension vector
+                row
+            })
+            .collect();
+        let good = pending_entry(); // valid 384-dim vector: retryable
+        let good_id = good.id;
+        rows.push(good);
+
+        let outbox = MemoryOutbox::with_backoff_filter(rows);
+        // Disabled endpoint: the first batch can never produce a vector, the
+        // exact permanent-failure scenario from the adversarial review.
+        let embedder = disabled_embedder();
+
+        // Pass 1: the whole batch of failing rows is deferred, not deleted.
+        reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
+        assert_eq!(
+            outbox.count(),
+            RECONCILE_BATCH_LIMIT + 1,
+            "deferring is not deletion"
+        );
+
+        let after_first = outbox.snapshot();
+        let failing: Vec<_> = after_first.iter().filter(|r| r.id != good_id).collect();
+        assert_eq!(failing.len(), RECONCILE_BATCH_LIMIT);
+        assert!(
+            failing.iter().all(|r| r.attempts == 1),
+            "each failing row must record exactly one attempt"
+        );
+        assert!(
+            failing
+                .iter()
+                .all(|r| r.next_retry_at.is_some_and(|at| at > Utc::now())),
+            "each failing row must be deferred out of the next batch"
+        );
+        assert!(
+            after_first
+                .iter()
+                .find(|r| r.id == good_id)
+                .is_some_and(|r| r.attempts == 0 && r.next_retry_at.is_none()),
+            "the un-reached good row must be untouched"
+        );
+
+        // Pass 2: deferred rows are not due, so the good row reaches the sink,
+        // succeeds, and is removed. Without backoff this row would be starved
+        // forever by the full batch of permanent failures.
+        reconcile_pending(
+            &outbox,
+            &ScriptedSink::new(vec![true]),
+            Some(&embedder),
+            384,
+        )
+        .await;
+        let remaining = outbox.snapshot();
+        assert_eq!(remaining.len(), RECONCILE_BATCH_LIMIT);
+        assert!(
+            !remaining.iter().any(|r| r.id == good_id),
+            "a retryable row must not be starved by the failing head of the queue"
+        );
     }
 }
 
