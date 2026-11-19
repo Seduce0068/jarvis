@@ -9,15 +9,24 @@ Import `dashboards/jarvis-overview.json` into Grafana Cloud:
 The panels depend on the scrape jobs defined in
 `infra/config/otelcol-config.yaml`:
 
-| Panel | Query | Source |
-| --- | --- | --- |
-| HTTP request rate | `sum(rate(jarvis_http_requests_total[5m]))` | sidecar `/metrics` |
-| Total HTTP requests | `sum(jarvis_http_requests_total)` | sidecar `/metrics` |
-| JARVIS services | `up{job=~"jarvis-.*"}` | otelcol Prometheus receiver |
-| Dependencies | `up{job=~"postgresql\|qdrant\|opencode\|code-server\|node-exporter"}` | otelcol Prometheus receiver |
+| Panel | Source |
+| --- | --- |
+| HTTP request rate | sidecar `/metrics` |
+| Total HTTP requests | sidecar `/metrics` |
+| JARVIS services | otelcol Prometheus receiver |
+| Dependencies | otelcol Prometheus receiver |
+
+Queries (kept in sync with `jarvis-overview.json`):
+
+```promql
+sum by (job) (rate(jarvis_http_requests_total[5m]))
+sum by (job) (jarvis_http_requests_total)
+up{job=~"jarvis-.*"}
+up{job=~"(qdrant|opencode|code-server|postgresql|node-exporter)"}
+```
 
 `jarvis_http_requests_total` has no labels yet; the dashboard aggregates it
-across all sidecars. Add request-path labels before splitting the panel by
+per scrape `job`. Add request-path labels before splitting the panel by
 endpoint.
 
 ## Provisioning
