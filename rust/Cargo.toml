@@ -124,8 +124,7 @@ hex = "0.4"
 
 # Testing
 testcontainers = { version = "0.20", features = ["default"] }
-mockall = "0.13"
-proptest = "1.4"
+# mockall / proptest は参照0のため削除。mock / property-based テストを導入するなら再宣言。
 
 # Build dependencies
 

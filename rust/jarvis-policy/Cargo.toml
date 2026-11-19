@@ -54,8 +54,8 @@ axum = { workspace = true }
 tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
-proptest = { workspace = true }
-mockall = { workspace = true }
+# mockall / proptest は参照0のため削除（workspace 宣言も削除）。
+# 再導入時は workspace と同時に宣言する。
 reqwest = { workspace = true }
 
 [[bin]]
