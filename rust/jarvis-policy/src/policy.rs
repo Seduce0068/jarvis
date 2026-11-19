@@ -104,10 +104,32 @@ impl CedarEngine {
         } else if path.is_file() {
             load_from_file(path)?
         } else {
-            tracing::info!(
-                "Cedar policy path {} not found; starting with no policies (deny by default)",
-                path.display()
-            );
+            // `is_dir()`/`is_file()` return `false` on any metadata error, so an
+            // existing but unreadable policy path is indistinguishable from a
+            // missing one here. Probe explicitly: keep the "missing path -> info"
+            // contract, but surface real inspection/enumeration failures as a
+            // warning that records only the directory name (no policy contents).
+            match std::fs::metadata(path) {
+                Ok(_) => {
+                    tracing::warn!(
+                        "Cedar policy path {} is not a readable directory or file; starting with no policies (deny by default)",
+                        path.display()
+                    );
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::info!(
+                        "Cedar policy path {} not found; starting with no policies (deny by default)",
+                        path.display()
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to inspect Cedar policy directory {} ({}); starting with no policies (deny by default)",
+                        path.display(),
+                        err
+                    );
+                }
+            }
             (PolicySet::new(), Entities::empty())
         };
 
@@ -176,9 +198,35 @@ impl CedarEngine {
 ///
 /// Entity data is read from `entities.json` in the same directory when present.
 fn load_from_directory(dir: &Path) -> Result<(PolicySet, Entities)> {
-    let mut cedar_files: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
+    // `CedarEngine::new` only calls this for a path that passed `is_dir()`,
+    // which can still race with an external change or lose permission before
+    // the open. Log the failure instead of silently ending up with no policies.
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                "Failed to enumerate Cedar policy directory {} ({}); starting with no policies (deny by default)",
+                dir.display(),
+                err
+            );
+            return Ok((PolicySet::new(), Entities::empty()));
+        }
+    };
+
+    let mut cedar_files: Vec<PathBuf> = entries
+        .filter_map(|entry| match entry {
+            Ok(entry) => Some(entry.path()),
+            Err(err) => {
+                // Do not log the entry itself (it may name a policy file);
+                // record only the directory that could not be fully enumerated.
+                tracing::warn!(
+                    "Failed to read an entry in Cedar policy directory {} ({}); skipping",
+                    dir.display(),
+                    err
+                );
+                None
+            }
+        })
         .filter(|path| {
             path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("cedar")
         })
