@@ -1527,3 +1527,33 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、anyhow `context()` の move（qdrant）、未使用 import、
   SDK 自身の DEBUG ログを捕捉したテスト（自アプリ WARN 行のみへ限定）。
+
+### Round 52（R4 で修正済み）
+
+- [x] **kill switch 409 の非常停止 pin が probe 一時障害で解除**（high）→
+  probe を fail-closed 化（エラー時は停止中）＋409 由来の latch を sticky に
+  OR。UI 61 tests pass。
+- [x] **BASE_DIR 検査が重複キーで迂回**（high）→ 最終割り当て行のみ検査、
+  同一キー重複を DANGER、`/` と `..` 成分を拒否。deploy 側にも同じロジック。
+- [x] **mcp-gw env 配置が非アトミック**（high）→ 一時パス install ＋
+  `mv -f`、.bak 0600＋trap 復元、配置直後に `--env-only` drift 検査。
+- [x] 409 固定本文を jarvis-core 共有定数へ一本化、UI 契約テストを
+  独立 fixture との一致 pin へ置換（self-confirmation 解消）。
+- [x] SIGTERM を「即時停止（in-flight 保証なし）」と明記、旧 "exiting
+  cleanly" ログを削除、TimeoutStopSec 30→10。
+
+### Round 52 の残り指摘（未対応）
+
+- [ ] **gRPC search_memory が符号付き limit を `as usize` で受け流す**
+  （confirmed high）— `limit=-1` が `usize::MAX` になり Qdrant へ実質上限なし。
+  `usize::try_from` で InvalidArgument 化＋共通上限、回帰追加。
+- [ ] jarvis-policy の TracerGuard::Drop だけ Round 51 修正から漏れ、
+  早期リターンでスパン消失が無記録＋生 err を eprintln（medium）。
+- [ ] 語彙パリティ／6RPC 回帰がソース文字列スキャン依存（medium）—
+  `error_kind` を pub(crate) 化して実戻り値比較、gRPC 側にも振る舞いテスト。
+- [ ] store_memory が embedding 次元を検証せず書き込み時 fail-open
+  （medium）— `embedding.len() == embedding_dim` を 400/InvalidArgument で拒否。
+- [ ] metadata が object 以外でも parse 成功、expires_at 範囲外が黙って
+  None 降格（medium）— 共通ヘルパで拒否（additive degrade とは区別）。
+
+- 親が対応: UI fmt 差分のみ。
