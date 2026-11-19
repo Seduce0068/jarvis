@@ -1110,7 +1110,9 @@ pub mod memory {
     ///   (no single dimension to compare); its own warn-and-continue behavior
     ///   in [`check_existing_dimension`] is retained for the pure helpers, but
     ///   startup now fails closed via [`reject_multi_vector_collection`]
-    ///   (I51-C) because the upsert/search paths use an unnamed vector.
+    ///   (I51-C / I53-A) because the upsert/search paths use an unnamed vector.
+    ///   A single named vector yields `Ok(Some(size))` here, but is still
+    ///   rejected by that guard at startup (I53-A).
     /// - `Err(())` — a field was missing, the named-vector map was empty, or
     ///   the response could not otherwise be interpreted; fail startup.
     pub(super) fn inspected_dimension_from_info(
@@ -1133,25 +1135,29 @@ pub mod memory {
         }
     }
 
-    /// Reject a collection configured with two or more named vectors (I51-C).
+    /// Reject a collection configured with named vectors (`Config::ParamsMap`,
+    /// I51-C / I53-A).
     ///
     /// Adopted policy: **fail startup (fail-closed)**. Both write and read paths
     /// in this file address a single *unnamed* vector: [`upsert_vector`] builds
     /// its point with `PointStruct::new`, and [`search_vectors`] builds its query
     /// with `SearchPointsBuilder`. Qdrant rejects unnamed-vector points/queries
-    /// against a named-vector collection, so treating a confirmed multi-vector
-    /// collection as a healthy startup would make *every* memory save/search
-    /// fail afterwards while the `pending_embeddings` outbox retries forever —
-    /// a mismatch that is far cheaper to detect here than at runtime.
+    /// against a named-vector collection — including one holding only a *single*
+    /// named vector — so treating it as a healthy startup would make *every*
+    /// memory save/search fail afterwards while the `pending_embeddings` outbox
+    /// retries forever — a mismatch that is far cheaper to detect here than at
+    /// runtime.
     ///
     /// The alternative policy — read a vector name from configuration and pass
     /// named vectors to upsert/search — would require a new config field and
     /// changes outside this file, so it is deliberately **not** adopted for this
-    /// file-only change. Single-vector collections (unnamed or a single named
-    /// vector) are unaffected, and the warn-and-continue path for an unreadable
-    /// single-vector dimension ([`check_existing_dimension`],
-    /// `unknown_existing_dimension_only_warns`) is left untouched: this guard
-    /// fires only for 2+ named vectors.
+    /// file-only change. A single *unnamed* vector collection (`Config::Params`)
+    /// is unaffected, and the warn-and-continue path for an unreadable dimension
+    /// ([`check_existing_dimension`], `unknown_existing_dimension_only_warns`) is
+    /// left untouched: this guard fires for every non-empty named-vector map
+    /// (`named >= 1`). An empty map carries no usable vector config and is
+    /// classified as unparsed by [`inspected_dimension_from_info`], which fails
+    /// closed through [`check_inspected_dimension`].
     ///
     /// As everywhere in this module, no raw response or error text is ever
     /// formatted. Only the fixed `error_kind` vocabulary, the collection name
@@ -1176,21 +1182,28 @@ pub mod memory {
         let Config::ParamsMap(params_map) = inner else {
             return Ok(());
         };
-        let named = params_map.map.len();
-        if named < 2 {
+        // I53-A: `Config::ParamsMap` is named-vector mode regardless of the
+        // number of entries. Even a single named vector makes Qdrant reject the
+        // unnamed points/queries built by `upsert_vector`/`search_vectors`, so
+        // every non-empty map (`named >= 1`) must fail startup. An empty map has
+        // no usable vector config and is classified as unparsed by
+        // `inspected_dimension_from_info`, which already fails closed; leave it
+        // to that path.
+        if params_map.map.is_empty() {
             return Ok(());
         }
+        let named = params_map.map.len();
         let kind = ErrorKind::Qdrant.as_str();
         error!(
             collection = %name,
             named_vectors = named,
             error_kind = kind,
-            "Qdrant collection uses multiple named vectors; failing closed"
+            "Qdrant collection uses named vectors; failing closed"
         );
         anyhow::bail!(
             "Qdrant collection '{name}' has {named} named vectors (error_kind={kind}); \
              this builder addresses a single unnamed vector and cannot upsert into or \
-             search a multi-vector collection; refusing to start"
+             search a named-vector collection; refusing to start"
         )
     }
 
@@ -1225,11 +1238,11 @@ pub mod memory {
         let inspected = match client.collection_info(name).await {
             Ok(response) => match response.result.as_ref() {
                 Some(info) => {
-                    // I51-C: a confirmed multi-vector collection (2+ named
-                    // vectors) cannot be served by the unnamed-vector upsert
-                    // and search paths below. Fail startup here instead of
-                    // warning and continuing into a healthy-looking but fully
-                    // broken runtime with an endlessly retrying outbox.
+                    // I51-C / I53-A: any named-vector collection (even a single
+                    // named vector) cannot be served by the unnamed-vector
+                    // upsert and search paths below. Fail startup here instead
+                    // of warning and continuing into a healthy-looking but
+                    // fully broken runtime with an endlessly retrying outbox.
                     reject_multi_vector_collection(name, info)?;
                     inspected_dimension_from_info(info)
                 }
@@ -1991,6 +2004,11 @@ mod tests {
             CollectionConfig, CollectionInfo, CollectionParams, VectorParams, VectorsConfig,
         };
 
+        // Historical name: since I53-A a single *named* vector IS rejected (see
+        // `single_named_vector_collection_fails_closed_at_startup`). What still
+        // holds is that this guard leaves the non-named cases alone: a single
+        // unnamed vector and an unparsed response.
+
         // A single unnamed vector (the normal collection created here).
         let dense = CollectionInfo {
             config: Some(CollectionConfig {
@@ -2009,9 +2027,13 @@ mod tests {
         };
         assert!(memory::reject_multi_vector_collection("jarvis_memories", &dense).is_ok());
 
-        // A single named vector is still one vector: not a multi-vector map.
+        // I53-A: a single named vector is still named-vector mode. Qdrant
+        // rejects unnamed points/queries against it, so the guard must reject.
         let single_named = named_vector_info(&["dense"]);
-        assert!(memory::reject_multi_vector_collection("jarvis_memories", &single_named).is_ok());
+        assert!(
+            memory::reject_multi_vector_collection("jarvis_memories", &single_named).is_err(),
+            "a single named vector must fail closed (I53-A)"
+        );
 
         // An unparsed response must not be swallowed by this guard; it stays a
         // fail-closed error through `check_inspected_dimension` (I47-C/I49-C).
@@ -2027,6 +2049,41 @@ mod tests {
         assert!(
             memory::check_existing_dimension("jarvis_memories", 384, None).is_ok(),
             "single-vector unknown dimension keeps warn-and-continue"
+        );
+    }
+
+    #[test]
+    fn single_named_vector_collection_fails_closed_at_startup() {
+        // I53-A: one named vector is enough. `Config::ParamsMap` is named-vector
+        // mode even with a single entry, and the builder's unnamed upsert/search
+        // paths cannot serve it, so startup must fail closed with the same fixed
+        // vocabulary used for the 2+ named-vector case.
+        let single = named_vector_info(&["dense"]);
+
+        // The pure inspection layer still reports the exact size of the single
+        // named vector (that classification is unchanged); it is the startup
+        // guard that rejects it now.
+        assert_eq!(
+            memory::inspected_dimension_from_info(&single),
+            Ok(Some(384))
+        );
+
+        let err = memory::reject_multi_vector_collection("jarvis_memories", &single)
+            .expect_err("a single named vector cannot be served by unnamed vectors");
+        let message = format!("{err:#}");
+        assert!(message.contains("jarvis_memories"), "{message}");
+        assert!(message.contains("error_kind=qdrant"), "{message}");
+        assert!(
+            message.contains("1 named vector"),
+            "the parsed vector count is reported: {message}"
+        );
+        assert!(
+            !message.contains("http") && !message.contains("response"),
+            "no endpoint or response fragment may leak: {message}"
+        );
+        assert!(
+            !message.contains("dense"),
+            "named-vector identifiers must not leak: {message}"
         );
     }
 
