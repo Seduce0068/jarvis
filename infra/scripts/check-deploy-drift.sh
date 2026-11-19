@@ -40,23 +40,38 @@ else
     say "web.fetch approval" "OK (requires approval)"
   fi
 fi
-# 4) policy
-if [ -f /etc/jarvis/policy/casbin_policy.csv ] && [ -f "$repo/infra/config/policy/casbin_policy.csv" ]; then
+# 4) policy. A file present on only one side must no longer be silently
+# skipped (I7-C): a missing deployed file is a DANGER (same framework as the
+# allowlist check) and a missing repo source is flagged too.
+if [ ! -f /etc/jarvis/policy/casbin_policy.csv ]; then
+  say "policy" "MISSING (deployed)"
+  danger=1
+elif [ ! -f "$repo/infra/config/policy/casbin_policy.csv" ]; then
+  say "policy" "MISSING (repo)"
+  danger=1
+else
   if cmp -s /etc/jarvis/policy/casbin_policy.csv "$repo/infra/config/policy/casbin_policy.csv"; then
     say "policy" "OK (same)"
   else
     say "policy" "DIFF"; drift=1
   fi
 fi
-# 4b) Cedar policy / schema / PII patterns (P2-12). Same drift semantics as
-# casbin_policy.csv: compare only when the deployed file exists.
+# 4b) Cedar policy / schema / PII patterns (P2-12). Missing files are no longer
+# silently skipped (I7-C): a missing deployed file is a DANGER and a missing
+# repo source is flagged too, using the same framework as the allowlist check.
 for pair in \
   "$deployed_policy_dir/policies.cedar|$repo/infra/config/policy/policies.cedar" \
   "$deployed_policy_dir/cedar_schema.cedarschema|$repo/infra/config/policy/cedar_schema.cedarschema" \
   "$deployed_pii|$repo/infra/config/pii_patterns.toml"; do
   deployed="${pair%%|*}"; source="${pair##*|}"
   label="$(basename "$deployed")"
-  if [ -f "$deployed" ] && [ -f "$source" ]; then
+  if [ ! -f "$deployed" ]; then
+    say "$label" "MISSING (deployed)"
+    danger=1
+  elif [ ! -f "$source" ]; then
+    say "$label" "MISSING (repo)"
+    danger=1
+  else
     if cmp -s "$deployed" "$source"; then say "$label" "OK (same)"; else say "$label" "DIFF"; drift=1; fi
   fi
 done
