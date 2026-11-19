@@ -110,6 +110,37 @@ fi
 
 MIGRATIONS_DST="/opt/jarvis/rust/migrations"
 
+# I38-B: reconcile the destination *.sql filename set against this checkout's
+# staging set before installing the new payload. `sudo install` only adds or
+# overwrites; it never removes a migration that was deleted from the source.
+# Such a stale file would still be applied by jarvis-migrations.service's
+# pre-flight (`--source ${MIGRATIONS_DST}`) while being absent from the
+# context binary's build-time `sqlx::migrate!()` set, producing a checksum /
+# unknown-version mismatch and a startup failure. Compute the stale set with
+# a read-only listing here (before any /opt write), fail closed on an
+# unexpected directory, and delete the extras explicitly in the deploy step
+# below -- before the new SQL and the markers are installed.
+STALE_SQL_FILES=()
+shopt -s nullglob
+for dst_sql in "${MIGRATIONS_DST}"/*.sql; do
+  dst_name="${dst_sql##*/}"
+  keep=0
+  for staged_sql in "${STAGED_SQL_FILES[@]}"; do
+    if [[ "${staged_sql##*/}" == "${dst_name}" ]]; then
+      keep=1
+      break
+    fi
+  done
+  if (( keep == 0 )); then
+    if [[ -d "${dst_sql}" && ! -L "${dst_sql}" ]]; then
+      echo "stale migration path is a directory, refusing to delete: ${dst_sql}" >&2
+      exit 1
+    fi
+    STALE_SQL_FILES+=("${dst_sql}")
+  fi
+done
+shopt -u nullglob
+
 # All checks passed; deploy from the validated staging set. Payload files go
 # in first and the commit markers go in LAST, so the markers act as the seal
 # of a completed deploy: if an install aborts mid-way, set -e stops here, the
@@ -122,6 +153,15 @@ for bin in "${BINARIES[@]}"; do
   install -m 755 "${STAGE_BIN}/${bin}" "/opt/jarvis/bin/${bin}"
 done
 sudo install -d -o root -g root -m 0755 "${MIGRATIONS_DST}"
+# I38-B: explicitly remove migrations that are not in this checkout, then
+# install the current set and finally the markers. Keeping the delete inside
+# this write boundary means a failure aborts before the markers can seal a
+# mixed new/old migration tree.
+if (( ${#STALE_SQL_FILES[@]} > 0 )); then
+  echo "removing stale migration SQL not present in this checkout from ${MIGRATIONS_DST}:" >&2
+  printf '  %s\n' "${STALE_SQL_FILES[@]}" >&2
+  sudo rm -f -- "${STALE_SQL_FILES[@]}"
+fi
 sudo install -o root -g root -m 0644 "${STAGED_SQL_FILES[@]}" "${MIGRATIONS_DST}/"
 sudo install -o root -g root -m 0644 "${bin_commit_file}" /opt/jarvis/bin/.jarvis-build-commit
 sudo install -o root -g root -m 0644 "${mig_commit_file}" "${MIGRATIONS_DST}/.jarvis-source-commit"
