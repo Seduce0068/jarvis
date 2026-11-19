@@ -180,7 +180,7 @@ fn create_layout(args: &Args, root: &Path, source_root: &Path, server: bool) -> 
     }
 
     if server {
-        write_private(&root.join("config/jarvis.env"), SERVER_ENV)?;
+        write_private_if_absent(&root.join("config/jarvis.env"), SERVER_ENV)?;
         copy_tool(
             source_root,
             "scripts/doctor/jarvis-doctor.rs",
@@ -214,6 +214,39 @@ fn write_private(path: &Path, contents: &str) -> Result<()> {
         .mode(0o600)
         .open(path)
         .with_context(|| format!("write {}", path.display()))?;
+    std::io::Write::write_all(&mut file, contents.as_bytes())?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+/// Generate a private template only when `path` does not exist yet.
+///
+/// `create_new` makes the existence check and creation atomic: an existing
+/// entry (file, directory or symlink) yields `AlreadyExists` and is left
+/// completely untouched (no truncation, no append, no symlink follow).
+/// Re-running bootstrap therefore cannot destroy secrets provisioned into the
+/// env file after the first run. The warning reports only the path, never the
+/// file contents.
+fn write_private_if_absent(path: &Path, contents: &str) -> Result<()> {
+    use std::io::ErrorKind;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            eprintln!(
+                "WARNING: {} already exists; skipping to preserve its contents.",
+                path.display()
+            );
+            return Ok(());
+        }
+        Err(error) => return Err(error).with_context(|| format!("write {}", path.display())),
+    };
     std::io::Write::write_all(&mut file, contents.as_bytes())?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
