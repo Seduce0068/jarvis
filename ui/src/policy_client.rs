@@ -1207,4 +1207,133 @@ mod tests {
             assert!(rendered.contains("redacted"), "{rendered}");
         }
     }
+
+    // --- I38-D / TC-U13: real POST send path scope resolution ---------------
+
+    /// Fixed sentinels only: real token values must never reach logs, errors
+    /// or assertion text. Assertions below compare values without printing
+    /// them, so even a failure keeps the sentinel out of the output.
+    const TC_U13_API_SCOPE_TOKEN: &str = "tc-u13-api-scope-token";
+    const TC_U13_ADMIN_SCOPE_TOKEN: &str = "tc-u13-admin-scope-token";
+
+    /// Drive both decision POSTs through a loopback stub and return the raw
+    /// requests in call order (`approve`, then `deny`). The factory receives
+    /// the stub base URL so each test picks the production wiring to exercise.
+    fn capture_decide_requests(client_factory: impl FnOnce(String) -> PolicyClient) -> Vec<String> {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = seen.clone();
+        let mut responses = [
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
+        ]
+        .into_iter();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                seen_for_thread.lock().expect("lock").push(request);
+                respond(stream, responses.next().expect("queued response"));
+            },
+            2,
+        );
+
+        let client = client_factory(format!("http://{addr}"));
+        let approved = client.approve("req-1", "koppe");
+        let denied = client.deny("req-2", "because");
+        handle.join().expect("server thread");
+        assert!(approved.is_ok(), "approve must succeed against the stub");
+        assert!(denied.is_ok(), "deny must succeed against the stub");
+        let requests = seen.lock().expect("lock").clone();
+        assert_eq!(requests.len(), 2, "both POSTs must reach the stub");
+        requests
+    }
+
+    /// TC-U13 real send path: without an admin scope, `approve` must fall back
+    /// to the API-scope token in `X-Jarvis-Approval-Token`.
+    #[test]
+    fn tc_u13_approve_sends_api_scope_token_when_admin_scope_is_unset() {
+        let requests = capture_decide_requests(|base_url| {
+            PolicyClient::new_with_tokens(base_url, Some(TC_U13_API_SCOPE_TOKEN.into()), None)
+        });
+        let request = &requests[0];
+        assert!(
+            request.starts_with("POST /v1/approval/req-1/approve "),
+            "approve must POST to the approve endpoint"
+        );
+        assert!(
+            approval_token(request).as_deref() == Some(TC_U13_API_SCOPE_TOKEN),
+            "approve must send the API-scope token when admin scope is unset"
+        );
+    }
+
+    /// TC-U13 real send path: the same fallback must apply to `deny`.
+    #[test]
+    fn tc_u13_deny_sends_api_scope_token_when_admin_scope_is_unset() {
+        let requests = capture_decide_requests(|base_url| {
+            PolicyClient::new_with_tokens(base_url, Some(TC_U13_API_SCOPE_TOKEN.into()), None)
+        });
+        let request = &requests[1];
+        assert!(
+            request.starts_with("POST /v1/approval/req-2/deny "),
+            "deny must POST to the deny endpoint"
+        );
+        assert!(
+            approval_token(request).as_deref() == Some(TC_U13_API_SCOPE_TOKEN),
+            "deny must send the API-scope token when admin scope is unset"
+        );
+    }
+
+    /// TC-U13 real send path through the *startup* wiring: the encoded
+    /// two-token bundle decoded by `new_with_token` must still resolve to the
+    /// admin scope on both POSTs, never the API scope.
+    #[test]
+    fn tc_u13_admin_scope_wins_on_real_send_path_via_encoded_bundle() {
+        let requests = capture_decide_requests(|base_url| {
+            let tokens = PolicyTokens::new(
+                Some(TC_U13_API_SCOPE_TOKEN.into()),
+                Some(TC_U13_ADMIN_SCOPE_TOKEN.into()),
+            );
+            let encoded = tokens.encode().expect("bundle encodes");
+            PolicyClient::new_with_token(base_url, Some(encoded))
+        });
+        for request in &requests {
+            assert!(
+                approval_token(request).as_deref() == Some(TC_U13_ADMIN_SCOPE_TOKEN),
+                "decisions must send the admin-scope token via the encoded bundle"
+            );
+            assert!(
+                !request.contains(TC_U13_API_SCOPE_TOKEN),
+                "decisions must not send the API-scope token when admin scope is set"
+            );
+        }
+    }
+
+    /// TC-U13 real send path: an admin-only configuration must send the admin
+    /// scope on both POSTs (no API scope to fall back to).
+    #[test]
+    fn tc_u13_admin_scope_is_sent_when_api_scope_is_unset() {
+        let requests = capture_decide_requests(|base_url| {
+            PolicyClient::new_with_tokens(base_url, None, Some(TC_U13_ADMIN_SCOPE_TOKEN.into()))
+        });
+        for request in &requests {
+            assert!(
+                approval_token(request).as_deref() == Some(TC_U13_ADMIN_SCOPE_TOKEN),
+                "decisions must send the admin-scope token when it is the only scope"
+            );
+        }
+    }
+
+    /// TC-U13 real send path: no configured scope means no approval-token
+    /// header at all on either POST.
+    #[test]
+    fn tc_u13_no_token_header_when_no_scope_is_configured() {
+        let requests =
+            capture_decide_requests(|base_url| PolicyClient::new_with_tokens(base_url, None, None));
+        for request in &requests {
+            assert!(
+                approval_token(request).is_none(),
+                "no X-Jarvis-Approval-Token header may be sent when no scope is configured"
+            );
+        }
+    }
 }
