@@ -139,7 +139,7 @@ make check-evidence
 | `results.skipped` | 正の値は `notes` に数値付き `N ignored`（`N` = `results.skipped`）が必要（`SKIPPED_TESTS`） |
 | `notes` | 文字列型（`BAD_NOTES_TYPE`）。`passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致（`NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH`） |
 | `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed のみ、skipped は除外）がその数以上（`SCENARIO_COUNT_MISMATCH`）。`ignored` 明記済みのスキップでもカバレッジは満たせない |
-| 契約 step | 契約マーカー以降の step に現れるキーワードが証跡 `notes` にもあること。baseline 超過分が未同期なら `SCENARIO_STEP_UNCOVERED` |
+| 契約 step | strict モード。契約マーカー以降の step に現れるキーワードが証跡 `notes` にもあること（baseline 例外なし）。未同期なら `SCENARIO_STEP_UNCOVERED` |
 | index | 両 index が全成果物をリンクし、リンク切れなし |
 | index のエントリ | 参照定義・インラインリンクを等価に解決し、`N passed` / `N failed` が必須（欠落は `INDEX_RESULT_MISSING`） |
 | index の件数 | 見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
@@ -165,27 +165,19 @@ step に現れる `BareJson` / `415` / `413` / `400` / no-leak /
 `Counter` で出現回数を数えるため、既存 step の重複追記も新規 step と
 みなされ、notes 未同期なら拒否される。
 
-### Round 61 の legacy baseline（解消待ち）
+### strict モード（Round 61 baseline は廃止）
 
-Round 61 で 4 仕様へ追記された契約 step は、対応する 4 証跡の `notes` に
-キーワードが同期されていない（2026-11-20 時点で確認）。既存 6 証跡を通す
-ため、これら既知の出現回数だけを `check-evidence.sh` の
-`BASELINE_CONTRACT_STEPS` で grandfather している。
+Round 61 で 4 仕様へ追記された契約 step のキーワード（`BareJson` / `415` /
+`413` / `400` / no-leak / `error_kind=invalid_input` / `field=body`）は、
+2026-11-20 に対応 4 証跡の `notes` へ実測済みとして同期済み。
+**`BASELINE_CONTRACT_STEPS` による grandfather は削除済み**で、現在は
+strict モードである。仕様の契約 step に現れるキーワードは、重複追記を
+含め当該証跡の `notes` に同じキーワードが無ければ
+`SCENARIO_STEP_UNCOVERED` で fail-closed に拒否される。
 
-| 仕様 | 対応証跡の `notes` の状態 |
-| --- | --- |
-| `test-context.md` | `BareJson` / `415` / `413` / `400` / no-leak / 固定語彙のいずれも未記載 |
-| `test-event.md` | 同上（「非漏洩検証」はあるが no-leak 契約キーワードとしては未同期） |
-| `test-policy-approval.md` | 同上 |
-| `test-mcp-gateway.md` | 同上 |
-
-baseline を超える新規・重複 step は notes 同期が必須となり、未同期なら
-`SCENARIO_STEP_UNCOVERED` で拒否される。`ci/scripts/test-legacy-guards.sh`
-に、契約 step を重複追記したコピーが拒否される tamper 回帰を追加済み。
-
-**残作業（本担当の担当外）**: 上記 4 証跡の `notes` へ実測済みキーワードを
-追記したうえで `BASELINE_CONTRACT_STEPS` を削除し、strict モードへ移行する。
-証跡 JSON と仕様ファイルは本担当の編集範囲外のため未変更である。
+`ci/scripts/test-legacy-guards.sh` の tamper 回帰は、コピーした仕様へ契約
+step を追記し、かつコピーした証跡の `notes` から当該キーワードを外すことで、
+notes 未同期を検出する（実リポジトリの仕様・証跡は変更しない）。
 
 ## JSON リジェクションの status 回帰（I61-A）
 

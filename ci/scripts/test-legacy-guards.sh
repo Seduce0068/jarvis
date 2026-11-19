@@ -804,10 +804,11 @@ PY
   fi
 done
 
-# I65-C: a contract step appended to an existing Scenario must not be treated
-# as covered when the evidence notes still lack its keyword. Use COPIED specs
-# so the real specification is untouched; the gate evaluates contract coverage
-# before the hash gate, so the drifted sha256 cannot mask the targeted code.
+# I65-C: in strict mode a contract keyword present in a spec but absent from
+# the matching notes must fail with SCENARIO_STEP_UNCOVERED. Use COPIED specs
+# and evidence so the real files are untouched; the gate evaluates contract
+# coverage before the hash gate, so the drifted sha256 cannot mask the
+# targeted code.
 step_tmp="$tmp/scenario_step_negative"
 mkdir -p "$step_tmp/ci/scripts" "$step_tmp/evidence" "$step_tmp/specs"
 cp "$repo/ci/scripts/check-evidence.sh" "$step_tmp/ci/scripts/check-evidence.sh"
@@ -816,20 +817,32 @@ cp "$repo/evidence/index.md" "$step_tmp/evidence/index.md"
 cp "$repo/todo.md" "$step_tmp/todo.md"
 cp "$repo"/evidence/test-run-*.json "$step_tmp/evidence/"
 cp "$repo"/specs/test-*.md "$step_tmp/specs/"
-# Duplicate the existing 415 contract step in TC-C. The Scenario count is
-# unchanged and the notes are untouched, so only the new contract-coverage
-# gate can reject this copy.
-if python3 - "$step_tmp/specs/test-context.md" <<'PY'
-import sys
+# Duplicate the existing 415 contract step in TC-C and strip 415 from the
+# COPIED evidence notes. The notes were synced for strict mode, so a spec-only
+# duplication would still be covered; removing the keyword reproduces an
+# out-of-sync (notes 未同期) run. The Scenario count is unchanged, so only the
+# contract-coverage gate can reject this copy.
+step_evidence="$step_tmp/evidence/test-run-20261120-f1e67b2a5e2c.json"
+if python3 - "$step_tmp/specs/test-context.md" "$step_evidence" <<'PY'
+import json, sys
 
-path = sys.argv[1]
-with open(path, encoding='utf-8') as fh:
+spec_path, evidence_path = sys.argv[1:3]
+with open(spec_path, encoding='utf-8') as fh:
     text = fh.read()
 needle = '  Then 空本文の 415 を返す（ヘッダ付与を促す）\n'
 if text.count(needle) != 1:
     raise SystemExit('415 contract step anchor not unique')
-with open(path, 'w', encoding='utf-8') as fh:
+with open(spec_path, 'w', encoding='utf-8') as fh:
     fh.write(text.replace(needle, needle + needle, 1))
+# Only the copied JSON is edited; the repository evidence stays pristine.
+with open(evidence_path, encoding='utf-8') as fh:
+    data = json.load(fh)
+notes = data.get('notes', '')
+if not isinstance(notes, str) or '415' not in notes:
+    raise SystemExit('415 keyword not found in copied evidence notes')
+data['notes'] = notes.replace('415', '')
+with open(evidence_path, 'w', encoding='utf-8') as fh:
+    json.dump(data, fh, ensure_ascii=False)
 PY
 then
   out=$(bash "$step_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?

@@ -32,9 +32,10 @@
 # added to an EXISTING Scenario (e.g. the Round 61 BareJson 415/413/400/no-leak
 # steps) do not change the Scenario count, so an unchanged executed total could
 # still be reported as sufficient. Pinned contract keywords are therefore
-# counted per spec; any keyword beyond the grandfathered Round 61 baseline must
-# appear in the matching evidence notes, otherwise SCENARIO_STEP_UNCOVERED fails
-# closed. No keyword value is emitted; no secret values are read.
+# counted per spec in strict mode: EVERY keyword found in a spec's contract
+# steps must appear in the matching evidence notes, otherwise
+# SCENARIO_STEP_UNCOVERED fails closed. No baseline/grandfather exception
+# remains. No keyword value is emitted; no secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -67,16 +68,14 @@ RFC3339 = re.compile(
     r'^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$')
 DOCUMENT_TYPES = ("test-execution-log", "test-result", "test-summary-report")
 
-# I65-C contract-step coverage. Round 61 appended the BareJson 415/413/400/
-# no-leak contract group to four EXISTING Scenarios, so the executed >=
-# scenario_count gate could not notice a spec-only edit. A "contract step" is a
-# gherkin step line (or the I61-A marker comment inside a gherkin block) that
-# carries one of these pinned keywords. Those four specs' evidence notes were
-# NOT synced with the keywords (reported separately), so their exact keyword
-# occurrences are grandfathered via BASELINE_CONTRACT_STEPS. Any additional or
-# duplicated occurrence must be present in the evidence notes, otherwise the
-# gate fails closed with SCENARIO_STEP_UNCOVERED. Remove the baseline once the
-# four notes have been synchronised with a real test run.
+# I65-C contract-step coverage (strict). Round 61 appended the BareJson
+# 415/413/400/no-leak contract group to four EXISTING Scenarios, so the
+# executed >= scenario_count gate could not notice a spec-only edit. A
+# "contract step" is a gherkin step line (or the I61-A marker comment inside a
+# gherkin block) that carries one of these pinned keywords. The four evidence
+# notes have since been synchronised with a real test run, so EVERY detected
+# keyword must be present in the matching notes; a missing or duplicated
+# occurrence fails closed with SCENARIO_STEP_UNCOVERED. No baseline exception.
 CONTRACT_KEYWORDS = {
     "BareJson": r'\bBareJson\b',
     "415": r'\b415\b',
@@ -96,17 +95,6 @@ CONTRACT_NOTE_PATTERNS = {
     "no-leak": r'no-?leak|非漏洩|漏洩しな|rejection\s*文',
     "invalid_input": r'invalid[_-]?input',
     "field=body": r'field\s*[=:]\s*body',
-}
-BASELINE_CONTRACT_STEPS = {
-    "test-context.md": ("BareJson", "415", "413", "400", "no-leak",
-                        "invalid_input", "field=body"),
-    "test-event.md": ("BareJson", "415", "413", "400", "no-leak",
-                      "invalid_input", "field=body"),
-    "test-policy-approval.md": ("BareJson", "415", "413", "400", "no-leak",
-                                "invalid_input", "field=body"),
-    # mcp-gateway has one extra 400 step (ArgsTooLarge と別経路).
-    "test-mcp-gateway.md": ("BareJson", "415", "413", "400", "400",
-                            "no-leak", "invalid_input", "field=body"),
 }
 
 def contract_keywords(spec_text):
@@ -277,13 +265,12 @@ for f in evidence_files:
         errors.append(f"{f}: SPEC_UNREADABLE"); continue
     # I65-C: a contract step appended to an existing Scenario keeps the
     # Scenario count unchanged, so the executed total alone cannot detect a
-    # spec-only edit. Only keyword occurrences beyond the grandfathered Round
-    # 61 baseline require a matching note. A Counter (not a set) is used so a
-    # duplicated step also counts as newly uncovered. No keyword is emitted.
+    # spec-only edit. In strict mode EVERY detected keyword needs a matching
+    # note; the Round 61 baseline/grandfather list has been removed. A Counter
+    # (not a set) is used so a duplicated step also counts as uncovered. No
+    # keyword is emitted.
     detected_steps = contract_keywords(spec_text)
-    baseline_steps = Counter(BASELINE_CONTRACT_STEPS.get(
-        os.path.basename(spec_path), ()))
-    uncovered_steps = detected_steps - baseline_steps
+    uncovered_steps = detected_steps
     if uncovered_steps:
         missing_steps = [name for name in uncovered_steps
                          if not re.search(CONTRACT_NOTE_PATTERNS[name], notes,
