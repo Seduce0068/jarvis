@@ -1,14 +1,19 @@
 [Unit]
 Description=JARVIS shared DB migrations (sqlx)
 Documentation=https://github.com/Seduce0068/jarvis
-# Pre-flight applier for shared migrations (001 and later, currently through
-# 004), not the authoritative owner: jarvis-context.service embeds the same
+# Pre-flight applier for shared migrations (001 and later, through 005), not
+# the authoritative owner: jarvis-context.service embeds the same
 # migrations via `sqlx::migrate!()` and is the final applier (the migrations
 # embedded in the context binary are authoritative). This oneshot applies them
 # early so dependants start sooner; concurrent runs are serialized by the sqlx
 # advisory lock. Migration sources and the context binary must ship from the
 # same commit (see build-selfhost.sh): otherwise sqlx reports a checksum
 # mismatch and jarvis-context fails to start.
+# NOTE: adding a migration (e.g. 006) requires updating BOTH this "through NNN"
+# range and the companion migration-distribution guard comment in
+# infra/scripts/build-selfhost.sh in the SAME commit. build-selfhost.sh is
+# outside this change's scope, so this note is the coordination point until
+# that guard comment can carry the reminder itself.
 # jarvis-policy.service and jarvis-context.service both declare After/Wants on
 # this unit, so no policy <-> context ordering cycle is introduced. This unit
 # itself only waits for the local PostgreSQL instance and the network.
