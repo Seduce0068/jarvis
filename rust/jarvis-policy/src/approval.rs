@@ -134,6 +134,24 @@ pub trait ApprovalPersistence: Send + Sync {
     /// behavior remain unchanged.
     async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError>;
 
+    /// Re-read the authoritative committed decision for `id`, if any (I38-A).
+    ///
+    /// Used by the timeout path after a lost expiry CAS: when `mark_expired`
+    /// reports [`ApprovalError::AlreadyDecided`] but no watch notification
+    /// arrives within the grace window, the durable row is the only source of
+    /// truth. `Ok(None)` means no committed decision is visible (the row is
+    /// still undecided or unknown); `Ok(Some(_))` is authoritative and wins
+    /// over the provisional memory-only `Expired`. Implementations must never
+    /// log the id, SQL text or decision body.
+    ///
+    /// The default returns [`None`], which keeps every existing backend (and
+    /// the memory-only default) source-compatible: without a durable re-read
+    /// capability the timeout path keeps its legacy `Expired` fallback. The Pg
+    /// backend overrides it with the authoritative committed row.
+    async fn load_decision(&self, _id: Uuid) -> Result<Option<ApprovalDecision>, ApprovalError> {
+        Ok(None)
+    }
+
     /// Mark a pending request as expired at `expired_at`.
     ///
     /// Used by the runtime timeout path, the lazy `prune` sweep (including
@@ -172,6 +190,10 @@ impl ApprovalPersistence for NoopPersistence {
 
     async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
         Ok(Vec::new())
+    }
+
+    async fn load_decision(&self, _id: Uuid) -> Result<Option<ApprovalDecision>, ApprovalError> {
+        Ok(None)
     }
 
     async fn mark_expired(
@@ -481,12 +503,13 @@ impl ApprovalStore {
                                 // A concurrent settlement won the durable CAS.
                                 // The row may already carry the real decision
                                 // even though this waiter never observed the
-                                // watch notification (lost-ack). Give the
-                                // winner one bounded chance to publish before
-                                // falling back to a memory-only `Expired`
-                                // (I36-C (3)). A full fix also has to re-read
-                                // the durable decision, which needs a new seam
-                                // on `ApprovalPersistence` (I36-B).
+                                // watch notification (lost-ack). The 100ms grace
+                                // is only a fast path for a notification that is
+                                // already in flight (I36-C (3)); the authoritative
+                                // answer is the durable row read through
+                                // `load_decision` when that grace elapses
+                                // (I38-A), so DB=decided / waiter=Expired cannot
+                                // split brain.
                                 Err(ApprovalError::AlreadyDecided(_)) => {
                                     let grace = Duration::from_millis(100);
                                     let changed =
@@ -497,11 +520,34 @@ impl ApprovalStore {
                                     } else {
                                         None
                                     };
-                                    if let Some(decision) = published {
+                                    let decision = match published {
+                                        Some(decision) => Some(decision),
+                                        None => {
+                                            // Grace expired with no notification:
+                                            // re-read the committed value. A DB
+                                            // error or a still-undecided row is
+                                            // non-fatal and keeps the legacy
+                                            // `Expired` fallback. Only fixed
+                                            // log categories are emitted: never
+                                            // the id, SQL or decision body.
+                                            match self.inner.persistence.load_decision(id).await {
+                                                Ok(decision) => decision,
+                                                Err(error) => {
+                                                    tracing::warn!(
+                                                        error_category = error.category(),
+                                                        request_id = %id,
+                                                        "durable decision re-read failed after lost expiry CAS"
+                                                    );
+                                                    None
+                                                }
+                                            }
+                                        }
+                                    };
+                                    if let Some(decision) = decision {
                                         // Reconcile the provisional `Expired`
-                                        // written above with the decision the
-                                        // CAS winner committed, so memory, the
-                                        // waiter and the durable row agree.
+                                        // written above with the authoritative
+                                        // decision, so memory, the watch channel,
+                                        // the waiter and the durable row agree.
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id)
                                             && matches!(
@@ -511,12 +557,13 @@ impl ApprovalStore {
                                         {
                                             entry.decision = Some(decision.clone());
                                             entry.decided_at = Some(expired_at);
+                                            let _ = entry.tx.send(Some(decision.clone()));
                                         }
                                         return Ok(decision);
                                     }
                                     tracing::warn!(
                                         request_id = %id,
-                                        "expiry CAS lost; waiter has no durable re-read (I36-B)"
+                                        "expiry CAS lost and durable re-read found no decision; waiter expires"
                                     );
                                     return Ok(ApprovalDecision::Expired);
                                 }
@@ -1364,6 +1411,13 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
         async fn mark_expired(
             &self,
             id: Uuid,
@@ -1468,6 +1522,13 @@ mod tests {
 
         async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
             Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
         }
 
         async fn mark_expired(
@@ -1700,6 +1761,13 @@ mod tests {
             Ok(self.rows.lock().await.clone())
         }
 
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
         async fn mark_expired(
             &self,
             id: Uuid,
@@ -1866,6 +1934,13 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
         async fn mark_expired(
             &self,
             id: Uuid,
@@ -1944,6 +2019,13 @@ mod tests {
 
         async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
             Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
         }
 
         async fn mark_expired(
@@ -2221,5 +2303,121 @@ mod tests {
         let settled = mock.expired.lock().await;
         assert_eq!(*settled, vec![good.id]);
         assert_eq!(*mock.audit.lock().await, vec![good.id]);
+    }
+
+    // ---- I38-A durable re-read after a lost expiry CAS (mock, no real DB) ---
+
+    /// Lost-ack double: `mark_expired` reports `AlreadyDecided` (a concurrent
+    /// decider committed) while no watch notification is ever sent, and
+    /// `load_decision` reports the configured durable state. No I/O and no
+    /// watch send: exactly the shape that used to split DB=decided from
+    /// waiter=Expired.
+    #[derive(Debug)]
+    struct LostAckPersistence {
+        committed: Option<ApprovalDecision>,
+        fail_load: bool,
+        load_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for LostAckPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            self.load_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_load {
+                Err(ApprovalError::Persistence)
+            } else {
+                Ok(self.committed.clone())
+            }
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Err(ApprovalError::AlreadyDecided(id))
+        }
+    }
+
+    /// The regression: an expiry CAS loss with no watch notification must be
+    /// resolved from the durable decision, overwriting both the provisional
+    /// in-memory `Expired` and the waiter's return value.
+    #[tokio::test]
+    async fn lost_expiry_cas_rereads_durable_decision() {
+        let committed = approved();
+        let persistence = Arc::new(LostAckPersistence {
+            committed: Some(committed.clone()),
+            fail_load: false,
+            load_calls: AtomicUsize::new(0),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(30),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let request = make_request();
+        let id = request.id;
+
+        let decision = store.request(request).await;
+        assert_eq!(
+            decision, committed,
+            "the durable decision must win over the provisional Expired"
+        );
+        assert_eq!(persistence.load_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            store.status(id).await.expect("status"),
+            committed,
+            "the in-memory entry must be reconciled with the durable decision"
+        );
+    }
+
+    /// Fail-safe: no committed durable row (or a re-read outage) keeps the
+    /// legacy `Expired` fallback; the seam never fabricates a decision the
+    /// database does not have.
+    #[tokio::test]
+    async fn lost_expiry_cas_without_durable_decision_stays_expired() {
+        let cases: [(Option<ApprovalDecision>, bool); 2] = [(None, false), (None, true)];
+        for (committed, fail_load) in cases {
+            let persistence = Arc::new(LostAckPersistence {
+                committed,
+                fail_load,
+                load_calls: AtomicUsize::new(0),
+            });
+            let store = ApprovalStore::with_persistence(
+                Duration::from_millis(30),
+                DEFAULT_MAX_PENDING,
+                persistence.clone(),
+            );
+            let decision = store.request(make_request()).await;
+            assert!(
+                matches!(decision, ApprovalDecision::Expired),
+                "no authoritative row must leave the waiter Expired: {decision:?}"
+            );
+            assert_eq!(persistence.load_calls.load(Ordering::SeqCst), 1);
+        }
     }
 }
