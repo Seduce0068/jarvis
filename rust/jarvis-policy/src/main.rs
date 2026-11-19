@@ -37,12 +37,13 @@ impl Drop for TracerGuard {
     }
 }
 
-/// Initialise JSON logging with OTLP trace export.
+/// Initialise JSON logging with optional OTLP trace export.
 ///
 /// The collector endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT` and
-/// defaults to the local collector. Export failures do not stop the service.
-/// The provider is returned so its lifetime can be tied to `main`, and an
-/// invalid endpoint still aborts startup via the `?` on `build()`.
+/// defaults to the local collector. An invalid endpoint (or any other
+/// exporter build failure) is downgraded to a warning: the service still
+/// starts with JSON logging and metrics intact, only trace export is lost.
+/// The provider is returned so its lifetime can be tied to `main`.
 fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_otlp::WithExportConfig;
@@ -55,14 +56,25 @@ fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(&endpoint)
-        .build()?;
-
-    let provider = SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
         .build();
 
-    let tracer = provider.tracer(service);
-    let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+    // Keep a provider on every path so `TracerGuard::shutdown` stays
+    // meaningful. Without an exporter it simply has no span processors.
+    let (provider, telemetry, exporter_error) = match exporter {
+        Ok(exporter) => {
+            let provider = SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .build();
+            let tracer = provider.tracer(service);
+            let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+            (provider, Some(telemetry), None)
+        }
+        Err(err) => (
+            SdkTracerProvider::builder().build(),
+            None,
+            Some(err.to_string()),
+        ),
+    };
 
     // The global default subscriber is installed exactly once, as before.
     tracing_subscriber::registry()
@@ -70,6 +82,16 @@ fn init_tracing(service: &'static str) -> Result<TracerGuard> {
         .with(tracing_subscriber::fmt::layer().json())
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
+
+    // Warn only after the fmt layer is installed; before that there is no
+    // subscriber and the message would be lost.
+    if let Some(err) = exporter_error {
+        tracing::warn!(
+            error = %err,
+            endpoint = %endpoint,
+            "OTLP trace exporter initialisation failed; continuing without trace export"
+        );
+    }
 
     Ok(TracerGuard { provider })
 }
@@ -90,12 +112,22 @@ async fn main() -> Result<()> {
     let grpc_addr = config.grpc_addr.parse()?;
     let http_addr = config.http_addr.parse()?;
 
-    let result = tokio::try_join!(engine.serve_grpc(grpc_addr), engine.serve_http(http_addr),);
+    // `join!` polls both listeners to completion, so a failure in one never
+    // drops the other's future. Errors are aggregated only after both have
+    // finished.
+    let grpc = engine.serve_grpc(grpc_addr);
+    let http = engine.serve_http(http_addr);
+    let (grpc_result, http_result) = tokio::join!(grpc, http);
 
     // Explicit shutdown on the normal path; `TracerGuard::drop` covers the
     // early `?` returns above as well as any unwinding.
     tracer.shutdown();
 
-    result?;
-    Ok(())
+    match (grpc_result, http_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(err), Ok(())) | (Ok(()), Err(err)) => Err(err),
+        (Err(grpc_err), Err(http_err)) => Err(anyhow::anyhow!(
+            "gRPC listener failed: {grpc_err}; HTTP listener failed: {http_err}"
+        )),
+    }
 }
