@@ -440,7 +440,7 @@ generated:
   `ci/scripts/secret_scan.py:32-41` / R5-VU4 / 重大度 high / confirmed。
 - [x] **`#[instrument]` が HTTP リクエスト本文全体をログへ記録し機微情報を漏洩**（2026-11-19 対応済み: check/request/approve/deny の `#[instrument(skip(engine, req))]` 化で本文をスパンから除外。health/metrics/check の認証スコープ不変） — 根拠
   `rust/jarvis-policy/src/http.rs:198-201` / R5-VU1 / 重大度 high / confirmed。
-- [ ] **`install-backup-timer.sh` が `backup-local.sh` を無バックアップで上書きしロールバックで削除** — 根拠
+- [x] **`install-backup-timer.sh` が `backup-local.sh` を無バックアップで上書きしロールバックで削除**（2026-11-19 確認: `script_dst.bak-$ts` への退避と rollback での復元が既に実装済み（:62, :48）。src/dst/unit の3ファイルが同じ枠組みで処理されている。コード変更不要） — 根拠
   `infra/scripts/install-backup-timer.sh:52` / R2-ER3 / 重大度 high / confirmed。
 - [x] **bootstrap 再実行が本番 `config/jarvis.env` をトランケートし秘密情報を失う**（2026-11-19 対応済み: `write_private_if_absent` を追加し `create_new(true)` で原子的に存在確認、既存ファイルは警告のみで一切変更しない。dry-run / `--help` / Termux dry-run / `make lint` pass） — 根拠
   `scripts/bootstrap/bootstrap.rs:183` / R4-DR4 / 重大度 high / confirmed。
@@ -460,16 +460,17 @@ generated:
 - [x] `embedding_model` は設定可能だが Qdrant 次元が 384 固定 — 2026-11-19 対応済み: `embedding_dim`（既定 384、`JARVIS_CONTEXT_EMBEDDING_DIM`）を追加しコレクション生成に使用。既存コレクションは起動時に実次元を読み取り不一致なら明確なエラー。回帰テスト8件追加、context 53 tests pass / `context/src/builder.rs:253-255` / R1-CF11,R1-AR2 / confirmed
 - [x] PostgreSQL 既定 URL に固定パスワード — 2026-11-19 対応済み: 既定値を `postgres://localhost:5432/jarvis` へ変更し認証を libpq へ委譲。LEGACY_TOML もパスワードレス化、回帰テスト3件追加 / `context/src/config.rs:54` / R1-CF11 / confirmed
 - [x] `CheckResponse` が `allowed` 真偽値のみで拒否理由を返さない — 2026-11-19 対応済み: proto に後方互換の `reason = 2` を追加し HTTP/gRPC 両ハンドラが固定語彙（allowed/kill_switch/rbac_denied/cedar_denied/evaluation_error）を返す。jarvis-core 共有モデルも serde default で対応 / `policy/proto/policy.proto:19-21` / R1-AP01 / confirmed
-- [ ] MCP `tools/list` が upstream inputSchema を破棄し cursor も無視 — `mcp-gw/src/mcp_server.rs:59-99,120-126` / R1-AP01,R5-DC1 / confirmed
+- [x] MCP `tools/list` が upstream inputSchema を破棄し cursor も無視 — 2026-11-19 対応済み: 登録時に upstream の inputSchema を保持し `tools/list` で返却（ネイティブ優先・汎用フォールバック維持）。cursor 無視・nextCursor 非発行を契約として明記、回帰テスト3件追加 / `mcp-gw/src/mcp_server.rs:59-99,120-126` / R1-AP01,R5-DC1 / confirmed
 - [x] otelcol 設定の配布経路がビルドスクリプトから欠落 — 2026-11-19 対応済み: `otelcol-config.yaml` を `.bak-<ts>` 退避付きで `install -o root -g root -m 0644 /etc/jarvis/` へ配置。bash -n OK / `infra/scripts/build-selfhost.sh:26-28` / R1-AR3 / confirmed（既存 P0-6 と関連）
 - [x] Grafana の job セレクタ / service ラベルが scrape 設定と不一致 — 2026-11-19 対応済み: ダッシュボード側を実在 job 名（`jarvis-*` / `qdrant` 等）へ統一し `service` ラベルと `jarvis/` 接頭辞を除去。otelcol 側の job_name は時系列継続のため未変更。JSON 有効・旧セレクタ残存0 / `dashboards/jarvis-overview.json:46` / R1-AR3,R5-VU3 / confirmed
 - [x] filelog レシーバの入力が空（`/var/log/jarvis/*.log` を誰も書かない）— 2026-11-19 対応済み: journald receiver へ置換し `jarvis-*` unit を対象化、logs パイプラインも接続。子が追加した無効キー `offset_storage_dir` は親が削除し `otelcol-contrib validate` exit 0 / `otelcol-config.yaml:52` / R5-VU3 / confirmed
-- [ ] `check-shell` が shellcheck 未インストール時に SKIP して成功扱い — `ci/scripts/check-shell.sh:22-33` / R5-VU4 / confirmed
+- [x] `check-shell` が shellcheck 未インストール時に SKIP して成功扱い — 2026-11-19 対応済み: 未検出時に fail-closed でエラー終了。CI runner へ shellcheck を導入するため `.github/workflows/ci.yml` の apt_packages にも追加。shfmt 警告のみの挙動は維持 / `ci/scripts/check-shell.sh:22-33` / R5-VU4 / confirmed
 - [x] `check-evidence.sh` が skipped 数・仕様シナリオ数を照合せず合格 — 2026-11-19 対応済み: `Scenario:` 行数と `passed+failed+skipped` を照合し不足時に `SCENARIO_COUNT_MISMATCH`。1シナリオが複数テストへ展開される既存設計のため下限判定を採用、既存6証跡すべて合格（ok=6 errors=0） / `ci/scripts/check-evidence.sh:82-85` / R3-TQ4 / confirmed
 - [x] deploy がヘルスチェック失敗を警告のみで完了報告 — 2026-11-19 対応済み: `evaluate_health_checks()` を追加し異常なら `bail!` で非ゼロ終了（全失敗ポートを列挙）。dry-run の skip と 200 は維持。回帰テスト4件追加、deploy rust-script pass / `rust/scripts/deploy.rs:385-389` / R4-DR2 / confirmed（既存 P2-8 と関連）
 - [x] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — 2026-11-19 対応済み: 完全セットに postgres/qdrant/config-* の実在を必須化し欠落時 `REQUIRED MISSING` で失敗。子の指摘で既存フィクスチャ2件が新チェックで失敗したため親が必須ペイロードを追加、`test-verify-backup` 23 tests pass / `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
 - [x] jq 欠落時にバックアップ整合性検証をスキップして verified と報告 — 2026-11-19 対応済み: apply 時に jq が無ければ `fail()` で非ゼロ終了（verified に到達しない）。dry-run は jq 不要を維持、bash -n OK / `infra/scripts/install-backup-timer.sh:96` / R2-ER3 / confirmed
-- [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed
+- [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed。
+  - **2026-11-19 調査**: repo 内に SHA256SUMS / 署名鍵 / 公開ダイジェストは存在せず（glob/grep 0件）、Qdrant / otelcol-contrib / bws / code-server の取得元を照合できない。勝手なハードコードや外部取得は追加せず、未検証の旨と推奨対応（リリース側でバージョン固定の SHA256SUMS + 署名を公開し取得・照合）を setup-selfhost.sh のコメントに明記。情報源が用意されるまで未解決。
 - [x] `/health` が固定 `"OK"` を返し劣化を検知できない — 2026-11-19 対応済み: kill switch 発動時とポリシー来源欠落時に 503 `{"status":"degraded","reason":...}` を返す。固定語彙のみで理由文字列・パスは非開示、正常時は 200 維持。新規テスト3件追加、policy 86 tests pass / `policy/src/http.rs:187-189` / R4-DR1 / confirmed
 - [x] シグナル処理・ドレインが無くデプロイ時停止で保留作業が失われる — 2026-11-19 対応済み: Ctrl-C / SIGTERM を `tokio::select!` で join! と競わせ停止時に tracer flush 付きで終了。biased で実エラーを優先。完全なコネクションドレインは serve 側の変更が必要で別タスク / `policy/src/main.rs:59` / R4-DR1 / confirmed
 - [ ] axum 0.7 と 0.8 が workspace 内で二重解決 — `rust/Cargo.toml:51` / R4-DP1 / confirmed
@@ -480,7 +481,7 @@ generated:
 - [x] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — 2026-11-19 対応済み: allowlist と同じ枠組みで `MISSING (deployed)` / `MISSING (repo)` と danger=1 を設定。既存回帰22 tests pass / `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
 - [x] `install-mcp-gateway.sh` のヘルス確認が HTTP ステータスを検証せずロールバックしない — 2026-11-19 対応済み: `curl -fsS -w '%{http_code}'` で 200 を明示検証し、失敗時は既存のロールバックフローへ。本文/トークンは出力せず、bash -n OK / `infra/scripts/install-mcp-gateway.sh:28` / R4-DR3 / confirmed
 - [x] 放棄された承認が pending のまま残りキュー枠を枯渇 — 2026-11-19 対応済み: `Entry.deadline` を保存し `prune()` が期限切れ/放棄エントリを回収して待機側へ Expired 通知。`try_request` 前段で実行。回帰テスト1件追加、policy 88 tests pass / `policy/src/approval.rs:148-162` / R5-VU1 / likely
-- [ ] web.fetch の SSRF 検証が DNS 解決の TOCTOU で迂回可能 — `mcp-gw/src/sandbox.rs:359-365` / R3-AU1 / likely
+- [x] web.fetch の SSRF 検証が DNS 解決の TOCTOU で迂回可能 — 2026-11-19 対応済み: 検証済み IP を `resolve_to_addrs()` で reqwest に固定（SNI/証明書検証は元ホスト名を維持）、リダイレクト毎に再検証・再ピン留め。`.no_proxy()` でプロキシ迂回も防止。回帰テスト2件追加 / `mcp-gw/src/sandbox.rs:359-365` / R3-AU1 / likely
 - [x] メトリクスが HTTP ステータス別のみで kill switch / 承認の状態が観測不可 — 2026-11-19 対応済み: `jarvis_kill_switch_activated` (0/1) と `jarvis_approval_pending`（保留数）の gauge を追加。`/metrics` スクレイプ時に状態を反射、ラベルゼロで理由/principal/id は非送出 / `policy/src/http.rs:155-169` / R5-VU1 / confirmed
 - [x] 登録済み MCP サーバの子プロセス死活を検知せず孤立登録が残る — 2026-11-19 対応済み: `ProcessLiveness` で `try_wait()` を実行前検査し、死亡/状態不明の登録を削除してエラー。`Box<ChildHandle>` 化で clippy large-enum も解消。回帰テスト2件追加 / `mcp-gw/src/gateway.rs:36-42` / R5-VU1 / likely
 - [x] Qdrant スナップショット 0 件が warn のみで成功扱い — 2026-11-19 対応済み: `require_snapshot_name()` を追加し空一覧/空名前を `bail!` で失敗扱い。回帰テスト3件追加、backup rust-script pass / `rust/scripts/backup.rs:198` / R1-ST2 / confirmed
