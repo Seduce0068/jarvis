@@ -71,9 +71,11 @@ API scope は `JARVIS_POLICY_APPROVAL_API_TOKEN`、レガシー
 `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN` を読み、未設定時は API scope へ
 フォールバックする。両 scope ともヘッダ名は `X-Jarvis-Approval-Token`。
 
-409 の分類は `jarvis-core` が公開する共有固定本文 `KILL_SWITCH_409_BODY` の
-trim 後完全一致で行う。空または読み取り不能な本文も停止側へ fail-closed に分類する。
-winner の取得は status 端点で API scope を優先し、未設定なら admin scope を使う。
+409 の分類は fail-closed である。`jarvis-core` が公開する共有固定本文
+`ALREADY_DECIDED_409_BODY` の trim 後完全一致の場合のみ winner 取得へ進み、
+`KILL_SWITCH_409_BODY`・空・読み取り不能・未知／改変本文はすべて非常停止側へ
+分類する。winner の取得は status 端点で API scope を優先し、未設定なら
+admin scope を使う。
 
 ## Risk & tier
 
