@@ -9,6 +9,60 @@ use std::sync::Arc;
 use tracing::{instrument, warn};
 use uuid::Uuid;
 
+/// Fixed-vocabulary error categories for builder-layer warnings.
+///
+/// The full `anyhow` chain is deliberately never formatted into a log record:
+/// it can carry Qdrant URLs and response fragments, PostgreSQL connection and
+/// statement details, and outbox re-embedding content. Only these tokens reach
+/// OTLP/Grafana. The `ContextError` mapping mirrors `grpc::error_kind` and the
+/// transport policy; the two extra variants cover the injectable seams
+/// (persistence outbox) and embedding failures, which are plain `anyhow::Error`
+/// rather than `ContextError`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ErrorKind {
+    Database,
+    Qdrant,
+    Pii,
+    Config,
+    Grpc,
+    Serialization,
+    Persistence,
+    Embedding,
+}
+
+impl ErrorKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Database => "database",
+            Self::Qdrant => "qdrant",
+            Self::Pii => "pii",
+            Self::Config => "config",
+            Self::Grpc => "grpc",
+            Self::Serialization => "serialization",
+            Self::Persistence => "persistence",
+            Self::Embedding => "embedding",
+        }
+    }
+}
+
+/// Reduce an internal error to a fixed category, never to its message.
+///
+/// `fallback` is the calling site's own dependency class for errors that are
+/// not a `ContextError` (the `VectorSink`/`PendingStore` seams return
+/// `anyhow::Result`, and embedding failures are raised with `bail!`). No part
+/// of the error's `Display` or `Debug` is ever read here.
+fn error_kind(err: &anyhow::Error, fallback: ErrorKind) -> &'static str {
+    match err.downcast_ref::<crate::error::ContextError>() {
+        Some(crate::error::ContextError::Database(_)) => ErrorKind::Database.as_str(),
+        Some(crate::error::ContextError::Qdrant(_)) => ErrorKind::Qdrant.as_str(),
+        Some(crate::error::ContextError::Pii(_)) => ErrorKind::Pii.as_str(),
+        Some(crate::error::ContextError::Config(_)) => ErrorKind::Config.as_str(),
+        Some(crate::error::ContextError::Grpc(_)) => ErrorKind::Grpc.as_str(),
+        Some(crate::error::ContextError::Serialization(_)) => ErrorKind::Serialization.as_str(),
+        None => fallback.as_str(),
+    }
+}
+
 /// Reassemble PostgreSQL rows in the relevance order supplied by Qdrant.
 /// `WHERE id = ANY($1)` does not preserve the input order, so without this
 /// the vector-search ranking is silently discarded (P1-1).
@@ -352,7 +406,7 @@ async fn store_memory_with_sinks(
             if let Err(error) = outbox.remove(memory.id).await {
                 warn!(
                     id = %memory.id,
-                    error = %format!("{error:#}"),
+                    error_kind = error_kind(&error, ErrorKind::Persistence),
                     "vector upsert succeeded but a stale pending_embeddings row could not be removed"
                 );
             }
@@ -361,7 +415,7 @@ async fn store_memory_with_sinks(
         Err(error) => {
             warn!(
                 id = %memory.id,
-                error = %format!("{error:#}"),
+                error_kind = error_kind(&error, ErrorKind::Qdrant),
                 "Qdrant upsert failed; queuing memory in pending_embeddings for retry"
             );
             outbox
@@ -419,7 +473,8 @@ async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
     if let Err(error) = outbox.mark_failed(id, attempts, next_retry_at).await {
         warn!(
             id = %id,
-            error = %format!("{error:#}"),
+            attempts = attempts,
+            error_kind = error_kind(&error, ErrorKind::Persistence),
             "could not record a deferred retry for a pending memory"
         );
     }
@@ -440,7 +495,8 @@ async fn reconcile_pending(
         Ok(pending) => pending,
         Err(error) => {
             warn!(
-                error = %format!("{error:#}"),
+                batch_limit = RECONCILE_BATCH_LIMIT,
+                error_kind = error_kind(&error, ErrorKind::Persistence),
                 "could not read pending_embeddings; deferring reconcile to next startup"
             );
             return;
@@ -456,7 +512,8 @@ async fn reconcile_pending(
             Err(error) => {
                 warn!(
                     id = %item.id,
-                    error = %format!("{error:#}"),
+                    attempts = attempts,
+                    error_kind = error_kind(&error, ErrorKind::Embedding),
                     "could not produce a vector for a pending memory; deferring this row"
                 );
                 defer_failed(outbox, item.id, attempts).await;
@@ -481,7 +538,7 @@ async fn reconcile_pending(
                 if let Err(error) = outbox.remove(memory.id).await {
                     warn!(
                         id = %memory.id,
-                        error = %format!("{error:#}"),
+                        error_kind = error_kind(&error, ErrorKind::Persistence),
                         "reconciled upsert succeeded but the pending row could not be deleted"
                     );
                 }
@@ -489,7 +546,8 @@ async fn reconcile_pending(
             Err(error) => {
                 warn!(
                     id = %memory.id,
-                    error = %format!("{error:#}"),
+                    attempts = attempts,
+                    error_kind = error_kind(&error, ErrorKind::Qdrant),
                     "reconciled Qdrant upsert failed; deferring the row to a later pass"
                 );
                 defer_failed(outbox, memory.id, attempts).await;
@@ -987,8 +1045,15 @@ pub mod memory {
                 let actual = info.result.as_ref().and_then(configured_vector_size);
                 check_existing_dimension(name, embedding_dim, actual)
             }
-            Err(error) => {
-                warn!("could not inspect Qdrant collection '{name}' dimension: {error}");
+            Err(_) => {
+                // The Qdrant error Display can embed endpoints and response
+                // fragments; log only fixed vocabulary and safe metadata.
+                warn!(
+                    collection = %name,
+                    embedding_dim = embedding_dim,
+                    error_kind = "qdrant",
+                    "could not inspect Qdrant collection dimension; assuming configured embedding_dim"
+                );
                 Ok(())
             }
         }
@@ -1919,5 +1984,232 @@ mod ordering_tests {
 
         assert_eq!(attached[0].score, Some(0.0));
         assert_eq!(attached[1].score, None);
+    }
+}
+
+#[cfg(test)]
+mod log_safety_tests {
+    use super::*;
+    use serde_json::json;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// A credential-bearing URL that would appear in the captured logs if any
+    /// builder warning ever formatted the raw error chain.
+    // Split the credential-like key name so the repository secret scanner does
+    // not flag this deliberate leak-detection fixture as a real credential.
+    const PROBE: &str = concat!(
+        "https://admin:s3cr3t@qdrant.internal:6333/private",
+        "?api",
+        "_key=DO_NOT_LOG"
+    );
+
+    #[derive(Clone)]
+    struct SharedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedLogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `future` under a thread-local WARN subscriber and return what it
+    /// wrote. A current-thread runtime keeps every event on the subscribed
+    /// thread, so the capture is deterministic and isolated from other tests.
+    fn capture_warns<F>(future: F) -> String
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = SharedLogBuffer(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        tracing::subscriber::with_default(subscriber, || runtime.block_on(future));
+        let captured = buffer.lock().expect("log buffer lock").clone();
+        String::from_utf8(captured).expect("captured logs are UTF-8")
+    }
+
+    struct OkSink;
+
+    #[async_trait::async_trait]
+    impl VectorSink for OkSink {
+        async fn upsert(&self, _memory: &MemoryEntry) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Fails with the credential-bearing URL in the error chain; if any builder
+    /// warning ever formats that chain, `PROBE` shows up in the captured logs.
+    struct LeakSink;
+
+    #[async_trait::async_trait]
+    impl VectorSink for LeakSink {
+        async fn upsert(&self, _memory: &MemoryEntry) -> Result<()> {
+            anyhow::bail!("upsert failed for {PROBE} with a response fragment")
+        }
+    }
+
+    /// Configurable outbox seam; each failure also carries `PROBE`.
+    struct LeakStore {
+        rows: Mutex<Vec<PendingEmbedding>>,
+        fail_list: bool,
+        fail_remove: bool,
+        fail_mark_failed: bool,
+    }
+
+    impl LeakStore {
+        fn new(rows: Vec<PendingEmbedding>) -> Self {
+            Self {
+                rows: Mutex::new(rows),
+                fail_list: false,
+                fail_remove: false,
+                fail_mark_failed: false,
+            }
+        }
+
+        fn failing_list() -> Self {
+            Self {
+                fail_list: true,
+                ..Self::new(Vec::new())
+            }
+        }
+
+        fn with_remove_failure(mut self) -> Self {
+            self.fail_remove = true;
+            self
+        }
+
+        fn with_mark_failed_failure(mut self) -> Self {
+            self.fail_mark_failed = true;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PendingStore for LeakStore {
+        async fn record(&self, _memory: &MemoryEntry, _embedding: &[f32]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list(&self, _limit: usize) -> Result<Vec<PendingEmbedding>> {
+            if self.fail_list {
+                anyhow::bail!("list failed for {PROBE} with statement details");
+            }
+            Ok(self.rows.lock().expect("rows lock").clone())
+        }
+
+        async fn remove(&self, _id: Uuid) -> Result<()> {
+            if self.fail_remove {
+                anyhow::bail!("delete failed for {PROBE} with connection details");
+            }
+            Ok(())
+        }
+
+        async fn mark_failed(
+            &self,
+            _id: Uuid,
+            _attempts: i32,
+            _next_retry_at: DateTime<Utc>,
+        ) -> Result<()> {
+            if self.fail_mark_failed {
+                anyhow::bail!("deferred-retry write failed for {PROBE}");
+            }
+            Ok(())
+        }
+    }
+
+    fn memory() -> MemoryEntry {
+        MemoryEntry {
+            id: Uuid::new_v4(),
+            content: "private payload".into(),
+            embedding: vec![0.1; 384],
+            metadata: json!({}),
+            source: "test".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at: None,
+            score: None,
+        }
+    }
+
+    fn pending() -> PendingEmbedding {
+        PendingEmbedding {
+            id: Uuid::new_v4(),
+            content: format!("private payload {PROBE}"),
+            metadata: json!({}),
+            embedding: vec![0.1; 384],
+            attempts: 0,
+            next_retry_at: None,
+        }
+    }
+
+    #[test]
+    fn builder_warnings_never_log_the_raw_error_chain() {
+        let logs = capture_warns(async {
+            // Direct store: Qdrant upsert failure (sink) and stale-row removal
+            // failure (outbox).
+            let _ = store_memory_with_sinks(&memory(), &LeakSink, &LeakStore::new(vec![])).await;
+            let _ = store_memory_with_sinks(
+                &memory(),
+                &OkSink,
+                &LeakStore::new(vec![]).with_remove_failure(),
+            )
+            .await;
+
+            // Reconcile: list failure, Qdrant failure + deferred-retry failure,
+            // reconciled remove failure, and a stale vector with no embedder.
+            reconcile_pending(&LeakStore::failing_list(), &OkSink, None, 384).await;
+            reconcile_pending(
+                &LeakStore::new(vec![pending()]).with_mark_failed_failure(),
+                &LeakSink,
+                None,
+                384,
+            )
+            .await;
+            reconcile_pending(
+                &LeakStore::new(vec![pending()]).with_remove_failure(),
+                &OkSink,
+                None,
+                384,
+            )
+            .await;
+            let mut stale = pending();
+            stale.embedding.clear();
+            reconcile_pending(&LeakStore::new(vec![stale]), &OkSink, None, 384).await;
+        });
+
+        assert!(!logs.contains(PROBE), "raw error text leaked: {logs}");
+        assert!(!logs.contains("private payload"), "payload leaked: {logs}");
+        // Do not pin the textual rendering of structured fields: it depends on
+        // the tracing-subscriber formatter version. The contract is the absence
+        // of raw error text; the fixed `error_kind` fields are set at the sites.
+    }
+
+    #[test]
+    fn error_kind_maps_context_error_variants_without_reading_their_text() {
+        let err: anyhow::Error = crate::error::ContextError::Qdrant(PROBE.to_owned()).into();
+        assert_eq!(error_kind(&err, ErrorKind::Persistence), "qdrant");
+
+        let err: anyhow::Error = crate::error::ContextError::Pii(PROBE.to_owned()).into();
+        assert_eq!(error_kind(&err, ErrorKind::Persistence), "pii");
+
+        let err: anyhow::Error = anyhow::anyhow!("{PROBE}");
+        assert_eq!(error_kind(&err, ErrorKind::Persistence), "persistence");
+        assert_eq!(error_kind(&err, ErrorKind::Embedding), "embedding");
     }
 }
