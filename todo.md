@@ -391,11 +391,11 @@ generated:
   R2-ER1,R1-AR01,R1-CF01,R1-AP01 / 重大度 high / confirmed。
   `serde_json::from_str(&req.args).unwrap()` を不正 JSON で発火させられる。
   dev/test は unwind のためテストで顕在化しない。
-- [ ] **kill switch 状態が既定 `None` で再起動時に非常停止が解除される** — 根拠
+- [x] **kill switch 状態が既定 `None` で再起動時に非常停止が解除される**（2026-11-19 対応済み: opt-in ガード `require_kill_switch_state_path`（既定 false）を追加し、`load()` 内で検証して true 時は未設定なら起動失敗。既定パス変更は実機権限未確認のため見送り。新規テスト7件、policy 67 tests pass） — 根拠
   `rust/jarvis-policy/src/config.rs:72`, `src/kill_switch.rs:159-162` /
   R4-DR1,R1-AR01,R1-CF01 / 重大度 high / confirmed。
   `require_kill_switch_admin_token`（P0-10）とは別の永続化問題。
-- [ ] **Cedar スキーマ検証が `#[cfg(test)]` 内のみで本番に接続されていない** — 根拠
+- [x] **Cedar スキーマ検証が `#[cfg(test)]` 内のみで本番に接続されていない**（2026-11-19 対応済み: `CedarEngine::new` で schema を解決し `Validator::validate(Strict)` を実行、違反時は `bail!` で起動失敗。既存 shipped テストは共通ヘルパーへ集約し維持、新規2テスト追加。policy 67 tests pass） — 根拠
   `rust/jarvis-policy/src/policy.rs:236,353-366` / R1-ST1 / 重大度 high /
   confirmed。起動時に投入されたポリシーは型検査されない。
 - [x] **`backup.rs --dry-run` がローカルバックアップを削除する**（2026-11-18 対応済み: `cleanup_local` に `dry_run` を伝播し、true 時は `remove_file` せず削除予定をログ出力。選定条件は従来どおり。`rustfmt --check` / `rust-script --test` 1 pass / CLI help exit 0） — 根拠
@@ -418,11 +418,11 @@ generated:
   `rust/jarvis-policy/src/http.rs:43-51,216,221-222` /
   R2-ER1,R1-AP01,R1-ST01 / 重大度 high / confirmed。
   `Uuid::parse_str(...).unwrap_or_else(new_v4)` と `unwrap_or_default()`。
-- [ ] **`web.fetch` の機密ファイル判定がファイル名末尾のみ** — 根拠
+- [x] **`web.fetch` の機密ファイル判定がファイル名末尾のみ**（2026-11-19 対応済み: `reject_sensitive_path` を canonicalize 済みパスの全 components 走査へ拡張し `.ssh` / `.aws` / `.gnupg` / `.kube` / `.config/gcloud` 配下や `id_rsa*` / `credentials` / `known_hosts` を拒否。新規2テスト追加、sandbox 12 tests pass） — 根拠
   `rust/jarvis-mcp-gw/src/sandbox.rs:250-267` / R3-AU1,R1-ST01 /
   重大度 high / confirmed。`.ssh/id_rsa` や `.aws/credentials` が
   filename ベースの拒否リストをすり抜ける。
-- [ ] **イベントキュー溢れ時にドロップしつつ `success: true` を返す** — 根拠
+- [x] **イベントキュー溢れ時にドロップしつつ `success: true` を返す**（2026-11-19 対応済み: HTTP は 503、gRPC は `RESOURCE_EXHAUSTED` を返す。既存 `emit()` の warn&drop は維持し、ハンドラ側で `event_sender().try_send()` の結果を検査。回帰テスト4件追加、event 29 tests pass） — 根拠
   `rust/jarvis-event/src/normalizer.rs:21-37`, `src/http.rs:133-139`,
   `src/grpc.rs:35-36` / R2-ER2,R1-AR11 / 重大度 high / confirmed。
 - [ ] **登録済み upstream MCP サーバがメモリのみで再起動時に消える** — 根拠
@@ -697,7 +697,7 @@ generated:
 
 ## follow-up（2026-11-19 Round 3 / R4 レビュー）
 
-- [ ] **gRPC の `store_memory` も呼び出し側指定 id で上書き可能** — 根拠
+- [x] **gRPC の `store_memory` も呼び出し側指定 id で上書き可能**（2026-11-19 対応済み: proto に `StoreMemoryResponse { id }` を追加し戻り値を変更。grpc.rs で `Uuid::new_v4()` を生成して指定 id を破棄し、生成 id をレスポンスで返す。回帰テスト2件追加、context grpc 2 tests pass。proto3 のフィールド追加は後方互換） — 根拠
   `rust/jarvis-context/src/grpc.rs:47-70`, `proto/context.proto:7,22` /
   R4 レビュー / 優先度 高。
   - HTTP 側はサーバ生成 UUID へ修正済みだが、gRPC は
