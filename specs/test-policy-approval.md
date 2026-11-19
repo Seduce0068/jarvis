@@ -41,7 +41,7 @@ status: draft
 | REQ-4 | 状態は再起動で復元され、破損時は発動扱い (fail-closed) |
 | REQ-5 | トークン設定時、承認ルートはヘッダ検証で 401/200 を分岐 |
 | REQ-6 | トークンは承認ルートのみ、health/check は認証対象外 |
-| REQ-7 | `max_pending` 超過は `approval queue full` で即 Denied |
+| REQ-7 | `max_pending` 超過はストア層で Denied 互換、HTTP では 503 を返す |
 | REQ-8 | 上限境界は cap-1 受付、cap 受付、cap+1 拒否 |
 | REQ-9 | 同一 ID の再登録は元の保留を守り Denied する |
 | REQ-10 | 二重決定 409、未知名 404、不正 UUID 400、競合は決定優先 |
@@ -174,7 +174,9 @@ Scenario: TC-A2 認証スコープの境界
 Scenario: TC-Q1 上限超過の fail-closed
   Given max_pending=1 で先頭要求が pending
   When 別 ID で新規要求を登録する
-  Then Denied(reason="approval queue full") を返す
+  Then ストア層 request() は Denied(reason="approval queue full") を返す
+  Then try_request() は ApprovalError::QueueFull を返す
+  Then HTTP /v1/approval は 503 を返す（通常 deny は 200 decision を維持）
   Then pending 数は 1 のまま増加しない
 ```
 
