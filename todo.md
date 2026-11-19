@@ -1808,3 +1808,34 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、migration 005 分離、spec 変更に伴う証跡再生成、
   secret_scan の未ステージファイル対象エラー。
+
+### Round 62（R4 で修正済み）
+
+- [x] **証跡 index の参照リンク除去で件数照合がスキップ**（confirmed high、
+  Runtime Proof 付き）→ 条目を構造的に evidence として扱い、JSON 解決不能を
+  `INDEX_UNRESOLVED_ENTRY` で fail-closed。glob 外 spec_path の
+  `REQ_SPEC_UNRESOLVED`、index の .md リンクと JSON の spec_path 照合
+  `INDEX_SPEC_MISMATCH` も追加、tamper7件。
+- [x] health 応答の重複キー／余分キー（confirmed medium/low）→ policy の
+  3形状を jarvis-core 固定文字列定数化、UI は trim 後完全一致のみ分類、
+  他は Err→停止側。cross-crate pin 更新。UI 82 tests。
+- [x] BytesRejection の無条件413（low）→ `LengthLimitError` のみ413、
+  他は axum 準拠の400。
+
+### Round 62 の残り指摘（未対応）
+
+- [ ] migration 005 の死信保持に振る舞いテストが無く、既存テストは逆の
+  「削除」を期待（confirmed high）— Pg の dead_letter が行を保持し後続 list
+  が返さないことを実 DB／永続モックで検証、文字列 contains を置換。
+- [ ] dead-letter カウンタが DB 書き込み成功前に increment（medium）—
+  成功後に移動、失敗カウンタを分離。
+- [ ] attempts 上限到達行が終端マーカーもメトリクスも無くサイレント除外
+  （medium）— vector_state='exhausted' 永続化＋専用メトリクス。
+- [ ] シナリオ充足判定が下限のみ（medium）— 契約 step 追記時に新規 Scenario
+  を要求、またはシナリオ別 pass 数を記録。
+- [ ] migration pre-flight unit コメントが「through 004」のまま（low）。
+- [ ] `overflow_warning_records_event_metadata_without_payload` が並列実行時
+  にフレーキ（tracing ログキャプチャ競合）— 再実行で pass、構造修正は未実施。
+
+- 親が対応: fmt 差分、I64-A pristine 一時ツリーへの evidence/index.md
+  コピー漏れ（safety-test fail）、event ログキャプチャのフレーキ再実行。
