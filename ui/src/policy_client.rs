@@ -11,12 +11,17 @@
 //! The console only ever talks to the configured loopback base URL.
 
 use anyhow::{Context as _, Result, bail};
+use jarvis_core::approval::{ApprovalDecision as Decision, ApprovalRequest as CoreApprovalRequest};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// A pending approval request as returned by `jarvis-policy`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct ApprovalRequest {
+    /// Legacy peers may omit the id entirely; `""` keeps such an entry
+    /// renderable instead of failing the whole poll. Canonical conversion
+    /// rejects it explicitly at the boundary (see `request_to_core`).
+    #[serde(default)]
     pub id: String,
     pub principal: String,
     pub action: String,
@@ -27,6 +32,88 @@ pub struct ApprovalRequest {
     pub requested_at: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Thin wire DTO for decision JSON returned by `jarvis-policy`.
+///
+/// Same boundary pattern as `jarvis-mcp-gw`: the HTTP contract carries
+/// `approved_at` as an RFC 3339 *string*, while the canonical core type stores
+/// a `DateTime<Utc>`. The serde tag and field names below are the unchanged
+/// wire contract; only the receiving type is thin.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+#[serde(tag = "decision")]
+enum DecisionWire {
+    Approved {
+        approved_by: String,
+        approved_at: String,
+    },
+    Denied {
+        reason: String,
+    },
+    Pending,
+    Expired,
+}
+
+/// Boundary: incoming decision JSON -> canonical core [`Decision`].
+///
+/// The tagged shape is the current `jarvis-policy` contract. The legacy
+/// two-variant shape (`"Approved"` / `{"Denied":{"reason":".."}}`) is accepted
+/// as a fallback so already-queued decisions keep working. A legacy `Approved`
+/// carries no author/timestamp, so those canonical fields use documented
+/// defaults. A malformed RFC 3339 timestamp is an explicit error, never an
+/// implicitly accepted approval.
+///
+/// The approve/deny HTTP flow deliberately keeps checking status only and
+/// ignores the response body (its legacy body omits these fields), so this
+/// boundary is exposed as API and exercised by the regression tests below.
+#[allow(dead_code)]
+pub fn decision_from_json(value: &serde_json::Value) -> Result<Decision> {
+    if let Ok(wire) = serde_json::from_value::<DecisionWire>(value.clone()) {
+        return match wire {
+            DecisionWire::Approved {
+                approved_by,
+                approved_at,
+            } => {
+                let approved_at = chrono::DateTime::parse_from_rfc3339(&approved_at)
+                    .with_context(|| format!("invalid approved_at: {approved_at}"))?
+                    .with_timezone(&chrono::Utc);
+                Ok(Decision::Approved {
+                    approved_by,
+                    approved_at,
+                })
+            }
+            DecisionWire::Denied { reason } => Ok(Decision::Denied { reason }),
+            DecisionWire::Pending => Ok(Decision::Pending),
+            DecisionWire::Expired => Ok(Decision::Expired),
+        };
+    }
+    // The legacy two-variant core type was removed with P1-7 slice 4; an
+    // unrecognized tagged decision must now fail explicitly (fail-closed)
+    // rather than being misread as a legacy shape.
+    Err(anyhow::anyhow!("unrecognized approval decision JSON"))
+}
+
+/// Boundary: UI wire request -> canonical core [`CoreApprovalRequest`].
+///
+/// The UI wire DTO intentionally keeps a `String` id and nullable timestamps so
+/// legacy payloads still render. Conversion constructs the canonical core type
+/// directly: missing timestamps become the epoch, while a missing/malformed
+/// UUID id fails explicitly instead of silently producing a canonical request
+/// with a fabricated identity.
+#[allow(dead_code)]
+pub fn request_to_core(wire: &ApprovalRequest) -> Result<CoreApprovalRequest> {
+    let id = uuid::Uuid::parse_str(&wire.id).context("invalid approval id at UI boundary")?;
+    let epoch = chrono::DateTime::from_timestamp(0, 0).expect("epoch is valid");
+    Ok(CoreApprovalRequest {
+        id,
+        principal: wire.principal.clone(),
+        action: wire.action.clone(),
+        resource: wire.resource.clone(),
+        context: wire.context.clone(),
+        requested_at: wire.requested_at.unwrap_or(epoch),
+        expires_at: wire.expires_at.unwrap_or(epoch),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -487,6 +574,126 @@ mod tests {
         assert!(
             denied_message.contains("500"),
             "deny error must surface the status: {denied_message}"
+        );
+    }
+
+    fn timestamp(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).expect("valid timestamp")
+    }
+
+    /// TC-U5: tagged decision JSON converts to the canonical core type; the
+    /// wire contract (tag + field names + RFC 3339 timestamp) stays unchanged.
+    #[test]
+    fn tagged_decision_json_converts_to_canonical_core() {
+        let approved = serde_json::json!({
+            "decision": "Approved",
+            "approved_by": "koppe",
+            "approved_at": "2026-11-15T08:00:00Z",
+        });
+        assert_eq!(
+            decision_from_json(&approved).expect("approved converts"),
+            Decision::Approved {
+                approved_by: "koppe".into(),
+                approved_at: chrono::DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
+                    .expect("timestamp parses")
+                    .with_timezone(&chrono::Utc),
+            }
+        );
+
+        let denied = serde_json::json!({ "decision": "Denied", "reason": "not now" });
+        assert_eq!(
+            decision_from_json(&denied).expect("denied converts"),
+            Decision::Denied {
+                reason: "not now".into()
+            }
+        );
+        assert_eq!(
+            decision_from_json(&serde_json::json!({ "decision": "Pending" }))
+                .expect("pending converts"),
+            Decision::Pending
+        );
+        assert_eq!(
+            decision_from_json(&serde_json::json!({ "decision": "Expired" }))
+                .expect("expired converts"),
+            Decision::Expired
+        );
+    }
+
+    /// TC-U6: legacy two-variant decisions are rejected explicitly after the
+    /// core legacy type removal (P1-7 slice 4), and a malformed RFC 3339
+    /// timestamp fails closed instead of being defaulted.
+    #[test]
+    fn legacy_decision_json_is_rejected_at_boundary() {
+        let legacy_approved = serde_json::json!("Approved");
+        assert!(decision_from_json(&legacy_approved).is_err());
+        let legacy_denied = serde_json::json!({ "Denied": { "reason": "legacy no" } });
+        assert!(decision_from_json(&legacy_denied).is_err());
+
+        let malformed = serde_json::json!({
+            "decision": "Approved",
+            "approved_by": "koppe",
+            "approved_at": "not-a-timestamp",
+        });
+        assert!(
+            decision_from_json(&malformed).is_err(),
+            "malformed timestamp must fail at the boundary"
+        );
+    }
+
+    /// TC-U7: a full wire request projects onto the canonical core type with
+    /// every field preserved, and the core JSON shape stays RFC 3339/UUID.
+    #[test]
+    fn wire_request_converts_to_canonical_core_keeping_the_json_shape() {
+        let wire = ApprovalRequest {
+            id: "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88".into(),
+            principal: "opencode".into(),
+            action: "execute".into(),
+            resource: "tool:shell.execute".into(),
+            context: serde_json::json!({ "cmd": "ls" }),
+            requested_at: Some(timestamp(0)),
+            expires_at: Some(timestamp(60)),
+        };
+        let core = request_to_core(&wire).expect("converts");
+        assert_eq!(core.principal, "opencode");
+        assert_eq!(core.action, "execute");
+        assert_eq!(core.resource, "tool:shell.execute");
+        assert_eq!(core.context, serde_json::json!({ "cmd": "ls" }));
+        assert_eq!(core.requested_at, timestamp(0));
+        assert_eq!(core.expires_at, timestamp(60));
+
+        let json = serde_json::to_value(&core).expect("canonical request serializes");
+        assert_eq!(json["id"], "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88");
+        assert_eq!(json["requested_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(json["expires_at"], "1970-01-01T00:01:00Z");
+    }
+
+    /// TC-U8: legacy payloads that omit `requested_at`/`expires_at` still cross
+    /// the boundary (nullable timestamps become the epoch), while a missing or
+    /// malformed UUID id is rejected explicitly instead of being fabricated.
+    #[test]
+    fn legacy_wire_request_tolerance_and_explicit_id_error() {
+        let legacy_json = serde_json::json!({
+            "principal": "jarvis",
+            "action": "execute",
+            "resource": "tool:git.commit",
+        });
+        let wire: ApprovalRequest = serde_json::from_value(legacy_json).expect("legacy parses");
+        assert_eq!(wire.requested_at, None);
+        assert_eq!(wire.expires_at, None);
+        assert!(
+            request_to_core(&wire).is_err(),
+            "empty id must fail explicitly"
+        );
+
+        let with_bad_id = ApprovalRequest {
+            id: "not-a-uuid".into(),
+            requested_at: None,
+            expires_at: None,
+            ..wire
+        };
+        assert!(
+            request_to_core(&with_bad_id).is_err(),
+            "malformed id must fail explicitly"
         );
     }
 }

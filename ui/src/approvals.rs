@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use crate::policy_client::{ApprovalRequest, PolicyClient};
+use jarvis_core::approval::ApprovalDecision as CoreApprovalDecision;
 
 // Tab navigation for the focusable approval buttons. GPUI has no default Tab
 // binding, so these are registered here to keep the console's keyboard support
@@ -114,6 +115,9 @@ impl ApprovalsView {
     /// Apply an operator decision, then refresh immediately.
     fn decide(&mut self, id: String, approve: bool, cx: &mut Context<Self>) {
         let client = self.client.clone();
+        // Name the operator's intent with the canonical core decision type.
+        // Only the fields consumed by the unchanged HTTP body are read below.
+        let decision = operator_decision(approve);
         let label: SharedString = if approve { "承認" } else { "却下" }.into();
         self.status = format!("{label}を送信中… ({id})").into();
 
@@ -123,10 +127,16 @@ impl ApprovalsView {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    if approve {
-                        decide_client.approve(&decide_id, "koppe")
-                    } else {
-                        decide_client.deny(&decide_id, "operator denied")
+                    match &decision {
+                        CoreApprovalDecision::Approved { approved_by, .. } => {
+                            decide_client.approve(&decide_id, approved_by)
+                        }
+                        CoreApprovalDecision::Denied { reason } => {
+                            decide_client.deny(&decide_id, reason)
+                        }
+                        CoreApprovalDecision::Pending | CoreApprovalDecision::Expired => {
+                            unreachable!("an operator action is never Pending or Expired")
+                        }
                     }
                 })
                 .await;
@@ -322,6 +332,24 @@ fn format_args(context: &serde_json::Value) -> String {
     format!("args: {body}")
 }
 
+/// Represent the operator action with the canonical core decision type.
+///
+/// The values read from this type are exactly the ones the existing HTTP
+/// contract sends (`approve`: `approved_by`, `deny`: `reason`). The endpoint
+/// paths, body shapes, status strings and expiry logic are unchanged.
+fn operator_decision(approve: bool) -> CoreApprovalDecision {
+    if approve {
+        CoreApprovalDecision::Approved {
+            approved_by: "koppe".into(),
+            approved_at: chrono::Utc::now(),
+        }
+    } else {
+        CoreApprovalDecision::Denied {
+            reason: "operator denied".into(),
+        }
+    }
+}
+
 /// Pure expiry predicate shared by row rendering and regression tests.
 /// A deadline exactly equal to `now` is still considered valid.
 fn is_expired(request: &ApprovalRequest, now: chrono::DateTime<chrono::Utc>) -> bool {
@@ -332,8 +360,8 @@ fn is_expired(request: &ApprovalRequest, now: chrono::DateTime<chrono::Utc>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalsView, format_args, is_expired};
-    use crate::policy_client::{ApprovalRequest, PolicyClient};
+    use super::{ApprovalsView, CoreApprovalDecision, format_args, is_expired, operator_decision};
+    use crate::policy_client::{ApprovalRequest, PolicyClient, request_to_core};
     use serde_json::json;
 
     #[test]
@@ -446,5 +474,35 @@ mod tests {
         assert!(!is_expired(&exact, now));
         assert!(!is_expired(&future, now));
         assert!(!is_expired(&none, now));
+    }
+
+    /// TC-U9: the canonical core decision carries exactly the values the
+    /// unchanged approve/deny HTTP bodies use.
+    #[test]
+    fn operator_decision_keeps_http_contract_values() {
+        let approved = operator_decision(true);
+        match approved {
+            CoreApprovalDecision::Approved { approved_by, .. } => {
+                assert_eq!(approved_by, "koppe");
+            }
+            other => panic!("expected Approved, got {other:?}"),
+        }
+        let denied = operator_decision(false);
+        match denied {
+            CoreApprovalDecision::Denied { reason } => assert_eq!(reason, "operator denied"),
+            other => panic!("expected Denied, got {other:?}"),
+        }
+    }
+
+    /// TC-U10: every field the row renders survives the core boundary, so the
+    /// display projection stays faithful to the canonical domain type.
+    #[test]
+    fn core_request_keeps_display_fields() {
+        let wire = request_with_expiry("3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88", None);
+        let core = request_to_core(&wire).expect("valid uuid converts");
+        assert_eq!(core.principal, wire.principal);
+        assert_eq!(core.action, wire.action);
+        assert_eq!(core.resource, wire.resource);
+        assert_eq!(core.context, wire.context);
     }
 }
