@@ -5,7 +5,7 @@ use crate::config::validation::{self, InvalidInput};
 use crate::error::ContextError;
 use axum::{
     Json, Router,
-    extract::{Request, State},
+    extract::{FromRequest, Request, State},
     middleware::Next,
     response::Response,
     routing::{get, post},
@@ -345,22 +345,57 @@ fn reject_invalid_input(field: &'static str) -> axum::http::StatusCode {
     axum::http::StatusCode::BAD_REQUEST
 }
 
+/// JSON body extractor that collapses every `JsonRejection` to the shared
+/// bare-400 contract.
+///
+/// axum's stock `Json<T>` rejects type-mismatched or malformed bodies (for
+/// example `limit: "abc"`, `embedding: "x"` or a syntax error) *before* the
+/// handler runs and returns a detailed `JsonRejection` body. That body
+/// bypasses the fixed-vocabulary / value-non-disclosing contract of
+/// [`reject_invalid_input`] and made HTTP asymmetric with gRPC's fixed
+/// `InvalidArgument`. Wrapping `Json<T>` here discards the rejection detail and
+/// routes every failure through [`reject_invalid_input`]: a single
+/// `invalid_input` log record with a static field label and an empty 400
+/// response, no matter where deserialization fails. Valid bodies still reach
+/// the handler unchanged, so the shared validator keeps ownership of all
+/// semantic checks.
+struct BareJson<T>(Json<T>);
+
+#[async_trait::async_trait]
+impl<S, T> FromRequest<S> for BareJson<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = axum::http::StatusCode;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        Json::<T>::from_request(req, state)
+            .await
+            .map(Self)
+            .map_err(|_| reject_invalid_input("body"))
+    }
+}
+
 #[instrument(skip(builder, req))]
 async fn build_context(
     State(builder): State<Arc<dyn MemoryBackend>>,
-    Json(req): Json<BuildContextRequest>,
+    req: BareJson<BuildContextRequest>,
 ) -> Result<Json<BuildContextResponse>, axum::http::StatusCode> {
+    // A type-mismatched body was already collapsed to a bare 400 by `BareJson`
+    // before this line; only deserialized data reaches the handler.
+    let BareJson(Json(body)) = req;
     // I53-C: a malformed event id must not be silently replaced with a fresh
     // UUID — the caller would receive 200 while the event carried an id they
     // never asked for. Reject with a bare 400 instead.
-    let id = uuid::Uuid::parse_str(&req.event_id).map_err(|_| reject_invalid_input("event_id"))?;
+    let id = uuid::Uuid::parse_str(&body.event_id).map_err(|_| reject_invalid_input("event_id"))?;
     let event = UnifiedEvent {
         id,
         source: jarvis_core::EventSource::Manual,
-        event_type: req.event_type,
-        payload: req.payload,
+        event_type: body.event_type,
+        payload: body.payload,
         timestamp: chrono::Utc::now(),
-        correlation_id: req.correlation_id,
+        correlation_id: body.correlation_id,
     };
     let context = log_internal_error(builder.build(&event).await, "build_context")?;
     Ok(Json(BuildContextResponse { context }))
@@ -403,9 +438,10 @@ fn prepare_store_memory(
 #[instrument(skip(builder, req))]
 async fn store_memory(
     State(builder): State<Arc<dyn MemoryBackend>>,
-    Json(req): Json<StoreMemoryRequest>,
+    req: BareJson<StoreMemoryRequest>,
 ) -> Result<Json<StoreMemoryResponse>, axum::http::StatusCode> {
-    let (memory, response) = prepare_store_memory(req, builder.embedding_dim())?;
+    let BareJson(Json(body)) = req;
+    let (memory, response) = prepare_store_memory(body, builder.embedding_dim())?;
     log_internal_error(builder.store(memory).await, "store_memory")?;
     Ok(Json(response))
 }
@@ -413,14 +449,17 @@ async fn store_memory(
 #[instrument(skip(builder, req))]
 async fn search_memory(
     State(builder): State<Arc<dyn MemoryBackend>>,
-    Json(req): Json<SearchMemoryRequest>,
+    req: BareJson<SearchMemoryRequest>,
 ) -> Result<Json<Vec<MemoryEntryResponse>>, axum::http::StatusCode> {
+    let BareJson(Json(body)) = req;
     // I55-A: the signed wire value is widened/try_from-checked by the shared
     // validator, so a negative or oversized limit yields the same bare 400 as
     // gRPC's InvalidArgument and never reaches the over-fetch/Qdrant path.
-    let limit = validation::validate_search_limit(req.limit)
+    // A wrong JSON type (e.g. limit:"abc") never reaches here: `BareJson`
+    // already returned the same bare 400 via `reject_invalid_input`.
+    let limit = validation::validate_search_limit(body.limit)
         .map_err(|invalid| reject_invalid_input(invalid.field))?;
-    let memories = log_internal_error(builder.search(&req.query, limit).await, "search_memory")?;
+    let memories = log_internal_error(builder.search(&body.query, limit).await, "search_memory")?;
     Ok(Json(
         memories
             .into_iter()
@@ -621,6 +660,64 @@ mod tests {
         assert_eq!(status, StatusCode::OK, "an in-range limit stays accepted");
     }
 
+    /// I57-C: oversized content/source/metadata and deeply nested metadata are
+    /// rejected by the shared validator with the same bare 400 / no body.
+    #[tokio::test]
+    async fn i57_c_oversized_and_deep_fields_are_rejected_with_bare_400() {
+        let deep_metadata = format!(
+            "{}0{}",
+            r#"{"a":"#.repeat(validation::MAX_METADATA_DEPTH + 1),
+            "}".repeat(validation::MAX_METADATA_DEPTH + 1)
+        );
+        let cases: [(&str, serde_json::Value); 4] = [
+            (
+                "oversized content",
+                serde_json::json!({
+                    "content": "x".repeat(validation::MAX_CONTENT_BYTES + 1),
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": "{\"kind\":\"test\"}",
+                    "source": "probe",
+                }),
+            ),
+            (
+                "oversized source",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": "{\"kind\":\"test\"}",
+                    "source": "s".repeat(validation::MAX_SOURCE_BYTES + 1),
+                }),
+            ),
+            (
+                "oversized metadata",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": format!(
+                        r#"{{"k":"{}"}}"#,
+                        "m".repeat(validation::MAX_METADATA_BYTES)
+                    ),
+                    "source": "probe",
+                }),
+            ),
+            (
+                "deep metadata",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": deep_metadata,
+                    "source": "probe",
+                }),
+            ),
+        ];
+        for (label, body) in cases {
+            let app = i53_c_test_app();
+            let (status, response_body) = post_and_read(app, "/v1/memory", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{label}");
+            assert!(response_body.is_empty(), "{label}: no error body may leak");
+        }
+    }
+
     /// I55-A: required store fields are rejected with a bare 400. Additive
     /// fields keep their degrade contract; these cases are all required ones.
     #[tokio::test]
@@ -678,6 +775,133 @@ mod tests {
             assert_eq!(status, StatusCode::BAD_REQUEST, "{label}");
             assert!(response_body.is_empty(), "{label}: no error body may leak");
         }
+    }
+
+    /// I57-A (b): axum's stock `Json<T>` rejection carries a detailed body that
+    /// bypasses the shared validator's bare-400 / fixed-vocabulary contract.
+    /// `BareJson` must collapse every type mismatch to an empty 400 on all
+    /// three routes, before any handler body runs.
+    #[tokio::test]
+    async fn i57_a_json_type_mismatch_is_rejected_with_bare_400() {
+        let cases: [(&str, &str, serde_json::Value); 5] = [
+            (
+                "search limit as string",
+                "/v1/memory/search",
+                serde_json::json!({"query": "probe", "limit": "abc"}),
+            ),
+            (
+                "search limit as fractional number",
+                "/v1/memory/search",
+                serde_json::json!({"query": "probe", "limit": 1.5}),
+            ),
+            (
+                "embedding as string",
+                "/v1/memory",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": "x",
+                    "metadata": "{\"kind\":\"test\"}",
+                    "source": "probe",
+                }),
+            ),
+            (
+                "non-string event_id",
+                "/v1/context/build",
+                serde_json::json!({
+                    "event_id": 42,
+                    "event_type": "state_changed",
+                    "payload": {"body": "probe"},
+                    "correlation_id": "corr-1",
+                }),
+            ),
+            (
+                "missing required field",
+                "/v1/memory",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                }),
+            ),
+        ];
+        for (label, uri, body) in cases {
+            let (status, response_body) = post_and_read(i53_c_test_app(), uri, body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{label}");
+            assert!(
+                response_body.is_empty(),
+                "{label}: JsonRejection detail leaked: {}",
+                String::from_utf8_lossy(&response_body)
+            );
+        }
+    }
+
+    /// I57-A (a)+(b): `NaN` is not valid JSON, so it arrives as a
+    /// `JsonSyntaxError`. The bare-400 contract must hold for syntax failures
+    /// too; no parser detail may cross the boundary.
+    #[tokio::test]
+    async fn i57_a_invalid_json_syntax_is_rejected_with_bare_400() {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/memory/search")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"query":"probe","limit":NaN}"#))
+            .expect("request builds");
+        let response = i53_c_test_app()
+            .oneshot(request)
+            .await
+            .expect("service responds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        assert!(
+            body.is_empty(),
+            "JsonSyntaxError detail leaked: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    /// I57-A (b): the rejection log must use the same `invalid_input`
+    /// vocabulary as the shared validator and must never contain the offending
+    /// value or axum's `invalid type: ...` rejection text.
+    #[test]
+    fn i57_a_json_rejection_logs_fixed_vocabulary_without_detail() {
+        const TYPE_PROBE: &str = "abc-I57A-PROBE";
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let status = tracing::subscriber::with_default(subscriber, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime builds");
+            runtime.block_on(async {
+                i53_c_test_app()
+                    .oneshot(i53_c_post(
+                        "/v1/memory/search",
+                        serde_json::json!({"query": "probe", "limit": TYPE_PROBE}),
+                    ))
+                    .await
+                    .expect("service responds")
+                    .status()
+            })
+        });
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(logs.contains("invalid_input"), "{logs}");
+        assert!(logs.contains("body"), "{logs}");
+        assert!(logs.contains("invalid client input"), "{logs}");
+        assert!(!logs.contains(TYPE_PROBE), "offending value leaked: {logs}");
+        assert!(
+            !logs.contains("invalid type"),
+            "rejection detail leaked: {logs}"
+        );
     }
 
     #[test]
@@ -1438,68 +1662,78 @@ mod tests {
         }
     }
 
-    /// I55-C: cross-transport proof based on real calls. For each of the seven
-    /// categories, all six RPCs (3 HTTP + 3 gRPC) are invoked with an injected
-    /// error and must emit the same fixed `error_kind` in their logs, return a
-    /// bare failure to the caller, and never leak the probe text. The static
-    /// source checks above remain only as a secondary guard.
+    /// I55-C / I57-B: cross-transport proof based on real calls. For each of the
+    /// seven categories, all six RPCs (3 HTTP + 3 gRPC) are invoked with an
+    /// injected error *under their own subscriber and log buffer*. For every
+    /// RPC we assert that the single emitted record carries the matching
+    /// (`operation`, `error_kind`) pair: 3 RPCs x 7 categories = 21 pairs per
+    /// transport, 42 in total. An aggregate token count (`matches == 3`) could
+    /// pass with one RPC mis-categorizing and another double-logging; per-pair
+    /// counting cannot. Callers still get a bare failure and no probe text. The
+    /// static source checks above remain only as a secondary guard.
     #[test]
     fn all_six_rpcs_return_the_same_seven_vocabularies_by_real_calls() {
-        use crate::error::test_support::{ERROR_KIND_TOKENS, ErrorCase, SENSITIVE_PROBE};
+        use crate::error::test_support::{
+            ERROR_KIND_TOKENS, ErrorCase, SENSITIVE_PROBE, assert_single_operation_kind,
+        };
+
+        // (operation label, HTTP route, JSON request body) for the three RPCs.
+        let http_calls = [
+            (
+                "build_context",
+                "/v1/context/build",
+                serde_json::json!({
+                    "event_id": "00000000-0000-0000-0000-000000000001",
+                    "event_type": "state_changed",
+                    "payload": {"body": "probe"},
+                    "correlation_id": "corr-1",
+                })
+                .to_string(),
+            ),
+            (
+                "store_memory",
+                "/v1/memory",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": "{\"kind\":\"test\"}",
+                    "source": "regression-test",
+                })
+                .to_string(),
+            ),
+            (
+                "search_memory",
+                "/v1/memory/search",
+                serde_json::json!({"query": "probe", "limit": 5}).to_string(),
+            ),
+        ];
 
         let mut http_seen = std::collections::BTreeSet::new();
         let mut grpc_seen = std::collections::BTreeSet::new();
 
         for case in ErrorCase::ALL {
-            // ---------- HTTP: three real handler calls. ----------
-            let http_buffer = LogBuffer::default();
-            let http_writer = http_buffer.clone();
-            let http_subscriber = tracing_subscriber::fmt()
-                .without_time()
-                .with_target(false)
-                .with_writer(move || http_writer.clone())
-                .finish();
+            // ---------- HTTP: one real handler call + one fresh buffer per RPC. ----------
+            for &(op, uri, ref body) in &http_calls {
+                let http_buffer = LogBuffer::default();
+                let http_writer = http_buffer.clone();
+                let http_subscriber = tracing_subscriber::fmt()
+                    .without_time()
+                    .with_target(false)
+                    .with_writer(move || http_writer.clone())
+                    .finish();
 
-            tracing::subscriber::with_default(http_subscriber, || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("runtime builds");
-                runtime.block_on(async {
-                    let app = Router::new()
-                        .route("/v1/context/build", post(build_context))
-                        .route("/v1/memory", post(store_memory))
-                        .route("/v1/memory/search", post(search_memory))
-                        .with_state(Arc::new(ErrorCaseBackend(case)) as Arc<dyn MemoryBackend>);
+                tracing::subscriber::with_default(http_subscriber, || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime builds");
+                    runtime.block_on(async {
+                        let app = Router::new()
+                            .route("/v1/context/build", post(build_context))
+                            .route("/v1/memory", post(store_memory))
+                            .route("/v1/memory/search", post(search_memory))
+                            .with_state(Arc::new(ErrorCaseBackend(case)) as Arc<dyn MemoryBackend>);
 
-                    let requests = [
-                        (
-                            "/v1/context/build",
-                            serde_json::json!({
-                                "event_id": "00000000-0000-0000-0000-000000000001",
-                                "event_type": "state_changed",
-                                "payload": {"body": "probe"},
-                                "correlation_id": "corr-1",
-                            })
-                            .to_string(),
-                        ),
-                        (
-                            "/v1/memory",
-                            serde_json::json!({
-                                "content": "probe",
-                                "embedding": [0.1, 0.2, 0.3],
-                                "metadata": "{\"kind\":\"test\"}",
-                                "source": "regression-test",
-                            })
-                            .to_string(),
-                        ),
-                        (
-                            "/v1/memory/search",
-                            serde_json::json!({"query": "probe", "limit": 5}).to_string(),
-                        ),
-                    ];
-
-                    for (uri, body) in requests {
                         let response = app
                             .clone()
                             .oneshot(
@@ -1507,7 +1741,7 @@ mod tests {
                                     .method("POST")
                                     .uri(uri)
                                     .header("content-type", "application/json")
-                                    .body(Body::from(body))
+                                    .body(Body::from(body.clone()))
                                     .expect("request builds"),
                             )
                             .await
@@ -1521,103 +1755,94 @@ mod tests {
                             .await
                             .expect("body reads");
                         assert!(bytes.is_empty(), "no error body may cross the boundary");
-                    }
+                    });
                 });
-            });
 
-            let captured = http_buffer.0.lock().expect("log buffer mutex").clone();
-            let http_logs = String::from_utf8(captured).expect("logs are utf-8");
-            assert_eq!(
-                http_logs.matches(case.token()).count(),
-                3,
-                "each HTTP RPC must log the injected category {case:?}: {http_logs}"
-            );
-            assert!(
-                !http_logs.contains(SENSITIVE_PROBE),
-                "HTTP leak: {http_logs}"
-            );
-            http_seen.insert(case.token());
+                let captured = http_buffer.0.lock().expect("log buffer mutex").clone();
+                let http_logs = String::from_utf8(captured).expect("logs are utf-8");
+                assert_single_operation_kind(&http_logs, op, case.token(), "HTTP");
+                assert!(
+                    !http_logs.contains(SENSITIVE_PROBE),
+                    "HTTP leak: {case:?}/{op}"
+                );
+                http_seen.insert(case.token());
+            }
 
-            // ---------- gRPC: three real handler calls. ----------
-            let grpc_buffer = LogBuffer::default();
-            let grpc_writer = grpc_buffer.clone();
-            let grpc_subscriber = tracing_subscriber::fmt()
-                .without_time()
-                .with_target(false)
-                .with_writer(move || grpc_writer.clone())
-                .finish();
+            // ---------- gRPC: one real handler call + one fresh buffer per RPC. ----------
+            for op in ["build_context", "store_memory", "search_memory"] {
+                let grpc_buffer = LogBuffer::default();
+                let grpc_writer = grpc_buffer.clone();
+                let grpc_subscriber = tracing_subscriber::fmt()
+                    .without_time()
+                    .with_target(false)
+                    .with_writer(move || grpc_writer.clone())
+                    .finish();
 
-            tracing::subscriber::with_default(grpc_subscriber, || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("runtime builds");
-                runtime.block_on(async {
-                    use crate::grpc::proto::context_service_server::ContextService;
+                tracing::subscriber::with_default(grpc_subscriber, || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime builds");
+                    runtime.block_on(async {
+                        use crate::grpc::proto::context_service_server::ContextService;
 
-                    let service = crate::grpc::GrpcContextService::with_backend(
-                        Arc::new(GrpcErrorCaseBackend(case)),
-                        None,
-                    );
+                        let service = crate::grpc::GrpcContextService::with_backend(
+                            Arc::new(GrpcErrorCaseBackend(case)),
+                            None,
+                        );
 
-                    let build = service
-                        .build_context(tonic::Request::new(
-                            crate::grpc::proto::BuildContextRequest {
-                                event_id: "00000000-0000-0000-0000-000000000001".into(),
-                                event_type: "state_changed".into(),
-                                payload: r#"{"body":"probe"}"#.into(),
-                                correlation_id: "corr-1".into(),
-                                source: "manual".into(),
-                                timestamp: 0,
-                            },
-                        ))
-                        .await
-                        .expect_err("injected error must fail the RPC");
-                    assert_eq!(build.code(), tonic::Code::Internal);
-                    assert_eq!(build.message(), crate::grpc::INTERNAL_ERROR_MESSAGE);
-
-                    let store = service
-                        .store_memory(tonic::Request::new(
-                            crate::grpc::proto::StoreMemoryRequest {
-                                id: "ignored".into(),
-                                content: "probe".into(),
-                                embedding: vec![0.1, 0.2, 0.3],
-                                metadata: r#"{"kind":"test"}"#.into(),
-                                source: "regression-test".into(),
-                                expires_at: 0,
-                            },
-                        ))
-                        .await
-                        .expect_err("injected error must fail the RPC");
-                    assert_eq!(store.code(), tonic::Code::Internal);
-                    assert_eq!(store.message(), crate::grpc::INTERNAL_ERROR_MESSAGE);
-
-                    let search = service
-                        .search_memory(tonic::Request::new(
-                            crate::grpc::proto::SearchMemoryRequest {
-                                query: "probe".into(),
-                                limit: 5,
-                            },
-                        ))
-                        .await
-                        .expect_err("injected error must fail the RPC");
-                    assert_eq!(search.code(), tonic::Code::Internal);
-                    assert_eq!(search.message(), crate::grpc::INTERNAL_ERROR_MESSAGE);
+                        let status = match op {
+                            "build_context" => service
+                                .build_context(tonic::Request::new(
+                                    crate::grpc::proto::BuildContextRequest {
+                                        event_id: "00000000-0000-0000-0000-000000000001".into(),
+                                        event_type: "state_changed".into(),
+                                        payload: r#"{"body":"probe"}"#.into(),
+                                        correlation_id: "corr-1".into(),
+                                        source: "manual".into(),
+                                        timestamp: 0,
+                                    },
+                                ))
+                                .await
+                                .expect_err("injected error must fail the RPC"),
+                            "store_memory" => service
+                                .store_memory(tonic::Request::new(
+                                    crate::grpc::proto::StoreMemoryRequest {
+                                        id: "ignored".into(),
+                                        content: "probe".into(),
+                                        embedding: vec![0.1, 0.2, 0.3],
+                                        metadata: r#"{"kind":"test"}"#.into(),
+                                        source: "regression-test".into(),
+                                        expires_at: 0,
+                                    },
+                                ))
+                                .await
+                                .expect_err("injected error must fail the RPC"),
+                            "search_memory" => service
+                                .search_memory(tonic::Request::new(
+                                    crate::grpc::proto::SearchMemoryRequest {
+                                        query: "probe".into(),
+                                        limit: 5,
+                                    },
+                                ))
+                                .await
+                                .expect_err("injected error must fail the RPC"),
+                            other => panic!("unknown operation {other}"),
+                        };
+                        assert_eq!(status.code(), tonic::Code::Internal);
+                        assert_eq!(status.message(), crate::grpc::INTERNAL_ERROR_MESSAGE);
+                    });
                 });
-            });
 
-            let captured = grpc_buffer.0.lock().expect("log buffer mutex").clone();
-            let grpc_logs = String::from_utf8(captured).expect("logs are utf-8");
-            assert_eq!(
-                grpc_logs.matches(case.token()).count(),
-                3,
-                "each gRPC RPC must log the injected category {case:?}: {grpc_logs}"
-            );
-            assert!(
-                !grpc_logs.contains(SENSITIVE_PROBE),
-                "gRPC leak: {grpc_logs}"
-            );
-            grpc_seen.insert(case.token());
+                let captured = grpc_buffer.0.lock().expect("log buffer mutex").clone();
+                let grpc_logs = String::from_utf8(captured).expect("logs are utf-8");
+                assert_single_operation_kind(&grpc_logs, op, case.token(), "gRPC");
+                assert!(
+                    !grpc_logs.contains(SENSITIVE_PROBE),
+                    "gRPC leak: {case:?}/{op}"
+                );
+                grpc_seen.insert(case.token());
+            }
         }
 
         let expected: std::collections::BTreeSet<&str> = ERROR_KIND_TOKENS.into_iter().collect();

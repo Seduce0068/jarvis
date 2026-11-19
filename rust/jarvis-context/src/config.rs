@@ -104,6 +104,30 @@ pub(crate) mod validation {
     /// the sign and this constant handles the magnitude.
     pub(crate) const MAX_SEARCH_LIMIT: usize = 1_000;
 
+    /// Maximum UTF-8 byte length of a caller-supplied `content` (I57-C).
+    ///
+    /// `content` is stored verbatim in PostgreSQL and can be rendered into JSON
+    /// logs; without a bound one request can exhaust row storage or the log
+    /// pipeline. 1 MiB is generous for a single memory entry.
+    pub(crate) const MAX_CONTENT_BYTES: usize = 1_048_576;
+
+    /// Maximum UTF-8 byte length of a caller-supplied `source` (I57-C).
+    ///
+    /// `source` is a short provenance label, not a document body.
+    pub(crate) const MAX_SOURCE_BYTES: usize = 4_096;
+
+    /// Maximum UTF-8 byte length of the raw `metadata` JSON string (I57-C).
+    ///
+    /// Parsed metadata becomes a Qdrant payload; bounding the raw bytes rejects
+    /// oversized payloads before a large `serde_json::Value` is allocated.
+    pub(crate) const MAX_METADATA_BYTES: usize = 65_536;
+
+    /// Maximum nesting depth of the parsed `metadata` object (I57-C).
+    ///
+    /// Deeply nested objects inflate Qdrant payload serialization and JSON log
+    /// size without bound even when the total byte count is modest.
+    pub(crate) const MAX_METADATA_DEPTH: usize = 16;
+
     /// The only information a boundary validation failure carries outward.
     ///
     /// `field` is always a static label chosen here (never derived from input),
@@ -154,19 +178,68 @@ pub(crate) mod validation {
         matches!(value, serde_json::Value::Object(_))
     }
 
-    /// Parse the `metadata` string and require a JSON object.
+    /// Reject a text field larger than its transport-neutral byte budget (I57-C).
+    ///
+    /// The `field` label is always static, so the fixed-vocabulary rejection
+    /// path cannot carry any of the oversized caller data into logs.
+    fn validate_text_bytes(
+        value: &str,
+        max: usize,
+        field: &'static str,
+    ) -> Result<(), InvalidInput> {
+        if value.len() > max {
+            return Err(InvalidInput { field });
+        }
+        Ok(())
+    }
+
+    /// Depth check that stops descending as soon as the limit is exceeded, so a
+    /// hostile nested object cannot drive unbounded recursion (I57-C).
+    fn metadata_depth_within(value: &serde_json::Value, depth: usize) -> bool {
+        if depth > MAX_METADATA_DEPTH {
+            return false;
+        }
+        match value {
+            serde_json::Value::Object(map) => map
+                .values()
+                .all(|entry| metadata_depth_within(entry, depth + 1)),
+            serde_json::Value::Array(items) => items
+                .iter()
+                .all(|entry| metadata_depth_within(entry, depth + 1)),
+            _ => true,
+        }
+    }
+
+    /// Shared metadata checks used by both the ingress parser and the core-store
+    /// defense-in-depth recheck (I57-C).
+    fn validate_metadata_value(value: &serde_json::Value) -> Result<(), InvalidInput> {
+        if !is_object(value) {
+            return Err(InvalidInput { field: "metadata" });
+        }
+        // `Value`'s `Display` is infallible. Checking the canonical serialization
+        // prevents a bypass via escaped/reshaped input whose raw form is short.
+        if value.to_string().len() > MAX_METADATA_BYTES {
+            return Err(InvalidInput { field: "metadata" });
+        }
+        if !metadata_depth_within(value, 0) {
+            return Err(InvalidInput { field: "metadata" });
+        }
+        Ok(())
+    }
+
+    /// Parse the `metadata` string, require a JSON object and enforce the shared
+    /// byte/depth bounds (I55-A + I57-C).
     ///
     /// A scalar such as `"text"` or `123` used to satisfy `from_str` and pass
     /// the boundary, but `memory::upsert_vector` only copies `Value::Object`
     /// entries into the Qdrant payload — the caller's data was silently lost.
     pub(crate) fn parse_metadata(raw: &str) -> Result<serde_json::Value, InvalidInput> {
+        // Reject the oversized payload before allocating a `Value` for it.
+        validate_text_bytes(raw, MAX_METADATA_BYTES, "metadata")?;
         let value: serde_json::Value =
             serde_json::from_str(raw).map_err(|_| InvalidInput { field: "metadata" })?;
-        if is_object(&value) {
-            Ok(value)
-        } else {
-            Err(InvalidInput { field: "metadata" })
-        }
+        validate_metadata_value(&value)?;
+        Ok(value)
     }
 
     /// Validate an embedding vector against the configured dimension.
@@ -175,11 +248,21 @@ pub(crate) mod validation {
     /// path stayed fail-open and forwarded a wrong-sized (or empty) vector to
     /// Qdrant, contradicting that startup guarantee. An empty vector is a
     /// special case of the same mismatch and is rejected explicitly.
+    ///
+    /// Every component must also be finite. proto3 `repeated float` carries
+    /// NaN and +/-Inf verbatim (JSON cannot represent them), so a correctly
+    /// sized vector of non-finite values previously passed this shared check
+    /// and reached Qdrant's upsert and distance computation. Rejecting here
+    /// covers both ingress paths and the core store recheck, which all call
+    /// this same helper.
     pub(crate) fn validate_embedding(
         embedding: &[f32],
         embedding_dim: usize,
     ) -> Result<(), InvalidInput> {
-        if embedding.is_empty() || embedding.len() != embedding_dim {
+        if embedding.is_empty()
+            || embedding.len() != embedding_dim
+            || !embedding.iter().all(|v| v.is_finite())
+        {
             return Err(InvalidInput { field: "embedding" });
         }
         Ok(())
@@ -224,6 +307,10 @@ pub(crate) mod validation {
         embedding_dim: usize,
     ) -> Result<MemoryEntry, InvalidInput> {
         validate_embedding(&embedding, embedding_dim)?;
+        // I57-C: bound the stored text fields before building the entry so an
+        // oversized payload never reaches PostgreSQL or the JSON log pipeline.
+        validate_text_bytes(&content, MAX_CONTENT_BYTES, "content")?;
+        validate_text_bytes(&source, MAX_SOURCE_BYTES, "source")?;
         let metadata = parse_metadata(metadata_raw)?;
         let expires_at = parse_expires_at(expires_at_raw)?;
         Ok(MemoryEntry {
@@ -250,11 +337,9 @@ pub(crate) mod validation {
         embedding_dim: usize,
     ) -> Result<(), InvalidInput> {
         validate_embedding(&memory.embedding, embedding_dim)?;
-        if is_object(&memory.metadata) {
-            Ok(())
-        } else {
-            Err(InvalidInput { field: "metadata" })
-        }
+        validate_text_bytes(&memory.content, MAX_CONTENT_BYTES, "content")?;
+        validate_text_bytes(&memory.source, MAX_SOURCE_BYTES, "source")?;
+        validate_metadata_value(&memory.metadata)
     }
 
     #[cfg(test)]
@@ -316,6 +401,49 @@ pub(crate) mod validation {
             );
         }
 
+        /// proto3 `repeated float` can carry NaN and both infinities even when
+        /// the vector length matches the configured dimension. The shared
+        /// validator must reject them so no non-finite vector reaches Qdrant's
+        /// upsert / distance computation. gRPC is the ingress that can actually
+        /// transport these values; HTTP uses the very same function.
+        #[test]
+        fn embedding_rejects_nan_and_infinities() {
+            for non_finite in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+                assert_eq!(
+                    validate_embedding(&[non_finite, 0.2, 0.3], 3),
+                    Err(InvalidInput { field: "embedding" }),
+                    "non-finite component at index 0 must be rejected: {non_finite}"
+                );
+                assert_eq!(
+                    validate_embedding(&[0.1, non_finite, 0.3], 3),
+                    Err(InvalidInput { field: "embedding" }),
+                    "non-finite component at index 1 must be rejected: {non_finite}"
+                );
+            }
+            // A fully finite vector of the right size remains valid.
+            assert!(validate_embedding(&[0.1, 0.2, 0.3], 3).is_ok());
+        }
+
+        /// The defense-in-depth core recheck goes through `validate_embedding`,
+        /// so a direct `store_memory` caller cannot inject NaN past ingress.
+        #[test]
+        fn core_store_recheck_rejects_non_finite_embedding() {
+            let mut memory = prepare_memory(
+                "content".into(),
+                vec![0.1, 0.2, 0.3],
+                r#"{"kind":"test"}"#,
+                "source".into(),
+                0,
+                3,
+            )
+            .expect("valid memory entry");
+            memory.embedding[1] = f32::NAN;
+            assert_eq!(
+                validate_memory_for_store(&memory, 3),
+                Err(InvalidInput { field: "embedding" })
+            );
+        }
+
         #[test]
         fn positive_out_of_range_expiry_is_rejected() {
             assert_eq!(parse_expires_at(0).expect("unset"), None);
@@ -339,6 +467,84 @@ pub(crate) mod validation {
             let err = InvalidInput { field: "limit" };
             assert_eq!(err.to_string(), "invalid client input");
             assert!(!err.to_string().contains("limit"));
+        }
+
+        /// Build a valid three-dimensional entry with caller-controlled text.
+        fn entry(content: &str, source: &str, metadata: &str) -> Result<MemoryEntry, InvalidInput> {
+            prepare_memory(
+                content.into(),
+                vec![0.1_f32, 0.2, 0.3],
+                metadata,
+                source.into(),
+                0,
+                3,
+            )
+        }
+
+        /// I57-C: stored text fields and raw metadata are bounded at ingress.
+        #[test]
+        fn prepare_memory_rejects_oversized_text_and_metadata() {
+            let valid_metadata = r#"{"kind":"test"}"#;
+            assert!(entry("content", "source", valid_metadata).is_ok());
+
+            let long_content = "x".repeat(MAX_CONTENT_BYTES + 1);
+            let err = entry(&long_content, "source", valid_metadata).unwrap_err();
+            assert_eq!(err.field, "content");
+
+            let long_source = "s".repeat(MAX_SOURCE_BYTES + 1);
+            let err = entry("content", &long_source, valid_metadata).unwrap_err();
+            assert_eq!(err.field, "source");
+
+            let long_metadata = format!(r#"{{"k":"{}"}}"#, "m".repeat(MAX_METADATA_BYTES));
+            let err = entry("content", "source", &long_metadata).unwrap_err();
+            assert_eq!(err.field, "metadata");
+
+            // Exact boundary values stay accepted.
+            let content_at_limit = "x".repeat(MAX_CONTENT_BYTES);
+            let source_at_limit = "s".repeat(MAX_SOURCE_BYTES);
+            let metadata_at_limit = format!(r#"{{"k":"{}"}}"#, "m".repeat(MAX_METADATA_BYTES - 8));
+            assert!(entry(&content_at_limit, "source", valid_metadata).is_ok());
+            assert!(entry("content", &source_at_limit, valid_metadata).is_ok());
+            assert!(entry("content", "source", &metadata_at_limit).is_ok());
+        }
+
+        /// I57-C: metadata nesting is bounded both at ingress and at the
+        /// core-store recheck.
+        #[test]
+        fn metadata_depth_limit_is_enforced() {
+            let shallow: serde_json::Value =
+                serde_json::from_str(r#"{"a":{"b":{"c":1}}}"#).expect("shallow object parses");
+            assert!(validate_metadata_value(&shallow).is_ok());
+
+            let raw = format!(
+                "{}0{}",
+                r#"{"a":"#.repeat(MAX_METADATA_DEPTH + 1),
+                "}".repeat(MAX_METADATA_DEPTH + 1)
+            );
+            let deep: serde_json::Value = serde_json::from_str(&raw).expect("nested object parses");
+            assert_eq!(
+                validate_metadata_value(&deep),
+                Err(InvalidInput { field: "metadata" })
+            );
+            let err = entry("content", "source", &raw).unwrap_err();
+            assert_eq!(err.field, "metadata");
+        }
+
+        /// I57-C: the core-store recheck applies the same byte bounds so a
+        /// direct `store_memory` caller cannot bypass ingress validation.
+        #[test]
+        fn core_store_recheck_enforces_size_bounds() {
+            let mut memory = entry("content", "source", r#"{"kind":"test"}"#).unwrap();
+            assert!(validate_memory_for_store(&memory, 3).is_ok());
+
+            memory.content = "x".repeat(MAX_CONTENT_BYTES + 1);
+            let err = validate_memory_for_store(&memory, 3).unwrap_err();
+            assert_eq!(err.field, "content");
+            memory.content.clear();
+
+            memory.source = "s".repeat(MAX_SOURCE_BYTES + 1);
+            let err = validate_memory_for_store(&memory, 3).unwrap_err();
+            assert_eq!(err.field, "source");
         }
     }
 }
