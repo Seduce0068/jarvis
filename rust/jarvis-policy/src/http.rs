@@ -198,11 +198,17 @@ fn default_deny_reason() -> String {
 /// Which token guards a given approval route.
 #[derive(Clone, Copy)]
 enum ApprovalScope {
-    /// request/list/status: gateway-facing `approval_api_token`.
+    /// request/list: gateway-facing `approval_api_token`.
     Api,
     /// approve/deny: `approval_admin_token` when configured, otherwise the
     /// legacy `approval_api_token` fallback.
     Admin,
+    /// Read-only status (I52-A): either token unlocks it. A 409 winner readback
+    /// follows an admin decision, and an admin-only deployment has no API token
+    /// for the UI to present. Widening only this route keeps request/list on
+    /// their original scope; both candidate values are already-held secrets
+    /// and the header name is unchanged.
+    ApiOrAdmin,
 }
 
 pub fn router(engine: Arc<PolicyEngine>) -> Router {
@@ -213,7 +219,6 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
     let api_approvals = Router::new()
         .route("/", post(request_approval))
         .route("/list", get(list_approvals))
-        .route("/:id", get(approval_status))
         .layer(axum::middleware::from_fn_with_state(
             (engine.clone(), ApprovalScope::Api),
             require_approval_token,
@@ -225,7 +230,15 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
             (engine.clone(), ApprovalScope::Admin),
             require_approval_token,
         ));
-    let approvals = api_approvals.merge(admin_approvals);
+    // Status is split into its own sub-router so it can carry a different
+    // layer without re-wrapping the API or admin routes (I52-A (b)).
+    let status_approvals = Router::new().route("/:id", get(approval_status)).layer(
+        axum::middleware::from_fn_with_state(
+            (engine.clone(), ApprovalScope::ApiOrAdmin),
+            require_approval_token,
+        ),
+    );
+    let approvals = api_approvals.merge(admin_approvals).merge(status_approvals);
 
     Router::new()
         .route("/health", get(health))
@@ -252,8 +265,9 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
 ///
 /// `Api` routes use `approval_api_token`; `Admin` routes use the separate
 /// `approval_admin_token` when configured and fall back to `approval_api_token`
-/// when it is not (legacy compatibility). When the effective token is unset
-/// the endpoint keeps its historical loopback-only behavior, unless the opt-in
+/// when it is not (legacy compatibility). `ApiOrAdmin` (status only) accepts
+/// either configured token. When no token for the route is configured the
+/// endpoint keeps its historical loopback-only behavior, unless the opt-in
 /// `require_approval_api_token` guard is enabled: then it fails closed with
 /// 503. A configured token must be sent in the `X-Jarvis-Approval-Token`
 /// header. Health/metrics/check are not covered by this middleware.
@@ -262,13 +276,16 @@ async fn require_approval_token(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
-    let expected = match scope {
-        ApprovalScope::Api => engine.approval_api_token(),
-        ApprovalScope::Admin => engine
-            .approval_admin_token()
-            .or_else(|| engine.approval_api_token()),
+    let api = engine.approval_api_token();
+    let admin = engine.approval_admin_token();
+    // A pair keeps the old one-token semantics for Api/Admin and lets the
+    // status route hold both candidates without allocating per request.
+    let accepted: [Option<&str>; 2] = match scope {
+        ApprovalScope::Api => [api, None],
+        ApprovalScope::Admin => [admin.or(api), None],
+        ApprovalScope::ApiOrAdmin => [api, admin],
     };
-    let Some(expected) = expected else {
+    if accepted.iter().all(|candidate| candidate.is_none()) {
         if engine.require_approval_api_token() {
             tracing::warn!(
                 "Approval endpoints are disabled: approval token is required but not configured"
@@ -276,7 +293,7 @@ async fn require_approval_token(
             return Err(axum::http::StatusCode::SERVICE_UNAVAILABLE);
         }
         return Ok(next.run(request).await);
-    };
+    }
     let provided = request
         .headers()
         .get("x-jarvis-approval-token")
@@ -286,8 +303,19 @@ async fn require_approval_token(
     // configured empty value through `constant_time_eq`: that would let any
     // caller decide approvals when `JARVIS_POLICY_APPROVAL_*_TOKEN=""`. The
     // config startup guard rejects that setting; this is the request-time
-    // backstop for engines built programmatically without it.
-    if !provided.is_some_and(|p| !p.trim().is_empty() && constant_time_eq(p, expected)) {
+    // backstop for engines built programmatically without it. `|=` (rather
+    // than `||`) checks every candidate so which token matched is not revealed
+    // by short-circuit timing.
+    if !provided.is_some_and(|provided| {
+        if provided.trim().is_empty() {
+            return false;
+        }
+        let mut matched = false;
+        for expected in accepted.into_iter().flatten() {
+            matched |= constant_time_eq(provided, expected);
+        }
+        matched
+    }) {
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
@@ -668,6 +696,12 @@ fn approval_error_status(error: crate::approval::ApprovalError) -> axum::http::S
     match error {
         crate::approval::ApprovalError::NotFound(_) => axum::http::StatusCode::NOT_FOUND,
         crate::approval::ApprovalError::AlreadyDecided(_) => axum::http::StatusCode::CONFLICT,
+        // I52-A: the emergency stop deliberately keeps HTTP 409 so the status
+        // contract with existing clients is unchanged (moving it to 423 would
+        // break callers that key on 409). The two cases are distinguished by
+        // the fixed bodies above: `approval_error_reasons::KILL_SWITCH` vs
+        // `ALREADY_DECIDED`. A 409 is only a durable "winner" when the body is
+        // the already-decided literal; the UI pins its halt display otherwise.
         crate::approval::ApprovalError::KillSwitchActivated => axum::http::StatusCode::CONFLICT,
         // キュー枯渇は一時的な基盤エラー。通常の deny (200 の decision) と
         // 区別し、呼び出し側が後でリトライできるよう 503 を返す。
@@ -1821,6 +1855,94 @@ mod tests {
         assert_eq!(decision["approved_by"], "admin");
     }
 
+    /// I52-A (b): the read-only status route accepts both scopes so the 409
+    /// winner readback works whichever token the operator console holds. The
+    /// list route stays API-only: the admin token must not widen it.
+    #[tokio::test]
+    async fn approval_status_accepts_admin_token_without_widening_list() {
+        let (engine, _dir) = test_engine_with_full_approval_config(
+            "http-status-both-tokens",
+            10,
+            Some("gateway-api-token".into()),
+            Some("admin-secret".into()),
+            true,
+        )
+        .await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let pending = spawn_approval_request(&client, &base, "gateway-api-token");
+        let id = wait_for_pending_with_token(&client, &base, "gateway-api-token").await;
+
+        for token in ["gateway-api-token", "admin-secret"] {
+            let status = client
+                .get(format!("{base}/v1/approval/{id}"))
+                .header("x-jarvis-approval-token", token)
+                .send()
+                .await
+                .expect("status request")
+                .status();
+            assert_eq!(status, reqwest::StatusCode::OK);
+        }
+        let list_with_admin = client
+            .get(format!("{base}/v1/approvals"))
+            .header("x-jarvis-approval-token", "admin-secret")
+            .send()
+            .await
+            .expect("list request")
+            .status();
+        assert_eq!(list_with_admin, reqwest::StatusCode::UNAUTHORIZED);
+        drop(pending);
+    }
+
+    /// I52-A (b): an admin-only deployment has no API token for the UI to
+    /// present on the status readback. Seeding the store directly keeps this
+    /// contract independent of the API-scoped submission/list routes.
+    #[tokio::test]
+    async fn approval_status_accepts_admin_token_in_admin_only_config() {
+        let (engine, _dir) = test_engine_with_full_approval_config(
+            "http-status-admin-only",
+            10,
+            None,
+            Some("admin-only-token".into()),
+            true,
+        )
+        .await;
+        let id = uuid::Uuid::new_v4();
+        let now = chrono::Utc::now();
+        engine
+            .request_approval_http(ApprovalRequest {
+                id,
+                principal: "test".into(),
+                action: "execute".into(),
+                resource: "tool:filesystem.read".into(),
+                context: json!({}),
+                requested_at: now,
+                expires_at: now + chrono::Duration::seconds(60),
+            })
+            .await
+            .expect("seed pending approval");
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let authorized = client
+            .get(format!("{base}/v1/approval/{id}"))
+            .header("x-jarvis-approval-token", "admin-only-token")
+            .send()
+            .await
+            .expect("status request")
+            .status();
+        assert_eq!(authorized, reqwest::StatusCode::OK);
+
+        let unauthenticated = client
+            .get(format!("{base}/v1/approval/{id}"))
+            .send()
+            .await
+            .expect("status request")
+            .status();
+        assert_eq!(unauthenticated, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
     /// I7-A compatibility: with no admin token configured, the API token
     /// still authorizes approve/deny exactly as before.
     #[tokio::test]
@@ -2289,6 +2411,20 @@ mod tests {
             approval_error_reasons::PERSISTENCE,
             approval_error_reasons::QUEUE_FULL
         );
+    }
+
+    /// I52-A: both errors stay on 409 for client compatibility, so callers
+    /// must be able to tell them apart using only the fixed response body.
+    #[test]
+    fn kill_switch_409_body_is_distinct_from_already_decided() {
+        let (kill_status, kill_body) = approval_error_response(ApprovalError::KillSwitchActivated);
+        let (decided_status, decided_body) =
+            approval_error_response(ApprovalError::AlreadyDecided(uuid::Uuid::nil()));
+        assert_eq!(kill_status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(decided_status, axum::http::StatusCode::CONFLICT);
+        assert_eq!(kill_body, approval_error_reasons::KILL_SWITCH);
+        assert_eq!(decided_body, approval_error_reasons::ALREADY_DECIDED);
+        assert_ne!(kill_body, decided_body);
     }
 
     /// Backend double reporting the dedicated persistence failure on the

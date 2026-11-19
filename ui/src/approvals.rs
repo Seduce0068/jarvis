@@ -220,11 +220,22 @@ impl ApprovalsView {
                     Ok(outcome) => {
                         // The service's tagged decision JSON crossed the core
                         // boundary in the client; project the winner onto the
-                        // UI view instead of echoing the pre-send intent. An
-                        // HTTP 409 is an already-decided winner, not a failure
-                        // (I50-C (b)).
-                        let halt_pinned = halt_was_pinned(outcome.decision(), kill_switch_active);
-                        view.status = status_for_outcome(&outcome, kill_switch_active).into();
+                        // UI view instead of echoing the pre-send intent. A
+                        // 409 with the already-decided body is a winner, not a
+                        // failure (I50-C (b)). A 409 with the kill-switch body
+                        // is not a decision at all: pin the emergency-stop
+                        // display even if the follow-up probe transiently
+                        // disagrees (I52-A (a)).
+                        let kill_switch_blocked =
+                            matches!(&outcome, DecisionOutcome::KillSwitchBlocked);
+                        if kill_switch_blocked {
+                            view.apply_kill_switch(true);
+                        }
+                        let halt_pinned = match outcome.decision() {
+                            Some(decision) => halt_was_pinned(decision, view.kill_switch_active),
+                            None => kill_switch_blocked,
+                        };
+                        view.status = status_for_outcome(&outcome, view.kill_switch_active).into();
                         view.error = None;
                         view.action_status = true;
                         view.halted_decision_status = halt_pinned;
@@ -485,16 +496,23 @@ fn halt_was_pinned(decision: &CoreApprovalDecision, kill_switch_active: bool) ->
     kill_switch_active && matches!(decision, CoreApprovalDecision::Approved { .. })
 }
 
-/// Operator-visible status for a full decision outcome (I50-C (b)).
+/// Operator-visible status for a full decision outcome (I50-C (b), I52-A (a)).
 ///
 /// A fresh 2xx commit keeps its existing text; a 409 winner-preservation is
-/// marked "既に決定済み" followed by the authoritative winner status. Only fixed
-/// status strings are used — no reason body, token or operator input is shown.
+/// marked "既に決定済み" followed by the authoritative winner status. A
+/// kill-switch 409 is not a decision at all, so it pins the emergency-stop
+/// display instead of claiming a durable outcome. Only fixed status strings
+/// are used — no reason body, token or operator input is shown.
 fn status_for_outcome(outcome: &DecisionOutcome, kill_switch_active: bool) -> String {
-    let base = status_for_decision_with_kill_switch(outcome.decision(), kill_switch_active);
     match outcome {
-        DecisionOutcome::Decided(_) => base.to_string(),
-        DecisionOutcome::AlreadyDecided(_) => format!("既に決定済み: {base}"),
+        DecisionOutcome::KillSwitchBlocked => "非常停止中：承認・却下は実行されません".to_string(),
+        DecisionOutcome::Decided(decision) => {
+            status_for_decision_with_kill_switch(decision, kill_switch_active).to_string()
+        }
+        DecisionOutcome::AlreadyDecided(decision) => format!(
+            "既に決定済み: {}",
+            status_for_decision_with_kill_switch(decision, kill_switch_active)
+        ),
     }
 }
 
@@ -823,5 +841,49 @@ mod tests {
             status_for_outcome(&DecisionOutcome::Decided(approved), true),
             "承認済み・実行は非常停止中"
         );
+    }
+
+    /// I52-A (a): a kill-switch 409 is neither a decision nor "already
+    /// decided". It pins a fixed halt display with no reason/body text.
+    #[test]
+    fn kill_switch_blocked_outcome_pins_halt_status_without_decision() {
+        let outcome = DecisionOutcome::KillSwitchBlocked;
+        assert!(outcome.decision().is_none());
+        let status = status_for_outcome(&outcome, true);
+        assert_eq!(status, "非常停止中：承認・却下は実行されません");
+        assert!(!status.contains("既に決定済み"));
+        assert!(!status.contains("保留中"));
+        assert!(!status.contains("kill"));
+        // The display is pinned from the 409 body itself, not from a probe.
+        assert_eq!(status_for_outcome(&outcome, false), status);
+    }
+
+    /// I52-A (a): the halt status survives polls while the stop is active and
+    /// is released once the probe confirms the switch lifted.
+    #[test]
+    fn kill_switch_blocked_status_survives_polls_until_switch_lifts() {
+        let mut view = view_with("非常停止中：承認・却下は実行されません", None, true);
+        view.halted_decision_status = true;
+        view.apply_kill_switch(true);
+        let pending = vec![request_with_expiry("a", None)];
+
+        for _ in 0..3 {
+            view.apply_poll(Ok(pending.clone()));
+            view.apply_kill_switch(true);
+            assert_eq!(
+                view.status.to_string(),
+                "非常停止中：承認・却下は実行されません"
+            );
+        }
+
+        view.apply_kill_switch(false);
+        assert!(!view.halted_decision_status);
+        view.apply_poll(Ok(pending.clone()));
+        assert_eq!(
+            view.status.to_string(),
+            "非常停止中：承認・却下は実行されません"
+        );
+        view.apply_poll(Ok(pending));
+        assert_eq!(view.status.to_string(), "保留中: 1 件");
     }
 }
