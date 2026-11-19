@@ -1780,3 +1780,31 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   他は400（axum 準拠）。
 
 - 親が対応: fmt 差分、context/event の feature 配線（Runtime Proof で発見）。
+
+### Round 61（R4 で修正済み）
+
+- [x] dead-letter／attempts 上限がログのみ（medium）→ 永続カラム
+  （migration 005）＋メトリクス＋選択クエリの3ゲート。
+- [x] poison 判定が再埋め込みより先行（medium）→ 旧次元は1回再埋め込みで
+  回復、非有限かつ次元一致のみ dead-letter。回帰3件。
+- [x] BareJson の 413/415 が仕様・証跡に未反映（medium）→ 4仕様へ明記、
+  実測で証跡再生成（context 156 / event 76 / mcp 125 / policy 205）。
+- [x] migration 004 のチェックサム変更リスクを回避: 列追加を新規 005 へ
+  分離し 004 は元の内容へ復元。
+
+### Round 61 の残り指摘（未対応）
+
+- [ ] **証跡 index の参照リンクを外すだけで件数照合がスキップ**
+  （confirmed high、Runtime Proof 付き）— evidence_entry 判定を条目の必須
+  属性とし、JSON 解決不能な条目を fail-closed 化。双方向照合も追加。
+- [ ] REQ 集合ゲートが glob 外の spec_path を無検査で通す（medium）—
+  未一致 entry を `REQ_SPEC_UNRESOLVED` で拒否、specs/ 内へ正規化。
+- [ ] health 応答の重複 JSON キーで kill_switch→no_policy に collapse
+  （medium）— 重複キー検出または固定3形状との生本文完全一致。
+- [ ] index 条目の spec リンクと JSON の spec_path が無相関（medium）—
+  .md リンクの basename 一致を `INDEX_SPEC_MISMATCH` で検証。
+- [ ] BytesRejection を無条件413へ丸め、health の exact body match 契約
+  記述と実装の不一致（low 2件）。
+
+- 親が対応: fmt 差分、migration 005 分離、spec 変更に伴う証跡再生成、
+  secret_scan の未ステージファイル対象エラー。
