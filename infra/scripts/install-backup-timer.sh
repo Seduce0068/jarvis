@@ -36,6 +36,13 @@ fi
 rollback() {
   trap - ERR
   echo "== ROLLBACK ==" >&2
+  # Stop and disable the timer before touching unit files: restoring the files
+  # alone leaves an already enabled/started timer running. Only act when
+  # systemd knows the unit; ignore any failure so restore + reload still run.
+  if systemctl cat jarvis-backup.timer >/dev/null 2>&1; then
+    systemctl stop jarvis-backup.timer || true
+    systemctl disable jarvis-backup.timer || true
+  fi
   if [ -f "$service_dst.bak-$ts" ]; then mv -f "$service_dst.bak-$ts" "$service_dst" || true; else rm -f "$service_dst" || true; fi
   if [ -f "$timer_dst.bak-$ts" ]; then mv -f "$timer_dst.bak-$ts" "$timer_dst" || true; else rm -f "$timer_dst" || true; fi
   if [ -f "$script_dst.bak-$ts" ]; then mv -f "$script_dst.bak-$ts" "$script_dst" || true; else rm -f "$script_dst" || true; fi
