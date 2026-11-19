@@ -7,6 +7,20 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+/// An upstream MCP server to spawn and register when the gateway starts.
+///
+/// Only the registration `name` and the child-process `command` are needed:
+/// the server speaks MCP over stdio and its tools are discovered through
+/// `tools/list` at registration time. The allowlist still decides which of
+/// those tools may actually be executed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpstreamConfig {
+    /// Name used for registration (re-registering the same name replaces it).
+    pub name: String,
+    /// Program followed by its arguments, e.g. `["/usr/bin/mcp-fs", "--root", "/srv"]`.
+    pub command: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpGatewayConfig {
     pub grpc_addr: String,
@@ -39,9 +53,21 @@ pub struct McpGatewayConfig {
     /// approval and log decision. Default false keeps the current behavior.
     #[serde(default)]
     pub require_server_side_principal: bool,
+    /// Upstream MCP servers registered at startup.
+    ///
+    /// TOML uses `[[upstreams]]` blocks. From the environment the same value
+    /// is supplied as a TOML-style array, e.g.
+    /// `JARVIS_MCP_GW_UPSTREAMS='[{name="fs",command=["/usr/bin/mcp-fs"]}]'`.
+    #[serde(default)]
+    pub upstreams: Vec<UpstreamConfig>,
 }
 
 impl McpGatewayConfig {
+    /// Load from `config/mcp_gateway.toml` and `JARVIS_MCP_GW_*` variables.
+    ///
+    /// Figment parses environment values as TOML-style data, so structured
+    /// fields such as `upstreams` are readable from both sources without any
+    /// split of the flat snake_case keys used by the existing variables.
     pub fn load() -> Result<Self> {
         let config: McpGatewayConfig = Figment::new()
             .merge(Toml::file("config/mcp_gateway.toml"))
@@ -71,6 +97,7 @@ impl Default for McpGatewayConfig {
             admin_token: None,
             mcp_principal: "opencode".into(),
             require_server_side_principal: false,
+            upstreams: Vec::new(),
         }
     }
 }
@@ -94,6 +121,7 @@ pub enum SandboxType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use figment::providers::Serialized;
 
     /// Config files written before the MCP-1 approval flow existed do not
     /// contain `policy_http_addr`; loading them must still work (fail-open
@@ -234,5 +262,87 @@ require_server_side_principal = true
 "#;
         let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
         assert!(config.require_server_side_principal);
+    }
+
+    /// A legacy config (and `Default`) has no upstreams, so startup
+    /// registration must be a no-op without a config migration.
+    #[test]
+    fn legacy_config_without_upstreams_still_loads() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+mcp_principal = "opencode"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
+        assert!(config.upstreams.is_empty());
+        assert!(McpGatewayConfig::default().upstreams.is_empty());
+    }
+
+    #[test]
+    fn configured_upstreams_are_honoured_from_toml() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+mcp_principal = "opencode"
+
+[[upstreams]]
+name = "filesystem"
+command = ["/usr/bin/mcp-fs", "--root", "/srv"]
+
+[[upstreams]]
+name = "git"
+command = ["/usr/bin/mcp-git"]
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
+        assert_eq!(config.upstreams.len(), 2);
+        assert_eq!(config.upstreams[0].name, "filesystem");
+        assert_eq!(
+            config.upstreams[0].command,
+            vec!["/usr/bin/mcp-fs", "--root", "/srv"]
+        );
+        assert_eq!(config.upstreams[1].name, "git");
+        assert_eq!(config.upstreams[1].command, vec!["/usr/bin/mcp-git"]);
+    }
+
+    /// Figment's Env provider parses `JARVIS_MCP_GW_UPSTREAMS` as a TOML-style
+    /// array of dicts. `Serialized` reproduces the resulting `Value` shape
+    /// without mutating process-wide environment variables (racy under
+    /// parallel tests, and unsafe in the 2024 edition).
+    #[test]
+    fn upstreams_are_deserialized_from_env_style_value() {
+        let env_value = serde_json::json!({
+            "grpc_addr": "127.0.0.1:50052",
+            "http_addr": "127.0.0.1:8082",
+            "allowlist_path": "/etc/jarvis/mcp_allowlist.toml",
+            "sandbox_type": "none",
+            "sandbox_config": {},
+            "policy_grpc_addr": "http://127.0.0.1:50051",
+            "mcp_principal": "opencode",
+            "upstreams": [
+                {"name": "filesystem", "command": ["/usr/bin/mcp-fs", "--root", "/srv"]},
+                {"name": "git", "command": ["/usr/bin/mcp-git"]}
+            ]
+        });
+        let config: McpGatewayConfig = Figment::from(Serialized::defaults(env_value))
+            .extract()
+            .expect("env-style value parses");
+        assert_eq!(config.upstreams.len(), 2);
+        assert_eq!(config.upstreams[0].name, "filesystem");
+        assert_eq!(
+            config.upstreams[0].command,
+            vec!["/usr/bin/mcp-fs", "--root", "/srv"]
+        );
+        assert_eq!(config.upstreams[1].name, "git");
+        assert_eq!(config.upstreams[1].command, vec!["/usr/bin/mcp-git"]);
     }
 }

@@ -1,6 +1,6 @@
 //! Main binary entry point
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use jarvis_mcp_gw::McpGateway;
 use jarvis_policy::PolicyClient;
 use std::sync::Arc;
@@ -50,6 +50,27 @@ async fn main() -> Result<()> {
     let policy_client = Arc::new(PolicyClient::new(&config.policy_grpc_addr)?);
 
     let gateway = McpGateway::new(config.clone(), policy_client).await?;
+
+    // Register every configured upstream before the listeners start. A
+    // failure aborts startup (fail-closed): the gateway must never come up
+    // silently missing a capability it was explicitly configured to provide.
+    // Runtime registration via RegisterMcpServer stays unchanged.
+    for upstream in &config.upstreams {
+        info!(
+            server = %upstream.name,
+            command = ?upstream.command,
+            "Registering configured MCP upstream"
+        );
+        gateway
+            .register_mcp_server(&upstream.name, upstream.command.clone())
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to register configured MCP upstream '{}'",
+                    upstream.name
+                )
+            })?;
+    }
 
     info!(
         "Starting JARVIS MCP Gateway on gRPC {} HTTP {}",

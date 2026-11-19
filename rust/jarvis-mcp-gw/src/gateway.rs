@@ -18,6 +18,10 @@
 //! used by the REST, gRPC and MCP surfaces. Registering a server never
 //! widens the allowlist: the allowlist file remains the single source of
 //! truth for which tools may run at all.
+//!
+//! Startup registration from `config.upstreams` is driven by `main.rs` through
+//! [`Gateway::register_mcp_server`]. The runtime `RegisterMcpServer` gRPC RPC
+//! uses the same method, so both paths share the same discovery and routing.
 
 use crate::error::McpGatewayError;
 use anyhow::{Context, Result};
@@ -344,5 +348,34 @@ requires_approval = false
             .await
             .expect_err("MCP error results are surfaced");
         assert!(error.to_string().contains("returned an error"));
+    }
+
+    /// `Gateway::new` must not spawn configured upstreams by itself: startup
+    /// registration belongs to `main.rs`, and runtime registration via RPC
+    /// remains the only other way to add a server.
+    #[tokio::test]
+    async fn gateway_new_does_not_spawn_configured_upstreams() {
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-config-upstreams");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let allowlist_path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist_path, ECHO_ALLOWLIST)
+            .await
+            .unwrap();
+
+        let config = crate::config::McpGatewayConfig {
+            allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            upstreams: vec![crate::config::UpstreamConfig {
+                name: "not-spawned".into(),
+                // Deliberately invalid: if `new` spawned this command the
+                // test would observe an unexpected child process.
+                command: vec!["/definitely/not/a/real/mcp/binary".into()],
+            }],
+            ..Default::default()
+        };
+        let allowlist = Arc::new(crate::allowlist::AllowList::new(&config).await.unwrap());
+        let sandbox = Arc::new(crate::sandbox::Sandbox::new(&config).await.unwrap());
+        let gateway = Gateway::new(config, allowlist, sandbox).await.unwrap();
+
+        assert!(gateway.servers.read().await.is_empty());
     }
 }
