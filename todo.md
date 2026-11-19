@@ -1588,3 +1588,35 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、`tracing_subscriber::fmt()` 修正（3箇所）、
   grpc.rs テストの UnifiedEvent / MemoryEntry import。
+
+### Round 54（R4 で修正済み）
+
+- [x] **egress allowlist の重複キー検査が未実装**（confirmed high、Runtime
+  Proof 付き）→ BASE_DIR と同じ重複拒否＋最終割り当て行検査を egress にも
+  適用。空値は deny-all として正当。
+- [x] **デプロイロールバックが env を削除し fail-open**（high）→ .bak が
+  無ければ repo の deny-all テンプレートを root:root 0600 で書き戻し、
+  ロールバック後 drift DANGER を exit 3 の強制ゲート化。
+- [x] 409 本文読み取り失敗の fail-open→fail-closed、latch に generation を
+  付与し古い probe が 409 を解除する TOCTOU を解消（UI 64 tests）。
+- [x] event/context も即時停止方針へ統一（旧 "exiting cleanly" 削除、
+  TimeoutStopSec 30→10）。
+- [x] UI / mcp-gw の仕様・証跡を実測へ同期（UI 64、mcp-gw 124/1 ignored）。
+
+### Round 54 の残り指摘（未対応）
+
+- [ ] gRPC embedding に NaN/±Inf を送ると有限性チェック無しで Qdrant へ
+  （medium）— `validate_embedding` に `is_finite()` を追加。
+- [ ] HTTP の axum JsonRejection が bare-400／no-leak 契約を迂回（medium）—
+  型不正で詳細本文が返る。カスタム extractor または Value 受け。
+- [ ] 語彙パリティ実呼び出しテストが RPC ごとの割当てを検証していない
+  （low）— operation とカテゴリの組を1回ずつアサート。
+- [ ] OTel SDK 自身の DEBUG 行が RUST_LOG=debug で生エラーを残す（low）—
+  EnvFilter に `opentelemetry_sdk=warn` 等を追加。
+- [ ] 共有 validation が content/source/metadata のサイズ境界を未定義のまま
+  （low）— MAX_*_BYTES と深さ上限を追加。
+- [ ] check-evidence が requirements 集合と Traceability の REQ 値を照合
+  せず（medium）、Runbook ゲート表が現行エラーコードと乖離（low）。
+
+- 親が対応: UI fmt 差分、spec 変更に伴う evidence 実測再生成
+  （UI 64 / mcp-gw 124）、notes 件数同期。
