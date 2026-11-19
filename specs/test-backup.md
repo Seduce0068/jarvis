@@ -65,6 +65,7 @@ status: draft
 | R-5 | 既定の retention で世代が削除される | T3 | unit >= 0.60 |
 | R-6 | timer 導入失敗時に旧 unit が戻らない | T2 | unit >= 0.80 |
 | R-7 | 旧ランチャー復活でデータ消失/OCI 転送が起きる | T1 | unit >= 0.90 |
+| R-8 | --retain-days の不正値受け付けによる誤削除 | T3 | unit >= 0.60 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
