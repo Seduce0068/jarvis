@@ -414,7 +414,7 @@ generated:
 - [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
   重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
-- [ ] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる** — 根拠
+- [x] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる**（2026-11-19 対応済み: id と requested_at はサーバ生成、expires_at は server timeout でクランプし生成値をレスポンスで返却。不正値は 400 で拒否。回帰テスト6件追加、policy 73 tests pass） — 根拠
   `rust/jarvis-policy/src/http.rs:43-51,216,221-222` /
   R2-ER1,R1-AP01,R1-ST01 / 重大度 high / confirmed。
   `Uuid::parse_str(...).unwrap_or_else(new_v4)` と `unwrap_or_default()`。
@@ -442,7 +442,7 @@ generated:
   `rust/jarvis-policy/src/http.rs:198-201` / R5-VU1 / 重大度 high / confirmed。
 - [ ] **`install-backup-timer.sh` が `backup-local.sh` を無バックアップで上書きしロールバックで削除** — 根拠
   `infra/scripts/install-backup-timer.sh:52` / R2-ER3 / 重大度 high / confirmed。
-- [ ] **bootstrap 再実行が本番 `config/jarvis.env` をトランケートし秘密情報を失う** — 根拠
+- [x] **bootstrap 再実行が本番 `config/jarvis.env` をトランケートし秘密情報を失う**（2026-11-19 対応済み: `write_private_if_absent` を追加し `create_new(true)` で原子的に存在確認、既存ファイルは警告のみで一切変更しない。dry-run / `--help` / Termux dry-run / `make lint` pass） — 根拠
   `scripts/bootstrap/bootstrap.rs:183` / R4-DR4 / 重大度 high / confirmed。
   `SERVER_ENV`（REPLACE_ME プレースホルダ）で無条件書き込み。
 - [x] **`Makefile clean` が上書き可能な `JARVIS_ROOT` を検証せず `rm -rf` を実行**（2026-11-18 対応済み: `/`・`$HOME`・`.`・`..`・相対パス・空を exit 2 で拒否。実機テストで全危険値が拒否され `/bin` 無傷を確認） — 根拠
@@ -581,7 +581,7 @@ generated:
   `rust/jarvis-context/src/builder.rs:115-121` / R2-ER2 / 重大度 high / confirmed。
 - [x] **`expires_at` 付きメモリが失効後も検索・直近コンテキストに混入**（2026-11-19 対応済み: `is_expired` / `retain_unexpired` を追加し `expires_at <= now`（UTC・境界包含）を失効と判定。SQL と Rust の両方でフィルタ、Qdrant 関連度順は維持。UTC 境界・順序保持の回帰テスト追加、full tests pass） — 根拠
   `rust/jarvis-context/proto/context.proto:28` / R2-FG2 / 重大度 high / confirmed。
-- [ ] **バックアップ/リストアが Qdrant コレクション名をハードコード** — 根拠
+- [x] **バックアップ/リストアが Qdrant コレクション名をハードコード**（2026-11-19 対応済み: `backup-local.sh` と `restore-local.d/qdrant.sh` で `JARVIS_QDRANT_COLLECTION`（既定 `jarvis_memories`）を唯一の情報源とし、隔離コレクション名も `<collection>_restore_test` へ派生。カスタム名の dry-run で反映を確認、bash -n OK） — 根拠
   `rust/jarvis-context/src/config.rs:17` / R2-FG2 / 重大度 high / confirmed。
 - [x] **`kill_switch::arm()` が `SystemTime::duration_since` を unwrap し非常停止経路が abort**（2026-11-19 対応済み: unwrap を match に置換し、時計失敗時は `activated_at=0` センチネルと CLOCK_FAILURE_REASON を記録して fail-closed を維持。正常時は既存挙動不変、kill_switch 関連12 tests pass） — 根拠
   `rust/jarvis-policy/src/kill_switch.rs:126-129` / R2-ER1 / 重大度 high / likely。
@@ -707,3 +707,17 @@ generated:
     拒否する方式を検討。
   - 多層防御として `builder.rs:134` の `ON CONFLICT (id) DO UPDATE`
     の見直しも検討対象。
+
+## 完了記録（2026-11-19 Round 5 / R4 対応）
+
+- [x] **HTTP エラー分類を型ベースへ変更** — `error.rs` に `ErrorKind` と
+  `McpGatewayError::ClientError` を追加し、`http.rs` の `http_status_for` を
+  downcast ベースへ。19個のメッセージ接頭辞判定（`is_client_error`）を廃止。
+  R4 で発見した 400→500 契約後退は `sandbox.rs` / `gateway.rs` の
+  入力検証エラーを `ClientError` へ型化して復元（内部エラーは 500 を維持）。
+  mcp-gw 59 tests pass。
+- [x] **MCP inputSchema を実装へ整合** — `filesystem.read/list` の `path` を
+  required から外し既定値 `"."` を description に明記。無視される
+  `max_bytes` を `filesystem.read` から削除し、`web.fetch` は実装の
+  clamp 範囲 [1024, 1048576] へ合わせた。子のテストが `"required"` キー
+  欠落でパニックしたため親が `get()` ベースへ修正、対象テスト pass。
