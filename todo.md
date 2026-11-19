@@ -1170,27 +1170,27 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 39 のレビュー／発掘結果（未対応）
 
-- [ ] **migration 世代ツリーの prune が現在の symlink 実体を削除しうる**
+- [x] **migration 世代ツリーの prune が現在の symlink 実体を削除しうる** — 2026-11-20 対応済み: mtime 順ソート＋`readlink -f` の現役ツリー明示除外＋削除前 tripwire（現役と一致すれば fail-closed）。辞書順では現役が最古に来るケースを一時ディレクトリで再現確認。`bash -n` / shellcheck OK。
   （confirmed high）— `build-selfhost.sh:218,285,292-296` の prune が
   `sort`（辞書順）のため、commit SHA の辞書順で最新ツリーが古い側に入ると
   symlink 先が `rm -rf` される。mtime 順（`find -printf '%T@ %f\n' | sort -n`）
   にするか `readlink -f` の解決先を除外。
-- [ ] **タイムアウトが永続化前にメモリへ Expired を確定し prune が再試行しない**
+- [x] **タイムアウトが永続化前にメモリへ Expired を確定し prune が再試行しない** — 2026-11-20 対応済み: mark_expired を `deciding` でクレームし、コミット成功後にのみ decision/decided_at を確定。失敗時は Pending のまま残し次回 prune / reconcile が再試行。呼び出し側の Expired 返却契約は維持。DB 失敗注入回帰追加。
   （confirmed high）— `approval.rs:528-530,550,1010-1013`。mark_expired が
   Persistence(503) を返しても Expired が確定し、次回 prune は `is_expired`
   分支で mark_expired を呼ばず破棄。監査行が欠落。コミット成功後にのみ
   decision/decided_at を確定するか、未確認フラグで再試行。
-- [ ] **check-evidence が型不一致で整合チェック全体を黙ってスキップ**
+- [x] **check-evidence が型不一致で整合チェック全体を黙ってスキップ** — 2026-11-20 対応済み: notes は str、passed/failed/skipped は厳密 int かつ >=0 を必須とし、違反を `BAD_NOTES_TYPE` / `BAD_RESULTS_TYPE`（値は非出力）で fail-closed。bool も type() is int で除外。6証跡すべて通过。
   （confirmed medium）— `check-evidence.sh:95-99,106-107,157-158`。skipped が
   str／notes が dict だと NOTES_* / skipped 検証が走らず、passed 捏造を通過。
   型違反を `BAD_NOTES_TYPE` / `BAD_RESULTS_TYPE` で fail-closed に。
-- [ ] **backup 仕様とエビデンスでリスク ID 集合が不一致（R-8 欠落）**
+- [x] **backup 仕様とエビデンスでリスク ID 集合が不一致（R-8 欠落）** — 2026-11-20 対応済み: `specs/test-backup.md` の Risk & tier に R-8（T3、unit >= 0.60、--retain-days 不正値による誤削除）を追加。TC-B5 の Traceability 行は既に Tier=T3 で整合。spec_hash 変更に伴い evidence を実測再生成（29件）し index 同期。
   （confirmed medium）— `specs/test-backup.md:59-67` は R-1〜R-7、evidence は
   R-8 を含む。Risk & tier に R-8（T3）を追加し、集合一致をゲート化。
-- [ ] **prune だけが AlreadyDecided を失敗扱いしゴーストを永久保持**
+- [x] **prune だけが AlreadyDecided を失敗扱いしゴーストを永久保持** — 2026-11-20 対応済み: prune Phase 2 で AlreadyDecided を成功扱いし、`load_decision_with_time` で権威決定をメモリへ反映＋watch 通知のうえ evict。re-read 不能でも CAS が decided を証明するため Expired として evict。reconcile / timeout と挙動統一、回帰テスト追加。
   （confirmed medium）— `approval.rs:1030-1046`。reconcile / timeout と挙動を
   揃え、AlreadyDecided を成功扱いにして evict する。
-- [ ] **発掘: 自動修正可能な残タスク5件** — test-restore-local.sh が
+- [x] **発掘: 自動修正可能な残タスク5件** — **2026-11-20 全件対応済み: test-restore-local.sh を Makefile（.PHONY / 単独ターゲット / safety-test / ci-local）と ci.yml extra_gates へ配線、config テンプレート3件に実装済み変数のコメント追記、.PHONY の欠落4件（test は既存）追加、ui-build コメントを「UI 検証は CI 対象」へ訂正、dsh.md の ntfy を「実装見送り判断済み」／監査永続化を「実装済み」へ訂正。親が `printf '-- ...'` の5箇所を `printf '%s\n'` へ修正し警告解消**（当初: test-restore-local.sh が
   Makefile / ci-local / CI に未配線、config テンプレート3件に実装済み
   セキュリティ変数が未反映、Makefile の .PHONY が5ターゲット欠落、
   ui-build コメントが「CI 対象外」のまま、dsh.md の通知／監査永続化が
