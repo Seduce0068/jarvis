@@ -22,16 +22,47 @@ pub struct PiiFilter {
 
 impl PiiFilter {
     pub async fn new(config: &crate::config::ContextConfig) -> Result<Self> {
-        let content = tokio::fs::read_to_string(&config.pii_patterns_path)
-            .await
-            .unwrap_or_default();
-        let pii_config: PiiConfig = toml::from_str(&content).unwrap_or_else(|_| PiiConfig {
+        // Never silently swallow a config load/parse failure. The old code used
+        // unwrap_or_default()/unwrap_or_else(), so a broken on-disk config was
+        // indistinguishable from a valid one that simply happened to use the
+        // defaults. Log loudly and keep the fail-closed fallback (redaction on,
+        // shipped patterns) so an invalid config cannot disable PII filtering.
+        let content = match tokio::fs::read_to_string(&config.pii_patterns_path).await {
+            Ok(content) => content,
+            Err(error) => {
+                warn!(
+                    path = %config.pii_patterns_path,
+                    error = %error,
+                    "Failed to read PII pattern config file; applying shipped default \
+                     patterns (fail-closed)"
+                );
+                return Ok(Self::from_config(Self::default_config()));
+            }
+        };
+
+        let pii_config: PiiConfig = match toml::from_str(&content) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                warn!(
+                    path = %config.pii_patterns_path,
+                    error = %error,
+                    "Failed to parse PII pattern config file; applying shipped default \
+                     patterns (fail-closed)"
+                );
+                Self::default_config()
+            }
+        };
+
+        Ok(Self::from_config(pii_config))
+    }
+
+    /// Fail-closed configuration: redaction enabled with the shipped patterns.
+    fn default_config() -> PiiConfig {
+        PiiConfig {
             patterns: Self::default_patterns(),
             redact_replacement: "[REDACTED]".into(),
             enabled: true,
-        });
-
-        Ok(Self::from_config(pii_config))
+        }
     }
 
     /// Build a filter directly from a config (used by tests and embedders
