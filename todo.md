@@ -466,9 +466,9 @@ generated:
 - [x] filelog レシーバの入力が空（`/var/log/jarvis/*.log` を誰も書かない）— 2026-11-19 対応済み: journald receiver へ置換し `jarvis-*` unit を対象化、logs パイプラインも接続。子が追加した無効キー `offset_storage_dir` は親が削除し `otelcol-contrib validate` exit 0 / `otelcol-config.yaml:52` / R5-VU3 / confirmed
 - [ ] `check-shell` が shellcheck 未インストール時に SKIP して成功扱い — `ci/scripts/check-shell.sh:22-33` / R5-VU4 / confirmed
 - [ ] `check-evidence.sh` が skipped 数・仕様シナリオ数を照合せず合格 — `ci/scripts/check-evidence.sh:82-85` / R3-TQ4 / confirmed
-- [ ] deploy がヘルスチェック失敗を警告のみで完了報告 — `rust/scripts/deploy.rs:385-389` / R4-DR2 / confirmed（既存 P2-8 と関連）
-- [ ] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
-- [ ] jq 欠落時にバックアップ整合性検証をスキップして verified と報告 — `infra/scripts/install-backup-timer.sh:96` / R2-ER3 / confirmed
+- [x] deploy がヘルスチェック失敗を警告のみで完了報告 — 2026-11-19 対応済み: `evaluate_health_checks()` を追加し異常なら `bail!` で非ゼロ終了（全失敗ポートを列挙）。dry-run の skip と 200 は維持。回帰テスト4件追加、deploy rust-script pass / `rust/scripts/deploy.rs:385-389` / R4-DR2 / confirmed（既存 P2-8 と関連）
+- [x] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — 2026-11-19 対応済み: 完全セットに postgres/qdrant/config-* の実在を必須化し欠落時 `REQUIRED MISSING` で失敗。子の指摘で既存フィクスチャ2件が新チェックで失敗したため親が必須ペイロードを追加、`test-verify-backup` 23 tests pass / `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
+- [x] jq 欠落時にバックアップ整合性検証をスキップして verified と報告 — 2026-11-19 対応済み: apply 時に jq が無ければ `fail()` で非ゼロ終了（verified に到達しない）。dry-run は jq 不要を維持、bash -n OK / `infra/scripts/install-backup-timer.sh:96` / R2-ER3 / confirmed
 - [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed
 - [x] `/health` が固定 `"OK"` を返し劣化を検知できない — 2026-11-19 対応済み: kill switch 発動時とポリシー来源欠落時に 503 `{"status":"degraded","reason":...}` を返す。固定語彙のみで理由文字列・パスは非開示、正常時は 200 維持。新規テスト3件追加、policy 86 tests pass / `policy/src/http.rs:187-189` / R4-DR1 / confirmed
 - [ ] シグナル処理・ドレインが無くデプロイ時停止で保留作業が失われる — `policy/src/main.rs:59` / R4-DR1 / confirmed
@@ -483,7 +483,7 @@ generated:
 - [ ] web.fetch の SSRF 検証が DNS 解決の TOCTOU で迂回可能 — `mcp-gw/src/sandbox.rs:359-365` / R3-AU1 / likely
 - [x] メトリクスが HTTP ステータス別のみで kill switch / 承認の状態が観測不可 — 2026-11-19 対応済み: `jarvis_kill_switch_activated` (0/1) と `jarvis_approval_pending`（保留数）の gauge を追加。`/metrics` スクレイプ時に状態を反射、ラベルゼロで理由/principal/id は非送出 / `policy/src/http.rs:155-169` / R5-VU1 / confirmed
 - [x] 登録済み MCP サーバの子プロセス死活を検知せず孤立登録が残る — 2026-11-19 対応済み: `ProcessLiveness` で `try_wait()` を実行前検査し、死亡/状態不明の登録を削除してエラー。`Box<ChildHandle>` 化で clippy large-enum も解消。回帰テスト2件追加 / `mcp-gw/src/gateway.rs:36-42` / R5-VU1 / likely
-- [ ] Qdrant スナップショット 0 件が warn のみで成功扱い — `rust/scripts/backup.rs:198` / R1-ST2 / confirmed
+- [x] Qdrant スナップショット 0 件が warn のみで成功扱い — 2026-11-19 対応済み: `require_snapshot_name()` を追加し空一覧/空名前を `bail!` で失敗扱い。回帰テスト3件追加、backup rust-script pass / `rust/scripts/backup.rs:198` / R1-ST2 / confirmed
 
 ### 優先度 低
 
@@ -599,7 +599,7 @@ generated:
 - [x] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — 2026-11-19 対応済み: 3xx 判定を単独化し Location 欠落/非 UTF-8/空/パース不能を `ClientError` で拒否。回帰テスト2件追加、mcp-gw 84 tests pass / `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
 - [x] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — 2026-11-19 対応済み: `metadata` probe と `read_dir` の失敗を warn で可視化（パス名と OS エラーのみ）。deny-by-default と NotFound 時の info 挙動は維持 / `policy/src/policy.rs:101-107` / R2-ER1 / likely
 - [x] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — 2026-11-19 対応済み: `activate_with_actor()` / `arm_with_actor()` を追加し既存 `activate()` は "system" の互換ラッパーに。永続化失敗時の fail-closed re-arm は従来どおり。回帰テスト3件追加 / `kill_switch.rs:133` / R2-FG1 / confirmed
-- [ ] Casbin `add_policy` / `remove_policy` が公開 API を持たず設定ファイル手編集に依存 — `policy.rs:190,205` / R2-FG1 / confirmed
+- [x] Casbin `add_policy` / `remove_policy` が公開 API を持たず設定ファイル手編集に依存 — 2026-11-19 対応済み: `CedarEngine` と `PolicyEngine` に永続化付き add/remove を公開（Strict 検証・パストラバーサル拒否・ロールバック）。認証は transport 側の責任としてコメント明記。回帰テスト4件追加 / `policy.rs:190,205` / R2-FG1 / confirmed
 - [x] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — 2026-11-19 対応済み: module doc と execute doc を実態（低レベル実行 primitive、policy/allowlist/approval は `McpGateway::execute_tool` が担当）へ修正。コード・シグネチャ・テストは無変更 / `gateway.rs:11-16` / R2-FG1 / confirmed
 - [x] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — 2026-11-19 対応済み: 削除結果を match し失敗は warn＋成功件数から除外。dry-run 抑制は維持。回帰テスト3件追加、backup rust-script 4 tests pass / `backup.rs:331` / R2-ER2 / confirmed
 - [x] deploy がビナリ・スクリプト欠落を警告スキップして完了報告 — 2026-11-19 対応済み: 実実行前に必須4バイナリを走査し欠落時は `bail!` で非ゼロ終了（SSH 前に停止）。回帰テスト3件 pass / `deploy.rs:308-311` / R2-ER2 / confirmed
