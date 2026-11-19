@@ -379,11 +379,23 @@ fn restore_postgres(args: &Args, hostname: &str, date: &str, config_flag: &str) 
 
     // Drop and recreate database
     run_sudo(
-        &["-u", "postgres", "psql", "-c", "DROP DATABASE IF EXISTS jarvis;"],
+        &[
+            "-u",
+            "postgres",
+            "psql",
+            "-c",
+            "DROP DATABASE IF EXISTS jarvis;",
+        ],
         "psql DROP DATABASE",
     )?;
     run_sudo(
-        &["-u", "postgres", "psql", "-c", "CREATE DATABASE jarvis OWNER jarvis;"],
+        &[
+            "-u",
+            "postgres",
+            "psql",
+            "-c",
+            "CREATE DATABASE jarvis OWNER jarvis;",
+        ],
         "psql CREATE DATABASE",
     )?;
 
@@ -524,9 +536,12 @@ fn restart_services() -> Result<()> {
         "code-server",
         "otelcol",
     ] {
+        // Use `restart` rather than `start`: `start` is a no-op for an already
+        // running unit, so a restored binary/config would not be reloaded.
+        // `restart` stops then starts, and also starts a stopped unit.
         run_sudo(
-            &["systemctl", "start", service],
-            &format!("systemctl start {service}"),
+            &["systemctl", "restart", service],
+            &format!("systemctl restart {service}"),
         )?;
     }
 
