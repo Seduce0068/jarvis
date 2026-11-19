@@ -65,6 +65,7 @@ jobs:
         # repo-relative script paths.
         cd ..
         make check-shell
+        make check-toml
         make check-evidence
         make secret-scan
         make safety-test

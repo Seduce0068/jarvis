@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup timer-status check-shell check-evidence
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup timer-status check-shell check-toml check-evidence
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -45,6 +45,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings && cargo test
 	@python3 ci/scripts/secret_scan.py
 	@bash ci/scripts/check-shell.sh
+	@bash ci/scripts/check-toml.sh
 	@bash ci/scripts/check-evidence.sh
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-review-run.sh
@@ -71,6 +72,9 @@ check-evidence: ## テスト仕様とエビデンスのハッシュ一致を検�
 
 check-shell: ## 全 tracked *.sh の静的解析（bash -n / shellcheck）
 	@bash ci/scripts/check-shell.sh
+
+check-toml: ## 全 tracked *.toml の構文検証（tomllib/tomli、値は出力しない・fail-closed）
+	@bash ci/scripts/check-toml.sh
 
 test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
 	@bash ci/scripts/test-verify-backup.sh
