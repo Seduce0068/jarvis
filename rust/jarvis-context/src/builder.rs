@@ -400,9 +400,27 @@ pub mod memory {
     }
 
     pub async fn create_qdrant_client(config: &crate::config::ContextConfig) -> Result<Qdrant> {
-        // The gRPC API is backward compatible, and the released server may be
-        // older than the client; skip the strict minor-version gate.
-        let mut client = Qdrant::from_url(&config.qdrant_url).skip_compatibility_check();
+        // R4-DP2: never restore `skip_compatibility_check()`. The client's
+        // default `check_compatibility = true` probes the server at build time
+        // and reads its version; disabling that let a server-side API/version
+        // change go completely unnoticed at startup.
+        //
+        // `check_connection()` is what makes a failed probe fail closed. In
+        // qdrant-client 1.19.0 a compatibility probe that cannot reach the
+        // server (or cannot obtain its version) is otherwise only `println!`ed,
+        // so the service would still start. With this flag `build()` returns
+        // `Err`, which is mapped below to `ContextError::Qdrant` and propagated
+        // by `ContextBuilder::new()` — startup fails with a clear error.
+        //
+        // CI note (out-of-scope test, intentionally unchanged): the Docker
+        // integration test in `tests/integration.rs` starts
+        // `qdrant/qdrant:v1.12.4` while Cargo.lock pins qdrant-client 1.19.0.
+        // That pair trips the client's minor-version mismatch warning (1.19 vs
+        // 1.12). qdrant-client 1.19.0 only prints on a version mismatch, so the
+        // ignored test still runs; only a connection failure is an error. If a
+        // future client turns that warning into a hard error, the test image
+        // must be bumped in a separate change.
+        let mut client = Qdrant::from_url(&config.qdrant_url).check_connection();
         if let Some(key) = config.qdrant_api_key() {
             client = client.api_key(key);
         }
@@ -885,6 +903,28 @@ mod tests {
         assert_eq!(
             memory::configured_vector_size(&CollectionInfo::default()),
             None
+        );
+    }
+
+    #[tokio::test]
+    async fn unreachable_qdrant_fails_client_creation_fail_closed() {
+        // No live Qdrant is needed: nothing listens on this loopback port, so
+        // the startup compatibility probe must fail instead of being skipped
+        // (R4-DP2). This guards the fail-closed behavior without Docker.
+        let config = crate::config::ContextConfig {
+            qdrant_url: "http://127.0.0.1:6999".into(),
+            ..Default::default()
+        };
+
+        // `expect_err` would require `Qdrant: Debug`, so match explicitly.
+        let err = match memory::create_qdrant_client(&config).await {
+            Ok(_) => panic!("an unverifiable Qdrant server must fail startup"),
+            Err(err) => err,
+        };
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Qdrant"),
+            "the error must name the failing dependency: {message}"
         );
     }
 }
