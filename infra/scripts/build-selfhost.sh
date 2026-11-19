@@ -51,7 +51,6 @@ for unit in \
   sed -e "s/^User=jarvis$/User=${JARVIS_USER}/" \
       -e "s/^Group=jarvis$/Group=${JARVIS_USER}/" \
       -e "s|/home/jarvis|/home/${JARVIS_USER}|g" \
-      -e "s/--port 49374/--port 49375/" \
       -e "/^EnvironmentFile=-\/etc\/jarvis\/op.env/d" \
       -e "/^Environment=PASSWORD_FILE=/d" \
       -e "s/^ProtectHome=yes$/ProtectHome=read-only/" \
