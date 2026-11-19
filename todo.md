@@ -1026,22 +1026,46 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 33 のレビュー結果（未対応）
 
-- [ ] **コミット照合ガードがバイナリ上書き後に走る**（confirmed high）—
+- [x] **コミット照合ガードがバイナリ上書き後に走る**（confirmed high）— 2026-11-19 対応済み: `cargo build` 直後に mktemp ステージングへバイナリ＋SQL をコピーし、両マーカー記録と照合を config/unit 生成・`/opt` 配置の前に移動。不一致・マーカー欠落・SQL 件数不整合は exit 1 で一切配置しない。`bash -n` / shellcheck OK。
   `build-selfhost.sh:36-38` で4バイナリを配置した後の `:44-56` で照合し、
   不一致なら exit 1 するため、新旧混在（新バイナリ＋旧 migration）が残る。
   照合とマーカー記録を `cargo build` 直後・バイナリ install 前に移動する。
-- [ ] **REQ-18/TC-B5 に対応する自動テストが無く evidence だけが pass を主張**
+- [x] **REQ-18/TC-B5 に対応する自動テストが無く evidence だけが pass を主張** — 2026-11-19 対応済み: `ci/scripts/test-backup-args.sh` を新規作成し6ケース（値欠落／空文字／非整数／0／負値／有効値）を dry-run で検証。既存 set の不変も確認。Makefile の `safety-test` / `ci-local` に組み込み、失敗時はエラーコードのみ出力。
   （confirmed medium）— `--retain-days` の境界値拒否は手動確認のみで回帰ゲートが無い。
   ci/scripts に回帰テストを追加し、TC 単位の実行記録を evidence に持たせる。
-- [ ] **flaky 修正でスパン捕捉アサーションを削除した結果、非漏洩テストが
-  vacuous pass しうる**（confirmed medium）— subscriber がスパンを捕捉しなければ
+- [x] **flaky 修正でスパン捕捉アサーションを削除した結果、非漏洩テストが
+  vacuous pass しうる**（confirmed medium）— 2026-11-19 対応済み: 両テストに `tracing::info!` イベントによる positive control（subscriber 健全性）を追加、`include_str!` ＋ `concat!` で `#[instrument(skip(...))]` 属性の静的ガードを追加。スパン捕捉自体はアサートせず flaky を再導入しない — subscriber がスパンを捕捉しなければ
   logs は空文字列で `!contains` はすべて真。テスト内で既知マーカの span を発行し
   捕捉を確認する deterministic な健全性アサーションを残す。
-- [ ] **BUILD_COMMIT の `unknown` フォールバックで fail-open**（likely medium）—
+- [x] **BUILD_COMMIT の `unknown` フォールバックで fail-open**（likely medium）— 2026-11-19 対応済み: `git rev-parse` 失敗を明示 exit 1 とし、空文字・`unknown` も拒否。マーカー側も `unknown` でも照合を通過しない —
   git rev-parse 失敗時に記録される `unknown` とマーカー側が一致すると照合を通過する。
   rev-parse 失敗を明示 exit 1 に変更。
-- [ ] **backup エビデンスの passed=23 が runtime 宣言（2ゲート）と矛盾**
+- [x] **backup エビデンスの passed=23 が runtime 宣言（2ゲート）と矛盾** — 2026-11-19 対応済み: runtime を実際に集計した `make test-verify-backup` へ限定し、notes の混在表記を削除。`check-evidence.sh` に notes の件数と results の整合チェック（NOTES_*_MISMATCH、値は非出力）を追加。6証跡すべて通过。
   （likely low）— safety-test の22件が反映されない。ゲートごとの内訳を記録する
   か runtime 宣言を実際の集計コマンドへ限定。
 
 - 親が対応: clippy の collapsible_if（let chain 化）、evidence 2件の実測再生成。
+
+### Round 34 のレビュー結果（未対応）
+
+- [ ] **expiry CAS の lost-ack で durable re-read が無く待機側が Expired を返す**
+  （confirmed high）— `approval.rs:490-521`（特に 517-521 の warn + Expired）。
+  並行 decide が CAS に勝っても watch::send が 100ms 以内に届かなければ、
+  DB=approved / 待機側=Expired に分裂。`ApprovalPersistence` に id による
+  decision 再読取り seam を追加し、grace 満了時に DB の権威決定で上書きする。
+- [ ] **read-back の生成リフレッシュが試行単位で掛け算され 503 が遅延**
+  （confirmed medium）— `persistence.rs:301-324` が1呼び出しで3回 reconnect＋probe し、
+  呼び出し元がさらに3回トランザクション再試行（最大9回の TCP 接続）。
+  単一の試行予算へ統合する。
+- [ ] **migration SQL 配布が上書きのみで古い *.sql を /opt に残す**
+  （likely medium）— `build-selfhost.sh:125` は上書きのみで削除しない。
+  削除されたマイグレーションが残存すると unit の pre-flight が適用し、
+  context の checksum 不一致で起動失敗しうる。配置前に余分なファイルを削除。
+- [ ] **timer rollback が next elapse を記録するだけで復元しない**
+  （confirmed low）— `install-backup-timer.sh:5-6` の「next elapse は restored」は
+  誤記。active/enabled を復元し next elapse は再計算される旨へ訂正するか、
+  OnCalendar 自体を退避・復元。
+- [ ] **UI の admin→API scope フォールバックが test-only の複製で検証され
+  証跡がカバー済みと主張**（likely medium）— `policy_client.rs:80-81` の
+  test-only ヘルパのみを検証し、ランタイム送信パス（`:386-388`）は未検証。
+  スタブサーバで実送信を検証し TC-U13 の Traceability に明示。
