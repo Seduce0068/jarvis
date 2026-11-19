@@ -140,13 +140,33 @@ exporters:
     sampling_initial: 10
     sampling_thereafter: 100
 
+  # OTLP exporter -> Grafana Cloud (traces + logs).
+  # No endpoint or credential value is stored in this file: both are resolved
+  # from environment variables at collector startup.
+  #   GRAFANA_CLOUD_OTLP_ENDPOINT  e.g. otlp-gateway-prod-xx-xx.grafana.net:4317
+  #                               (gRPC/TLS), or https://otlp-gateway-prod-xx-xx.grafana.net:4318 (HTTP)
+  #   GRAFANA_CLOUD_AUTH           base64("<instanceID>:<apiKey>"), same value
+  #                               already used by prometheusremotewrite above.
+  # UNSET ENV BEHAVIOUR: an unresolved ${env:...} reference makes config loading
+  # fail, so the collector REFUSES TO START (it does not silently skip the
+  # exporter and does not send data to Grafana). On builds that substitute an
+  # empty string instead, the exporter starts with an empty endpoint/auth and
+  # cannot export. Either way nothing is shipped until the vars are supplied.
+  # Providing values (e.g. via /etc/jarvis/bws.env or a root-owned unit
+  # EnvironmentFile) is a separate operator decision (P0-7); only references
+  # are declared here. bws.env itself is not touched by this config change.
+  otlp/grafana:
+    endpoint: "${env:GRAFANA_CLOUD_OTLP_ENDPOINT}"
+    headers:
+      Authorization: "Basic ${env:GRAFANA_CLOUD_AUTH}"
+
 service:
   extensions: [health_check, pprof, zpages]
   pipelines:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch, resource, transform, filter, tail_sampling]
-      exporters: [debug]
+      exporters: [debug, otlp/grafana]
 
     metrics:
       receivers: [otlp, prometheus]
@@ -156,7 +176,7 @@ service:
     logs:
       receivers: [otlp, journald]
       processors: [memory_limiter, batch, resource]
-      exporters: [debug]
+      exporters: [debug, otlp/grafana]
 
   telemetry:
     logs:
