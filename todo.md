@@ -481,15 +481,15 @@ generated:
 - [ ] `install-mcp-gateway.sh` のヘルス確認が HTTP ステータスを検証せずロールバックしない — `infra/scripts/install-mcp-gateway.sh:28` / R4-DR3 / confirmed
 - [ ] 放棄された承認が pending のまま残りキュー枠を枯渇 — `policy/src/approval.rs:148-162` / R5-VU1 / likely
 - [ ] web.fetch の SSRF 検証が DNS 解決の TOCTOU で迂回可能 — `mcp-gw/src/sandbox.rs:359-365` / R3-AU1 / likely
-- [ ] メトリクスが HTTP ステータス別のみで kill switch / 承認の状態が観測不可 — `policy/src/http.rs:155-169` / R5-VU1 / confirmed
+- [x] メトリクスが HTTP ステータス別のみで kill switch / 承認の状態が観測不可 — 2026-11-19 対応済み: `jarvis_kill_switch_activated` (0/1) と `jarvis_approval_pending`（保留数）の gauge を追加。`/metrics` スクレイプ時に状態を反射、ラベルゼロで理由/principal/id は非送出 / `policy/src/http.rs:155-169` / R5-VU1 / confirmed
 - [ ] 登録済み MCP サーバの子プロセス死活を検知せず孤立登録が残る — `mcp-gw/src/gateway.rs:36-42` / R5-VU1 / likely
 - [ ] Qdrant スナップショット 0 件が warn のみで成功扱い — `rust/scripts/backup.rs:198` / R1-ST2 / confirmed
 
 ### 優先度 低
 
-- [ ] バックアップ/リストア CLI が OCI/1Password 前提の説明のまま — `rust/scripts/backup.rs:31,35,79` / R5-DC2 / confirmed（ADR-0004 準拠の文言へ）
-- [ ] トークン予算ドキュメントが文字数とバイト数を混同 — `context/src/builder.rs:195-196` / R5-DC2 / confirmed
-- [ ] OpenCode クライアントのモジュール doc フロー図が実装の認可順序と不一致 — `event/src/opencode.rs:7-8` / R5-DC2 / likely
+- [x] バックアップ/リストア CLI が OCI/1Password 前提の説明のまま — 2026-11-19 対応済み: 両スクリプトの module doc / `about` / `long_about` を「レガシー・非推奨、現行は backup-local.sh / restore-local.sh」へ更新。rust-script マニフェストと restore.rs 非推奨ヘッダは維持 / `rust/scripts/backup.rs:31,35,79` / R5-DC2 / confirmed（ADR-0004 準拠の文言へ）
+- [x] トークン予算ドキュメントが文字数とバイト数を混同 — 2026-11-19 対応済み: `ESTIMATED_UTF8_BYTES_PER_TOKEN=4` を導入しトークン≠文字数≠UTF-8 バイトを明記、多バイト文字では過大見積もりになる旨も記載。`saturating_mul` でオーバーフロー防止 / `context/src/builder.rs:195-196` / R5-DC2 / confirmed
+- [x] OpenCode クライアントのモジュール doc フロー図が実装の認可順序と不一致 — 2026-11-19 対応済み: 実順序（event → context → policy[dispatch 前] → OpenCode → MCP gateway[各呼び出し前再判定]）へ修正。コメントのみ変更 / `event/src/opencode.rs:7-8` / R5-DC2 / likely
 - [x] Grafana README のクエリがダッシュボード JSON の実式と不一致 — 2026-11-19 対応済み: 4パネルのクエリを実式へ同期し、長行はコードブロックへ移動して markdownlint MD013 を解消。注意書きも「per scrape job」へ修正、lint 0 issues / `infra/grafana/README.md:14-17` / R5-DC3 / confirmed
 - [x] OTel `SdkTracerProvider` が shutdown されずバッチスパンが失われる — 2026-11-19 対応済み: `TracerGuard`（Drop で shutdown）を追加し provider を main 全体へ延長。正常・エラー・早期リターンの全経路で flush、二重 shutdown も無害 / `policy/src/main.rs:27-30` / R4-DP1 / confirmed
 
@@ -597,7 +597,7 @@ generated:
 - [x] gRPC Check が不正 JSON コンテキストを空 Object にフォールバック — 2026-11-19 対応済み: `Status::invalid_argument` へ変換し回帰テスト2件追加（不正 JSON 拒否・正常系受理）。`policy/src/grpc.rs:27` / R1-AR1 / confirmed（既存 P2-1 と別経路）
 - [ ] kill switch の永続化失敗が unauthenticated として返される — `kill_switch.rs:147-150` / R2-ER1 / confirmed
 - [x] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — 2026-11-19 対応済み: 3xx 判定を単独化し Location 欠落/非 UTF-8/空/パース不能を `ClientError` で拒否。回帰テスト2件追加、mcp-gw 84 tests pass / `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
-- [ ] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — `policy/src/policy.rs:101-107` / R2-ER1 / likely
+- [x] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — 2026-11-19 対応済み: `metadata` probe と `read_dir` の失敗を warn で可視化（パス名と OS エラーのみ）。deny-by-default と NotFound 時の info 挙動は維持 / `policy/src/policy.rs:101-107` / R2-ER1 / likely
 - [x] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — 2026-11-19 対応済み: `activate_with_actor()` / `arm_with_actor()` を追加し既存 `activate()` は "system" の互換ラッパーに。永続化失敗時の fail-closed re-arm は従来どおり。回帰テスト3件追加 / `kill_switch.rs:133` / R2-FG1 / confirmed
 - [ ] Casbin `add_policy` / `remove_policy` が公開 API を持たず設定ファイル手編集に依存 — `policy.rs:190,205` / R2-FG1 / confirmed
 - [x] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — 2026-11-19 対応済み: module doc と execute doc を実態（低レベル実行 primitive、policy/allowlist/approval は `McpGateway::execute_tool` が担当）へ修正。コード・シグネチャ・テストは無変更 / `gateway.rs:11-16` / R2-FG1 / confirmed
@@ -619,7 +619,7 @@ generated:
 - [x] MCP プロトコルバージョン定数がスモークテストとドリフト検査で不一致 — 2026-11-19 対応済み: smoke の protocolVersion を `2025-11-25` へ更新し drift 検査と同期。両方を揃える旨のコメント追加、bash -n OK / `infra/scripts/smoke-mcp-gw.sh:101` / R4-DP3 / confirmed
 - [x] upstream MCP ツールのエラー本文が API 応答とログへそのまま流出 — 2026-11-19 対応済み: `safe_error_summary()` で本文を完全に除外し構造メタデータのみの分類へ。トークン/パス/URL クエリが要約に出ない回帰テスト2件追加。子のテスト用偽シークレットが secret_scan に誤検出されたため親がリネーム / `gateway.rs:200-203` / R5-VU1 / confirmed
 - [x] イベント処理失敗ログに `event_id` / `correlation_id` が欠落 — 2026-11-19 対応済み: `process_event` を借用へ変更し `tracing::error!` に両フィールドを構造化追加。payload はログに渡さない。event 40 tests pass / `normalizer.rs:64` / R5-VU2 / confirmed
-- [ ] トークン予算超過によるコンテキスト切り捨てが無観測 — `builder.rs:197-203` / R5-VU2 / confirmed
+- [x] トークン予算超過によるコンテキスト切り捨てが無観測 — 2026-11-19 対応済み: 純粋関数 `apply_token_budget()` と `TruncationReport` を追加し超過時に warn を1回発行（before/after バイトとセクション名のみ、内容や PII は非出力）。回帰テスト2件追加、context tests pass / `builder.rs:197-203` / R5-VU2 / confirmed
 - [x] HTTP ハンドラが内部エラーの理由を 500 に変換して捨てる — 2026-11-19 対応済み: `log_internal_error()` で anyhow の context チェーンを `tracing::error!` に記録し、クライアント応答は裸の 500 を維持。`#[instrument]` から req を除外し生データ/PII をログに出さない。新規テストでチェーン記録を検証 / `context/src/http.rs:120-123` / R5-VU2 / confirmed
 - [x] Qdrant スナップショット取得に HTTP タイムアウトがなくバックアップがハングし得る — 2026-11-19 対応済み: reqwest blocking Client に 30 秒タイムアウトを設定（`JARVIS_QDRANT_TIMEOUT_SECS` で上書き可）。全リクエストに適用 / `backup.rs:181` / R5-VU2 / likely
 
