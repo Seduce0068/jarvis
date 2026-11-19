@@ -262,13 +262,34 @@ const MAX_RECONCILE_ATTEMPTS: i32 = 10;
 /// Named so the three eligibility gates are stated once and can be asserted in
 /// a pure test without a live PostgreSQL connection. A dead-lettered row is
 /// retained in the table for auditing but can never be selected again; an
-/// exhausted row stays visible to the gauge while being excluded from retries.
+/// exhausted row is excluded from retries and exported by its own gauge
+/// (I65-B) rather than being counted as recoverable pending work.
 const LIST_PENDING_SQL: &str = "SELECT id, content, metadata, embedding, attempts, next_retry_at
                  FROM pending_embeddings
                  WHERE dead_lettered_at IS NULL
                    AND attempts < $2
                    AND (next_retry_at IS NULL OR next_retry_at <= NOW())
                  ORDER BY created_at ASC LIMIT $1";
+
+/// Partition the non-dead-lettered outbox into recoverable (`pending`) and
+/// retired (`exhausted`) rows for the two gauges (I65-B). One aggregate query
+/// keeps both counts consistent and, like the older single COUNT, exposes only
+/// numbers to the metrics layer. Named for a pure string assertion.
+const OUTBOX_STATE_COUNTS_SQL: &str = "SELECT
+       COUNT(*) FILTER (WHERE vector_state = 'pending'),
+       COUNT(*) FILTER (WHERE vector_state = 'exhausted')
+   FROM pending_embeddings
+   WHERE dead_lettered_at IS NULL";
+
+/// Idempotent backfill for rows that hit the attempt cap before the `exhausted`
+/// state existed (I65-B). Otherwise those legacy rows would disappear from
+/// both gauges once `pending` is filtered by `vector_state`. Best-effort: a
+/// failed write is retried on the next reconcile pass.
+const BACKFILL_EXHAUSTED_SQL: &str = "UPDATE pending_embeddings
+       SET vector_state = 'exhausted'
+       WHERE dead_lettered_at IS NULL
+         AND vector_state = 'pending'
+         AND attempts >= $1";
 
 /// `true` when a vector holds at least one non-finite component — NaN, a
 /// signed infinity, or a finite f64 that saturated on the f32 cast (I61-B).
@@ -349,6 +370,12 @@ struct PendingEmbedding {
     // Mirrored for the in-memory test store; production due-checks run in SQL.
     #[allow(dead_code)]
     next_retry_at: Option<DateTime<Utc>>,
+    /// Mirrors `pending_embeddings.vector_state` for the in-memory store
+    /// (I65-B). Only the fixed tokens `'pending'` and `'exhausted'` are written
+    /// here; dead-lettered rows are removed by the seam's default method.
+    // Read by the in-memory assertions; production state lives in SQL.
+    #[allow(dead_code)]
+    vector_state: &'static str,
 }
 
 /// Qdrant upsert seam. A trait keeps the outbox/reconcile decision testable
@@ -374,13 +401,24 @@ trait PendingStore: Send + Sync {
     ) -> Result<()>;
     /// Persist a terminal dead-letter decision (I63-A).
     ///
-    /// The default keeps the historical delete semantics used by the in-memory
-    /// test stores, so the existing outbox/reconcile/log-safety regressions are
-    /// unchanged. `PgPendingStore` overrides it to retain an auditable row:
+    /// `PgPendingStore` overrides this to retain an auditable row:
     /// `dead_lettered_at`/`vector_state` are written and the `list` gate keeps
-    /// the row out of every future batch without deleting the memory.
+    /// the row out of every future batch without deleting the memory. The
+    /// default keeps the legacy delete semantics for `MemoryOutbox`, whose
+    /// outbox/reconcile regressions predate retention; test stores that mirror
+    /// production override the seam so retention and the gate are asserted
+    /// behaviourally (see `RetainingOutbox` and the log-safety `LeakStore`).
     async fn dead_letter(&self, id: Uuid, _at: DateTime<Utc>) -> Result<()> {
         self.remove(id).await
+    }
+    /// Persist the terminal `exhausted` state when a row spends its whole retry
+    /// budget (I65-B). The default is a no-op so existing in-memory test stores
+    /// keep their historical behaviour; `PgPendingStore` writes
+    /// `vector_state = 'exhausted'` and `MemoryOutbox` retains the state so the
+    /// distinction between a retired row and a recoverable backlog is testable
+    /// without a live database.
+    async fn mark_exhausted(&self, _id: Uuid) -> Result<()> {
+        Ok(())
     }
 }
 
@@ -429,23 +467,26 @@ impl PendingStore for PgPendingStore {
                 ],
             )
             .await?;
-        // Best-effort observability (I63-A): a failed COUNT must not turn a
-        // successfully queued embedding into a reported store failure.
-        if let Ok(row) = client
-            .query_one(
-                "SELECT COUNT(*) FROM pending_embeddings WHERE dead_lettered_at IS NULL",
-                &[],
-            )
-            .await
-        {
-            let count: i64 = row.get(0);
-            crate::http::observe_pending_embeddings(count);
+        // Best-effort observability (I63-A / I65-B): a failed aggregate must not
+        // turn a successfully queued embedding into a reported store failure.
+        if let Ok(row) = client.query_one(OUTBOX_STATE_COUNTS_SQL, &[]).await {
+            let pending: i64 = row.get(0);
+            let exhausted: i64 = row.get(1);
+            crate::http::observe_pending_embeddings(pending);
+            crate::http::observe_exhausted_embeddings(exhausted);
         }
         Ok(())
     }
 
     async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
         let client = self.pool.get().await?;
+        // I65-B: retire legacy rows that exhausted the budget before the state
+        // existed, so the two gauges partition the backlog correctly. This is
+        // idempotent and touches only rows the `attempts < cap` gate already
+        // excludes from retries; a failed backfill is retried on the next pass.
+        let _ = client
+            .execute(BACKFILL_EXHAUSTED_SQL, &[&MAX_RECONCILE_ATTEMPTS])
+            .await;
         // Only live, due rows still inside the attempt budget are selected. A
         // deferred row drops out of the head of the batch (I30-C); once its
         // attempts reach `MAX_RECONCILE_ATTEMPTS` it drops out entirely
@@ -457,17 +498,14 @@ impl PendingStore for PgPendingStore {
                 &[&(limit as i64), &MAX_RECONCILE_ATTEMPTS],
             )
             .await?;
-        // Best-effort gauge (I63-A): count every retained, non-dead-lettered
-        // row, including exhausted ones that this batch cannot select.
-        if let Ok(row) = client
-            .query_one(
-                "SELECT COUNT(*) FROM pending_embeddings WHERE dead_lettered_at IS NULL",
-                &[],
-            )
-            .await
-        {
-            let count: i64 = row.get(0);
-            crate::http::observe_pending_embeddings(count);
+        // Best-effort gauges (I63-A / I65-B): the list gate only selects rows
+        // with `vector_state = 'pending'` (via the attempt cap), so report the
+        // retired rows separately instead of presenting them as recoverable.
+        if let Ok(row) = client.query_one(OUTBOX_STATE_COUNTS_SQL, &[]).await {
+            let pending: i64 = row.get(0);
+            let exhausted: i64 = row.get(1);
+            crate::http::observe_pending_embeddings(pending);
+            crate::http::observe_exhausted_embeddings(exhausted);
         }
         rows.into_iter()
             .map(|row| {
@@ -481,6 +519,9 @@ impl PendingStore for PgPendingStore {
                     embedding,
                     attempts: row.get(4),
                     next_retry_at: row.get(5),
+                    // The selection gate only returns still-pending rows, so the
+                    // mirrored state is fixed vocabulary: no row value is read.
+                    vector_state: "pending",
                 })
             })
             .collect()
@@ -521,6 +562,24 @@ impl PendingStore for PgPendingStore {
                  SET dead_lettered_at = $2, vector_state = 'dead_lettered'
                  WHERE id = $1",
                 &[&id, &dead_lettered_at],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn mark_exhausted(&self, id: Uuid) -> Result<()> {
+        let client = self.pool.get().await?;
+        // I65-B: persist the terminal state instead of leaving the row as
+        // `'pending'` while it silently drops out of every retry batch. The
+        // `attempts < cap` gate still excludes it; this makes the retired row
+        // visible to `jarvis_exhausted_embeddings` and distinct from a removable
+        // backlog. No id/payload label reaches metrics — only a bare COUNT does.
+        client
+            .execute(
+                "UPDATE pending_embeddings
+                 SET vector_state = 'exhausted'
+                 WHERE id = $1 AND dead_lettered_at IS NULL",
+                &[&id],
             )
             .await?;
         Ok(())
@@ -642,9 +701,10 @@ async fn vector_for_pending_with(
 /// Persist a failed reconcile attempt so the row is deferred out of the head
 /// of the queue (I30-C). `next_retry_state` caps `attempts` at
 /// [`MAX_RECONCILE_ATTEMPTS`], at which point `list` excludes the row entirely
-/// (I61-B). Backoff bookkeeping is best-effort: if it cannot be written the row
-/// stays queued and will simply be retried on the next pass, which is safe (no
-/// worse than the pre-fix behaviour).
+/// (I61-B) and the durable `exhausted` state is written (I65-B). Backoff
+/// bookkeeping is best-effort: if it cannot be written the row stays queued and
+/// will simply be retried on the next pass, which is safe (no worse than the
+/// pre-fix behaviour).
 async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
     let (attempts, next_retry_at) = next_retry_state(attempts, Utc::now());
     if let Err(error) = outbox.mark_failed(id, attempts, next_retry_at).await {
@@ -653,6 +713,20 @@ async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
             attempts = attempts,
             error_kind = error_kind(&error, ErrorKind::Persistence),
             "could not record a deferred retry for a pending memory"
+        );
+        return;
+    }
+    // I65-B: a row retired by the attempt cap must not stay `'pending'` in the
+    // database. Only mark it after the attempt count itself was durably stored,
+    // so a failed `mark_failed` never prematurely retires a recoverable row.
+    if attempts >= MAX_RECONCILE_ATTEMPTS
+        && let Err(error) = outbox.mark_exhausted(id).await
+    {
+        warn!(
+            id = %id,
+            attempts = attempts,
+            error_kind = error_kind(&error, ErrorKind::Persistence),
+            "could not persist the exhausted state for a pending memory"
         );
     }
 }
@@ -668,26 +742,64 @@ async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
 /// (I63-B). The row is retired instead: the
 /// production store writes `dead_lettered_at`/`vector_state` and keeps the row
 /// for inspection, while the `dead_lettered_at IS NULL` selection gate makes
-/// any retry impossible. In-memory test stores keep the historical delete
-/// behaviour through the seam's default method. A single decision warning uses
+/// any retry impossible. Test stores mirroring production override the seam
+/// so both halves are asserted behaviourally; only the legacy `MemoryOutbox`
+/// still uses the delete-based default. A single decision warning uses
 /// only the fixed `id`/`attempts`/`error_kind` vocabulary, and the decision is
 /// counted by a fixed-label metric; no raw error, payload or vector value is
 /// ever formatted or exported.
 async fn dead_letter_retry(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
+    dead_letter_retry_with(outbox, id, attempts, &PrometheusDeadLetterCounters).await;
+}
+
+/// Counter sink for terminal dead-letter decisions (I65-B).
+///
+/// The success counter is incremented only after the outbox confirms the write;
+/// a failed write increments a separate failure counter instead, so a decision
+/// that was never persisted is never reported as durable. Injecting the sink
+/// keeps the ordering testable without installing a global Prometheus recorder.
+trait DeadLetterCounters: Send + Sync {
+    fn persisted(&self);
+    fn persistence_failed(&self);
+}
+
+/// Production counter sink: fixed-label metrics from [`crate::http`].
+struct PrometheusDeadLetterCounters;
+
+impl DeadLetterCounters for PrometheusDeadLetterCounters {
+    fn persisted(&self) {
+        crate::http::record_dead_lettered_embedding();
+    }
+
+    fn persistence_failed(&self) {
+        crate::http::record_dead_letter_persistence_failure();
+    }
+}
+
+async fn dead_letter_retry_with(
+    outbox: &dyn PendingStore,
+    id: Uuid,
+    attempts: i32,
+    counters: &dyn DeadLetterCounters,
+) {
     warn!(
         id = %id,
         attempts = attempts,
         error_kind = ErrorKind::Embedding.as_str(),
         "pending memory has a non-finite vector; dead-lettering this row"
     );
-    // I63-A: count the terminal decision. Labels are fixed vocabulary only.
-    crate::http::record_dead_lettered_embedding();
-    if let Err(error) = outbox.dead_letter(id, Utc::now()).await {
-        warn!(
-            id = %id,
-            error_kind = error_kind(&error, ErrorKind::Persistence),
-            "could not persist a dead-letter decision for a pending memory"
-        );
+    // I65-B: durability first, accounting second. The monotonic success counter
+    // must only ever count decisions that actually reached the store.
+    match outbox.dead_letter(id, Utc::now()).await {
+        Ok(()) => counters.persisted(),
+        Err(error) => {
+            warn!(
+                id = %id,
+                error_kind = error_kind(&error, ErrorKind::Persistence),
+                "could not persist a dead-letter decision for a pending memory"
+            );
+            counters.persistence_failed();
+        }
     }
 }
 
@@ -2512,6 +2624,7 @@ mod tests {
                     embedding: embedding.to_vec(),
                     attempts: 0,
                     next_retry_at: None,
+                    vector_state: "pending",
                 });
             Ok(())
         }
@@ -2553,6 +2666,108 @@ mod tests {
             }
             Ok(())
         }
+
+        async fn mark_exhausted(&self, id: Uuid) -> Result<()> {
+            let mut rows = self.rows.lock().expect("outbox lock");
+            if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                row.vector_state = "exhausted";
+            }
+            Ok(())
+        }
+    }
+
+    /// A row plus the terminal decision a production `dead_letter` writes. The
+    /// PostgreSQL table stores `dead_lettered_at`/`vector_state` as columns; the
+    /// test store keeps them beside the row so retention and the selection gate
+    /// are both observable without a database.
+    #[derive(Clone, Debug)]
+    struct RetainedRow {
+        pending: PendingEmbedding,
+        dead_lettered_at: Option<DateTime<Utc>>,
+        vector_state: &'static str,
+    }
+
+    /// Persistence-mirroring outbox for the Round 61 / migration 005 policy:
+    /// `dead_letter` keeps the row and marks it, `list` applies the same
+    /// `dead_lettered_at IS NULL` exclusion as `LIST_PENDING_SQL`. This is the
+    /// seam the behavioural gate tests use instead of matching SQL text.
+    struct RetainingOutbox {
+        rows: std::sync::Mutex<Vec<RetainedRow>>,
+    }
+
+    impl RetainingOutbox {
+        fn new(rows: Vec<PendingEmbedding>) -> Self {
+            Self {
+                rows: std::sync::Mutex::new(
+                    rows.into_iter()
+                        .map(|pending| RetainedRow {
+                            pending,
+                            dead_lettered_at: None,
+                            vector_state: "pending",
+                        })
+                        .collect(),
+                ),
+            }
+        }
+
+        fn snapshot(&self) -> Vec<RetainedRow> {
+            self.rows.lock().expect("outbox lock").clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PendingStore for RetainingOutbox {
+        async fn record(&self, _memory: &MemoryEntry, _embedding: &[f32]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
+            let now = Utc::now();
+            Ok(self
+                .rows
+                .lock()
+                .expect("outbox lock")
+                .iter()
+                .filter(|row| row.dead_lettered_at.is_none())
+                .filter(|row| row.pending.attempts < MAX_RECONCILE_ATTEMPTS)
+                .filter(|row| is_retry_due(row.pending.next_retry_at, now))
+                .take(limit)
+                .map(|row| row.pending.clone())
+                .collect())
+        }
+
+        async fn remove(&self, id: Uuid) -> Result<()> {
+            self.rows
+                .lock()
+                .expect("outbox lock")
+                .retain(|row| row.pending.id != id);
+            Ok(())
+        }
+
+        async fn mark_failed(
+            &self,
+            id: Uuid,
+            attempts: i32,
+            next_retry_at: DateTime<Utc>,
+        ) -> Result<()> {
+            let mut rows = self.rows.lock().expect("outbox lock");
+            if let Some(row) = rows.iter_mut().find(|row| row.pending.id == id) {
+                row.pending.attempts = attempts;
+                row.pending.next_retry_at = Some(next_retry_at);
+            }
+            Ok(())
+        }
+
+        async fn dead_letter(&self, id: Uuid, at: DateTime<Utc>) -> Result<()> {
+            let mut rows = self.rows.lock().expect("outbox lock");
+            let row = rows
+                .iter_mut()
+                .find(|row| row.pending.id == id)
+                .expect("dead-letter target must still be retained");
+            row.dead_lettered_at = Some(at);
+            row.vector_state = "dead_lettered";
+            Ok(())
+        }
     }
 
     fn pending_entry() -> PendingEmbedding {
@@ -2563,6 +2778,7 @@ mod tests {
             embedding: vec![0.1; 384],
             attempts: 0,
             next_retry_at: None,
+            vector_state: "pending",
         }
     }
 
@@ -2653,24 +2869,90 @@ mod tests {
         }
     }
 
-    /// I61-B / I63-B: the stored vector is 384-dim, so `vector_for_pending`
-    /// only re-validates it and never re-embeds. The dead-letter expectation is
-    /// therefore unchanged by I63-B: this poison is genuinely unrecoverable.
-    /// The sink has no scripted result, so any upsert attempt would panic; the
-    /// in-memory outbox and mock sink keep this free of live DB/Qdrant access.
+    /// Round 61 / migration 005: dead-lettering is an audit decision, not a
+    /// delete. The persistence-mirroring store must keep the row, write both
+    /// terminal columns, and exclude it from every later `list` while leaving
+    /// live rows selectable. No PostgreSQL/Qdrant connection is involved.
+    #[tokio::test]
+    async fn dead_letter_retains_row_with_markers_and_hides_it_from_list() {
+        let poisoned = pending_entry();
+        let poisoned_id = poisoned.id;
+        let live = pending_entry();
+        let live_id = live.id;
+        let outbox = RetainingOutbox::new(vec![poisoned, live]);
+
+        assert_eq!(
+            outbox
+                .list(10)
+                .await
+                .expect("list before dead-letter")
+                .len(),
+            2,
+            "both rows must be selectable before the terminal decision"
+        );
+
+        outbox
+            .dead_letter(poisoned_id, Utc::now())
+            .await
+            .expect("dead-letter must succeed");
+
+        let rows = outbox.snapshot();
+        assert_eq!(rows.len(), 2, "no row may be deleted by dead-letter");
+        let terminal = rows
+            .iter()
+            .find(|row| row.pending.id == poisoned_id)
+            .expect("the dead-lettered row must still be retained");
+        assert!(
+            terminal.dead_lettered_at.is_some(),
+            "dead_lettered_at must be persisted for audit"
+        );
+        assert_eq!(
+            terminal.vector_state, "dead_lettered",
+            "vector_state must record the terminal decision"
+        );
+
+        let after = outbox.list(10).await.expect("list after dead-letter");
+        assert_eq!(after.len(), 1, "only the live row may still be selected");
+        assert_eq!(after[0].id, live_id, "the live row must remain selectable");
+        assert!(
+            !after.iter().any(|row| row.id == poisoned_id),
+            "the dead-lettered id must never be returned again"
+        );
+    }
+
+    /// I61-B / I63-B / I63-A: the stored vector is 384-dim, so
+    /// `vector_for_pending` only re-validates it and never re-embeds. This poison
+    /// is genuinely unrecoverable, so the terminal decision must RETAIN the row
+    /// with audit columns and the selection gate must hide it from every later
+    /// batch — never delete it. The persistence-mirroring outbox and mock sink
+    /// keep this free of live DB/Qdrant access; an empty sink script means any
+    /// upsert attempt would panic.
     #[tokio::test]
     async fn reconcile_dead_letters_pending_row_with_non_finite_vector() {
         let mut pending = pending_entry();
         pending.embedding[0] = f32::INFINITY;
-        let outbox = MemoryOutbox::with_backoff_filter(vec![pending.clone()]);
+        let id = pending.id;
+        let outbox = RetainingOutbox::new(vec![pending]);
         let embedder = disabled_embedder();
 
         reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
 
         let rows = outbox.snapshot();
+        assert_eq!(rows.len(), 1, "the poisoned row must be retained: {rows:?}");
+        assert_eq!(rows[0].pending.id, id);
         assert!(
-            rows.is_empty(),
-            "a poisoned vector must be deleted, not deferred: {rows:?}"
+            rows[0].dead_lettered_at.is_some(),
+            "the terminal decision must persist dead_lettered_at"
+        );
+        assert_eq!(
+            rows[0].vector_state, "dead_lettered",
+            "the terminal decision must persist vector_state"
+        );
+
+        let after = outbox.list(10).await.expect("list after dead-letter");
+        assert!(
+            !after.iter().any(|row| row.id == id),
+            "a dead-lettered row must not reappear in a later batch"
         );
     }
 
@@ -2758,6 +3040,7 @@ mod tests {
             embedding: Vec::new(),
             attempts: 0,
             next_retry_at: None,
+            vector_state: "pending",
         }]);
 
         store_memory_with_sinks(&memory, &ScriptedSink::new(vec![true]), &outbox)
@@ -2903,14 +3186,25 @@ mod tests {
 
     // --- I61-B: poison dead-lettering + bounded retry attempts (pure/mock) ---
 
-    /// I63-A: the production selection query must gate on all three retirement
-    /// mechanisms. Pure string assertion: no PostgreSQL connection is needed.
-    #[test]
-    fn pending_selection_query_requires_live_rows() {
+    /// I63-A: the dead-letter retirement is verified behaviourally — the
+    /// persistence-mirroring store's `list` must hide the retained row — instead
+    /// of by matching `dead_lettered_at IS NULL` in the SQL text. The two
+    /// backoff/budget gates stay as pure query assertions. No DB is contacted.
+    #[tokio::test]
+    async fn pending_selection_query_requires_live_rows() {
+        let pending = pending_entry();
+        let id = pending.id;
+        let outbox = RetainingOutbox::new(vec![pending]);
+        outbox
+            .dead_letter(id, Utc::now())
+            .await
+            .expect("dead-letter");
+        let after = outbox.list(10).await.expect("list");
         assert!(
-            LIST_PENDING_SQL.contains("dead_lettered_at IS NULL"),
-            "dead-lettered rows must never be retried: {LIST_PENDING_SQL}"
+            !after.iter().any(|row| row.id == id),
+            "a dead-lettered row must never be retried"
         );
+
         assert!(
             LIST_PENDING_SQL.contains("attempts < $2"),
             "exhausted rows must stay out of the batch: {LIST_PENDING_SQL}"
@@ -3060,11 +3354,73 @@ mod tests {
             rows[0].attempts, MAX_RECONCILE_ATTEMPTS,
             "attempts must saturate at the cap"
         );
+        assert_eq!(
+            rows[0].vector_state, "exhausted",
+            "retiring a row from retries must persist the terminal state (I65-B)"
+        );
 
         // One more pass with an empty sink script: the exhausted row is not
         // listed, so no upsert is attempted and the row is left for inspection.
         reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
-        assert_eq!(outbox.snapshot()[0].attempts, MAX_RECONCILE_ATTEMPTS);
+        let rows = outbox.snapshot();
+        assert_eq!(rows[0].attempts, MAX_RECONCILE_ATTEMPTS);
+        assert_eq!(
+            rows[0].vector_state, "exhausted",
+            "the durable state must survive later reconcile passes"
+        );
+    }
+
+    /// I65-B: only a row that actually spent its whole retry budget is retired.
+    /// A single transient failure keeps the fixed `'pending'` state so it remains
+    /// part of the recoverable backlog reported by `jarvis_pending_embeddings`.
+    #[tokio::test]
+    async fn a_transient_failure_keeps_the_row_recoverable() {
+        let pending = pending_entry();
+        let outbox = MemoryOutbox::with_rows(vec![pending]);
+        let embedder = disabled_embedder();
+
+        reconcile_pending(
+            &outbox,
+            &ScriptedSink::new(vec![false]),
+            Some(&embedder),
+            384,
+        )
+        .await;
+
+        let rows = outbox.snapshot();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].attempts, 1);
+        assert_eq!(
+            rows[0].vector_state, "pending",
+            "a retryable row must not be counted as exhausted"
+        );
+    }
+
+    /// I65-B: the gauge queries partition non-dead-lettered rows by durable
+    /// state, and the backfill retires legacy cap-reaching rows. Pure string
+    /// assertions keep this free of a PostgreSQL connection.
+    #[test]
+    fn outbox_state_queries_partition_pending_and_exhausted() {
+        assert!(
+            OUTBOX_STATE_COUNTS_SQL.contains("dead_lettered_at IS NULL"),
+            "dead-lettered rows must be excluded from both gauges"
+        );
+        assert!(
+            OUTBOX_STATE_COUNTS_SQL.contains("vector_state = 'pending'"),
+            "the pending gauge must not count retired rows"
+        );
+        assert!(
+            OUTBOX_STATE_COUNTS_SQL.contains("vector_state = 'exhausted'"),
+            "a dedicated exhausted count is required: {OUTBOX_STATE_COUNTS_SQL}"
+        );
+        assert!(
+            BACKFILL_EXHAUSTED_SQL.contains("attempts >= $1"),
+            "legacy cap-reaching rows must be backfilled: {BACKFILL_EXHAUSTED_SQL}"
+        );
+        assert!(
+            BACKFILL_EXHAUSTED_SQL.contains("vector_state = 'pending'"),
+            "backfill must be idempotent: {BACKFILL_EXHAUSTED_SQL}"
+        );
     }
 }
 
@@ -3223,9 +3579,12 @@ mod log_safety_tests {
         }
     }
 
-    /// Configurable outbox seam; each failure also carries `PROBE`.
+    /// Configurable outbox seam; each failure also carries `PROBE`. Dead-letter
+    /// ids are tracked so `list` mirrors the production retention gate instead
+    /// of falling through to the delete-based trait default.
     struct LeakStore {
         rows: Mutex<Vec<PendingEmbedding>>,
+        dead_lettered: Mutex<Vec<Uuid>>,
         fail_list: bool,
         fail_remove: bool,
         fail_mark_failed: bool,
@@ -3235,6 +3594,7 @@ mod log_safety_tests {
         fn new(rows: Vec<PendingEmbedding>) -> Self {
             Self {
                 rows: Mutex::new(rows),
+                dead_lettered: Mutex::new(Vec::new()),
                 fail_list: false,
                 fail_remove: false,
                 fail_mark_failed: false,
@@ -3269,7 +3629,15 @@ mod log_safety_tests {
             if self.fail_list {
                 anyhow::bail!("list failed for {PROBE} with statement details");
             }
-            Ok(self.rows.lock().expect("rows lock").clone())
+            let dead = self.dead_lettered.lock().expect("dead lock").clone();
+            Ok(self
+                .rows
+                .lock()
+                .expect("rows lock")
+                .iter()
+                .filter(|row| !dead.contains(&row.id))
+                .cloned()
+                .collect())
         }
 
         async fn remove(&self, _id: Uuid) -> Result<()> {
@@ -3288,6 +3656,13 @@ mod log_safety_tests {
             if self.fail_mark_failed {
                 anyhow::bail!("deferred-retry write failed for {PROBE}");
             }
+            Ok(())
+        }
+
+        async fn dead_letter(&self, id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+            // Production retains the row and excludes it via the SELECT gate;
+            // never fall through to the trait's delete-based default here.
+            self.dead_lettered.lock().expect("dead lock").push(id);
             Ok(())
         }
     }
@@ -3314,6 +3689,7 @@ mod log_safety_tests {
             embedding: vec![0.1; 384],
             attempts: 0,
             next_retry_at: None,
+            vector_state: "pending",
         }
     }
 
@@ -3359,23 +3735,37 @@ mod log_safety_tests {
         // of raw error text; the fixed `error_kind` fields are set at the sites.
     }
 
-    /// I61-B: a poison row emits exactly one decision warning, carrying only
-    /// `id`, `attempts` and `error_kind` — never the vector value, a raw error
-    /// or the row payload. The row is deleted, so no later pass warns again.
+    /// I61-B / I63-A: a poison row emits exactly one decision warning, carrying
+    /// only `id`, `attempts` and `error_kind` — never the vector value, a raw
+    /// error or the row payload. The row is retained with an audit marker, and
+    /// the dead-letter gate hides it from later `list` calls, so a second pass
+    /// emits no warning and the row is still present.
     #[test]
     fn dead_letter_warns_once_with_fixed_vocabulary() {
         let mut poison = pending();
         poison.embedding[0] = f32::NAN;
         let id = poison.id;
+        let store = LeakStore::new(vec![poison]);
 
         let logs = capture_warns(async {
-            reconcile_pending(&LeakStore::new(vec![poison]), &OkSink, None, 384).await;
+            reconcile_pending(&store, &OkSink, None, 384).await;
+            reconcile_pending(&store, &OkSink, None, 384).await;
         });
 
         assert_eq!(
             logs.lines().count(),
             1,
             "a dead-lettered row must warn exactly once: {logs}"
+        );
+        assert_eq!(
+            store.rows.lock().expect("rows lock").len(),
+            1,
+            "the dead-lettered row must be retained, not deleted"
+        );
+        assert_eq!(
+            *store.dead_lettered.lock().expect("dead lock"),
+            vec![id],
+            "the row must carry the terminal decision marker"
         );
         assert!(logs.contains("dead-lettering"), "{logs}");
         assert!(!logs.contains(PROBE), "raw error text leaked: {logs}");
@@ -3404,6 +3794,123 @@ mod log_safety_tests {
         let err: anyhow::Error = anyhow::anyhow!("{PROBE}");
         assert_eq!(error_kind(&err, ErrorKind::Persistence), "persistence");
         assert_eq!(error_kind(&err, ErrorKind::Embedding), "embedding");
+    }
+
+    /// Ordering log shared by a scripted outbox and a recording counter sink.
+    #[derive(Clone, Default)]
+    struct Events(Arc<Mutex<Vec<&'static str>>>);
+
+    impl Events {
+        fn push(&self, event: &'static str) {
+            self.0.lock().expect("events lock").push(event);
+        }
+
+        fn snapshot(&self) -> Vec<&'static str> {
+            self.0.lock().expect("events lock").clone()
+        }
+    }
+
+    /// `dead_letter` either succeeds (recording `"persisted"`) or fails with an
+    /// error carrying `PROBE`, so the failure warn can be checked for leaks too.
+    struct ScriptedDeadLetterStore {
+        fail: bool,
+        events: Events,
+    }
+
+    #[async_trait::async_trait]
+    impl PendingStore for ScriptedDeadLetterStore {
+        async fn record(&self, _memory: &MemoryEntry, _embedding: &[f32]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list(&self, _limit: usize) -> Result<Vec<PendingEmbedding>> {
+            Ok(Vec::new())
+        }
+
+        async fn remove(&self, _id: Uuid) -> Result<()> {
+            Ok(())
+        }
+
+        async fn mark_failed(
+            &self,
+            _id: Uuid,
+            _attempts: i32,
+            _next_retry_at: DateTime<Utc>,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn dead_letter(&self, _id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+            if self.fail {
+                anyhow::bail!("dead-letter write failed for {PROBE}");
+            }
+            self.events.push("persisted");
+            Ok(())
+        }
+    }
+
+    /// Test sink replacing the process-wide Prometheus recorder: records which
+    /// counter was incremented, and when, without installing a global recorder.
+    struct RecordingCounters(Events);
+
+    impl DeadLetterCounters for RecordingCounters {
+        fn persisted(&self) {
+            self.0.push("success");
+        }
+
+        fn persistence_failed(&self) {
+            self.0.push("failure");
+        }
+    }
+
+    /// I65-B: a terminal decision is counted as durable only after the outbox
+    /// write has actually succeeded — never merely because it was attempted.
+    #[tokio::test]
+    async fn dead_letter_success_counter_follows_the_successful_write() {
+        let events = Events::default();
+        let outbox = ScriptedDeadLetterStore {
+            fail: false,
+            events: events.clone(),
+        };
+        let counters = RecordingCounters(events.clone());
+
+        dead_letter_retry_with(&outbox, Uuid::new_v4(), 0, &counters).await;
+
+        assert_eq!(
+            events.snapshot(),
+            vec!["persisted", "success"],
+            "the success counter must be incremented after durability, not before"
+        );
+    }
+
+    /// I65-B: a failed DB write is accounted for separately and never inflates
+    /// the success counter; the failure warning is still emitted and stays free
+    /// of raw error text.
+    #[test]
+    fn dead_letter_persistence_failure_is_counted_separately_and_still_warns() {
+        let events = Events::default();
+        let outbox = ScriptedDeadLetterStore {
+            fail: true,
+            events: events.clone(),
+        };
+        let counters = RecordingCounters(events.clone());
+        let id = Uuid::new_v4();
+
+        let logs = capture_warns(async {
+            dead_letter_retry_with(&outbox, id, 3, &counters).await;
+        });
+
+        assert_eq!(
+            events.snapshot(),
+            vec!["failure"],
+            "a non-persisted decision must only touch the failure counter"
+        );
+        assert!(
+            logs.contains("could not persist a dead-letter decision"),
+            "the failure warning must be maintained: {logs}"
+        );
+        assert!(logs.contains(&id.to_string()), "fixed id label: {logs}");
+        assert!(!logs.contains(PROBE), "raw error text leaked: {logs}");
     }
 
     /// I49-B / I51-D: all five Qdrant call sites (build, list, create, upsert,

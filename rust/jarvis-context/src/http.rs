@@ -42,15 +42,45 @@ pub(crate) fn record_dead_lettered_embedding() {
     .increment(1);
 }
 
-/// Current non-dead-lettered outbox size as a gauge (I63-A).
+/// Failed attempts to *persist* a dead-letter decision (I65-B).
 ///
-/// `count` is a bare number produced by a `COUNT(*)`; only the numeric value
-/// and fixed labels are exported, never a row id or payload. Exhausted rows
-/// (attempts at the cap) are still counted: they remain in the table but are no
-/// longer retried, and that backlog must stay visible.
+/// Kept strictly separate from [`record_dead_lettered_embedding`]: the success
+/// counter is only incremented after the outbox write succeeds, so a DB failure
+/// can never inflate the number of durable terminal decisions. Labels remain
+/// fixed vocabulary — no row id, payload, vector value or raw error text.
+pub(crate) fn record_dead_letter_persistence_failure() {
+    metrics::counter!(
+        "jarvis_dead_letter_persistence_failures_total",
+        "service" => "jarvis-context",
+        "error_kind" => "persistence",
+    )
+    .increment(1);
+}
+
+/// Recoverable, non-dead-lettered outbox rows as a gauge (I63-A / I65-B).
+///
+/// `count` is a bare number produced by a `COUNT(*) FILTER`; only the numeric
+/// value and fixed labels are exported, never a row id or payload. Since I65-B
+/// this counts only rows whose durable `vector_state` is still `'pending'`;
+/// retired rows are exported by [`observe_exhausted_embeddings`] instead, so a
+/// poisoned backlog can no longer masquerade as recoverable work.
 pub(crate) fn observe_pending_embeddings(count: i64) {
     metrics::gauge!(
         "jarvis_pending_embeddings",
+        "service" => "jarvis-context",
+    )
+    .set(count as f64);
+}
+
+/// Rows that exhausted the reconcile retry budget as a gauge (I65-B).
+///
+/// These rows are retained for inspection but permanently excluded from future
+/// batches. Exporting their count separately makes them distinguishable from
+/// the recoverable backlog in [`observe_pending_embeddings`]. Only a bare
+/// `COUNT(*)` value and fixed labels are exported.
+pub(crate) fn observe_exhausted_embeddings(count: i64) {
+    metrics::gauge!(
+        "jarvis_exhausted_embeddings",
         "service" => "jarvis-context",
     )
     .set(count as f64);
