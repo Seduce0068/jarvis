@@ -150,6 +150,14 @@ elif mode == 'bad_results_type':
     # no "ignored" phrase (chosen by the caller), so a disabled type gate is
     # detectable instead of being masked by a notes/index error.
     data['results']['skipped'] = -1
+elif mode == 'req_removed':
+    # Drop one requirement from the evidence declaration. The referenced spec
+    # still defines the full set, so only the REQ_SET_MISMATCH gate can reject
+    # this copy; every other check stays valid.
+    reqs = data['test_basis_ref'].get('requirements')
+    if not isinstance(reqs, list) or len(reqs) < 2:
+        raise SystemExit('requirements array too short for tamper')
+    reqs.pop()
 elif mode == 'scenario_shortfall':
     # Report fewer executions than the spec declares while keeping results,
     # notes and the index entry mutually consistent. Only the Scenario gate
@@ -218,7 +226,7 @@ else
   # notes_* modes add a second, conflicting count to otherwise valid notes:
   # they verify that the gate validates every count match, not only the first.
   for mode in hash failed empty_passed timestamp calendar failed_bool passed_bool \
-              notes_count_conflict notes_passed_conflict; do
+              notes_count_conflict notes_passed_conflict req_removed; do
     if ! tamper_evidence "$source_json" "$evidence_copy" "$mode"; then
       echo "  FAIL: could not prepare tampered evidence ($mode)"
       fail=$((fail+1))
@@ -237,6 +245,7 @@ else
       passed_bool) pattern='NO_PASSING_TESTS' ;;
       notes_count_conflict) pattern='NOTES_COUNT_MISMATCH' ;;
       notes_passed_conflict) pattern='NOTES_PASSED_MISMATCH' ;;
+      req_removed) pattern='REQ_SET_MISMATCH' ;;
     esac
     if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
       echo "  PASS: check-evidence.sh rejects tampered $mode"
@@ -493,6 +502,43 @@ if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'MISSING_INFO_ITEM'; then
   ok=$((ok+1))
 else
   echo "  FAIL: check-evidence.sh accepted spec with missing info item (exit $code)"
+  printf '%s\n' "$out" | head -3 >&2
+  fail=$((fail+1))
+fi
+
+# I57-D: a Traceability Req that no requirement defines must fail closed.
+# Use a separate temp tree with copied (not symlinked) specs so one Req cell
+# can be rewritten without touching the repository's real specification.
+req_tmp="$tmp/req_negative"
+mkdir -p "$req_tmp/ci/scripts" "$req_tmp/evidence" "$req_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$req_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/specs/index.md" "$req_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$req_tmp/evidence/index.md"
+cp "$repo/todo.md" "$req_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$req_tmp/evidence/"
+cp "$repo"/specs/test-*.md "$req_tmp/specs/"
+# Rewrite the first Traceability Req cell to an id no spec defines. The spec
+# hash for that evidence also drifts; the REQ gate must still fire regardless.
+python3 - "$req_tmp/specs/$(basename "${spec_files[0]}")" <<'PY'
+import re, sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as fh:
+    text = fh.read()
+pattern = re.compile(r'(^\|[ \t]*TC-[^|]*\|[ \t]*)REQ-\d+([ \t]\|)', re.MULTILINE)
+text, changed = pattern.subn(
+    lambda m: m.group(1) + 'REQ-99999' + m.group(2), text, count=1)
+if changed != 1:
+    raise SystemExit('Traceability Req cell not found')
+with open(path, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+out=$(bash "$req_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'REQ_SET_MISMATCH'; then
+  echo "  PASS: check-evidence.sh rejects an undefined Traceability Req"
+  ok=$((ok+1))
+else
+  echo "  FAIL: check-evidence.sh accepted an undefined Traceability Req (exit $code)"
   printf '%s\n' "$out" | head -3 >&2
   fail=$((fail+1))
 fi

@@ -53,6 +53,10 @@ sha256sum specs/test-<name>.md
 両方を新しい `sha256:<64hex>` に揃える。片方だけの更新は
 `NESTED_HASH_MISMATCH` としてゲートに拒否される。
 
+`test_basis_ref.requirements` は spec の `REQ-\d+` 定義集合と
+Traceability の Req 列集合の両方と一致させる。要件の追加・削除や
+未定義 Req の参照は `REQ_SET_MISMATCH` で拒否される。
+
 ### 4. results / timestamp / notes を実測へ更新する
 
 - `results.passed` / `results.failed`: 手順2の実測値。厳密な整数型であり、
@@ -90,26 +94,38 @@ make check-evidence
 ```
 
 `ok=<n> errors=0` なら成功。失敗時はエラーコードのみが出力され、
-問題の値は表示されない（例: `SPEC_HASH_MISMATCH`,
-`HASH_FILENAME_MISMATCH`, `NESTED_HASH_MISMATCH`, `FAILED_TESTS`,
-`SCENARIO_COUNT_MISMATCH`, `SKIPPED_TESTS`, `NOTES_*_MISMATCH`,
-`BAD_DOCUMENT_TYPE`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK`）。
+問題の値は表示されない。現行実装が発行する主なコードは次のとおり。
+
+| 区分 | エラーコード |
+| --- | --- |
+| JSON 形式 | `INVALID_JSON`, `MISSING:*` |
+| ハッシュ | `BAD_HASH_FORMAT`, `HASH_FILENAME_MISMATCH`, `SPEC_HASH_MISMATCH`, `NESTED_HASH_MISMATCH` |
+| 仕様参照 | `NO_SPEC_PATH`, `SPEC_PATH_NOT_FOUND`, `SPEC_UNREADABLE` |
+| 時刻・署名・種別 | `BAD_TIMESTAMP`, `BAD_SIGNATURE`, `BAD_DOCUMENT_TYPE` |
+| 結果 | `FAILED_TESTS`, `NO_PASSING_TESTS`, `BAD_RESULTS_TYPE` |
+| notes | `BAD_NOTES_TYPE`, `SKIPPED_TESTS`, `NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH` |
+| 要件 | `REQ_SET_MISMATCH` |
+| シナリオ | `SCENARIO_COUNT_MISMATCH` |
+| 仕様構造 | `MISSING_EVIDENCE`, `MISSING_SECTION`, `MISSING_TRACEABILITY`, `MISSING_INFO_ITEM`, `MISSING_CONFORMANCE` |
+| 索引 | `INDEX_NOT_FOUND`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK`, `INDEX_RESULT_MISMATCH` |
 
 ## ゲートが検証する項目
 
 | 検証対象 | 内容 |
 | --- | --- |
-| `spec_hash` | トップレベルが仕様ファイルの sha256 と一致 |
+| `spec_hash` | トップレベルが仕様ファイルの sha256 と一致（不一致は `SPEC_HASH_MISMATCH`、形式不正は `BAD_HASH_FORMAT`） |
 | ファイル名末尾 | ハッシュ接頭詞（12文字）が `spec_hash` と一致（不一致は `HASH_FILENAME_MISMATCH`） |
-| `test_basis_ref.spec_hash` | トップレベルと一致（nested hash） |
-| `results` | `failed=0` / `passed>0` / 厳密な整数型 |
+| `test_basis_ref.spec_path` | 実在する仕様ファイル（未指定は `NO_SPEC_PATH`、欠落は `SPEC_PATH_NOT_FOUND`） |
+| `test_basis_ref.spec_hash` | トップレベルと一致（nested hash、不一致は `NESTED_HASH_MISMATCH`） |
+| `requirements` | evidence の要件集合＝spec の `REQ-\d+` 定義集合＝Traceability の Req 列集合（不一致は `REQ_SET_MISMATCH`） |
+| `results` | `failed=0` / `passed>0` / 厳密な非負整数型（型不正は `BAD_RESULTS_TYPE`） |
 | `results.skipped` | 正の値は `notes` に `ignored` の明記が必要（`SKIPPED_TESTS`） |
-| `notes` | `passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致 |
-| `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed + skipped）がその数以上 |
-| index | 両 index が全成果物をリンクし、リンク切れなし |
-| `timestamp` / `signature` | RFC 3339 の実在日時 / `self-attested` |
-| `document_type` | 設定時は `test-execution-log` / `test-result` / `test-summary-report` のいずれか |
-| 仕様構造 | 必須4セクション、7列 Traceability、Document map、`tailored` |
+| `notes` | 文字列型（`BAD_NOTES_TYPE`）。`passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致（`NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH`） |
+| `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed + skipped）がその数以上（`SCENARIO_COUNT_MISMATCH`） |
+| index | 両 index が全成果物をリンクし、リンク切れなし。見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
+| `timestamp` / `signature` | RFC 3339 の実在日時（`BAD_TIMESTAMP`）/ `self-attested`（`BAD_SIGNATURE`） |
+| `document_type` | 設定時は `test-execution-log` / `test-result` / `test-summary-report` のいずれか（`BAD_DOCUMENT_TYPE`） |
+| 仕様構造 | 必須4セクション、7列 Traceability、Document map、6情報項目、`tailored`（`MISSING_SECTION` 等） |
 
 ## 関連
 

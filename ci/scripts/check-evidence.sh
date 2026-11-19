@@ -14,7 +14,10 @@
 # and every results count a strict, non-negative int; a wrong type fails closed
 # instead of silently skipping a check. Every notes count must agree with
 # results.passed/failed/skipped, so a multi-gate claim cannot drift away from
-# the single aggregated total. The executed total must also cover every
+# the single aggregated total. The evidence requirements, the spec's REQ
+# definitions and the Traceability Req column must be the same set, so adding
+# or removing a requirement or citing an undefined Req fails closed. The
+# executed total must also cover every
 # `Scenario:` declared by the referenced spec, so a run that executes
 # only part of a specification cannot pass. Index entry counts
 # ("N passed / N failed / N skipped") are resolved through reference-style link
@@ -41,6 +44,7 @@ from urllib.parse import unquote
 evidence_files = sys.argv[1:]
 errors = []
 covered = set()
+evi_reqs_by_spec = {}
 ok = 0
 
 # A timezone is mandatory: naive ISO strings are not RFC 3339. Fractional
@@ -152,6 +156,10 @@ for f in evidence_files:
     if not isinstance(ref, dict) or not ref.get("spec_path"):
         errors.append(f"{f}: NO_SPEC_PATH"); continue
     spec_path = ref["spec_path"]
+    # Remember the declared requirements per spec. The set comparison happens
+    # in the spec loop below, independent of the hash/result checks above, so a
+    # tampered spec still reaches the REQ gate instead of short-circuiting.
+    evi_reqs_by_spec[os.path.normpath(spec_path)] = ref.get("requirements")
     if not os.path.isfile(spec_path):
         errors.append(f"{f}: SPEC_PATH_NOT_FOUND:{spec_path}"); continue
     actual = digest(spec_path)
@@ -192,6 +200,29 @@ TRACEABILITY_HEADER = re.compile(
     r'^\|\s*Scenario\s*\|\s*Req\s*\|\s*ASVS\s*\|\s*800-53\s*\|\s*CC\s*\|'
     r'\s*Technique\s*\|\s*Tier\s*\|', re.MULTILINE)
 
+def defined_reqs(text):
+    """REQ ids defined in the requirements table (table's first cell)."""
+    return set(re.findall(r'^\|[ \t]*(REQ-\d+)[ \t]*\|', text, re.MULTILINE))
+
+
+def traceability_reqs(text):
+    """REQ ids cited in the Req column of the seven-column Traceability table."""
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if not TRACEABILITY_HEADER.match(line):
+            continue
+        reqs = set()
+        for row in lines[i + 1:]:
+            if not row.lstrip().startswith('|'):
+                break
+            cells = [c.strip() for c in row.strip().strip('|').split('|')]
+            if len(cells) != 7:
+                continue
+            if re.fullmatch(r'REQ-\d+', cells[1]):
+                reqs.add(cells[1])
+        return reqs
+    return set()
+
 # Document map must declare the six 29119-3:2021 information items and state
 # tailored conformance (with no full-conformance claim).
 INFO_ITEMS = (
@@ -224,6 +255,18 @@ for spec in spec_files:
             errors.append(f"MISSING_SECTION:{spec}:{section}")
     if not TRACEABILITY_HEADER.search(spec_text):
         errors.append(f"MISSING_TRACEABILITY:{spec}")
+    # The evidence requirement set, the REQ ids defined by the spec and the
+    # Req column of the Traceability table must all be the same set. A removed
+    # or added requirement, or a Req reference that is not defined by the spec,
+    # fails closed. No REQ value is emitted -- only the value-less code.
+    evi_reqs = evi_reqs_by_spec.get(os.path.normpath(spec))
+    def_reqs = defined_reqs(spec_text)
+    trc_reqs = traceability_reqs(spec_text)
+    if not (isinstance(evi_reqs, list)
+            and all(isinstance(x, str) for x in evi_reqs)
+            and def_reqs and trc_reqs
+            and set(evi_reqs) == def_reqs == trc_reqs):
+        errors.append(f"REQ_SET_MISMATCH:{spec}")
     doc_map = section_body(spec_text, "Document map")
     for item in INFO_ITEMS:
         if item not in doc_map:
