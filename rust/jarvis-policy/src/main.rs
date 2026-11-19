@@ -37,6 +37,51 @@ impl Drop for TracerGuard {
     }
 }
 
+/// Why waiting for the two listeners ended.
+enum ListenerOutcome {
+    /// Both listeners ended on their own; their results still need the
+    /// existing one-error / both-errors aggregation.
+    Finished((Result<()>, Result<()>)),
+    /// A termination signal arrived first. `select!` dropped the listener
+    /// futures, which stops both accept loops before a clean exit.
+    Shutdown,
+}
+
+/// Resolves when the process is asked to stop.
+///
+/// `Ctrl-C` covers interactive stops, while systemd sends `SIGTERM` from
+/// `systemctl stop`. Both are registered here so the `select!` in `main` stays
+/// platform-independent; a registration failure degrades to the other signal
+/// instead of blocking a clean shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            eprintln!("jarvis-policy: failed to listen for Ctrl-C: {err}");
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        let terminate = tokio::signal::unix::SignalKind::terminate();
+        let mut sigterm = match tokio::signal::unix::signal(terminate) {
+            Ok(signal) => signal,
+            Err(err) => {
+                eprintln!("jarvis-policy: failed to listen for SIGTERM: {err}");
+                ctrl_c.await;
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
+}
+
 /// Initialise JSON logging with optional OTLP trace export.
 ///
 /// The collector endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT` and
@@ -113,21 +158,37 @@ async fn main() -> Result<()> {
     let http_addr = config.http_addr.parse()?;
 
     // `join!` polls both listeners to completion, so a failure in one never
-    // drops the other's future. Errors are aggregated only after both have
-    // finished.
+    // drops the other's future. Racing it against the shutdown signal lets a
+    // signal stop both listeners by dropping the `join!` future, while a
+    // listener failure still completes the branch and keeps the existing
+    // error aggregation. `biased;` gives the listener branch priority so a
+    // real failure is reported rather than masked by a coincident signal.
     let grpc = engine.serve_grpc(grpc_addr);
     let http = engine.serve_http(http_addr);
-    let (grpc_result, http_result) = tokio::join!(grpc, http);
+    let outcome = tokio::select! {
+        biased;
+        results = async { tokio::join!(grpc, http) } => ListenerOutcome::Finished(results),
+        _ = shutdown_signal() => {
+            info!("shutdown signal received; stopping listeners");
+            ListenerOutcome::Shutdown
+        }
+    };
 
-    // Explicit shutdown on the normal path; `TracerGuard::drop` covers the
-    // early `?` returns above as well as any unwinding.
+    // Explicit shutdown on every exit path after the listeners stop;
+    // `TracerGuard::drop` remains the safety net for the early `?` returns.
     tracer.shutdown();
 
-    match (grpc_result, http_result) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(err), Ok(())) | (Ok(()), Err(err)) => Err(err),
-        (Err(grpc_err), Err(http_err)) => Err(anyhow::anyhow!(
-            "gRPC listener failed: {grpc_err}; HTTP listener failed: {http_err}"
-        )),
+    match outcome {
+        ListenerOutcome::Finished((grpc_result, http_result)) => match (grpc_result, http_result) {
+            (Ok(()), Ok(())) => Ok(()),
+            (Err(err), Ok(())) | (Ok(()), Err(err)) => Err(err),
+            (Err(grpc_err), Err(http_err)) => Err(anyhow::anyhow!(
+                "gRPC listener failed: {grpc_err}; HTTP listener failed: {http_err}"
+            )),
+        },
+        ListenerOutcome::Shutdown => {
+            info!("listeners stopped, exiting cleanly");
+            Ok(())
+        }
     }
 }
