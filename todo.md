@@ -463,14 +463,14 @@ generated:
 - [ ] MCP `tools/list` が upstream inputSchema を破棄し cursor も無視 — `mcp-gw/src/mcp_server.rs:59-99,120-126` / R1-AP01,R5-DC1 / confirmed
 - [x] otelcol 設定の配布経路がビルドスクリプトから欠落 — 2026-11-19 対応済み: `otelcol-config.yaml` を `.bak-<ts>` 退避付きで `install -o root -g root -m 0644 /etc/jarvis/` へ配置。bash -n OK / `infra/scripts/build-selfhost.sh:26-28` / R1-AR3 / confirmed（既存 P0-6 と関連）
 - [x] Grafana の job セレクタ / service ラベルが scrape 設定と不一致 — 2026-11-19 対応済み: ダッシュボード側を実在 job 名（`jarvis-*` / `qdrant` 等）へ統一し `service` ラベルと `jarvis/` 接頭辞を除去。otelcol 側の job_name は時系列継続のため未変更。JSON 有効・旧セレクタ残存0 / `dashboards/jarvis-overview.json:46` / R1-AR3,R5-VU3 / confirmed
-- [ ] filelog レシーバの入力が空（`/var/log/jarvis/*.log` を誰も書かない）— `otelcol-config.yaml:52` / R5-VU3 / confirmed
+- [x] filelog レシーバの入力が空（`/var/log/jarvis/*.log` を誰も書かない）— 2026-11-19 対応済み: journald receiver へ置換し `jarvis-*` unit を対象化、logs パイプラインも接続。子が追加した無効キー `offset_storage_dir` は親が削除し `otelcol-contrib validate` exit 0 / `otelcol-config.yaml:52` / R5-VU3 / confirmed
 - [ ] `check-shell` が shellcheck 未インストール時に SKIP して成功扱い — `ci/scripts/check-shell.sh:22-33` / R5-VU4 / confirmed
 - [ ] `check-evidence.sh` が skipped 数・仕様シナリオ数を照合せず合格 — `ci/scripts/check-evidence.sh:82-85` / R3-TQ4 / confirmed
 - [ ] deploy がヘルスチェック失敗を警告のみで完了報告 — `rust/scripts/deploy.rs:385-389` / R4-DR2 / confirmed（既存 P2-8 と関連）
 - [ ] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
 - [ ] jq 欠落時にバックアップ整合性検証をスキップして verified と報告 — `infra/scripts/install-backup-timer.sh:96` / R2-ER3 / confirmed
 - [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed
-- [ ] `/health` が固定 `"OK"` を返し劣化を検知できない — `policy/src/http.rs:187-189` / R4-DR1 / confirmed
+- [x] `/health` が固定 `"OK"` を返し劣化を検知できない — 2026-11-19 対応済み: kill switch 発動時とポリシー来源欠落時に 503 `{"status":"degraded","reason":...}` を返す。固定語彙のみで理由文字列・パスは非開示、正常時は 200 維持。新規テスト3件追加、policy 86 tests pass / `policy/src/http.rs:187-189` / R4-DR1 / confirmed
 - [ ] シグナル処理・ドレインが無くデプロイ時停止で保留作業が失われる — `policy/src/main.rs:59` / R4-DR1 / confirmed
 - [ ] axum 0.7 と 0.8 が workspace 内で二重解決 — `rust/Cargo.toml:51` / R4-DP1 / confirmed
 - [x] 配線済み review-gate が PR ではなく既定ブランチを検証 — 2026-11-19 対応済み: 未配線の参照実装 `ci/review-gate.yml` の3ステージ checkout に `refs/pull/<number>/head` を追加（workflow_dispatch は `pr_number` 入力）。auto-merge・権限・認証情報の方針は据え置き、YAML 有効 / R1-AR4 / confirmed（未配線の参照実装は既存 P2-2 の判断を維持）
@@ -596,12 +596,12 @@ generated:
 
 - [x] gRPC Check が不正 JSON コンテキストを空 Object にフォールバック — 2026-11-19 対応済み: `Status::invalid_argument` へ変換し回帰テスト2件追加（不正 JSON 拒否・正常系受理）。`policy/src/grpc.rs:27` / R1-AR1 / confirmed（既存 P2-1 と別経路）
 - [ ] kill switch の永続化失敗が unauthenticated として返される — `kill_switch.rs:147-150` / R2-ER1 / confirmed
-- [ ] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
+- [x] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — 2026-11-19 対応済み: 3xx 判定を単独化し Location 欠落/非 UTF-8/空/パース不能を `ClientError` で拒否。回帰テスト2件追加、mcp-gw 84 tests pass / `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
 - [ ] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — `policy/src/policy.rs:101-107` / R2-ER1 / likely
 - [x] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — 2026-11-19 対応済み: `activate_with_actor()` / `arm_with_actor()` を追加し既存 `activate()` は "system" の互換ラッパーに。永続化失敗時の fail-closed re-arm は従来どおり。回帰テスト3件追加 / `kill_switch.rs:133` / R2-FG1 / confirmed
 - [ ] Casbin `add_policy` / `remove_policy` が公開 API を持たず設定ファイル手編集に依存 — `policy.rs:190,205` / R2-FG1 / confirmed
 - [x] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — 2026-11-19 対応済み: module doc と execute doc を実態（低レベル実行 primitive、policy/allowlist/approval は `McpGateway::execute_tool` が担当）へ修正。コード・シグネチャ・テストは無変更 / `gateway.rs:11-16` / R2-FG1 / confirmed
-- [ ] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — `backup.rs:331` / R2-ER2 / confirmed
+- [x] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — 2026-11-19 対応済み: 削除結果を match し失敗は warn＋成功件数から除外。dry-run 抑制は維持。回帰テスト3件追加、backup rust-script 4 tests pass / `backup.rs:331` / R2-ER2 / confirmed
 - [x] deploy がビナリ・スクリプト欠落を警告スキップして完了報告 — 2026-11-19 対応済み: 実実行前に必須4バイナリを走査し欠落時は `bail!` で非ゼロ終了（SSH 前に停止）。回帰テスト3件 pass / `deploy.rs:308-311` / R2-ER2 / confirmed
 - [ ] gRPC EmitEvent が不正入力をデフォルト値に置換して success を返す — `event/src/grpc.rs:27-32` / R2-ER2 / confirmed
 - [x] WS 受信エラーに生メッセージ本文を埋め込みログへ流出 — 2026-11-19 対応済み: `decode_ha_message()` ヘルパでエラーを再構成し source/bytes/エラー分類のみを記録。回帰テストで本文・トークン様文字列の非漏洩を検証（テスト文字列は secret scanner に VALUE-LIKE と誤検出されない値へ調整） / `event/src/sources.rs:248-249` / R2-ER2 / likely
@@ -618,10 +618,10 @@ generated:
 - [ ] `jarvis-mcp-gw.service` のベースディレクトリが開発環境の絶対パスに固定 — `infra/systemd/jarvis-mcp-gw.service:52` / R4-DR3 / confirmed
 - [ ] MCP プロトコルバージョン定数がスモークテストとドリフト検査で不一致 — `infra/scripts/smoke-mcp-gw.sh:101` / R4-DP3 / confirmed
 - [ ] upstream MCP ツールのエラー本文が API 応答とログへそのまま流出 — `gateway.rs:200-203` / R5-VU1 / confirmed
-- [ ] イベント処理失敗ログに `event_id` / `correlation_id` が欠落 — `normalizer.rs:64` / R5-VU2 / confirmed
+- [x] イベント処理失敗ログに `event_id` / `correlation_id` が欠落 — 2026-11-19 対応済み: `process_event` を借用へ変更し `tracing::error!` に両フィールドを構造化追加。payload はログに渡さない。event 40 tests pass / `normalizer.rs:64` / R5-VU2 / confirmed
 - [ ] トークン予算超過によるコンテキスト切り捨てが無観測 — `builder.rs:197-203` / R5-VU2 / confirmed
 - [x] HTTP ハンドラが内部エラーの理由を 500 に変換して捨てる — 2026-11-19 対応済み: `log_internal_error()` で anyhow の context チェーンを `tracing::error!` に記録し、クライアント応答は裸の 500 を維持。`#[instrument]` から req を除外し生データ/PII をログに出さない。新規テストでチェーン記録を検証 / `context/src/http.rs:120-123` / R5-VU2 / confirmed
-- [ ] Qdrant スナップショット取得に HTTP タイムアウトがなくバックアップがハングし得る — `backup.rs:181` / R5-VU2 / likely
+- [x] Qdrant スナップショット取得に HTTP タイムアウトがなくバックアップがハングし得る — 2026-11-19 対応済み: reqwest blocking Client に 30 秒タイムアウトを設定（`JARVIS_QDRANT_TIMEOUT_SECS` で上書き可）。全リクエストに適用 / `backup.rs:181` / R5-VU2 / likely
 
 ### メモ（要判断・却下）
 
