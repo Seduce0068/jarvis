@@ -205,6 +205,20 @@ fn build_qdrant_client() -> Result<Client> {
         .context("Failed to build Qdrant HTTP client")
 }
 
+/// Picks the snapshot name to download from the snapshots-list response.
+///
+/// A backup must never finish with an empty Qdrant payload, so both an empty
+/// list and a blank name are hard errors instead of warnings.
+fn require_snapshot_name(response: &QdrantSnapshotResponse) -> Result<&str> {
+    let Some(snapshot) = response.result.first() else {
+        anyhow::bail!("No Qdrant snapshot found; aborting backup");
+    };
+    if snapshot.name.is_empty() {
+        anyhow::bail!("Qdrant snapshot name is empty; aborting backup");
+    }
+    Ok(snapshot.name.as_str())
+}
+
 fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
     info!("Backing up Qdrant...");
     let client = build_qdrant_client()?;
@@ -224,24 +238,20 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
         .error_for_status()?
         .json()?;
 
-    if let Some(snapshot) = response.result.first() {
-        let snapshot_name = &snapshot.name;
-        let output_file = backup_dir.join(format!("qdrant-{}.snapshot", date));
+    let snapshot_name = require_snapshot_name(&response)?;
+    let output_file = backup_dir.join(format!("qdrant-{}.snapshot", date));
 
-        let download = client
-            .get(&format!(
-                "http://localhost:6333/collections/jarvis_memories/snapshots/{}",
-                snapshot_name
-            ))
-            .send()?
-            .error_for_status()?
-            .bytes()?;
+    let download = client
+        .get(&format!(
+            "http://localhost:6333/collections/jarvis_memories/snapshots/{}",
+            snapshot_name
+        ))
+        .send()?
+        .error_for_status()?
+        .bytes()?;
 
-        fs::write(&output_file, download)?;
-        info!("Qdrant backup completed: {}", output_file.display());
-    } else {
-        warn!("No Qdrant snapshot found");
-    }
+    fs::write(&output_file, download)?;
+    info!("Qdrant backup completed: {}", output_file.display());
 
     Ok(())
 }
@@ -493,5 +503,33 @@ mod tests {
             build_qdrant_client().is_ok(),
             "Qdrant HTTP client must build with the configured timeout"
         );
+    }
+
+    fn snapshot_response(json: &str) -> QdrantSnapshotResponse {
+        serde_json::from_str(json).expect("test fixture must be valid JSON")
+    }
+
+    #[test]
+    fn require_snapshot_name_rejects_empty_list() {
+        let response = snapshot_response(r#"{"result":[]}"#);
+        assert!(
+            require_snapshot_name(&response).is_err(),
+            "empty snapshot list must fail the backup"
+        );
+    }
+
+    #[test]
+    fn require_snapshot_name_rejects_blank_name() {
+        let response = snapshot_response(r#"{"result":[{"name":""}]}"#);
+        assert!(
+            require_snapshot_name(&response).is_err(),
+            "blank snapshot name must fail the backup"
+        );
+    }
+
+    #[test]
+    fn require_snapshot_name_uses_first_snapshot() {
+        let response = snapshot_response(r#"{"result":[{"name":"first"},{"name":"second"}]}"#);
+        assert_eq!(require_snapshot_name(&response).unwrap(), "first");
     }
 }
