@@ -48,6 +48,11 @@ struct Entry {
     request: ApprovalRequest,
     decision: Option<ApprovalDecision>,
     decided_at: Option<DateTime<Utc>>,
+    /// The authoritative deadline computed at registration (the min of the
+    /// configured timeout and the caller's `expires_at`). Stored so `prune`
+    /// can reclaim pending entries whose waiter was abandoned before it ever
+    /// reached the timeout branch.
+    deadline: DateTime<Utc>,
     tx: watch::Sender<Option<ApprovalDecision>>,
 }
 
@@ -173,6 +178,7 @@ impl ApprovalStore {
                     request,
                     decision: None,
                     decided_at: None,
+                    deadline,
                     tx,
                 },
             );
@@ -249,13 +255,38 @@ impl ApprovalStore {
             .collect()
     }
 
-    /// Drop decided entries that are older than twice the timeout.
+    /// Drop entries that can no longer produce a real decision.
+    ///
+    /// Besides the decided-entry retention window (older than twice the
+    /// timeout), two kinds of expired entries are reclaimed:
+    ///   * entries already recorded as [`ApprovalDecision::Expired`];
+    ///   * pending entries (`decided_at.is_none()`) whose deadline has passed.
+    ///
+    /// The second case matters when a waiter is cancelled (e.g. the client
+    /// disconnects) before `try_request` reaches its timeout branch: without
+    /// this, the entry keeps `decision = None` forever and permanently eats a
+    /// `max_pending` slot. Called at the front of [`Self::try_request`], so no
+    /// periodic task is needed.
     fn prune(entries: &mut HashMap<Uuid, Entry>, timeout: Duration, now: DateTime<Utc>) {
         let retention = timeout.as_secs().saturating_mul(2).min(i64::MAX as u64) as i64;
         let cutoff = now - chrono::Duration::seconds(retention);
-        entries.retain(|_, entry| match entry.decided_at {
-            Some(decided_at) => decided_at > cutoff,
-            None => true,
+        entries.retain(|_, entry| {
+            let expired = matches!(entry.decision.as_ref(), Some(ApprovalDecision::Expired));
+            let deadline_passed = entry.decided_at.is_none() && now > entry.deadline;
+            if expired || deadline_passed {
+                // Wake a still-waiting receiver with the same decision the
+                // ordinary timeout path produces. Dropping the entry (and its
+                // sender) would also end the wait via the closed channel, but
+                // an explicit send keeps this path consistent with `decide`
+                // and the timeout branch. Ignore send errors: no receiver means
+                // the waiter already went away.
+                let _ = entry.tx.send(Some(ApprovalDecision::Expired));
+                return false;
+            }
+            match entry.decided_at {
+                Some(decided_at) => decided_at > cutoff,
+                None => true,
+            }
         });
     }
 }
@@ -455,6 +486,52 @@ mod tests {
 
         store.decide(first_id, approved()).await.expect("decide");
         let _ = waiter.await.expect("waiter task");
+    }
+
+    #[tokio::test]
+    async fn expired_pending_entries_do_not_exhaust_the_queue() {
+        // Regression: an abandoned waiter leaves a pending entry behind. Once
+        // its deadline passes, prune() must reclaim the slot so a new request
+        // is not rejected with QueueFull.
+        let store = ApprovalStore::with_max_pending(Duration::from_millis(50), 1);
+        let first = make_request();
+        let first_id = first.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(first).await });
+
+        loop {
+            if matches!(store.status(first_id).await, Ok(ApprovalDecision::Pending)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+
+        // Simulate the abandoned waiter: drop the task before its timeout
+        // fires, leaving the entry pending with no live decision path.
+        waiter.abort();
+        let _ = waiter.await;
+
+        // Let the stale entry's deadline pass. No periodic task exists, so it
+        // is still pending until the next request triggers prune().
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(matches!(
+            store.status(first_id).await,
+            Ok(ApprovalDecision::Pending)
+        ));
+
+        // The new request must be enqueued (and then follow the normal expiry
+        // path), not rejected as QueueFull.
+        let second = store.try_request(make_request()).await;
+        assert!(
+            matches!(second, Ok(ApprovalDecision::Expired)),
+            "stale pending entry must not occupy the only slot: {second:?}"
+        );
+        // The abandoned entry was actually removed by prune(), not just
+        // bypassed by an off-by-one in the capacity check.
+        assert!(matches!(
+            store.status(first_id).await,
+            Err(ApprovalError::NotFound(_))
+        ));
     }
 
     #[tokio::test]
