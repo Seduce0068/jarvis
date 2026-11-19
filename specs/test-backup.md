@@ -250,6 +250,8 @@ Scenario: TC-L2 drift 検出
 | TC-B5 | REQ-18 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.6 | T3 |
 | TC-V1 | REQ-8 | v5.0.0-V14.2.4 | SP800-53r5.2/SI-7 | ATE_COV.2 | 5.2.1 | T1 |
 | TC-V1 | REQ-9 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-7 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-V2 | REQ-4 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-7 | ATE_FUN.1 | 5.2.6 | T1 |
+| TC-V2 | REQ-5 | - | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.1 | T2 |
 | TC-V3 | REQ-10 | - | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.1 | T2 |
 | TC-V3 | REQ-11 | v5.0.0-V16.5.3 | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-V4 | REQ-12 | - | SP800-53r5.2/SI-7 | ATE_FUN.1 | 5.2.9 | T2 |
@@ -283,7 +285,8 @@ L-3: [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh) の
 
 回帰テストは [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh)
 と [test-legacy-guards.sh](../ci/scripts/test-legacy-guards.sh) にあり、
-`make test-verify-backup` (23 checks) と `make safety-test` (22 checks) で実行する。
+`make test-verify-backup` (23 checks) と `make test-backup-args` (6 checks)、
+合計 29 checks で実行する。
 実行結果は `evidence/` の test-run JSON に記録する。
 
 TC-B3 (秘密情報の非包含) と TC-V4 (形式検査) は task-24 の
