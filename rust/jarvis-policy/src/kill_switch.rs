@@ -15,6 +15,11 @@ use tracing::warn;
 const POISONED_LOCK_REASON: &str = "kill switch state lock poisoned; failing closed";
 /// Reason recorded when the state file cannot be written.
 const PERSIST_FAILURE_REASON: &str = "failed to persist kill switch state; failing closed";
+/// Reason recorded when the system clock predates UNIX_EPOCH. Reading the
+/// clock is fallible (e.g. on time regression); a safety device must fail
+/// closed and log the degradation rather than panic (fatal under `panic =
+/// "abort"`).
+const CLOCK_FAILURE_REASON: &str = "system clock is before UNIX_EPOCH; failing closed";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KillSwitchStatus {
@@ -134,10 +139,18 @@ impl KillSwitch {
     /// Set the in-memory state without persisting. Used by [`Self::restore`]
     /// so a corrupt state file is not overwritten during recovery.
     fn arm(&self, reason: String) {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        // `duration_since` returns Err when the clock is before UNIX_EPOCH
+        // (e.g. on time regression). Never unwrap here: this is the emergency
+        // stop path and a panic is fatal under `panic = "abort"`. Fail closed
+        // instead: keep the switch armed, use a sentinel timestamp and record
+        // the degradation in the reason slot alongside the original reason.
+        let (now, reason) = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => (duration.as_secs(), reason),
+            Err(error) => {
+                warn!("kill switch clock is before UNIX_EPOCH: {error}; failing closed");
+                (0, format!("{CLOCK_FAILURE_REASON}: {reason}"))
+            }
+        };
         self.activated.store(true, Ordering::SeqCst);
         self.activated_at.store(now, Ordering::SeqCst);
         Self::write_slot(&self.reason, Some(reason));
