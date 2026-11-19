@@ -10,10 +10,12 @@
 # seven-column Traceability header, the six 29119-3 information items in
 # Document map, and a tailored conformance statement (test-spec skill).
 # Evidence timestamps must be RFC 3339, signatures self-attested, and
-# document_type (when present) one of the declared kinds. Every notes count
-# must agree with results.passed/failed/skipped, so a multi-gate claim cannot
-# drift away from the single aggregated total. The executed total must also cover
-# every `Scenario:` declared by the referenced spec, so a run that executes
+# document_type (when present) one of the declared kinds. `notes` must be a str
+# and every results count a strict, non-negative int; a wrong type fails closed
+# instead of silently skipping a check. Every notes count must agree with
+# results.passed/failed/skipped, so a multi-gate claim cannot drift away from
+# the single aggregated total. The executed total must also cover every
+# `Scenario:` declared by the referenced spec, so a run that executes
 # only part of a specification cannot pass. Values are withheld from error
 # output; no secret values are read.
 set -euo pipefail
@@ -87,6 +89,20 @@ for f in evidence_files:
         errors.append(f"{f}: FAILED_TESTS"); continue
     if type(r.get("passed", 0)) is not int or r.get("passed", 0) <= 0:
         errors.append(f"{f}: NO_PASSING_TESTS"); continue
+    # Type fail-closed gate. `failed` and `passed` were already narrowed to
+    # strict ints above, so their legacy error codes are preserved. This closes
+    # the remaining gap where a str/dict/float/negative count (most importantly
+    # `skipped`) silently bypassed the skipped, notes and scenario checks below.
+    # bool is an int subclass, so require the exact int type. Values never printed.
+    if any(type(r.get(k)) is not int or r[k] < 0
+           for k in ("passed", "failed", "skipped")):
+        errors.append(f"{f}: BAD_RESULTS_TYPE"); continue
+    # `notes` must be a str whenever present: a dict/list previously turned the
+    # skipped-justification and notes-consistency checks into no-ops. Fail closed
+    # with a value-less code; an absent notes still defaults to "".
+    notes = d.get("notes", "")
+    if not isinstance(notes, str):
+        errors.append(f"{f}: BAD_NOTES_TYPE"); continue
     # A near-total skip must not satisfy the gate. A positive skipped count is
     # accepted only when the evidence notes explicitly document it as
     # `ignored` (e.g. Docker-only #[ignore] tests): silently rewriting the
