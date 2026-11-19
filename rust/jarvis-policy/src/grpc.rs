@@ -24,7 +24,11 @@ impl PolicyService for GrpcPolicyService {
         request: Request<CheckRequest>,
     ) -> Result<Response<CheckResponse>, Status> {
         let req = request.into_inner();
-        let context: serde_json::Value = serde_json::from_str(&req.context).unwrap_or_default();
+        // A malformed context used to fall back to an empty object via
+        // `unwrap_or_default()`, so Cedar evaluated a different request than
+        // the caller sent. Reject it at the RPC boundary instead.
+        let context: serde_json::Value = serde_json::from_str(&req.context)
+            .map_err(|e| Status::invalid_argument(format!("invalid context JSON: {}", e)))?;
         let allowed = self
             .engine
             .is_allowed(&req.principal, &req.action, &req.resource, &context)
@@ -101,4 +105,77 @@ pub async fn serve_with_listener(
         .serve_with_incoming(incoming)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::PolicyEngine;
+    use crate::config::PolicyConfig;
+    use std::path::{Path, PathBuf};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jarvis-policy-grpc-{label}"));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    /// Build a service backed by a real engine using the shipped Casbin files,
+    /// mirroring the setup in `client::tests::start_server`.
+    async fn test_service(label: &str) -> GrpcPolicyService {
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
+        let dir = temp_dir(label);
+        let model = dir.join("casbin_model.conf");
+        let policy = dir.join("casbin_policy.csv");
+        std::fs::copy(source.join("casbin_model.conf"), &model).expect("copy casbin model");
+        std::fs::copy(source.join("casbin_policy.csv"), &policy).expect("copy casbin policy");
+
+        let config = PolicyConfig {
+            cedar_policy_dir: dir.join("cedar").to_string_lossy().into_owned(),
+            casbin_model_path: model.to_string_lossy().into_owned(),
+            casbin_policy_path: policy.to_string_lossy().into_owned(),
+            kill_switch_admin_token: "test-admin-token".into(),
+            ..Default::default()
+        };
+        let engine = Arc::new(
+            PolicyEngine::new(config)
+                .await
+                .expect("policy engine starts"),
+        );
+        GrpcPolicyService { engine }
+    }
+
+    fn check_request(context: &str) -> Request<CheckRequest> {
+        Request::new(CheckRequest {
+            principal: "jarvis".into(),
+            action: "execute".into(),
+            resource: "tool:filesystem.read".into(),
+            context: context.into(),
+        })
+    }
+
+    /// Regression: unparseable context must not silently become `{}`; the gRPC
+    /// layer must surface it as `InvalidArgument` (tonic code 3).
+    #[tokio::test]
+    async fn malformed_context_json_is_invalid_argument() {
+        let service = test_service("malformed-context").await;
+
+        let status = service
+            .check(check_request("{ not valid json"))
+            .await
+            .expect_err("malformed JSON context must be rejected");
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    }
+
+    /// Guard the normal path: well-formed JSON still reaches evaluation.
+    #[tokio::test]
+    async fn valid_context_json_is_accepted() {
+        let service = test_service("valid-context").await;
+
+        service
+            .check(check_request(r#"{"event":{"type":"state_changed"}}"#))
+            .await
+            .expect("well-formed JSON context is accepted");
+    }
 }
