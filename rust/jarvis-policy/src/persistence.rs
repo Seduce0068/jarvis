@@ -312,8 +312,10 @@ impl Connection {
             })?;
 
         let driver = tokio::spawn(async move {
-            if let Err(error) = connection.await {
-                tracing::error!(%error, "approval persistence connection task ended");
+            if connection.await.is_err() {
+                // Fixed vocabulary only (I47-A): the driver error can embed
+                // connection detail, so the value is deliberately discarded.
+                db_error(DbOperation::ConnectionTask);
             }
         });
 
@@ -338,9 +340,9 @@ impl Connection {
         // aborted first, so a cancelled connect left the mutex holding a client
         // whose driver was already dead with no rescue path.
         let fresh = Self::open(pg_url).await.map_err(|_| {
-            // Never log the URL or the connect error text: both may carry
-            // credentials.
-            tracing::error!("failed to reconnect approval persistence after connection loss");
+            // Fixed vocabulary only (I47-A): neither the URL nor any connect
+            // error text (both may carry credentials) reaches a log record.
+            db_error(DbOperation::Reconnect);
             ApprovalError::Persistence
         })?;
 
@@ -432,8 +434,8 @@ impl PgApprovalPersistence {
     /// `MAX_DB_ATTEMPTS` generation cap is unchanged (I42-C).
     ///
     /// No URL, SQL, decision label or payload is logged: a probe error is
-    /// discarded and a reconnect failure is logged generically inside
-    /// [`Connection::reconnect`].
+    /// discarded and a reconnect failure is logged through the fixed-vocabulary
+    /// [`db_error`] seam (I47-A).
     // The shared budget and the lost-ack retry flag are deliberately passed
     // explicitly: bundling them would hide the transaction/probe budget split.
     #[allow(clippy::too_many_arguments)]
@@ -503,7 +505,8 @@ impl PgApprovalPersistence {
     /// [`db_failure`] to [`ApprovalError::Persistence`] (HTTP 503, retry later),
     /// which is distinct from [`ApprovalError::QueueFull`] so callers can tell a
     /// persistence outage from queue exhaustion. Raw database text is never
-    /// carried in the error.
+    /// carried in the error, nor in any log record (I47-A): every log site in
+    /// this module goes through a fixed-vocabulary helper.
     ///
     /// A failed transaction (or a broken connection at `transaction()` time) is
     /// retried up to [`MAX_DB_ATTEMPTS`] times; the whole transaction is redone
@@ -533,9 +536,9 @@ impl PgApprovalPersistence {
             // One whole transaction. `AlreadyDecided` is returned as a success
             // of the *attempt* so it is not retried; a `tokio_postgres::Error`
             // from any step drops `tx` (rolling back) and triggers a reconnect.
-            // tokio-postgres operation errors never contain the connection URL
-            // (that is only ever passed to `connect` and sanitized in
-            // `Connection::open`), so logging them keeps the no-URL policy.
+            // Any tokio-postgres error is discarded here (I47-A): it may echo
+            // statement or constraint detail, so only a fixed category and the
+            // attempt number are logged. Retry/read-back logic is unchanged.
             let outcome: Result<TransactionOutcome, tokio_postgres::Error> = async {
                 let tx = guard.client.transaction().await?;
 
@@ -621,12 +624,8 @@ impl PgApprovalPersistence {
                 Ok(TransactionOutcome::AlreadyDecided) => {
                     return Err(ApprovalError::AlreadyDecided(id));
                 }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        attempt_no,
-                        "approval decision transaction attempt failed"
-                    );
+                Err(_error) => {
+                    db_attempt_warn(DbOperation::Transaction, attempt_no);
                     // The error is ambiguous: the server may have committed and
                     // only the acknowledgement was lost. Resolve it with a
                     // read-back probe (I38-A), plus one dedicated extra probe on
@@ -665,7 +664,7 @@ impl PgApprovalPersistence {
                             if should_retry(attempt_no, MAX_DB_ATTEMPTS) {
                                 continue;
                             }
-                            return Err(db_failure(error));
+                            return Err(db_failure(DbOperation::Transaction));
                         }
                     }
                 }
@@ -681,10 +680,10 @@ impl ApprovalPersistence for PgApprovalPersistence {
     ///
     /// This runs before the store starts waiting (and therefore before any
     /// `decide` CAS), so on the success path the row exists when the decision
-    /// arrives. On a failed INSERT, [`db_failure`] logs the error and returns
-    /// [`ApprovalError::Persistence`]; the store then rolls back the in-memory
-    /// registration and answers HTTP 503 (retry). This fail-closed choice
-    /// (R4-PERSIST) prevents an orphan hold whose later `decide` would hit a
+    /// arrives. On a failed INSERT, [`db_failure`] logs a fixed-vocabulary
+    /// failure and returns [`ApprovalError::Persistence`]; the store then rolls
+    /// back the in-memory registration and answers HTTP 503 (retry). This
+    /// fail-closed choice (R4-PERSIST) prevents an orphan hold whose later `decide` would hit a
     /// zero-row CAS and surface as `AlreadyDecided` (409) with no audit row.
     async fn record_request(
         &self,
@@ -714,14 +713,14 @@ impl ApprovalPersistence for PgApprovalPersistence {
 
             match result {
                 Ok(_) => return Ok(()),
-                Err(error) => {
-                    // Operation errors never contain the connection URL (see
-                    // `commit_decision`), so logging them is safe.
-                    tracing::warn!(%error, attempt_no, "record_request database attempt failed");
+                Err(_error) => {
+                    // Fixed vocabulary only (I47-A): the raw error is discarded
+                    // before the attempt is logged.
+                    db_attempt_warn(DbOperation::RecordRequest, attempt_no);
                     if should_retry(attempt_no, MAX_DB_ATTEMPTS) {
                         guard.reconnect(&self.pg_url).await?;
                     } else {
-                        return Err(db_failure(error));
+                        return Err(db_failure(DbOperation::RecordRequest));
                     }
                 }
             }
@@ -772,14 +771,14 @@ impl ApprovalPersistence for PgApprovalPersistence {
                         })
                         .collect());
                 }
-                Err(error) => {
-                    // Operation errors never contain the connection URL (see
-                    // `commit_decision`), so logging them is safe.
-                    tracing::warn!(%error, attempt_no, "load_pending database attempt failed");
+                Err(_error) => {
+                    // Fixed vocabulary only (I47-A): the raw error is discarded
+                    // before the attempt is logged.
+                    db_attempt_warn(DbOperation::LoadPending, attempt_no);
                     if should_retry(attempt_no, MAX_DB_ATTEMPTS) {
                         guard.reconnect(&self.pg_url).await?;
                     } else {
-                        return Err(db_failure(error));
+                        return Err(db_failure(DbOperation::LoadPending));
                     }
                 }
             }
@@ -836,15 +835,15 @@ impl ApprovalPersistence for PgApprovalPersistence {
                     }));
                 }
                 Ok(None) => return Ok(None),
-                Err(error) => {
-                    // Fixed-vocabulary log only: a tokio-postgres error can
-                    // echo statement text, and this seam must never emit URL,
-                    // SQL or decision body into a log record.
-                    tracing::warn!(attempt_no, "load_decision database attempt failed");
+                Err(_error) => {
+                    // Fixed-vocabulary log only (I47-A): the tokio-postgres
+                    // error is not accepted by the logging seam, so no URL, SQL
+                    // or decision body can reach a log record from here.
+                    db_attempt_warn(DbOperation::LoadDecision, attempt_no);
                     if should_retry(attempt_no, MAX_DB_ATTEMPTS) {
                         guard.reconnect(&self.pg_url).await?;
                     } else {
-                        return Err(db_failure(error));
+                        return Err(db_failure(DbOperation::LoadDecision));
                     }
                 }
             }
@@ -897,10 +896,78 @@ fn decision_from_columns(
     }
 }
 
-/// Log the database error for operators, but never surface its raw text: a
-/// tokio-postgres error may embed statement/connection details.
-fn db_failure(error: tokio_postgres::Error) -> ApprovalError {
-    tracing::error!(error = %error, "approval persistence operation failed");
+/// Closed set of operations that may be named in a persistence log record.
+///
+/// A variant carries no data, so a `tokio_postgres::Error`, connection URL, SQL
+/// statement or decision payload has no representation here. Together with the
+/// fixed `error_kind = "postgres"` marker and an optional attempt number, these
+/// labels are the entire log vocabulary of this module (I47-A).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DbOperation {
+    ConnectionTask,
+    Reconnect,
+    Transaction,
+    RecordRequest,
+    LoadPending,
+    LoadDecision,
+}
+
+impl DbOperation {
+    #[cfg(test)]
+    const ALL: [Self; 6] = [
+        Self::ConnectionTask,
+        Self::Reconnect,
+        Self::Transaction,
+        Self::RecordRequest,
+        Self::LoadPending,
+        Self::LoadDecision,
+    ];
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ConnectionTask => "connection_task",
+            Self::Reconnect => "reconnect",
+            Self::Transaction => "commit_decision",
+            Self::RecordRequest => "record_request",
+            Self::LoadPending => "load_pending",
+            Self::LoadDecision => "load_decision",
+        }
+    }
+}
+
+/// Error-level, fixed-vocabulary database log record.
+///
+/// This is one of only two places in this module that reach `tracing` (the
+/// other is [`db_attempt_warn`]). Its signature accepts only a closed enum
+/// label, so raw error text, URLs, SQL and payloads cannot be logged here.
+fn db_error(operation: DbOperation) {
+    tracing::error!(
+        error_kind = "postgres",
+        operation = operation.as_str(),
+        "approval persistence database operation failed"
+    );
+}
+
+/// Warn-level, fixed-vocabulary log record for a failed database attempt.
+///
+/// Only the closed operation label and the attempt number are emitted; the
+/// `tokio_postgres::Error` that triggered the retry is deliberately discarded.
+fn db_attempt_warn(operation: DbOperation, attempt_no: usize) {
+    tracing::warn!(
+        error_kind = "postgres",
+        operation = operation.as_str(),
+        attempt_no,
+        "approval persistence database attempt failed"
+    );
+}
+
+/// Terminal database failure: fixed vocabulary only, no raw error text.
+///
+/// Callers pass only the operation that failed. The `tokio_postgres::Error`
+/// itself is never accepted, so statement text, constraint-violation detail,
+/// connection URLs and decision payloads cannot reach a log record from here.
+fn db_failure(operation: DbOperation) -> ApprovalError {
+    db_error(operation);
     ApprovalError::Persistence
 }
 
@@ -1400,6 +1467,124 @@ mod tests {
                 None
             ),
             Some(DurableResolution::OurCommit)
+        );
+    }
+
+    // ---- I47-A fixed-vocabulary logging / PROBE non-leak regression --------
+
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// In-memory sink for the JSON formatter, mirroring the OTLP-bound output.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer mutex poisoned")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Render the real JSON log lines a caller emits into an in-memory buffer.
+    fn capture_db_logs<F: FnOnce()>(f: F) -> String {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, f);
+        }
+        String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8")
+    }
+
+    /// No persistence log record may carry a token, a credential-bearing URL,
+    /// SQL text, a driver DETAIL or a decision payload. The control event first
+    /// proves the JSON capture observes those values, so the production
+    /// assertions cannot pass on an empty capture. This is the PROBE regression
+    /// for the review finding that `db_failure` (and the attempt warnings)
+    /// interpolated the raw `tokio_postgres::Error` into tracing.
+    #[test]
+    fn persistence_logs_never_leak_token_url_sql_or_payload() {
+        const SENSITIVE: [&str; 5] = [
+            "sk-jarvis-probe-token-4711",
+            "postgresql://policy:probe-secret@127.0.0.1:5432/jarvis",
+            "UPDATE approval_requests SET decision",
+            "DETAIL:  Key (id)=(00000000-0000-0000-0000-000000000001) already exists",
+            "alice@example.com",
+        ];
+
+        let (token, url, sql, detail, payload) = (
+            SENSITIVE[0],
+            SENSITIVE[1],
+            SENSITIVE[2],
+            SENSITIVE[3],
+            SENSITIVE[4],
+        );
+        let control = capture_db_logs(|| {
+            tracing::info!(token, url, sql, detail, payload, "probe control event");
+        });
+        assert!(
+            control.contains(SENSITIVE[0]),
+            "control event must be observable, otherwise this test proves nothing: {control}"
+        );
+
+        // Every production logging seam, every closed label, first and last
+        // attempt numbers, plus the terminal failure helper.
+        let log = capture_db_logs(|| {
+            for op in DbOperation::ALL {
+                db_error(op);
+                db_attempt_warn(op, 1);
+                db_attempt_warn(op, MAX_DB_ATTEMPTS);
+                assert!(matches!(db_failure(op), ApprovalError::Persistence));
+            }
+        });
+
+        assert!(log.contains("\"error_kind\":\"postgres\""), "{log}");
+        assert!(log.contains("\"operation\":\"commit_decision\""), "{log}");
+        assert!(log.contains("\"attempt_no\":1"), "{log}");
+        assert!(log.contains("\"attempt_no\":3"), "{log}");
+        for secret in SENSITIVE {
+            assert!(!log.contains(secret), "log leaked {secret}: {log}");
+        }
+    }
+
+    /// Structural guard: all production logging is routed through the two
+    /// fixed-vocabulary helpers. Neither accepts an error value, a URL or a SQL
+    /// string, so no call site can reintroduce raw interpolation (I47-A).
+    #[test]
+    fn persistence_logging_is_centralized_in_fixed_vocabulary_helpers() {
+        let source = include_str!("persistence.rs");
+        // Split at the test module itself, not at the earlier `#[cfg(test)]`
+        // on the test-only `DbOperation::ALL` constant.
+        let cut = source
+            .find("\n#[cfg(test)]\nmod tests")
+            .expect("test module marker");
+        let production = &source[..cut];
+        assert_eq!(
+            production.matches("tracing::").count(),
+            2,
+            "only db_error and db_attempt_warn may reach tracing"
         );
     }
 }
