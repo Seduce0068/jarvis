@@ -54,6 +54,42 @@ struct StoreMemoryResponse {
     id: String,
 }
 
+/// Additive HTTP view of a memory entry (P1-1).
+///
+/// `score` comes from Qdrant ranking and is absent for entries that were never
+/// ranked. Skipping it when `None` keeps responses byte-compatible with
+/// pre-score clients; newer clients can read the key when present, while older
+/// ones ignore it as an unknown field.
+#[derive(Debug, Serialize)]
+struct MemoryEntryResponse {
+    id: uuid::Uuid,
+    content: String,
+    embedding: Vec<f32>,
+    metadata: serde_json::Value,
+    source: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    score: Option<f32>,
+}
+
+impl From<MemoryEntry> for MemoryEntryResponse {
+    fn from(memory: MemoryEntry) -> Self {
+        Self {
+            id: memory.id,
+            content: memory.content,
+            embedding: memory.embedding,
+            metadata: memory.metadata,
+            source: memory.source,
+            created_at: memory.created_at,
+            updated_at: memory.updated_at,
+            expires_at: memory.expires_at,
+            score: memory.score,
+        }
+    }
+}
+
 /// Header carrying the shared admin token on the context HTTP API.
 const ADMIN_TOKEN_HEADER: &str = "x-jarvis-context-token";
 
@@ -287,6 +323,7 @@ fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryRes
         expires_at: req
             .expires_at
             .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
+        score: None,
     };
     (memory, response)
 }
@@ -308,12 +345,17 @@ async fn store_memory(
 async fn search_memory(
     State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<SearchMemoryRequest>,
-) -> Result<Json<Vec<MemoryEntry>>, axum::http::StatusCode> {
+) -> Result<Json<Vec<MemoryEntryResponse>>, axum::http::StatusCode> {
     let memories = builder
         .search(&req.query, req.limit)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(memories))
+    Ok(Json(
+        memories
+            .into_iter()
+            .map(MemoryEntryResponse::from)
+            .collect(),
+    ))
 }
 
 pub async fn serve(builder: Arc<ContextBuilder>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
@@ -326,9 +368,9 @@ pub async fn serve(builder: Arc<ContextBuilder>, addr: std::net::SocketAddr) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_TOKEN_HEADER, AuthState, MemoryBackend, MemoryEntry, StoreMemoryRequest,
-        UnifiedEvent, build_context, constant_time_eq, log_internal_error, prepare_store_memory,
-        require_admin_token, search_memory, store_memory,
+        ADMIN_TOKEN_HEADER, AuthState, MemoryBackend, MemoryEntry, MemoryEntryResponse,
+        StoreMemoryRequest, UnifiedEvent, build_context, constant_time_eq, log_internal_error,
+        prepare_store_memory, require_admin_token, search_memory, store_memory,
     };
     use axum::{
         Router,
@@ -446,6 +488,28 @@ mod tests {
         assert_eq!(
             memory.expires_at,
             chrono::DateTime::from_timestamp(1_800_000_000, 0)
+        );
+        assert_eq!(memory.score, None, "a stored (unranked) entry has no score");
+    }
+
+    /// P1-1 over HTTP: ranked responses carry `score`, unranked ones keep the
+    /// legacy JSON shape, so existing clients are unaffected either way.
+    #[test]
+    fn search_response_exposes_score_additively() {
+        let (mut memory, _) = prepare_store_memory(store_request(None));
+        memory.score = Some(0.75);
+
+        let ranked = serde_json::to_value(MemoryEntryResponse::from(memory.clone()))
+            .expect("ranked entry serializes");
+        assert_eq!(ranked["score"], serde_json::json!(0.75));
+        assert_eq!(ranked["content"], serde_json::json!("sensitive content"));
+
+        memory.score = None;
+        let unranked = serde_json::to_value(MemoryEntryResponse::from(memory))
+            .expect("unranked entry serializes");
+        assert!(
+            unranked.get("score").is_none(),
+            "an unranked response must not gain a null score key"
         );
     }
 

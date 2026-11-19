@@ -78,9 +78,28 @@ fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryRes
         } else {
             None
         },
+        score: None,
     };
     let response = StoreMemoryResponse { id: id.to_string() };
     (memory, response)
+}
+
+/// Map a core entry to its proto view, preserving the additive score (P1-1).
+///
+/// Kept as a pure function so score propagation is testable without a live
+/// PostgreSQL/Qdrant-backed builder.
+fn to_proto_memory_entry(memory: MemoryEntry) -> ProtoMemoryEntry {
+    ProtoMemoryEntry {
+        id: memory.id.to_string(),
+        content: memory.content,
+        embedding: memory.embedding,
+        metadata: memory.metadata.to_string(),
+        source: memory.source,
+        created_at: memory.created_at.timestamp(),
+        updated_at: memory.updated_at.timestamp(),
+        expires_at: memory.expires_at.map(|t| t.timestamp()).unwrap_or(0),
+        score: memory.score,
+    }
 }
 
 #[tonic::async_trait]
@@ -136,19 +155,7 @@ impl ContextService for GrpcContextService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
         Ok(Response::new(SearchMemoryResponse {
-            memories: memories
-                .into_iter()
-                .map(|m| ProtoMemoryEntry {
-                    id: m.id.to_string(),
-                    content: m.content,
-                    embedding: m.embedding,
-                    metadata: m.metadata.to_string(),
-                    source: m.source,
-                    created_at: m.created_at.timestamp(),
-                    updated_at: m.updated_at.timestamp(),
-                    expires_at: m.expires_at.map(|t| t.timestamp()).unwrap_or(0),
-                })
-                .collect(),
+            memories: memories.into_iter().map(to_proto_memory_entry).collect(),
         }))
     }
 }
@@ -166,6 +173,7 @@ pub async fn serve(builder: ContextBuilder, addr: std::net::SocketAddr) -> anyho
 mod tests {
     use super::{
         CONTEXT_TOKEN_HEADER, Request, StoreMemoryRequest, authorize, prepare_store_memory,
+        to_proto_memory_entry,
     };
     use std::io::Write;
     use std::sync::{Arc, Mutex};
@@ -299,5 +307,22 @@ mod tests {
             memory.expires_at,
             chrono::DateTime::from_timestamp(1_800_000_000, 0)
         );
+        assert_eq!(memory.score, None, "a stored (unranked) entry has no score");
+    }
+
+    /// P1-1 over gRPC: the additive proto `score` carries the similarity for
+    /// ranked entries and stays absent for non-ranked ones.
+    #[test]
+    fn proto_mapping_preserves_additive_score() {
+        let (mut memory, _) = prepare_store_memory(store_request("ignored"));
+
+        memory.score = Some(0.625);
+        let ranked = to_proto_memory_entry(memory.clone());
+        assert_eq!(ranked.score, Some(0.625));
+        assert_eq!(ranked.id, memory.id.to_string());
+
+        memory.score = None;
+        let unranked = to_proto_memory_entry(memory);
+        assert_eq!(unranked.score, None);
     }
 }

@@ -45,6 +45,14 @@ pub struct MemoryEntry {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Similarity score captured from vector search (P1-1).
+    ///
+    /// `None` for entries that never went through Qdrant ranking (for example
+    /// the PostgreSQL-only recent-memory path). `#[serde(default)]` keeps
+    /// deserialization compatible with payloads written before this additive
+    /// field existed; serde ignores the new key for older readers.
+    #[serde(default)]
+    pub score: Option<f32>,
 }
 
 /// Policy check request
@@ -235,6 +243,7 @@ mod tests {
             created_at: DateTime::from_timestamp(0, 0).expect("valid timestamp"),
             updated_at: DateTime::from_timestamp(0, 0).expect("valid timestamp"),
             expires_at: None,
+            score: Some(0.875),
         };
 
         let encoded = serde_json::to_string(&memory).expect("memory serializes");
@@ -242,5 +251,31 @@ mod tests {
         assert_eq!(decoded.content, memory.content);
         assert_eq!(decoded.embedding, memory.embedding);
         assert_eq!(decoded.metadata, memory.metadata);
+        assert_eq!(decoded.score, Some(0.875));
+        assert_eq!(
+            serde_json::to_value(&memory).expect("memory serializes to JSON")["score"],
+            serde_json::json!(0.875),
+            "the additive score must be exposed in serialized payloads"
+        );
+    }
+
+    /// Legacy payloads written before the additive `score` field existed must
+    /// still deserialize; the missing key becomes `None`, not an error.
+    #[test]
+    fn memory_entry_accepts_legacy_json_without_score() {
+        let legacy = r#"{
+            "id":"00000000-0000-0000-0000-000000000000",
+            "content":"legacy entry",
+            "embedding":[],
+            "metadata":{},
+            "source":"legacy",
+            "created_at":"1970-01-01T00:00:00Z",
+            "updated_at":"1970-01-01T00:00:00Z",
+            "expires_at":null
+        }"#;
+
+        let entry: MemoryEntry = serde_json::from_str(legacy).expect("legacy payload parses");
+        assert_eq!(entry.content, "legacy entry");
+        assert_eq!(entry.score, None, "a missing score must default to None");
     }
 }

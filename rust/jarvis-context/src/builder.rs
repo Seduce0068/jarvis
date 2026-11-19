@@ -18,6 +18,25 @@ fn reorder_by_ids(entries: Vec<MemoryEntry>, ids: &[Uuid]) -> Vec<MemoryEntry> {
     ids.iter().filter_map(|id| by_id.remove(id)).collect()
 }
 
+/// Attach Qdrant similarity scores captured before the PostgreSQL refetch.
+///
+/// The refetch only returns row columns, so the score would otherwise be lost
+/// (P1-1). Kept pure so both the relevance order and the score values are
+/// testable without a live Qdrant server. An id without a matching score keeps
+/// `None`, which stays distinguishable from a genuine zero score.
+fn attach_scores(
+    entries: Vec<MemoryEntry>,
+    scores: &std::collections::HashMap<Uuid, f32>,
+) -> Vec<MemoryEntry> {
+    entries
+        .into_iter()
+        .map(|mut entry| {
+            entry.score = scores.get(&entry.id).copied();
+            entry
+        })
+        .collect()
+}
+
 /// A memory is expired once `expires_at <= now` (UTC). The boundary is
 /// inclusive: an entry expiring exactly at `now` is already expired. `None`
 /// means the entry never expires.
@@ -94,6 +113,7 @@ fn entries_from_raw_points(points: Vec<(Option<String>, QdrantPayload)>) -> Vec<
                 created_at: now,
                 updated_at: now,
                 expires_at: None,
+                score: None, // Filled from the Qdrant score after the refetch.
             })
         })
         .collect()
@@ -321,6 +341,7 @@ async fn reconcile_pending(
             created_at: Utc::now(),
             updated_at: Utc::now(),
             expires_at: None,
+            score: None,
         };
 
         match sink.upsert(&memory).await {
@@ -497,7 +518,8 @@ impl Builder {
             None => return Ok(Vec::new()),
         };
 
-        // Search Qdrant
+        // Search Qdrant. Keep the score alongside each id: the PostgreSQL
+        // refetch below only returns row columns and cannot recover it (P1-1).
         let results = memory::search_vectors(
             &self.qdrant_client,
             &self.config.collection_name,
@@ -505,11 +527,12 @@ impl Builder {
             limit,
         )
         .await?;
+        let ids: Vec<Uuid> = results.iter().map(|(id, _)| *id).collect();
+        let scores: std::collections::HashMap<Uuid, f32> = results.into_iter().collect();
 
         // Fetch full entries from PostgreSQL, then reassemble in Qdrant's
         // relevance order (P1-1). Expired rows are excluded by SQL and filtered
         // again in Rust so the same UTC `<=` boundary holds on both sides.
-        let ids: Vec<Uuid> = results.iter().map(|r| r.id).collect();
         let client = self.pg_pool.get().await?;
         let rows = client.query(
             "SELECT id, content, metadata, source, created_at, updated_at, expires_at FROM memories WHERE id = ANY($1) AND (expires_at IS NULL OR expires_at > $2)",
@@ -527,9 +550,13 @@ impl Builder {
                 created_at: row.get(4),
                 updated_at: row.get(5),
                 expires_at: row.get(6),
+                score: None,
             })
             .collect();
-        Ok(reorder_by_ids(retain_unexpired(fetched, now), &ids))
+        Ok(attach_scores(
+            reorder_by_ids(retain_unexpired(fetched, now), &ids),
+            &scores,
+        ))
     }
 
     /// Recent memories with an injectable UTC `now`; expired entries
@@ -561,6 +588,7 @@ impl Builder {
                 created_at: row.get(4),
                 updated_at: row.get(5),
                 expires_at: row.get(6),
+                score: None,
             })
             .collect();
         Ok(retain_unexpired(entries, now))
@@ -647,6 +675,7 @@ fn apply_token_budget(
 
 pub mod memory {
     use super::*;
+    use qdrant_client::qdrant::point_id::PointIdOptions;
     use qdrant_client::qdrant::{
         CreateCollectionBuilder, Distance, PointStruct, SearchPointsBuilder, UpsertPointsBuilder,
         VectorParamsBuilder,
@@ -844,12 +873,31 @@ pub mod memory {
         Ok(())
     }
 
+    /// Extract a UUID string from a Qdrant scored point id.
+    ///
+    /// A missing `point_id`, missing `point_id_options` or a numeric id cannot
+    /// match PostgreSQL's `uuid` column, so all three map to `None` and the
+    /// point is skipped instead of becoming a fabricated nil/random id.
+    fn scored_point_id(scored: &qdrant_client::qdrant::ScoredPoint) -> Option<String> {
+        match scored
+            .id
+            .as_ref()
+            .and_then(|id| id.point_id_options.as_ref())
+        {
+            Some(PointIdOptions::Uuid(u)) => Some(u.to_string()),
+            Some(PointIdOptions::Num(_)) | None => None,
+        }
+    }
+
+    /// Return Qdrant hits as `(memory id, similarity score)` pairs in relevance
+    /// order. The score is captured here because the later PostgreSQL refetch
+    /// only returns row columns and cannot reconstruct it (P1-1).
     pub async fn search_vectors(
         client: &Qdrant,
         collection: &str,
         embedding: &[f32],
         limit: usize,
-    ) -> Result<Vec<MemoryEntry>> {
+    ) -> Result<Vec<(Uuid, f32)>> {
         let response = client
             .search_points(
                 SearchPointsBuilder::new(collection, embedding.to_vec(), limit as u64)
@@ -858,29 +906,26 @@ pub mod memory {
             .await
             .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
 
-        // A missing point id, missing `point_id_options`, or a numeric id
-        // cannot be represented as a `Uuid` matching PostgreSQL's `uuid`
-        // column. Map those to `None` so `entries_from_raw_points` skips the
-        // point (with a warning) instead of falling back to a nil/random id.
+        let scores: HashMap<Uuid, f32> = response
+            .result
+            .iter()
+            .filter_map(|scored| {
+                let id = parse_point_id(scored_point_id(scored).as_deref())?;
+                Some((id, scored.score))
+            })
+            .collect();
         let points = response
             .result
             .into_iter()
-            .map(|scored| {
-                let id_str = match scored.id.as_ref() {
-                    Some(id) => match id.point_id_options.as_ref() {
-                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(u)) => {
-                            Some(u.to_string())
-                        }
-                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(_)) | None => {
-                            None
-                        }
-                    },
-                    None => None,
-                };
-                (id_str, scored.payload)
-            })
+            .map(|scored| (scored_point_id(&scored), scored.payload))
             .collect();
-        Ok(entries_from_raw_points(points))
+
+        // Reuse the same validation as the entry path so a skipped point never
+        // contributes a foreign score to a valid id.
+        Ok(entries_from_raw_points(points)
+            .into_iter()
+            .map(|entry| (entry.id, scores.get(&entry.id).copied().unwrap_or(0.0)))
+            .collect())
     }
 }
 
@@ -1024,6 +1069,7 @@ mod tests {
             created_at: Utc::now(),
             updated_at: Utc::now(),
             expires_at,
+            score: None,
         }
     }
 
@@ -1416,7 +1462,7 @@ mod tests {
 
 #[cfg(test)]
 mod ordering_tests {
-    use super::reorder_by_ids;
+    use super::{attach_scores, reorder_by_ids};
     use jarvis_core::MemoryEntry;
     use serde_json::json;
     use uuid::Uuid;
@@ -1431,6 +1477,7 @@ mod ordering_tests {
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
             expires_at: None,
+            score: None,
         }
     }
 
@@ -1455,5 +1502,38 @@ mod ordering_tests {
         let b = Uuid::new_v4();
         let reordered = reorder_by_ids(vec![entry(a), entry(Uuid::new_v4())], &[b, a]);
         assert_eq!(reordered.iter().map(|e| e.id).collect::<Vec<_>>(), vec![a]);
+    }
+
+    /// P1-1: relevance order and scores must survive the PostgreSQL refetch
+    /// together. Pure test: no Qdrant/PostgreSQL connection is involved.
+    #[test]
+    fn reorder_then_attach_scores_keeps_order_and_scores() {
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        let c = Uuid::new_v4();
+        let fetched = vec![entry(c), entry(a), entry(b)];
+        let scores = std::collections::HashMap::from([(a, 0.9_f32), (b, 0.5), (c, 0.7)]);
+
+        let ordered = attach_scores(reorder_by_ids(fetched, &[b, a, c]), &scores);
+
+        assert_eq!(
+            ordered.iter().map(|e| (e.id, e.score)).collect::<Vec<_>>(),
+            vec![(b, Some(0.5)), (a, Some(0.9)), (c, Some(0.7))],
+            "score must follow its id after reordering"
+        );
+    }
+
+    /// A zero score is a real vector-search result and must not be confused
+    /// with a missing score from a non-ranked (PostgreSQL-only) path.
+    #[test]
+    fn attach_scores_distinguishes_zero_from_missing() {
+        let ranked = Uuid::new_v4();
+        let unranked = Uuid::new_v4();
+        let scores = std::collections::HashMap::from([(ranked, 0.0_f32)]);
+
+        let attached = attach_scores(vec![entry(ranked), entry(unranked)], &scores);
+
+        assert_eq!(attached[0].score, Some(0.0));
+        assert_eq!(attached[1].score, None);
     }
 }

@@ -75,6 +75,7 @@ async fn postgres_and_qdrant_round_trip() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
         expires_at: None,
+        score: None,
     };
     builder
         .store_memory(memory.clone())

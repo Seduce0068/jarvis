@@ -50,6 +50,9 @@ message MemoryEntry {
   int64 created_at = 6;
   int64 updated_at = 7;
   int64 expires_at = 8;
+  // Additive: vector-search similarity, absent for non-ranked entries.
+  // Older clients ignore field 9; older servers leave it unset.
+  optional float score = 9;
 }
 
 message Empty {}
