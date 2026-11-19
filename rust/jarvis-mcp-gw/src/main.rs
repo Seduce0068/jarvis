@@ -58,6 +58,92 @@ impl Drop for TracerGuard {
     }
 }
 
+/// Why waiting for the listener futures ended.
+enum ListenerOutcome {
+    /// The listeners finished on their own. The existing `try_join!` result is
+    /// preserved unchanged so its one-error aggregation stays intact.
+    Finished(Result<()>),
+    /// A termination signal arrived first. `select!` dropped the listener
+    /// futures, which stops every accept loop before a clean exit.
+    Shutdown,
+}
+
+/// Resolves when the process is asked to stop.
+///
+/// `Ctrl-C` covers interactive stops, while systemd sends `SIGTERM` from
+/// `systemctl stop`. Both are registered here so the race stays
+/// platform-independent; a registration failure degrades to the other signal
+/// instead of blocking a clean shutdown.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            eprintln!("jarvis-mcp-gw: failed to listen for Ctrl-C: {err}");
+        }
+    };
+
+    #[cfg(unix)]
+    {
+        let terminate = tokio::signal::unix::SignalKind::terminate();
+        let mut sigterm = match tokio::signal::unix::signal(terminate) {
+            Ok(signal) => signal,
+            Err(err) => {
+                eprintln!("jarvis-mcp-gw: failed to listen for SIGTERM: {err}");
+                ctrl_c.await;
+                return;
+            }
+        };
+
+        tokio::select! {
+            _ = ctrl_c => {}
+            _ = sigterm.recv() => {}
+        }
+    }
+
+    #[cfg(not(unix))]
+    ctrl_c.await;
+}
+
+/// Race the listener futures against the shutdown signal.
+///
+/// `biased;` gives the listener branch priority so a real listener failure is
+/// reported instead of being masked by a coincident signal. When the signal
+/// wins, `select!` drops the pending listener future and every accept loop
+/// stops before the explicit shutdown below.
+async fn race_listeners_with_shutdown<F, S>(listeners: F, signal: S) -> ListenerOutcome
+where
+    F: std::future::Future<Output = Result<()>>,
+    S: std::future::Future,
+{
+    tokio::select! {
+        biased;
+        result = listeners => ListenerOutcome::Finished(result),
+        _ = signal => {
+            info!("shutdown signal received; stopping listeners");
+            ListenerOutcome::Shutdown
+        }
+    }
+}
+
+/// Shut the tracer down on every post-listener exit path, then translate the
+/// outcome into the process exit status.
+///
+/// Fixed vocabulary only: a real listener error is returned unchanged to the
+/// caller instead of being re-logged, and no endpoint/config value is ever
+/// formatted into a shutdown message.
+fn complete_shutdown(outcome: ListenerOutcome, tracer: &TracerGuard) -> Result<()> {
+    // Explicit shutdown after the listeners stop; `TracerGuard::drop` remains
+    // the safety net for the early `?` returns above.
+    tracer.shutdown();
+
+    match outcome {
+        ListenerOutcome::Finished(result) => result,
+        ListenerOutcome::Shutdown => {
+            info!("listeners stopped, exiting cleanly");
+            Ok(())
+        }
+    }
+}
+
 /// Collector endpoint used when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset.
 const OTLP_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:4317";
 
@@ -178,13 +264,20 @@ async fn main() -> Result<()> {
     let grpc_addr = config.grpc_addr.parse()?;
     let http_addr = config.http_addr.parse()?;
 
-    tokio::try_join!(gateway.serve_grpc(grpc_addr), gateway.serve_http(http_addr),)?;
+    // Race both listeners against a termination signal. `biased;` keeps the
+    // listener branch first so a real failure is reported instead of being
+    // masked by a coincident signal; when the signal wins, the listener futures
+    // are dropped and both accept loops stop before a clean exit.
+    let outcome = race_listeners_with_shutdown(
+        async {
+            tokio::try_join!(gateway.serve_grpc(grpc_addr), gateway.serve_http(http_addr),)
+                .map(|_| ())
+        },
+        shutdown_signal(),
+    )
+    .await;
 
-    // Explicit shutdown on the normal exit path; `TracerGuard::drop` remains
-    // the safety net for the early `?` returns above.
-    tracer.shutdown();
-
-    Ok(())
+    complete_shutdown(outcome, &tracer)
 }
 
 #[cfg(test)]
@@ -327,6 +420,55 @@ mod tests {
         assert!(
             log.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
             "fixed error category missing: {log}"
+        );
+    }
+
+    /// Drop probe used by the shutdown regression test: the flag is set when
+    /// `tokio::select!` cancels (drops) the pending listener future.
+    struct ListenerProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for ListenerProbe {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    /// I52-C regression: a termination signal wins the listener race, the
+    /// pending listener future is dropped (accept loops stop), and the
+    /// shutdown outcome still routes through the explicit tracer shutdown so
+    /// queued spans are flushed on the signal path.
+    #[tokio::test]
+    async fn signal_stops_listeners_and_shuts_tracer_down() {
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = dropped.clone();
+        let listeners = async move {
+            let _probe = ListenerProbe(probe);
+            std::future::pending::<anyhow::Result<()>>().await
+        };
+
+        // `biased;` polls the listener branch first; it never completes, so the
+        // ready signal branch wins and `select!` drops the listener future.
+        let outcome = super::race_listeners_with_shutdown(listeners, std::future::ready(())).await;
+        assert!(
+            matches!(&outcome, super::ListenerOutcome::Shutdown),
+            "a ready shutdown signal must win over a pending listener"
+        );
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::SeqCst),
+            "listener future was not dropped when the shutdown signal fired"
+        );
+
+        // The shutdown outcome must go through the explicit tracer shutdown.
+        let provider = SdkTracerProvider::builder().build();
+        let observer = provider.clone();
+        let tracer = TracerGuard { provider };
+        assert!(
+            super::complete_shutdown(outcome, &tracer).is_ok(),
+            "clean shutdown must exit successfully"
+        );
+        assert!(
+            observer.shutdown().is_err(),
+            "shutdown outcome did not shut the tracer down"
         );
     }
 }
