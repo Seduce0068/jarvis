@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:08d29d5546cb814e77ed5bee79233eafeeec10bb05e672072ed9baff6bf3806e",
-  "timestamp": "2026-11-20T05:26:08+09:00",
+  "spec_hash": "sha256:6cf04d521f561d76f3b6adfc431bd6c6872ad5a0fa069fedbccea632d3f6983b",
+  "timestamp": "2026-11-20T05:41:17+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test --offline (working directory: ui)",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-ui.md",
-    "spec_hash": "sha256:08d29d5546cb814e77ed5bee79233eafeeec10bb05e672072ed9baff6bf3806e",
+    "spec_hash": "sha256:6cf04d521f561d76f3b6adfc431bd6c6872ad5a0fa069fedbccea632d3f6983b",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -43,7 +43,15 @@
       "REQ-17",
       "REQ-18",
       "REQ-19",
-      "REQ-20"
+      "REQ-20",
+      "REQ-21",
+      "REQ-22",
+      "REQ-23",
+      "REQ-24",
+      "REQ-25",
+      "REQ-26",
+      "REQ-27",
+      "REQ-28"
     ]
   },
   "techniques": [

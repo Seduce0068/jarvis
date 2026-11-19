@@ -314,6 +314,7 @@ Scenario: TC-U18 probe の fail-closed と 409 優先
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
 | --- | --- | --- | --- | --- | --- | --- |
+| TC-U2 | REQ-1 | v5.0.0-V16.5.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-U1 | REQ-3 | v5.0.0-V16.5.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-U1 | REQ-4 | v5.0.0-V16.5.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-U2 | REQ-5 | - | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.8 | T2 |

@@ -1,6 +1,6 @@
 {
   "spec_hash": "sha256:a44222ca21afa1b8294fee48c1cb0821422469d5eddd8dc131ff7342e9be1188",
-  "timestamp": "2026-11-20T05:26:08+09:00",
+  "timestamp": "2026-11-20T05:41:17+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-mcp-gw --lib --offline",
@@ -37,7 +37,14 @@
       "REQ-11",
       "REQ-12",
       "REQ-13",
-      "REQ-14"
+      "REQ-14",
+      "REQ-15",
+      "REQ-16",
+      "REQ-17",
+      "REQ-18",
+      "REQ-19",
+      "REQ-20",
+      "REQ-21"
     ]
   },
   "techniques": [
