@@ -2,7 +2,7 @@
 Description=JARVIS Context Builder
 Documentation=https://github.com/Seduce0068/jarvis
 # This binary embeds the shared migrations (001 and later, currently through
-# 004) via `sqlx::migrate!()` and applies them at startup: it is the final,
+# 005) via `sqlx::migrate!()` and applies them at startup: it is the final,
 # authoritative applier. jarvis-migrations.service is only the pre-flight
 # oneshot that applies the same sources early for availability; from here it
 # is just an ordering dependency. The existing policy ordering below is

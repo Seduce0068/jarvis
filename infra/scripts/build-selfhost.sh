@@ -26,11 +26,20 @@ fi
 # I35-A: one-commit distribution guarantee for migrations.
 # `sqlx::migrate!()` in jarvis-context embeds rust/migrations into the binary
 # at build time, while jarvis-migrations.service applies the same SQL from
-# /opt/jarvis/rust/migrations as a pre-flight. sqlx records a per-migration
-# checksum in _sqlx_migrations, so a binary/source mismatch makes context fail
-# at startup ("migration ... was previously applied but has been modified").
-# Every artifact here is built from this single checkout: never combine a
-# binary from another commit with these migration sources (or vice versa).
+# /opt/jarvis/rust/migrations as a pre-flight. The current shared set is
+# 001..005: 001_initial, 002_pending_embeddings, 003_audit_decided_by,
+# 004_pending_embeddings_retry, 005_pending_embeddings_dead_letter. The set
+# embedded in the binary and the *.sql files globbed here must be from the
+# same commit. sqlx records a per-migration checksum in _sqlx_migrations, so
+# a binary/source mismatch makes context fail at startup ("migration ... was
+# previously applied but has been modified"). Every artifact here is built
+# from this single checkout: never combine a binary from another commit with
+# these migration sources (or vice versa).
+# MAINTENANCE: when adding a migration (e.g. 006), update the "through NNN"
+# range in ALL unit comments (jarvis-migrations.service, jarvis-policy.service,
+# jarvis-context.service), this distribution guard, and the Runbook
+# (docs/integration/remaining-tasks.md) IN THE SAME COMMIT. Leaving any of
+# them stale makes reviewers trust a range that no longer matches the tree.
 MIGRATIONS_SRC="${REPO_DIR}/rust/migrations"
 if [[ ! -d "${MIGRATIONS_SRC}" ]]; then
   echo "migration sources not found at ${MIGRATIONS_SRC}" >&2

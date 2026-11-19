@@ -761,7 +761,12 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
 - sqlx は workspace に存在し `migrate` feature も有効
   （[Cargo.toml](../../rust/Cargo.toml):73）。ただし `sqlx::migrate!` の
   呼び出しや `_sqlx_migrations` を触るコードはなく、適用履歴は未管理。
-- `rust/migrations/` は `001_initial.sql` のみ（追加版なし）。
+- `rust/migrations/` は現行 001〜005 の 5 版（`001_initial.sql`、
+  `002_pending_embeddings.sql`、`003_audit_decided_by.sql`、
+  `004_pending_embeddings_retry.sql`、
+  `005_pending_embeddings_dead_letter.sql`）が存在する。
+- migration を追加したら jarvis-policy / jarvis-context / jarvis-migrations
+  各 unit の範囲コメントとこの Runbook を同一コミットで更新すること。
 
 #### 選択肢の比較（P1-3 / 要判断）
 

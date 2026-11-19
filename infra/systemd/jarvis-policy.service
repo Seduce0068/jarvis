@@ -3,7 +3,7 @@ Description=JARVIS Policy Engine
 Documentation=https://github.com/Seduce0068/jarvis
 After=network.target postgresql.service qdrant.service jarvis-migrations.service
 Wants=postgresql.service qdrant.service jarvis-migrations.service
-# Shared migrations (001 and later, currently through 004) are pre-applied by
+# Shared migrations (001 and later, currently through 005) are pre-applied by
 # jarvis-migrations.service (oneshot), ordered above; the final applier is
 # jarvis-context.service, which embeds the same migrations in its binary via
 # `sqlx::migrate!()`. Do NOT add After=/Wants=jarvis-context.service:
