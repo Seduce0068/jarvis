@@ -69,6 +69,12 @@ Environment=JARVIS_MCP_GW_BASE_DIR=/home/koppe/ドキュメント/作業用/jarv
 # in Environment=; see systemd.exec(5)). The ONLY override path is the
 # EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env above, whose values take
 # precedence over Environment=; set the minimum host set the deployment needs.
+# I56-A adopted policy: the deploy/rollback paths never delete that env file;
+# when no backup exists they restore the repo's deny-all template (empty egress
+# + absolute BASE_DIR, root:root 0600), so this example.com literal never
+# becomes effective via a deploy rollback. (Manually removing the env file is
+# still out of band; removing this literal would also require updating the
+# template comments, which is outside this change's scope.)
 Environment=JARVIS_MCP_GW_EGRESS_ALLOWLIST=example.com
 
 # Resource limits

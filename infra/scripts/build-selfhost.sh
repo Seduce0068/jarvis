@@ -203,8 +203,10 @@ cleanup_selfhost() {
       fi
       # 退避设置有無を示すフラグは立ったが .bak が無い場合は元位置を触らない。
     else
-      # 元ファイルが無かった（退避なし）場合のみ、途中まで配置した先を削除する。
-      sudo rm -f "${MCP_GW_ENV_DST}" 2>/dev/null || true
+      # I56-A (採用方針 A): 退避が無くても env は削除しない。repo の deny-all
+      # テンプレート（空 egress + 絶対 BASE_DIR）を root:root 0600 で書き戻し、
+      # unit の example.com リテラルが実効化する fail-open 窓を閉じる。
+      sudo install -o root -g root -m 0600 "${REPO_DIR}/infra/config/mcp_gateway.env" "${MCP_GW_ENV_DST}" 2>/dev/null || true
     fi
   fi
   if [[ "${mig_unit_masked:-0}" -eq 1 ]]; then

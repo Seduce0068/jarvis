@@ -23,26 +23,32 @@ for arg in "$@"; do
   esac
 done
 
-# I54-B: EnvironmentFile は同一キー「最後の割り当てが勝ち」セマンティクス。
-# any-match な grep は先頭に安全な絶対パス・末尾に相対パスを置いたすり抜けを
-# 許し、実効値が相対パスになって sandbox escape 境界が消える。よって同一キーの
-# 重複自体を DANGER とし、最後の割り当て行のみを抽出して形式検査する。
-# 絶対パス・/ 単独でない・.. 成分なしを必須化。値は一切出力しない（secret を
-# 含みうるためエラーコードのみ）。egress の空値は正当（deny-all）なのでキーの
-# 有無のみを検査する。
+# I54-B / I56-A: EnvironmentFile は同一キー「最後の割り当てが勝ち」セマンティクス。
+# any-match な grep は先頭に安全な値・末尾に危険な値を置いたすり抜けを許す。
+# よって BASE_DIR と egress の両方で同一キーの重複自体を DANGER とし、最後の
+# 割り当て行のみを抽出して形式検査する。BASE_DIR は絶対パス・/ 単独でない・
+# .. 成分なしを必須化。egress は空値を正当（genuine deny-all）として維持し、
+# 非空ならホストパターンとしてあり得る文字だけを許容する。値は一切出力しない
+# （secret を含みうるためエラーコードのみ）。
 check_mcp_env() {
   local base_count base_last base_val
-  base_count="$(grep -Ec '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env" 2>/dev/null || true)"
-  base_last="$(grep -E '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env" 2>/dev/null | tail -n1 || true)"
+  local egress_count egress_last egress_val
+  local egress_pattern='^[A-Za-z0-9*.,[:space:]-]+$'
+  local env_ok=1
   if [ ! -r "$deployed_env" ]; then
     say "mcp-gw env" "DANGER: E_ENV_UNREADABLE (code only)"
     danger=1
-  elif [ "${base_count:-0}" -eq 0 ]; then
+    return 0
+  fi
+  # --- BASE_DIR（既存ロジックを維持） ---
+  base_count="$(grep -Ec '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env" 2>/dev/null || true)"
+  base_last="$(grep -E '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env" 2>/dev/null | tail -n1 || true)"
+  if [ "${base_count:-0}" -eq 0 ]; then
     say "mcp-gw env" "DANGER: E_ENV_MISSING_BASE_DIR (code only)"
-    danger=1
+    danger=1; env_ok=0
   elif [ "${base_count:-0}" -gt 1 ]; then
     say "mcp-gw env" "DANGER: E_ENV_DUP_BASE_DIR (code only)"
-    danger=1
+    danger=1; env_ok=0
   else
     # 最後の割り当て行のみを検査する（行全体・値は出力しない）。
     base_val="${base_last#*=}"
@@ -54,19 +60,41 @@ check_mcp_env() {
     esac
     if [[ "$base_val" != /* ]]; then
       say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; not absolute)"
-      danger=1
+      danger=1; env_ok=0
     elif [ "$base_val" = "/" ]; then
       say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; root)"
-      danger=1
+      danger=1; env_ok=0
     elif [[ "/${base_val}/" == */../* ]]; then
       say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; dotdot)"
-      danger=1
-    elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$deployed_env"; then
-      say "mcp-gw env" "DANGER: E_ENV_MISSING_EGRESS_ALLOWLIST (code only)"
-      danger=1
-    else
-      say "mcp-gw env" "OK (last BASE_DIR absolute, non-root, no dotdot; egress key present)"
+      danger=1; env_ok=0
     fi
+  fi
+  # --- I56-A: egress にも BASE_DIR と同じ重複拒否 + 最終行のみ検査 ---
+  egress_count="$(grep -Ec '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$deployed_env" 2>/dev/null || true)"
+  egress_last="$(grep -E '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$deployed_env" 2>/dev/null | tail -n1 || true)"
+  if [ "${egress_count:-0}" -eq 0 ]; then
+    say "mcp-gw env" "DANGER: E_ENV_MISSING_EGRESS_ALLOWLIST (code only)"
+    danger=1; env_ok=0
+  elif [ "${egress_count:-0}" -gt 1 ]; then
+    # 先頭に空値・末尾に example.com を置く細工はここで拒否する。
+    say "mcp-gw env" "DANGER: E_ENV_DUP_EGRESS_ALLOWLIST (code only)"
+    danger=1; env_ok=0
+  else
+    egress_val="${egress_last#*=}"
+    egress_val="${egress_val#"${egress_val%%[![:space:]]*}"}"
+    egress_val="${egress_val%"${egress_val##*[![:space:]]}"}"
+    case "$egress_val" in
+      \"*\") egress_val="${egress_val#\"}"; egress_val="${egress_val%\"}" ;;
+      \'*\') egress_val="${egress_val#\'}"; egress_val="${egress_val%\'}" ;;
+    esac
+    # 空値は正当（deny-all）。非空なら値は出力せず形式のみ検査する。
+    if [ -n "$egress_val" ] && [[ ! "$egress_val" =~ $egress_pattern ]]; then
+      say "mcp-gw env" "DANGER: E_ENV_INVALID_EGRESS_ALLOWLIST (code only; unexpected characters)"
+      danger=1; env_ok=0
+    fi
+  fi
+  if [ "$env_ok" -eq 1 ]; then
+    say "mcp-gw env" "OK (last BASE_DIR absolute, non-root, no dotdot; egress single assignment, empty=deny-all or valid host list)"
   fi
 }
 

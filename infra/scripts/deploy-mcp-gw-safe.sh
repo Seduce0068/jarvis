@@ -30,20 +30,27 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 rollback() {
   echo "== ロールバック: 変更を戻します ==" >&2
   # install-backup-timer.sh:46-48 と同じ枠組み:
-  # 退避ファイルがあれば復元し、無ければ今回配置した先を明示削除する。
+  # 退避ファイルがあれば復元し、無ければ今回配置した先を明示削除する
+  # （ただし env は I56-A の採用方針により削除せず deny-all テンプレートを復元）。
   if [ -f "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" ]; then
     install -o root -g root -m 0755 "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" /opt/jarvis/bin/jarvis-mcp-gw
   else
     rm -f /opt/jarvis/bin/jarvis-mcp-gw || true
   fi
-  # I50-A: host override env を復元する。退避が無い場合は今回配置した先を削除し、
-  # unit のリテラル既定値へ戻す（例: egress=example.com の fail-open は戻すが、
-  # ロールバック後も check-deploy-drift.sh が DANGER を返して可視化する）。
+  # I56-A (採用方針 A): host override env は決して削除しない。退避が無い場合も
+  # repo の deny-all テンプレート（空 egress + 絶対 BASE_DIR）を root:root 0600
+  # で書き戻す。削除すると unit のリテラル既定（egress=example.com / 開発用
+  # BASE_DIR）が実効化して fail-open になるため、env を残す方式を採る。
+  # 復元に失敗しても下流の drift 強制ゲートが DANGER を検出して失敗を明示する。
   if [ "${env_changed:-0}" -eq 1 ]; then
     if [ -f "$env_target.bak-$ts" ]; then
-      cp -a "$env_target.bak-$ts" "$env_target" || true
+      if ! install -o root -g root -m 0600 "$env_target.bak-$ts" "$env_target"; then
+        echo "  警告: env 退避の復元に失敗: $env_target" >&2
+      fi
     else
-      rm -f "$env_target" || true
+      if ! install -o root -g root -m 0600 "$repo_env" "$env_target"; then
+        echo "  警告: deny-all env テンプレートの復元に失敗: $repo_env -> $env_target" >&2
+      fi
     fi
   fi
   # /etc allowlist は step2(承認必須化パッチ) -> step3(repo版 install) の順に更新する。
@@ -86,8 +93,17 @@ rollback() {
     sleep 0.5
   done
   echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || echo 000)" >&2
-  # ロールバック後の整合確認（情報表示のみ。ロールバックの成否には影響させない）
-  bash "$repo/infra/scripts/check-deploy-drift.sh" || true
+  # I56-A: ロールバック後の drift 検査は情報表示 (|| true) ではなく強制ゲート。
+  # exit 1 (PENDING) はロールバックに伴う通常の差分なので警告に留めるが、
+  # exit 2 (DANGER) は「安全な状態へ戻せていない」として明示的に失敗させる。
+  bash "$repo/infra/scripts/check-deploy-drift.sh"
+  drift_rc=$?
+  case "$drift_rc" in
+    0) echo "  ロールバック後 drift: OK" >&2 ;;
+    1) echo "  ロールバック後 drift: PENDING（差分あり・手動確認）" >&2 ;;
+    2) echo "  ロールバック後 drift: DANGER（安全状態を確認できません。手動対応必須）" >&2; exit 3 ;;
+    *) echo "  ロールバック後 drift: 不明な終了コード $drift_rc" >&2; exit 3 ;;
+  esac
   exit 1
 }
 
@@ -189,13 +205,41 @@ esac
 case "/$repo_base_val/" in
   */../*) die "env テンプレートの JARVIS_MCP_GW_BASE_DIR に .. 成分があります: $repo_env" ;;
 esac
-# egress allowlist の空値は正当（genuine deny-all）。キーの有無のみ検査する。
-grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$repo_env" \
+# I56-A: egress にも BASE_DIR と同じ「同一キー重複は拒否 + 最後の割り当て行の
+# み形式検査」を適用する。先頭に空値・末尾に example.com を置いたすり抜けを
+# 許すと EnvironmentFile の最終割り当てが勝ち、deny-all が後退する。
+# 空値は正当（genuine deny-all）とし、値は一切出力しない（code only）。
+repo_egress_count="$(grep -Ec '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$repo_env" 2>/dev/null || true)"
+repo_egress_last="$(grep -E '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$repo_env" 2>/dev/null | tail -n1 || true)"
+[ "${repo_egress_count:-0}" -ge 1 ] \
   || die "env テンプレートに JARVIS_MCP_GW_EGRESS_ALLOWLIST がありません: $repo_env"
+[ "${repo_egress_count:-0}" -eq 1 ] \
+  || die "env テンプレートの JARVIS_MCP_GW_EGRESS_ALLOWLIST が重複しています（最後の割り当てが実効値）: $repo_env"
+repo_egress_val="${repo_egress_last#*=}"
+repo_egress_val="${repo_egress_val#"${repo_egress_val%%[![:space:]]*}"}"
+repo_egress_val="${repo_egress_val%"${repo_egress_val##*[![:space:]]}"}"
+case "$repo_egress_val" in
+  \"*\") repo_egress_val="${repo_egress_val#\"}"; repo_egress_val="${repo_egress_val%\"}" ;;
+  \'*\') repo_egress_val="${repo_egress_val#\'}"; repo_egress_val="${repo_egress_val%\'}" ;;
+esac
+repo_egress_pattern='^[A-Za-z0-9*.,[:space:]-]+$'
+if [ -n "$repo_egress_val" ] && [[ ! "$repo_egress_val" =~ $repo_egress_pattern ]]; then
+  die "env テンプレートの JARVIS_MCP_GW_EGRESS_ALLOWLIST の値が不正です（値は出力しません）: $repo_env"
+fi
 echo "  user/base-dir/allowlist/unit/env-template: OK"
 
-echo "== 1. ドリフト確認（事前・情報表示のみ） =="
-bash "$repo/infra/scripts/check-deploy-drift.sh" || true
+echo "== 1. ドリフト確認（事前・配置前の診断。強制ゲートは配置後とロールバック後） =="
+# I56-A: ここは配置前の診断であり、DANGER でも配置を止めない（env 欠落など
+# この deploy 自体が直すべき状態を検出しうるため）。ただし終了コードを握り
+# 潰さず、DANGER を明示的に表示して配置後の強制ゲートへ引き継ぐ。
+bash "$repo/infra/scripts/check-deploy-drift.sh"
+pre_drift_rc=$?
+case "$pre_drift_rc" in
+  0) echo "  事前 drift: OK" ;;
+  1) echo "  事前 drift: PENDING（配置前の通常差分）" ;;
+  2) echo "  事前 drift: DANGER（危険な状態を検出。配置後のゲートで必ず再確認）" ;;
+  *) echo "  事前 drift: 不明な終了コード $pre_drift_rc" ;;
+esac
 
 if grep -A8 'name = "web.fetch"' "$allowlist" 2>/dev/null | grep -q 'requires_approval = false'; then
   if [ "$allow" -eq 1 ]; then
