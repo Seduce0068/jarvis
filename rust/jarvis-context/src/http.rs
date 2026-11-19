@@ -5,12 +5,12 @@ use crate::config::validation::{self, InvalidInput};
 use crate::error::ContextError;
 use axum::{
     Json, Router,
-    extract::{FromRequest, Request, State},
+    extract::State,
     middleware::Next,
     response::Response,
     routing::{get, post},
 };
-use jarvis_core::{JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
+use jarvis_core::{BareJson, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tracing::instrument;
@@ -130,7 +130,7 @@ impl AuthState {
 /// is ever logged.
 async fn require_admin_token(
     State(auth): State<AuthState>,
-    request: Request,
+    request: axum::extract::Request,
     next: Next,
 ) -> Result<Response, axum::http::StatusCode> {
     let Some(expected) = auth.token.as_deref() else {
@@ -345,45 +345,19 @@ fn reject_invalid_input(field: &'static str) -> axum::http::StatusCode {
     axum::http::StatusCode::BAD_REQUEST
 }
 
-/// JSON body extractor that collapses every `JsonRejection` to the shared
-/// bare-400 contract.
-///
-/// axum's stock `Json<T>` rejects type-mismatched or malformed bodies (for
-/// example `limit: "abc"`, `embedding: "x"` or a syntax error) *before* the
-/// handler runs and returns a detailed `JsonRejection` body. That body
-/// bypasses the fixed-vocabulary / value-non-disclosing contract of
-/// [`reject_invalid_input`] and made HTTP asymmetric with gRPC's fixed
-/// `InvalidArgument`. Wrapping `Json<T>` here discards the rejection detail and
-/// routes every failure through [`reject_invalid_input`]: a single
-/// `invalid_input` log record with a static field label and an empty 400
-/// response, no matter where deserialization fails. Valid bodies still reach
-/// the handler unchanged, so the shared validator keeps ownership of all
-/// semantic checks.
-struct BareJson<T>(Json<T>);
-
-#[async_trait::async_trait]
-impl<S, T> FromRequest<S> for BareJson<T>
-where
-    S: Send + Sync,
-    T: serde::de::DeserializeOwned,
-{
-    type Rejection = axum::http::StatusCode;
-
-    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
-        Json::<T>::from_request(req, state)
-            .await
-            .map(Self)
-            .map_err(|_| reject_invalid_input("body"))
-    }
-}
+// HTTP body extraction uses `jarvis_core::BareJson` (I61-A). The shared
+// extractor keeps the fixed-vocabulary rejection log and the bare-status
+// contract, and additionally distinguishes a missing Content-Type (415) and an
+// oversized body (413) from wrong types / bad syntax (400). Keeping one
+// implementation means all four services report the same rejection semantics.
 
 #[instrument(skip(builder, req))]
 async fn build_context(
     State(builder): State<Arc<dyn MemoryBackend>>,
     req: BareJson<BuildContextRequest>,
 ) -> Result<Json<BuildContextResponse>, axum::http::StatusCode> {
-    // A type-mismatched body was already collapsed to a bare 400 by `BareJson`
-    // before this line; only deserialized data reaches the handler.
+    // A type-mismatched body was already rejected with a bare 400 by the shared
+    // `BareJson` (I61-A); only deserialized data reaches the handler.
     let BareJson(Json(body)) = req;
     // I53-C: a malformed event id must not be silently replaced with a fresh
     // UUID — the caller would receive 200 while the event carried an id they
@@ -455,8 +429,8 @@ async fn search_memory(
     // I55-A: the signed wire value is widened/try_from-checked by the shared
     // validator, so a negative or oversized limit yields the same bare 400 as
     // gRPC's InvalidArgument and never reaches the over-fetch/Qdrant path.
-    // A wrong JSON type (e.g. limit:"abc") never reaches here: `BareJson`
-    // already returned the same bare 400 via `reject_invalid_input`.
+    // A wrong JSON type (e.g. limit:"abc") never reaches here: the shared
+    // `BareJson` already returned the same bare 400 (I61-A).
     let limit = validation::validate_search_limit(body.limit)
         .map_err(|invalid| reject_invalid_input(invalid.field))?;
     let memories = log_internal_error(builder.search(&body.query, limit).await, "search_memory")?;
@@ -862,7 +836,10 @@ mod tests {
 
     /// I57-A (b): the rejection log must use the same `invalid_input`
     /// vocabulary as the shared validator and must never contain the offending
-    /// value or axum's `invalid type: ...` rejection text.
+    /// value or axum's `invalid type: ...` rejection text. The shared extractor
+    /// lowered this record to DEBUG to avoid log amplification (I61-A), so this
+    /// subscriber explicitly opts into DEBUG; the fixed-token assertions are
+    /// unchanged.
     #[test]
     fn i57_a_json_rejection_logs_fixed_vocabulary_without_detail() {
         const TYPE_PROBE: &str = "abc-I57A-PROBE";
@@ -871,6 +848,7 @@ mod tests {
         let subscriber = tracing_subscriber::fmt()
             .without_time()
             .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
             .with_writer(move || writer.clone())
             .finish();
 

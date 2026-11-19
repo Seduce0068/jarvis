@@ -2241,7 +2241,9 @@ mod tests {
     /// I59-C: axum's stock `Json<T>` returned a detailed `JsonRejection` body
     /// (and a 422) for a wrong JSON type, bypassing the fixed-vocabulary /
     /// no-leak contract. Every JSON-accepting route must now answer a type
-    /// mismatch with an empty 400, before any handler body runs.
+    /// mismatch with an empty 400, before any handler body runs. I61-A keeps
+    /// this 400 for type mismatches while the shared extractor now reports a
+    /// missing Content-Type as 415 and an oversized body as 413.
     #[tokio::test]
     async fn json_type_mismatch_is_rejected_with_bare_400_on_every_route() {
         let (engine, dir) = test_engine("http-json-type-mismatch").await;

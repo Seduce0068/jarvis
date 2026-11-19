@@ -278,8 +278,9 @@ fn calendar_webhook_event(
 // handler name remains in the span; correlation ids are generated inside.
 #[instrument(skip(state, payload))]
 async fn ha_webhook(State(state): State<Arc<Normalizer>>, payload: BareJson<Value>) {
-    // `BareJson` collapses a malformed/type-mismatched body to an empty 400
-    // before this line; the raw rejection text never reaches a response or a log.
+    // `BareJson` maps rejections to bare statuses before this line: 415 for a
+    // missing Content-Type, 413 for an oversized body, 400 for bad syntax or a
+    // type mismatch. The raw rejection text never reaches a response or a log.
     let BareJson(Json(payload)) = payload;
     let event = ha_webhook_event(
         payload,

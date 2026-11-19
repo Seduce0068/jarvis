@@ -1010,7 +1010,9 @@ requires_approval = true
     }
 
     /// I59-C: a wrong JSON type must be rejected by the shared extractor with
-    /// a bare 400, never axum's detailed `JsonRejection` body.
+    /// a bare 400, never axum's detailed `JsonRejection` body. I61-A keeps the
+    /// 400 for type mismatches; a missing Content-Type is now 415 and a body
+    /// over axum's 2 MiB limit is 413.
     #[tokio::test]
     async fn bare_json_rejects_type_mismatch_with_bare_400() {
         use axum::extract::FromRequest;

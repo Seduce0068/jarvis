@@ -15,8 +15,15 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
-axum = { workspace = true }
-tracing = { workspace = true }
+# HTTP-only: the shared `BareJson` extractor needs these. Pure-Rust consumers
+# (e.g. the standalone GPUI UI) must not pull axum/tracing transitively.
+axum = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enables the axum-based `BareJson` extractor and its rejection vocabulary.
+http = ["dep:axum", "dep:tracing"]
 
 [lib]
 name = "jarvis_core"

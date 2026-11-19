@@ -436,8 +436,9 @@ mod tests {
     }
 
     /// I59-C: `/v1/events` used stock `Json<T>`, so a wrong JSON type leaked
-    /// axum's rejection body. The shared `BareJson` must map every rejection
-    /// to a bare 400 with no detail.
+    /// axum's rejection body. The shared `BareJson` must map a type mismatch
+    /// to a bare 400 with no detail; I61-A additionally maps a missing
+    /// Content-Type to 415 and an oversized body to 413.
     #[tokio::test]
     async fn tc_i59_c_emit_event_type_mismatch_is_a_bare_400() {
         use axum::extract::FromRequest;

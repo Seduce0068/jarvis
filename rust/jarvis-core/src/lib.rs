@@ -47,29 +47,63 @@ pub const ALREADY_DECIDED_409_BODY: &str = "approval request already decided";
 ///
 /// The offending bytes and axum's `JsonRejection` detail are never formatted:
 /// only these static tokens reach tracing (and therefore OTLP/Grafana).
+#[cfg(feature = "http")]
 pub const INVALID_JSON_BODY_ERROR_KIND: &str = "invalid_input";
 /// Static field label used by [`BareJson`]'s rejection log.
+#[cfg(feature = "http")]
 pub const INVALID_JSON_BODY_FIELD: &str = "body";
 
-/// JSON body extractor that collapses every `JsonRejection` to the shared
-/// bare-400 / fixed-vocabulary contract.
+/// Map a JSON rejection onto the fixed bare-status contract.
+///
+/// The match is on the rejection *variant* only: no rejection text, body byte
+/// or serde error is read, so nothing attacker-controlled can reach the
+/// response or a log record. axum's own `status()` is deliberately not used:
+/// it reports 422 for `JsonDataError`, while every service here keeps the
+/// historical bare 400 for wrong types and syntax errors.
+#[cfg(feature = "http")]
+fn bare_json_rejection_status(
+    rejection: &axum::extract::rejection::JsonRejection,
+) -> axum::http::StatusCode {
+    use axum::extract::rejection::JsonRejection;
+    match rejection {
+        // The client can fix this by adding `Content-Type: application/json`.
+        JsonRejection::MissingJsonContentType(_) => axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+        // `BytesRejection` is the default 2 MiB body-limit rejection: the client
+        // can fix this by shrinking the payload. Keep it visible to metrics.
+        JsonRejection::BytesRejection(_) => axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+        // Type mismatches (`JsonDataError`) and syntax errors
+        // (`JsonSyntaxError`) stay on the established bare-400 contract. The
+        // wildcard also covers any future `#[non_exhaustive]` variant.
+        _ => axum::http::StatusCode::BAD_REQUEST,
+    }
+}
+
+/// JSON body extractor that maps `JsonRejection` onto a bare status without
+/// ever exposing axum's rejection detail.
 ///
 /// axum's stock `Json<T>` rejects type-mismatched or malformed bodies (for
 /// example `limit: "abc"`, an embedding encoded as a string, or a syntax error)
 /// *before* the handler runs and returns a detailed `JsonRejection` body. That
 /// body bypasses each service's no-leak contract and makes HTTP asymmetric with
 /// gRPC's fixed `InvalidArgument`. Wrapping `Json<T>` here discards the rejection
-/// detail and emits one fixed-vocabulary log record (the same
+/// detail and selects an empty status from the rejection kind: 415 when the
+/// `Content-Type` header is missing, 413 when the body exceeds axum's default
+/// 2 MiB limit, and 400 for every other failure (wrong type or bad syntax).
+///
+/// Every rejection emits one fixed-vocabulary log record — the same
 /// `error_kind = "invalid_input"` / `field = "body"` / "invalid client input"
-/// record the context service already emits) before returning an empty 400.
-/// Valid bodies reach the handler unchanged; all semantic validation stays in
-/// the owning service.
+/// record the context service already emits — but at DEBUG, not WARN: a flood
+/// of malformed requests must not amplify journald/OTLP volume. The offending
+/// bytes and axum's rejection text are never formatted. Valid bodies reach the
+/// handler unchanged; all semantic validation stays in the owning service.
 ///
 /// The tuple field is public so consumers can keep the existing
 /// `let BareJson(Json(body)) = req;` destructuring pattern.
+#[cfg(feature = "http")]
 #[derive(Debug)]
 pub struct BareJson<T>(pub axum::Json<T>);
 
+#[cfg(feature = "http")]
 #[axum::async_trait]
 impl<S, T> axum::extract::FromRequest<S> for BareJson<T>
 where
@@ -82,13 +116,16 @@ where
         <axum::Json<T> as axum::extract::FromRequest<S>>::from_request(req, state)
             .await
             .map(Self)
-            .map_err(|_| {
-                tracing::warn!(
+            .map_err(|rejection| {
+                // Fixed vocabulary only: never format `rejection`, the request,
+                // or any body byte into this record. DEBUG (not WARN) keeps a
+                // rejection flood from amplifying journald/OTLP volume.
+                tracing::debug!(
                     error_kind = INVALID_JSON_BODY_ERROR_KIND,
                     field = INVALID_JSON_BODY_FIELD,
                     "invalid client input"
                 );
-                axum::http::StatusCode::BAD_REQUEST
+                bare_json_rejection_status(&rejection)
             })
     }
 }
@@ -230,10 +267,87 @@ mod tests {
     /// tokens the context service's `validation::log_invalid_input("body")`
     /// emits, so switching that service onto the shared extractor is a no-op
     /// for its log-based regression tests.
+    #[cfg(feature = "http")]
     #[test]
     fn bare_json_rejection_vocabulary_pins_the_wire_contract() {
         assert_eq!(INVALID_JSON_BODY_ERROR_KIND, "invalid_input");
         assert_eq!(INVALID_JSON_BODY_FIELD, "body");
+    }
+
+    /// Poll an extractor future without pulling an async runtime into
+    /// jarvis-core's dev-dependencies. Every rejection path below resolves
+    /// from an in-memory body in a single poll; `Waker::noop` is safe here
+    /// because no timer or I/O driver is involved.
+    #[cfg(feature = "http")]
+    fn poll_once<F: std::future::Future>(future: F) -> F::Output {
+        let mut future = std::pin::pin!(future);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        match future.as_mut().poll(&mut context) {
+            std::task::Poll::Ready(output) => output,
+            std::task::Poll::Pending => panic!("BareJson rejection did not resolve immediately"),
+        }
+    }
+
+    /// Drive the real `BareJson` extractor and return its rejection status.
+    #[cfg(feature = "http")]
+    fn bare_json_rejection<T>(
+        body: axum::body::Body,
+        content_type: Option<&str>,
+    ) -> axum::http::StatusCode
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        let mut builder = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/v1/check");
+        if let Some(content_type) = content_type {
+            builder = builder.header("content-type", content_type);
+        }
+        let request = builder.body(body).expect("request builds");
+        let future = <BareJson<T> as axum::extract::FromRequest<()>>::from_request(request, &());
+        poll_once(future)
+            .err()
+            .expect("the extractor rejects this body")
+    }
+
+    /// I61-A: a missing `Content-Type` is a bare 415 so the client knows to
+    /// add the header, instead of an indistinguishable empty 400.
+    #[cfg(feature = "http")]
+    #[test]
+    fn bare_json_missing_content_type_is_415() {
+        let status = bare_json_rejection::<serde_json::Value>(
+            axum::body::Body::from(r#"{"allowed":true}"#),
+            None,
+        );
+        assert_eq!(status, axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
+
+    /// I61-A: axum's 2 MiB `BytesRejection` stays visible as a bare 413 so the
+    /// size error is not erased from metrics. The rejection is a `StatusCode`,
+    /// so no rejection text or body can cross the boundary.
+    #[cfg(feature = "http")]
+    #[test]
+    fn bare_json_oversized_body_is_413() {
+        let oversized = vec![b'x'; 2_097_152 + 1];
+        let status = bare_json_rejection::<serde_json::Value>(
+            axum::body::Body::from(oversized),
+            Some("application/json"),
+        );
+        assert_eq!(status, axum::http::StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    /// Wrong types and bad syntax keep the established bare-400 contract;
+    /// axum's 422 for `JsonDataError` is deliberately not adopted.
+    #[cfg(feature = "http")]
+    #[test]
+    fn bare_json_type_and_syntax_errors_stay_400() {
+        for body in [r#"{"allowed":42}"#, r#"{"allowed":true,"#] {
+            let status = bare_json_rejection::<PolicyCheckResponse>(
+                axum::body::Body::from(body),
+                Some("application/json"),
+            );
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{body}");
+        }
     }
 
     /// Single canonical pin of the approval 409 wire body. Policy and UI
