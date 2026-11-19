@@ -1,11 +1,13 @@
 //! OpenCode server client.
 //!
 //! Implements the `jarvis-event` -> OpenCode hop of the event-driven flow in
-//! `adr/0001-unified-architecture.md`:
+//! `adr/0001-unified-architecture.md`. The authorization order follows
+//! `Normalizer::process_event` and the MCP gateway's `execute_tool`:
 //!
 //! ```text
-//! HA / Android / webhooks -> jarvis-event -> jarvis-context -> OpenCode
-//!     -> policy -> MCP gateway
+//! HA / Android / webhooks -> jarvis-event -> jarvis-context
+//!     -> policy (auto_respond, before dispatch) -> OpenCode
+//!     -> MCP gateway (policy re-check per tool call, before execution)
 //! ```
 //!
 //! Events are delivered to one long-lived session with
@@ -13,8 +15,8 @@
 //! of events cannot interrupt an agent turn that is already running. The
 //! session is created lazily (`POST /api/session`) with the configured
 //! location and recreated automatically when the server has forgotten it.
-//! Tool execution stays in the MCP gateway, which re-checks each tool call
-//! against the policy engine.
+//! Tool execution stays in the MCP gateway, which re-checks every tool call
+//! against the policy engine before running it.
 
 use anyhow::{Context, Result, bail};
 use jarvis_core::UnifiedEvent;
