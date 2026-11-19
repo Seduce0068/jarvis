@@ -10,6 +10,9 @@ User=koppe
 Group=koppe
 WorkingDirectory=/opt/jarvis/rust
 EnvironmentFile=-/etc/jarvis/bws.env
+# Host-specific overrides (incl. JARVIS_MCP_GW_BASE_DIR) are supplied here at
+# deploy time. Optional ("-") so the unit stays valid before provisioning.
+EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env
 
 # Secrets are injected by Bitwarden Secrets Manager (bws) at service start
 ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /opt/jarvis/bin/jarvis-mcp-gw
@@ -49,7 +52,10 @@ Environment=RUST_LOG=info
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 # Workspace root for the native read-only handlers. Must stay readable under
 # ProtectHome=read-only; the value is also the path-escape boundary.
-Environment=JARVIS_MCP_GW_BASE_DIR=/home/koppe/ドキュメント/作業用/jarvis/jarvis
+# The literal below is only a development-host fallback: デプロイ時に上書き —
+# set JARVIS_MCP_GW_BASE_DIR in /etc/jarvis/jarvis-mcp-gw.env (or the manager
+# environment) on every target host. ${VAR:-default} keeps that host value.
+Environment=JARVIS_MCP_GW_BASE_DIR=${JARVIS_MCP_GW_BASE_DIR:-/home/koppe/ドキュメント/作業用/jarvis/jarvis}
 
 # Resource limits
 LimitNOFILE=65536
