@@ -8,6 +8,25 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+/// Absolute default location of the event TOML. The former CWD-relative
+/// `config/event.toml` was not found when the service was started outside
+/// the repository root.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/jarvis/event.toml";
+
+/// Environment variable that overrides [`DEFAULT_CONFIG_PATH`].
+pub const CONFIG_PATH_ENV: &str = "JARVIS_EVENT_CONFIG_PATH";
+
+const ENV_PREFIX: &str = "JARVIS_EVENT_";
+
+/// Select the TOML path from an optional environment override. Kept pure so
+/// both branches are testable without mutating the process environment
+/// (edition 2024 makes `set_var` unsafe and parallel tests racy).
+fn resolve_config_path(override_path: Option<String>) -> String {
+    override_path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string())
+}
+
 /// Selects how `Normalizer` obtains context for an event.
 ///
 /// `InProcess` is the default and keeps the slice-1 `DefaultContextProvider`
@@ -140,12 +159,30 @@ pub struct EventConfig {
 }
 
 impl EventConfig {
+    /// Load from the absolute [`DEFAULT_CONFIG_PATH`], or from the path in
+    /// [`CONFIG_PATH_ENV`] when it is set and non-blank, with `JARVIS_EVENT_*`
+    /// environment overrides applied on top.
+    ///
+    /// The default file may be absent on real hosts: configuration is supplied
+    /// by the `JARVIS_EVENT_*` Env provider (`bws run` / systemd), so the
+    /// service starts with no TOML on disk. `Toml::file` simply contributes no
+    /// data for a missing file; every required field then comes from the
+    /// environment.
     pub fn load() -> Result<Self> {
+        let path = resolve_config_path(std::env::var(CONFIG_PATH_ENV).ok());
+        Self::load_from_path(&path)
+    }
+
+    /// Parse a config from an explicit TOML path. Split out from [`Self::load`]
+    /// so path selection is testable without touching the process environment.
+    fn load_from_path(path: &str) -> Result<Self> {
         // Flat snake_case fields: do NOT use figment's Env split, which would
         // turn JARVIS_EVENT_GRPC_ADDR into the nested key `grpc.addr`.
+        // The config-path variable only selects the file, so keep it out of
+        // the field provider as well.
         let config: EventConfig = Figment::new()
-            .merge(Toml::file("config/event.toml"))
-            .merge(Env::prefixed("JARVIS_EVENT_"))
+            .merge(Toml::file(path))
+            .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
             .extract()?;
         publish_admin_token(config.admin_token().map(str::to_owned));
         Ok(config)
@@ -378,5 +415,37 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("ctx-top-secret"));
         assert!(rendered.contains("context_grpc_token: \"<redacted>\""));
+    }
+
+    /// The service must find its config regardless of the launch directory;
+    /// the former `config/event.toml` was CWD-relative.
+    #[test]
+    fn default_config_path_is_absolute() {
+        use std::path::Path;
+        assert!(Path::new(DEFAULT_CONFIG_PATH).is_absolute());
+        assert_eq!(DEFAULT_CONFIG_PATH, "/etc/jarvis/event.toml");
+    }
+
+    #[test]
+    fn config_path_override_is_honoured() {
+        const OVERRIDE: &str = "/tmp/jarvis-event-custom.toml";
+        assert_eq!(resolve_config_path(Some(OVERRIDE.into())), OVERRIDE);
+        assert_eq!(resolve_config_path(None), DEFAULT_CONFIG_PATH);
+        assert_eq!(resolve_config_path(Some("   ".into())), DEFAULT_CONFIG_PATH);
+        assert_eq!(
+            resolve_config_path(Some(String::new())),
+            DEFAULT_CONFIG_PATH
+        );
+    }
+
+    /// The override variable shares the event env prefix, so verify it maps
+    /// to the `config_path` key that `load_from_path` filters out.
+    #[test]
+    fn config_path_env_name_matches_prefix() {
+        let field = CONFIG_PATH_ENV
+            .strip_prefix(ENV_PREFIX)
+            .expect("override variable uses the event env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "config_path");
     }
 }
