@@ -20,6 +20,38 @@ const PERSIST_FAILURE_REASON: &str = "failed to persist kill switch state; faili
 /// closed and log the degradation rather than panic (fatal under `panic =
 /// "abort"`).
 const CLOCK_FAILURE_REASON: &str = "system clock is before UNIX_EPOCH; failing closed";
+/// Context attached to errors from `persist()`. Even a caller
+/// that only logs `Display` must see an internal storage failure here, never
+/// a bad admin token.
+const PERSIST_ERROR_CONTEXT: &str =
+    "kill switch persistence failed (internal storage error, NOT an authentication failure)";
+
+/// Error categories for the token-gated kill switch operations.
+///
+/// [`KillSwitchError::InvalidAdminToken`] is the only authentication failure.
+/// [`KillSwitchError::Persistence`] means the token was accepted but the
+/// durable state file could not be written: the switch is armed in memory
+/// (fail-closed) while the change is not durable. Callers must map that
+/// variant to an internal/storage status (gRPC `Internal`, HTTP 5xx), never
+/// to `Unauthenticated`/401. Encoding the distinction in the type instead of
+/// message text lets the out-of-scope callers fix their mapping without
+/// string matching.
+#[derive(Debug, thiserror::Error)]
+pub enum KillSwitchError {
+    /// Wrong admin token: the sole variant that is an auth failure.
+    #[error("Invalid admin token")]
+    InvalidAdminToken,
+
+    /// Internal persistence/serialization failure. NOT an authentication
+    /// failure: the token was valid. The switch stays activated (fail-closed)
+    /// but the state file was not written, so a deactivation must not be
+    /// reported as successful.
+    #[error(
+        "internal error (NOT an authentication failure): kill switch state could not be \
+         persisted; switch remains activated: {detail}"
+    )]
+    Persistence { detail: String },
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KillSwitchStatus {
@@ -101,7 +133,7 @@ impl KillSwitch {
     /// local process cannot stop the system unilaterally.
     pub fn activate_with_token(&self, reason: String, admin_token: &str) -> Result<()> {
         if Self::hash_token(admin_token) != self.admin_token_hash {
-            return Err(anyhow::anyhow!("Invalid admin token"));
+            return Err(KillSwitchError::InvalidAdminToken.into());
         }
         self.activate(reason);
         Ok(())
@@ -183,7 +215,7 @@ impl KillSwitch {
 
     pub fn deactivate(&self, admin_token: &str) -> Result<()> {
         if Self::hash_token(admin_token) != self.admin_token_hash {
-            return Err(anyhow::anyhow!("Invalid admin token"));
+            return Err(KillSwitchError::InvalidAdminToken.into());
         }
         self.activated.store(false, Ordering::SeqCst);
         self.activated_at.store(0, Ordering::SeqCst);
@@ -191,11 +223,15 @@ impl KillSwitch {
         Self::write_slot(&self.activated_by, None);
         let persist_result = self.persist();
         // A persist failure fails closed by re-arming the switch. Never tell
-        // the operator the deactivation succeeded when it did not stick.
+        // the operator the deactivation succeeded when it did not stick, and
+        // never let this be mistaken for a bad token: the token was valid,
+        // the durable write was not.
         if persist_result.is_err() || self.is_activated() {
-            return Err(anyhow::anyhow!(
-                "kill switch state could not be persisted; switch remains activated"
-            ));
+            let detail = match persist_result {
+                Err(error) => format!("{error:#}"),
+                Ok(()) => "switch re-armed by fail-closed recovery".into(),
+            };
+            return Err(KillSwitchError::Persistence { detail }.into());
         }
         warn!("Kill switch deactivated by admin");
         Ok(())
@@ -264,9 +300,8 @@ impl KillSwitch {
             Err(error) => {
                 warn!("Failed to serialize kill switch state: {error}");
                 self.arm(PERSIST_FAILURE_REASON.into());
-                return Err(anyhow::anyhow!(
-                    "failed to serialize kill switch state: {error}"
-                ));
+                let error = anyhow::anyhow!("failed to serialize kill switch state: {error}");
+                return Err(error.context(PERSIST_ERROR_CONTEXT));
             }
         };
         if let Some(parent) = path.parent()
@@ -274,10 +309,8 @@ impl KillSwitch {
         {
             warn!("Failed to create {}: {error}", parent.display());
             self.arm(PERSIST_FAILURE_REASON.into());
-            return Err(anyhow::anyhow!(
-                "failed to create {}: {error}",
-                parent.display()
-            ));
+            let error = anyhow::anyhow!("failed to create {}: {error}", parent.display());
+            return Err(error.context(PERSIST_ERROR_CONTEXT));
         }
         if let Err(error) = std::fs::write(path, bytes) {
             warn!(
@@ -286,10 +319,11 @@ impl KillSwitch {
             );
             // `arm` never calls `persist`, so this cannot recurse.
             self.arm(PERSIST_FAILURE_REASON.into());
-            return Err(anyhow::anyhow!(
+            let error = anyhow::anyhow!(
                 "failed to persist kill switch state to {}: {error}",
                 path.display()
-            ));
+            );
+            return Err(error.context(PERSIST_ERROR_CONTEXT));
         }
         Ok(())
     }
@@ -541,6 +575,54 @@ mod tests {
             "failed persist must leave the switch armed"
         );
         assert_eq!(status.reason.as_deref(), Some(PERSIST_FAILURE_REASON));
+
+        std::fs::remove_file(parent).expect("clean blocker file");
+    }
+
+    /// A persistence failure must be a typed internal error, never the same
+    /// authentication error produced by a wrong token. Callers currently map
+    /// every `Err` to `Unauthenticated`/401, so the error *type* is the signal
+    /// they need to correct that mapping without parsing message text.
+    #[test]
+    fn persist_failure_is_typed_as_internal_not_authentication() {
+        let path = temp_path("persist-error-kind");
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+        assert!(!switch.is_activated());
+
+        let parent = path.parent().expect("state path has a parent");
+        std::fs::remove_dir_all(parent).expect("remove temp dir");
+        std::fs::write(parent, b"blocker").expect("create blocker file");
+
+        let bad_token = switch
+            .deactivate("wrong-token")
+            .expect_err("wrong token is rejected");
+        assert!(
+            bad_token
+                .downcast_ref::<KillSwitchError>()
+                .is_some_and(|error| matches!(error, KillSwitchError::InvalidAdminToken)),
+            "a bad token must be the only authentication error"
+        );
+
+        let persist_error = switch
+            .deactivate("admin-token")
+            .expect_err("failed persist must surface as an error");
+        let kind = persist_error
+            .downcast_ref::<KillSwitchError>()
+            .expect("persist failure must carry a typed error");
+        assert!(
+            matches!(kind, KillSwitchError::Persistence { .. }),
+            "persist failure must be typed as internal, not authentication"
+        );
+        let message = persist_error.to_string();
+        assert!(
+            message.contains("NOT an authentication failure"),
+            "message must rule out an auth failure: {message}"
+        );
+        assert!(
+            message.contains("remains activated"),
+            "message must keep the fail-closed signal: {message}"
+        );
+        assert!(switch.is_activated(), "fail-closed must be preserved");
 
         std::fs::remove_file(parent).expect("clean blocker file");
     }

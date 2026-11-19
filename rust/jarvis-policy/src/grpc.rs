@@ -61,7 +61,17 @@ impl PolicyService for GrpcPolicyService {
         let req = request.into_inner();
         self.engine
             .activate_kill_switch(req.reason, &req.admin_token)
-            .map_err(|e| Status::unauthenticated(e.to_string()))?;
+            .map_err(|e| {
+                use crate::kill_switch::KillSwitchError;
+                match e.downcast_ref::<KillSwitchError>() {
+                    Some(KillSwitchError::InvalidAdminToken) => {
+                        Status::unauthenticated(e.to_string())
+                    }
+                    // A valid token with a failed persistence write is an
+                    // internal/storage failure, never an authentication error.
+                    _ => Status::internal(e.to_string()),
+                }
+            })?;
         Ok(Response::new(Empty {}))
     }
 
@@ -72,7 +82,17 @@ impl PolicyService for GrpcPolicyService {
         let req = request.into_inner();
         self.engine
             .deactivate_kill_switch(&req.admin_token)
-            .map_err(|e| Status::unauthenticated(e.to_string()))?;
+            .map_err(|e| {
+                use crate::kill_switch::KillSwitchError;
+                match e.downcast_ref::<KillSwitchError>() {
+                    Some(KillSwitchError::InvalidAdminToken) => {
+                        Status::unauthenticated(e.to_string())
+                    }
+                    // A valid token with a failed persistence write is an
+                    // internal/storage failure, never an authentication error.
+                    _ => Status::internal(e.to_string()),
+                }
+            })?;
         Ok(Response::new(Empty {}))
     }
 }

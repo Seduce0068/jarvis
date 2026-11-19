@@ -551,7 +551,14 @@ async fn activate_kill_switch(
     engine
         .activate_kill_switch(req.reason, &req.admin_token)
         .map(|_| "activated")
-        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)
+        .map_err(|e| {
+            use crate::kill_switch::KillSwitchError;
+            match e.downcast_ref::<KillSwitchError>() {
+                Some(KillSwitchError::InvalidAdminToken) => axum::http::StatusCode::UNAUTHORIZED,
+                // Persistence failures are internal errors, not auth failures.
+                _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        })
 }
 
 #[derive(Deserialize, Debug)]
@@ -566,7 +573,14 @@ async fn deactivate_kill_switch(
     engine
         .deactivate_kill_switch(&req.admin_token)
         .map(|_| "deactivated")
-        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)
+        .map_err(|e| {
+            use crate::kill_switch::KillSwitchError;
+            match e.downcast_ref::<KillSwitchError>() {
+                Some(KillSwitchError::InvalidAdminToken) => axum::http::StatusCode::UNAUTHORIZED,
+                // Persistence failures are internal errors, not auth failures.
+                _ => axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        })
 }
 
 pub async fn serve(engine: Arc<PolicyEngine>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
