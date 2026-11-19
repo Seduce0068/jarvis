@@ -110,18 +110,63 @@ fn internal_status<T>(result: anyhow::Result<T>, op: &'static str) -> Result<T, 
     })
 }
 
+/// Fixed client-facing message for input rejected at the gRPC boundary (I53-C).
+///
+/// Mirrors [`INTERNAL_ERROR_MESSAGE`]: the caller learns the request was
+/// malformed, but never receives the offending bytes or a parser error string.
+const INVALID_ARGUMENT_MESSAGE: &str = "invalid client input";
+
+/// Reject malformed client input with `InvalidArgument` (I53-C).
+///
+/// A malformed `event_id` / `payload` / `metadata` used to become a fresh UUID /
+/// `{}` via `new_v4()` / `unwrap_or_default()`, so the caller received `OK` while
+/// the service used something other than what was sent. Input failures are now
+/// fail-closed at the boundary.
+///
+/// Only the static `field` label chosen at the call site is logged — together
+/// with the fixed `invalid_input` category — so the offending value cannot reach
+/// either the status message or any log record (Round-49 no-leak policy).
+fn reject_invalid_input(field: &'static str) -> Status {
+    tracing::warn!(
+        error_kind = "invalid_input",
+        field = field,
+        "invalid client input"
+    );
+    Status::invalid_argument(INVALID_ARGUMENT_MESSAGE)
+}
+
+/// Parse a client-supplied event id, rejecting malformed values instead of
+/// silently minting a new UUID (I53-C). Kept as a pure helper so the boundary is
+/// testable without a live PostgreSQL/Qdrant-backed builder.
+fn parse_event_id(value: &str) -> Result<uuid::Uuid, Status> {
+    uuid::Uuid::parse_str(value).map_err(|_| reject_invalid_input("event_id"))
+}
+
+/// Parse a client-supplied payload string into JSON (I53-C).
+fn parse_payload(value: &str) -> Result<serde_json::Value, Status> {
+    serde_json::from_str(value).map_err(|_| reject_invalid_input("payload"))
+}
+
 /// Build the memory entry and its response without touching the store.
 ///
 /// The caller-supplied id is deliberately discarded: honouring `req.id` would
 /// let any client overwrite an existing memory by choosing its id (I8-A).
-fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryResponse) {
+fn prepare_store_memory(
+    req: StoreMemoryRequest,
+) -> Result<(MemoryEntry, StoreMemoryResponse), Status> {
     let _ignored = &req.id;
     let id = uuid::Uuid::new_v4();
+    // I53-C: a malformed metadata string used to become `{}` via
+    // `unwrap_or_default()`, silently discarding the caller's data. Reject it.
+    // This is the metadata field itself, not an additive field: additive fields
+    // (source/timestamp, score) still degrade when absent or out of range.
+    let metadata =
+        serde_json::from_str(&req.metadata).map_err(|_| reject_invalid_input("metadata"))?;
     let memory = MemoryEntry {
         id,
         content: req.content,
         embedding: req.embedding,
-        metadata: serde_json::from_str(&req.metadata).unwrap_or_default(),
+        metadata,
         source: req.source,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
@@ -133,7 +178,7 @@ fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryRes
         score: None,
     };
     let response = StoreMemoryResponse { id: id.to_string() };
-    (memory, response)
+    Ok((memory, response))
 }
 
 /// Map a core entry to its proto view, preserving the additive score (P1-1).
@@ -191,14 +236,19 @@ impl ContextService for GrpcContextService {
     ) -> Result<Response<BuildContextResponse>, Status> {
         authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
+        // I53-C: event_id and payload are required inputs, not additive fields.
+        // Reject malformed values with InvalidArgument instead of silently
+        // minting a UUID / using an empty object.
+        let id = parse_event_id(&req.event_id)?;
+        let payload = parse_payload(&req.payload)?;
         // Convert proto event to UnifiedEvent; the additive fields carry the
         // original source/timestamp, falling back to legacy values when unset.
         let (source, timestamp) = event_metadata_from_request(&req);
         let event = UnifiedEvent {
-            id: uuid::Uuid::parse_str(&req.event_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+            id,
             source,
             event_type: req.event_type,
-            payload: serde_json::from_str(&req.payload).unwrap_or_default(),
+            payload,
             timestamp,
             correlation_id: req.correlation_id,
         };
@@ -214,7 +264,7 @@ impl ContextService for GrpcContextService {
     ) -> Result<Response<StoreMemoryResponse>, Status> {
         // Auth stays first so unauthenticated callers cannot reach the store.
         authorize(&request, self.admin_token.as_deref())?;
-        let (memory, response) = prepare_store_memory(request.into_inner());
+        let (memory, response) = prepare_store_memory(request.into_inner())?;
         internal_status(self.builder.store_memory(memory).await, "store_memory")?;
         Ok(Response::new(response))
     }
@@ -250,8 +300,9 @@ pub async fn serve(builder: ContextBuilder, addr: std::net::SocketAddr) -> anyho
 mod tests {
     use super::{
         BuildContextRequest, CONTEXT_TOKEN_HEADER, ContextError, DateTime, EventSource,
-        INTERNAL_ERROR_MESSAGE, Request, StoreMemoryRequest, Utc, authorize,
-        event_metadata_from_request, internal_status, prepare_store_memory, to_proto_memory_entry,
+        INTERNAL_ERROR_MESSAGE, INVALID_ARGUMENT_MESSAGE, Request, StoreMemoryRequest, Utc,
+        authorize, event_metadata_from_request, internal_status, parse_event_id, parse_payload,
+        prepare_store_memory, to_proto_memory_entry,
     };
     use crate::error::QdrantErrorKind;
     use std::io::Write;
@@ -293,6 +344,83 @@ mod tests {
             CONTEXT_TOKEN_HEADER,
             jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER
         );
+    }
+
+    // I53-C: invalid input used to collapse to a default (empty JSON / fresh
+    // UUID) and the caller still got OK. `*_PROBE_*` naming keeps these fixtures
+    // clear of the repository secret scanner's credential-key patterns.
+    const GRPC_INVALID_EVENT_ID_PROBE: &str = "not-a-uuid-I53C-PROBE";
+    const GRPC_INVALID_JSON_PROBE: &str = "{not-json-I53C-PROBE";
+
+    #[test]
+    fn i53_c_invalid_event_id_is_invalid_argument() {
+        let status = parse_event_id(GRPC_INVALID_EVENT_ID_PROBE)
+            .expect_err("a malformed event id must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            INVALID_ARGUMENT_MESSAGE,
+            "only the fixed message may cross the gRPC boundary"
+        );
+        // Valid ids are still accepted.
+        let valid = uuid::Uuid::new_v4().to_string();
+        let expected = valid.parse::<uuid::Uuid>().expect("parse");
+        assert_eq!(parse_event_id(&valid).expect("valid uuid"), expected);
+    }
+
+    #[test]
+    fn i53_c_invalid_payload_is_invalid_argument() {
+        let status = parse_payload(GRPC_INVALID_JSON_PROBE)
+            .expect_err("a malformed payload must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+        // Valid JSON payloads are still accepted.
+        assert_eq!(
+            parse_payload(r#"{"entity_id":"light.kitchen"}"#).expect("valid payload"),
+            serde_json::json!({"entity_id": "light.kitchen"})
+        );
+    }
+
+    #[test]
+    fn i53_c_invalid_metadata_is_invalid_argument() {
+        let mut req = store_request("ignored");
+        req.metadata = GRPC_INVALID_JSON_PROBE.into();
+        let status = prepare_store_memory(req).expect_err("malformed metadata must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+    }
+
+    #[test]
+    fn i53_c_valid_inputs_are_accepted() {
+        let (memory, response) =
+            prepare_store_memory(store_request("ignored")).expect("valid metadata is accepted");
+        assert_eq!(memory.metadata, serde_json::json!({"kind": "test"}));
+        assert_eq!(response.id, memory.id.to_string());
+    }
+
+    #[test]
+    fn i53_c_invalid_input_logs_fixed_vocabulary_without_offending_value() {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let status = tracing::subscriber::with_default(subscriber, || {
+            parse_event_id(GRPC_INVALID_EVENT_ID_PROBE).expect_err("malformed id is rejected")
+        });
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        // Fixed classification tokens are present; the offending value is not.
+        assert!(logs.contains("invalid_input"), "{logs}");
+        assert!(logs.contains("event_id"), "{logs}");
+        assert!(logs.contains("invalid client input"), "{logs}");
+        assert!(!logs.contains(GRPC_INVALID_EVENT_ID_PROBE), "{logs}");
     }
 
     #[test]
@@ -355,7 +483,8 @@ mod tests {
     #[test]
     fn store_memory_ignores_caller_id_and_returns_generated_id() {
         let supplied = uuid::Uuid::new_v4().to_string();
-        let (memory, response) = prepare_store_memory(store_request(&supplied));
+        let (memory, response) =
+            prepare_store_memory(store_request(&supplied)).expect("valid metadata is accepted");
 
         assert_ne!(
             memory.id.to_string(),
@@ -373,7 +502,8 @@ mod tests {
             "the response must carry the id that was actually stored"
         );
 
-        let (second, _) = prepare_store_memory(store_request(&supplied));
+        let (second, _) =
+            prepare_store_memory(store_request(&supplied)).expect("valid metadata is accepted");
         assert_ne!(
             memory.id, second.id,
             "repeated requests with the same id get distinct records"
@@ -382,7 +512,8 @@ mod tests {
 
     #[test]
     fn store_memory_preserves_all_other_fields() {
-        let (memory, _) = prepare_store_memory(store_request("ignored"));
+        let (memory, _) =
+            prepare_store_memory(store_request("ignored")).expect("valid metadata is accepted");
         assert_eq!(memory.content, "sensitive content");
         assert_eq!(memory.embedding, vec![0.1_f32, 0.2, 0.3]);
         assert_eq!(memory.metadata, serde_json::json!({ "kind": "test" }));
@@ -398,7 +529,8 @@ mod tests {
     /// ranked entries and stays absent for non-ranked ones.
     #[test]
     fn proto_mapping_preserves_additive_score() {
-        let (mut memory, _) = prepare_store_memory(store_request("ignored"));
+        let (mut memory, _) =
+            prepare_store_memory(store_request("ignored")).expect("valid metadata is accepted");
 
         memory.score = Some(0.625);
         let ranked = to_proto_memory_entry(memory.clone());

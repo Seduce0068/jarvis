@@ -309,13 +309,37 @@ fn log_internal_error<T>(
     })
 }
 
+/// Reject client input that used to collapse to a default value (I53-C).
+///
+/// A malformed `metadata` or `event_id` previously became an empty JSON value
+/// / a fresh UUID via `unwrap_or_default()` / `new_v4()`, so the caller received
+/// 200 while the service stored or searched something other than what was sent.
+/// Input failures are now fail-closed at the boundary.
+///
+/// Only the static `field` label chosen at the call site is logged — together
+/// with the fixed `invalid_input` category — so the offending bytes never enter
+/// journald/OTLP, and no error body is returned to the caller (bare 400). This
+/// mirrors the Round-49 no-leak policy used by [`log_internal_error`].
+fn reject_invalid_input(field: &'static str) -> axum::http::StatusCode {
+    tracing::warn!(
+        error_kind = "invalid_input",
+        field = field,
+        "invalid client input"
+    );
+    axum::http::StatusCode::BAD_REQUEST
+}
+
 #[instrument(skip(builder, req))]
 async fn build_context(
     State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<BuildContextRequest>,
 ) -> Result<Json<BuildContextResponse>, axum::http::StatusCode> {
+    // I53-C: a malformed event id must not be silently replaced with a fresh
+    // UUID — the caller would receive 200 while the event carried an id they
+    // never asked for. Reject with a bare 400 instead.
+    let id = uuid::Uuid::parse_str(&req.event_id).map_err(|_| reject_invalid_input("event_id"))?;
     let event = UnifiedEvent {
-        id: uuid::Uuid::parse_str(&req.event_id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        id,
         source: jarvis_core::EventSource::Manual,
         event_type: req.event_type,
         payload: req.payload,
@@ -333,17 +357,25 @@ async fn build_context(
 /// (I7-E). Always mint a fresh server-side UUID, ignore `req.id`, and hand the
 /// generated id back so the caller can reference the new record. Every other
 /// field keeps its previous handling.
-fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryResponse) {
+fn prepare_store_memory(
+    req: StoreMemoryRequest,
+) -> Result<(MemoryEntry, StoreMemoryResponse), axum::http::StatusCode> {
     // I7-E: consumed and discarded so the ignore is explicit in code, not just
     // in the docs above.
     let _ignored_client_id = req.id;
     let id = uuid::Uuid::new_v4();
     let response = StoreMemoryResponse { id: id.to_string() };
+    // I53-C: a malformed metadata string used to become `{}` via
+    // `unwrap_or_default()`, silently discarding the caller's data. Reject it
+    // instead. Note this is the metadata field itself, not an additive field:
+    // additive fields (e.g. response `score`) still degrade when absent.
+    let metadata =
+        serde_json::from_str(&req.metadata).map_err(|_| reject_invalid_input("metadata"))?;
     let memory = MemoryEntry {
         id,
         content: req.content,
         embedding: req.embedding,
-        metadata: serde_json::from_str(&req.metadata).unwrap_or_default(),
+        metadata,
         source: req.source,
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
@@ -352,7 +384,7 @@ fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryRes
             .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
         score: None,
     };
-    (memory, response)
+    Ok((memory, response))
 }
 
 #[instrument(skip(builder, req))]
@@ -360,11 +392,8 @@ async fn store_memory(
     State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<StoreMemoryRequest>,
 ) -> Result<Json<StoreMemoryResponse>, axum::http::StatusCode> {
-    let (memory, response) = prepare_store_memory(req);
-    builder
-        .store(memory)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (memory, response) = prepare_store_memory(req)?;
+    log_internal_error(builder.store(memory).await, "store_memory")?;
     Ok(Json(response))
 }
 
@@ -373,10 +402,8 @@ async fn search_memory(
     State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<SearchMemoryRequest>,
 ) -> Result<Json<Vec<MemoryEntryResponse>>, axum::http::StatusCode> {
-    let memories = builder
-        .search(&req.query, req.limit)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let memories =
+        log_internal_error(builder.search(&req.query, req.limit).await, "search_memory")?;
     Ok(Json(
         memories
             .into_iter()
@@ -397,7 +424,8 @@ mod tests {
     use super::{
         ADMIN_TOKEN_HEADER, AuthState, MemoryBackend, MemoryEntry, MemoryEntryResponse,
         StoreMemoryRequest, UnifiedEvent, build_context, constant_time_eq, error_kind,
-        log_internal_error, prepare_store_memory, require_admin_token, search_memory, store_memory,
+        log_internal_error, prepare_store_memory, reject_invalid_input, require_admin_token,
+        search_memory, store_memory,
     };
     use axum::{
         Router,
@@ -430,6 +458,127 @@ mod tests {
     #[test]
     fn http_header_uses_the_shared_context_token_header() {
         assert_eq!(ADMIN_TOKEN_HEADER, jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER);
+    }
+
+    // I53-C: invalid input used to collapse to a default (empty JSON / fresh
+    // UUID) and the caller still got 200. These probes are deliberately named
+    // `*_PROBE_*` so the repository secret scanner's credential patterns never
+    // match them. The malformed strings are not JSON / not UUIDs.
+    const HTTP_INVALID_EVENT_ID_PROBE: &str = "not-a-uuid-I53C-PROBE";
+    const HTTP_INVALID_METADATA_PROBE: &str = "{not-json-I53C-PROBE";
+
+    fn i53_c_test_app() -> Router {
+        Router::new()
+            .route("/v1/context/build", post(build_context))
+            .route("/v1/memory", post(store_memory))
+            .with_state(Arc::new(StubBackend) as Arc<dyn MemoryBackend>)
+    }
+
+    fn i53_c_post(uri: &str, body: serde_json::Value) -> Request<Body> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request builds")
+    }
+
+    #[tokio::test]
+    async fn i53_c_invalid_event_id_is_rejected_with_bare_400() {
+        let response = i53_c_test_app()
+            .oneshot(i53_c_post(
+                "/v1/context/build",
+                serde_json::json!({
+                    "event_id": HTTP_INVALID_EVENT_ID_PROBE,
+                    "event_type": "state_changed",
+                    "payload": {"body": "probe"},
+                    "correlation_id": "corr-1",
+                }),
+            ))
+            .await
+            .expect("service responds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        assert!(body.is_empty(), "no error body may cross the boundary");
+    }
+
+    #[tokio::test]
+    async fn i53_c_invalid_metadata_is_rejected_with_bare_400() {
+        let response = i53_c_test_app()
+            .oneshot(i53_c_post(
+                "/v1/memory",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2],
+                    "metadata": HTTP_INVALID_METADATA_PROBE,
+                    "source": "regression-test",
+                }),
+            ))
+            .await
+            .expect("service responds");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads");
+        assert!(body.is_empty(), "no error body may cross the boundary");
+    }
+
+    #[tokio::test]
+    async fn i53_c_valid_inputs_are_still_accepted() {
+        let app = i53_c_test_app();
+        for (uri, body) in [
+            (
+                "/v1/context/build",
+                serde_json::json!({
+                    "event_id": "00000000-0000-0000-0000-000000000001",
+                    "event_type": "state_changed",
+                    "payload": {"body": "probe"},
+                    "correlation_id": "corr-1",
+                }),
+            ),
+            (
+                "/v1/memory",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2],
+                    "metadata": r#"{"kind":"test"}"#,
+                    "source": "regression-test",
+                }),
+            ),
+        ] {
+            let status = app
+                .clone()
+                .oneshot(i53_c_post(uri, body))
+                .await
+                .expect("service responds")
+                .status();
+            assert_eq!(status, StatusCode::OK, "{uri} must accept valid input");
+        }
+    }
+
+    #[test]
+    fn i53_c_invalid_input_logs_fixed_vocabulary_without_offending_value() {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let status =
+            tracing::subscriber::with_default(subscriber, || reject_invalid_input("event_id"));
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        // Fixed classification tokens are present; no attacker-controlled text
+        // ever reaches this log because only a static field label is accepted.
+        assert!(logs.contains("invalid_input"), "{logs}");
+        assert!(logs.contains("event_id"), "{logs}");
+        assert!(logs.contains("invalid client input"), "{logs}");
     }
 
     /// I51-A: hostile detail of the kind that used to travel through
@@ -502,43 +651,106 @@ mod tests {
         assert!(logs.contains("qdrant"), "{logs}");
     }
 
+    /// Collect the plain `"..."` string literals inside a source slice.
+    ///
+    /// `error_kind`'s returned category tokens are the only string literals in
+    /// its body, so this yields the vocabulary actually written in that file
+    /// rather than a copy kept inside this test.
+    fn quoted_literals(src: &str) -> Vec<&str> {
+        let bytes = src.as_bytes();
+        let mut literals = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'"' {
+                let start = i + 1;
+                let mut end = start;
+                while end < bytes.len() && bytes[end] != b'"' {
+                    end += 1;
+                }
+                if end < bytes.len() {
+                    literals.push(&src[start..end]);
+                    i = end + 1;
+                    continue;
+                }
+            }
+            i += 1;
+        }
+        literals
+    }
+
     /// The HTTP vocabulary must stay identical to `grpc.rs::error_kind`:
     /// database / qdrant / pii / config / grpc / serialization / other.
+    ///
+    /// `grpc::error_kind` is private, so this test cannot call it directly. It
+    /// reads the real gRPC source with `include_str!` and compares the returned
+    /// literal sets instead of comparing HTTP literals to their own copies. A
+    /// vocabulary change on the gRPC side (in `grpc.rs`) changes that set and
+    /// fails this test.
     #[test]
     fn error_kind_vocabulary_matches_grpc_transport() {
         let database: anyhow::Error =
             crate::error::ContextError::Database(sqlx::Error::RowNotFound).into();
-        assert_eq!(error_kind(&database), "database");
-
         let qdrant = anyhow::Error::from(crate::error::ContextError::qdrant(
             crate::error::QdrantErrorKind::FAILED,
         ))
         .context(HTTP_LOG_PROBE_PII);
-        assert_eq!(error_kind(&qdrant), "qdrant");
-        // anyhow context layers must not mask the typed variant.
-        assert_eq!(error_kind(&qdrant.context("outer")), "qdrant");
-
         let pii: anyhow::Error =
             crate::error::ContextError::Pii(HTTP_LOG_PROBE_PII.to_owned()).into();
-        assert_eq!(error_kind(&pii), "pii");
-
         let config: anyhow::Error =
             crate::error::ContextError::Config(anyhow::anyhow!("{HTTP_LOG_PROBE_PATH}")).into();
-        assert_eq!(error_kind(&config), "config");
-
         let grpc_status: anyhow::Error =
             crate::error::ContextError::Grpc(tonic::Status::internal(HTTP_LOG_PROBE_SQL)).into();
-        assert_eq!(error_kind(&grpc_status), "grpc");
-
         let serialization: anyhow::Error = crate::error::ContextError::Serialization(
             serde_json::from_str::<serde_json::Value>(HTTP_LOG_PROBE_PII)
                 .expect_err("the PII probe is not JSON"),
         )
         .into();
-        assert_eq!(error_kind(&serialization), "serialization");
-
         let untyped = anyhow::anyhow!("{HTTP_LOG_PROBE_URL} {HTTP_LOG_PROBE_SQL}");
+
+        // Keep the original per-variant assertions so any HTTP regression is
+        // still reported at the exact variant that broke.
+        assert_eq!(error_kind(&database), "database");
+        assert_eq!(error_kind(&qdrant), "qdrant");
+        assert_eq!(error_kind(&pii), "pii");
+        assert_eq!(error_kind(&config), "config");
+        assert_eq!(error_kind(&grpc_status), "grpc");
+        assert_eq!(error_kind(&serialization), "serialization");
         assert_eq!(error_kind(&untyped), "other");
+        // Observe the HTTP vocabulary through the real function, then compare
+        // it to the literals compiled into grpc.rs.
+        let http_vocab: std::collections::BTreeSet<&str> = [
+            error_kind(&database),
+            error_kind(&qdrant),
+            error_kind(&pii),
+            error_kind(&config),
+            error_kind(&grpc_status),
+            error_kind(&serialization),
+            error_kind(&untyped),
+        ]
+        .into_iter()
+        .collect();
+
+        // anyhow context layers must not mask the typed variant. This consumes
+        // `qdrant`, so it runs after every other use of that value.
+        let qdrant_with_context = qdrant.context("outer");
+        assert_eq!(error_kind(&qdrant_with_context), "qdrant");
+
+        const GRPC_ERROR_KIND_SOURCE: &str = include_str!("grpc.rs");
+        let grpc_body = GRPC_ERROR_KIND_SOURCE
+            .split_once("fn error_kind")
+            .map(|(_, rest)| rest)
+            .expect("grpc.rs must define error_kind");
+        let grpc_body = grpc_body
+            .split_once("\n}")
+            .map(|(body, _)| body)
+            .expect("grpc.rs::error_kind must have a closing brace");
+        let grpc_vocab: std::collections::BTreeSet<&str> =
+            quoted_literals(grpc_body).into_iter().collect();
+
+        assert_eq!(
+            http_vocab, grpc_vocab,
+            "HTTP and gRPC error_kind vocabularies drifted"
+        );
     }
 
     fn store_request(id: Option<String>) -> StoreMemoryRequest {
@@ -555,7 +767,8 @@ mod tests {
     #[test]
     fn store_memory_ignores_caller_id_and_returns_generated_id() {
         let supplied = uuid::Uuid::new_v4().to_string();
-        let (memory, response) = prepare_store_memory(store_request(Some(supplied.clone())));
+        let (memory, response) = prepare_store_memory(store_request(Some(supplied.clone())))
+            .expect("valid metadata is accepted");
 
         assert_ne!(
             memory.id.to_string(),
@@ -580,7 +793,8 @@ mod tests {
             "the JSON body exposes the generated id to the caller"
         );
 
-        let (second, _) = prepare_store_memory(store_request(Some(supplied)));
+        let (second, _) = prepare_store_memory(store_request(Some(supplied)))
+            .expect("valid metadata is accepted");
         assert_ne!(
             memory.id, second.id,
             "repeated requests with the same id get distinct records"
@@ -589,7 +803,8 @@ mod tests {
 
     #[test]
     fn store_memory_preserves_all_other_fields() {
-        let (memory, _) = prepare_store_memory(store_request(None));
+        let (memory, _) =
+            prepare_store_memory(store_request(None)).expect("valid metadata is accepted");
         assert_eq!(memory.content, "sensitive content");
         assert_eq!(memory.embedding, vec![0.1_f32, 0.2, 0.3]);
         assert_eq!(memory.metadata, serde_json::json!({ "kind": "test" }));
@@ -605,7 +820,8 @@ mod tests {
     /// legacy JSON shape, so existing clients are unaffected either way.
     #[test]
     fn search_response_exposes_score_additively() {
-        let (mut memory, _) = prepare_store_memory(store_request(None));
+        let (mut memory, _) =
+            prepare_store_memory(store_request(None)).expect("valid metadata is accepted");
         memory.score = Some(0.75);
 
         let ranked = serde_json::to_value(MemoryEntryResponse::from(memory.clone()))
@@ -873,5 +1089,249 @@ mod tests {
                 "span for {handler} not captured: {logs}"
             );
         }
+    }
+
+    /// Backend whose every operation fails with the same typed, probe-carrying
+    /// error. Drives all three HTTP handlers to failure so the cross-transport
+    /// test can prove each one logs through the shared helper instead of
+    /// silently discarding the error into a bare 500.
+    struct FailingBackend;
+
+    fn probe_error() -> anyhow::Error {
+        let detail = [
+            HTTP_LOG_PROBE_URL,
+            HTTP_LOG_PROBE_SQL,
+            HTTP_LOG_PROBE_PATH,
+            HTTP_LOG_PROBE_PII,
+        ]
+        .join(" ");
+        anyhow::Error::from(crate::error::ContextError::qdrant(
+            crate::error::QdrantErrorKind::FAILED,
+        ))
+        .context(detail)
+    }
+
+    #[async_trait::async_trait]
+    impl MemoryBackend for FailingBackend {
+        async fn build(&self, _event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+            Err(probe_error())
+        }
+
+        async fn store(&self, _memory: MemoryEntry) -> anyhow::Result<()> {
+            Err(probe_error())
+        }
+
+        async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+            Err(probe_error())
+        }
+    }
+
+    /// Return the braced body that follows `marker` in `source`.
+    ///
+    /// Brace matching (rather than a plain substring search) scopes the
+    /// assertion to one function body, so a mention of a helper name inside the
+    /// test module cannot make the cross-transport check pass vacuously.
+    fn body_after<'a>(source: &'a str, marker: &str) -> &'a str {
+        let start = source
+            .find(marker)
+            .unwrap_or_else(|| panic!("marker not found: {marker}"));
+        let open = source[start..]
+            .find('{')
+            .unwrap_or_else(|| panic!("no body after: {marker}"));
+        let body_start = start + open;
+        let mut depth = 0usize;
+        for (offset, ch) in source[body_start..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &source[body_start..=body_start + offset];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("unbalanced body after: {marker}");
+    }
+
+    /// Every quoted literal in an `error_kind` body is a vocabulary token;
+    /// comparing the two sets proves the seven tokens stayed in sync.
+    fn error_kind_tokens(body: &str) -> std::collections::BTreeSet<&str> {
+        let mut tokens = std::collections::BTreeSet::new();
+        let mut rest = body;
+        while let Some(start) = rest.find('"') {
+            let tail = &rest[start + 1..];
+            let Some(end) = tail.find('"') else {
+                break;
+            };
+            tokens.insert(&tail[..end]);
+            rest = &tail[end + 1..];
+        }
+        tokens
+    }
+
+    /// I53-B: all six RPCs (3 HTTP + 3 gRPC) must funnel internal failures
+    /// through the fixed-vocabulary helper. HTTP is checked behaviourally:
+    /// every handler is driven to failure and must emit the same `error_kind`
+    /// log `build_context` already emitted — a bare `map_err(|_| 500)` would
+    /// still return 500 but log nothing, so it fails this test. The gRPC
+    /// handlers need a live store to invoke, so their bodies are scanned from
+    /// the HTTP side via `include_str!`, again scoped to one function body.
+    #[test]
+    fn all_six_rpcs_route_internal_failures_through_fixed_vocabulary() {
+        const OPS: [(&str, &str); 3] = [
+            ("build_context", "build_context"),
+            ("store_memory", "store_memory"),
+            ("search_memory", "search_memory"),
+        ];
+
+        // --- HTTP: behavioural proof for all three handlers. ---
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime builds");
+            runtime.block_on(async {
+                let app = Router::new()
+                    .route("/v1/context/build", post(build_context))
+                    .route("/v1/memory", post(store_memory))
+                    .route("/v1/memory/search", post(search_memory))
+                    .with_state(Arc::new(FailingBackend) as Arc<dyn MemoryBackend>);
+
+                let requests = [
+                    (
+                        "/v1/context/build",
+                        serde_json::json!({
+                            "event_id": "00000000-0000-0000-0000-000000000001",
+                            "event_type": "state_changed",
+                            "payload": {"body": "probe"},
+                            "correlation_id": "corr-1",
+                        })
+                        .to_string(),
+                    ),
+                    (
+                        "/v1/memory",
+                        serde_json::json!({
+                            "content": "probe",
+                            "embedding": [0.1, 0.2],
+                            "metadata": "{\"kind\":\"test\"}",
+                            "source": "regression-test",
+                        })
+                        .to_string(),
+                    ),
+                    (
+                        "/v1/memory/search",
+                        serde_json::json!({"query": "probe", "limit": 5}).to_string(),
+                    ),
+                ];
+
+                for (uri, body) in requests {
+                    let status = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method("POST")
+                                .uri(uri)
+                                .header("content-type", "application/json")
+                                .body(Body::from(body))
+                                .expect("request builds"),
+                        )
+                        .await
+                        .expect("service responds")
+                        .status();
+                    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{uri}");
+                }
+            });
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        for probe in [
+            HTTP_LOG_PROBE_URL,
+            HTTP_LOG_PROBE_SQL,
+            HTTP_LOG_PROBE_PATH,
+            HTTP_LOG_PROBE_PII,
+            "qdrant.internal",
+            "SELECT",
+            "/etc/jarvis",
+        ] {
+            assert!(
+                !logs.contains(probe),
+                "sensitive error-chain detail leaked to logs: {probe}"
+            );
+        }
+        // A bare 500 would emit no ERROR event at all; the fixed message plus
+        // the `qdrant` token can only come from `log_internal_error`.
+        assert!(logs.contains("internal error"), "{logs}");
+        assert!(logs.contains("qdrant"), "{logs}");
+        // Every HTTP handler's operation label is present, proving none of the
+        // three silently dropped its error.
+        for &(_, op) in OPS.iter() {
+            assert!(logs.contains(op), "missing operation label {op}: {logs}");
+        }
+
+        // --- HTTP: structural proof that no handler kept a bare-500 map_err. ---
+        let http_src = include_str!("http.rs");
+        for &(handler, op) in OPS.iter() {
+            let marker = format!("async fn {handler}(");
+            let body = body_after(http_src, &marker);
+            assert!(
+                body.contains("log_internal_error("),
+                "{handler} must route through log_internal_error: {body}"
+            );
+            assert!(
+                body.contains(&format!("\"{op}\"")),
+                "{handler} must pass its operation label: {body}"
+            );
+            assert!(
+                !body.contains("map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)"),
+                "{handler} must not discard the error into a bare 500: {body}"
+            );
+        }
+
+        // --- gRPC: structural proof for all three handlers. ---
+        let grpc_src = include_str!("grpc.rs");
+        for &(handler, op) in OPS.iter() {
+            let marker = format!("async fn {handler}(");
+            let body = body_after(grpc_src, &marker);
+            assert!(
+                body.contains("internal_status("),
+                "{handler} must route through internal_status: {body}"
+            );
+            assert!(
+                body.contains(&format!("\"{op}\"")),
+                "{handler} must pass its operation label: {body}"
+            );
+            assert!(
+                !body.contains("Status::internal("),
+                "{handler} must not build its own status: {body}"
+            );
+        }
+
+        // --- Shared seven-token vocabulary across both transports. ---
+        let http_tokens = error_kind_tokens(body_after(http_src, "fn error_kind(err:"));
+        let grpc_tokens = error_kind_tokens(body_after(grpc_src, "fn error_kind(err:"));
+        let expected: std::collections::BTreeSet<&str> = [
+            "database",
+            "qdrant",
+            "pii",
+            "config",
+            "grpc",
+            "serialization",
+            "other",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(http_tokens, expected);
+        assert_eq!(grpc_tokens, expected);
     }
 }
