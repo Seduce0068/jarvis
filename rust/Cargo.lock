@@ -2121,6 +2121,7 @@ dependencies = [
  "figment",
  "futures-util",
  "hex",
+ "jarvis-core",
  "metrics",
  "metrics-exporter-prometheus",
  "mockall",
