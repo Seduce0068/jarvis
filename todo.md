@@ -1308,3 +1308,33 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   または初回 upsert での実次元検証へ変更。
 
 - 親が対応: fmt 差分、Rust 1.100 の deprecated `fetch_update` → `try_update`（2箇所）。
+
+### Round 45（R4 で修正済み）
+
+- [x] 承認永続化が生 tokio-postgres エラーを OTLP へ送出（confirmed medium）
+  → 固定語彙 `DbOperation` ＋ `db_error` / `db_attempt_warn` の2関数へ集約、
+  生エラーを型レベルで排除。PROBE 非漏洩＋構造ガードの回帰2件追加。
+- [x] OTLP endpoint／初期化エラーが原文でログされる（low）→ `endpoint_configured`
+  と固定 `error_category` のみ、警告＋起動継続契約は維持。回帰1件。
+- [x] Qdrant 次元 inspection 失敗がサイレント fail-open（medium）→ transport
+  エラーは固定語彙 error! ＋ `bail!` で起動失敗、`Ok(None)` は既存どおり警告のみ。
+
+### Round 45 の残り指摘（未対応）
+
+- [ ] **systemd `Environment=` の `${VAR:-default}` は展開されない**
+  （confirmed high、Runtime Proof 付き）— `jarvis-mcp-gw.service:58,62` の
+  BASE_DIR / EGRESS_ALLOWLIST がリテラル文字列として渡り、未上書き時は
+  filesystem.* 全失敗／deny-all になる。systemd.exec(5) は変数展開を行わない。
+  `Environment=` をリテラル既定値へ変更し EnvironmentFile を唯一の上書き経路と
+  するか、shell ラッパで展開。併せて `${` 残存を fail-closed で検査。
+- [ ] kill switch 本体の `warn!` が自由入力 reason と `{error}` を OTLP へ送出
+  （medium）— `kill_switch.rs:246-252,357-361`。`redacted()` と同じ固定語彙化。
+- [ ] commit_gate 1回化の新契約が spec / UI / 回帰名に未反映（medium）—
+  TC-K2 への追記、UI の「承認済み・実行は非常停止中」表示、回帰名改名。
+- [ ] `decide()` の publish が既存決定を無条件上書き（medium）—
+  timeout / prune と同じ勝者温存ルールを適用（Noop バックエンドで競合）。
+- [ ] 発掘: rustfmt ゲートが CI 未配線、Cedar スキーマ旧コメント、
+  opencode.jsonc が build-selfhost 配布対象外、infra/README の 1Password 表記、
+  dsh.md / tool-matrix.md の tools/list 非表示記述。
+
+- 親が対応: fmt 差分、構造ガードの誤った切断位置（`#[cfg(test)]` → テストモジュール）。
