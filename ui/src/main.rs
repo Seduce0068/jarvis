@@ -15,11 +15,23 @@ use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_platform::application;
 
 use approvals::ApprovalsView;
+use policy_client::tokens_from_env;
 
 fn main() {
     let base_url = std::env::var("JARVIS_POLICY_HTTP_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
-    let approval_token = std::env::var("JARVIS_POLICY_APPROVAL_TOKEN").ok();
+    let tokens = tokens_from_env();
+    if tokens.legacy_api_env_used() {
+        // Names only — never log, echo, or embed the token value itself.
+        eprintln!(
+            "warning: JARVIS_POLICY_APPROVAL_TOKEN is deprecated; \
+             set JARVIS_POLICY_APPROVAL_API_TOKEN instead \
+             (the legacy name is honoured temporarily)"
+        );
+    }
+    // `ApprovalsView::new` exposes a single Option<String> channel; the bundle
+    // carries both scopes through it without changing that out-of-scope file.
+    let token_arg = tokens.encode();
 
     application().run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(980.), px(680.)), cx);
@@ -32,9 +44,7 @@ fn main() {
                 }),
                 ..Default::default()
             },
-            |_window, cx| {
-                cx.new(|cx| ApprovalsView::new(base_url.clone(), approval_token.clone(), cx))
-            },
+            |_window, cx| cx.new(|cx| ApprovalsView::new(base_url.clone(), token_arg.clone(), cx)),
         )
         .expect("open the JARVIS approval window");
         cx.activate(true);

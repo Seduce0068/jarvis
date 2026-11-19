@@ -35,6 +35,13 @@ generated:
   本番リソース非接触を多重ガード）。**実機の隔離先復元演習は承認待ち**。
 - **承認 API**: オプションのトークン認証を追加（既定は無効で後方互換）。
   4コンポーネント横断の契約テスト済み。
+- **承認 UI のトークン名・scope 整合（R4-UI）**: UI が
+  `JARVIS_POLICY_APPROVAL_API_TOKEN`（旧 `JARVIS_POLICY_APPROVAL_TOKEN` は
+  警告付き一時フォールバック）と `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`
+  （未設定時は API トークンへフォールバック）を読み、一覧取得に API
+  トークン、承認・却下に admin トークンを `X-Jarvis-Approval-Token` で
+  送信するよう修正。env 名→scope・ヘッダの契約テストを追加。
+  秘密情報の値は記載しない。
 - **読み取りツールの機微ファイル拒否**: `sandbox.rs` のパス解決で `.env`,
   `bws.env`, `*token*`, `*secret*`, `*.pem`, `*.key` を拒否する defensive
   check を追加（MCP-4 の残リスク低減）。回帰テスト・smoke 12/12 成功。
@@ -575,16 +582,21 @@ repo 側の参照関係を調査した結果を記録する。**結論: 要判�
 - 旧 backup/restore/deploy ランチャーは fail-closed 化し、`make safety-test`
   で回帰検証（ci-local に組込）。
 
-### MCP-1 承認フローのセキュリティ境界（2026-11-16 レビュー）
+### MCP-1 承認フローのセキュリティ境界（2026-11-16 レビュー、2026-11-19 更新）
 
 - jarvis-policy の承認 API（`/v1/approval`, `/v1/approvals`,
   `/v1/approval/{id}/approve|deny`）は既定では認証トークンを要求しない
-  （後方互換）。2026-11-17 に **オプションのトークン認証を追加**した。
-  `JARVIS_POLICY_APPROVAL_TOKEN` を設定すると全承認ルートが
-  `X-Jarvis-Approval-Token` ヘッダを要求し、未設定/不正は 401 で拒否する。
-  gateway (`JARVIS_MCP_GW_APPROVAL_API_TOKEN`) と UI
-  (`JARVIS_POLICY_APPROVAL_TOKEN`) が同じ値を送信する。health/metrics/check/
-  kill-switch は認証対象外。ループバック外へ公開する場合はトークン設定が必須。
+  （後方互換）。**オプションのトークン認証**では scope が分かれる。
+  - API scope（request/list/status）: `JARVIS_POLICY_APPROVAL_API_TOKEN`。
+  - admin scope（approve/deny）: `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`。
+    未設定なら API トークンへフォールバック（職務分離は効かない）。
+  - 両 scope ともヘッダ名は `X-Jarvis-Approval-Token`。未設定/不正は 401。
+  - 旧 `JARVIS_POLICY_APPROVAL_TOKEN` は policy 側の実変数ではない。UI は
+    旧名を一時フォールバックとして受け付け、起動時に非推奨警告を出す。
+  - gateway は `JARVIS_MCP_GW_APPROVAL_API_TOKEN`、UI は
+    `JARVIS_POLICY_APPROVAL_API_TOKEN` / `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`
+    を読み、対応する scope へ同じ値を送信する。health/metrics/check/
+    kill-switch は認証対象外。ループバック外へ公開する場合はトークン設定が必須。
 - `jarvis-mcp-gw` の承認 HTTP クライアントには 330 秒の overall timeout と
   2 秒の connect timeout を設定済み（2026-11-16 修正）。
   policy が応答を返さない場合も MCP 呼び出しは有限時間で fail-closed となる

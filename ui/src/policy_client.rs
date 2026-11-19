@@ -17,7 +17,150 @@
 use anyhow::{Context as _, Result, bail};
 use jarvis_core::approval::{ApprovalDecision as Decision, ApprovalRequest as CoreApprovalRequest};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::time::Duration;
+
+/// Canonical env var for the gateway-facing approval API token (list/request/status).
+pub const ENV_APPROVAL_API_TOKEN: &str = "JARVIS_POLICY_APPROVAL_API_TOKEN";
+/// Deprecated alias, honoured temporarily with a startup warning.
+pub const ENV_LEGACY_APPROVAL_TOKEN: &str = "JARVIS_POLICY_APPROVAL_TOKEN";
+/// Env var for the token guarding approve/deny on the policy side.
+pub const ENV_APPROVAL_ADMIN_TOKEN: &str = "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN";
+
+/// A secret value whose `Debug` output never contains the secret itself.
+#[derive(Clone)]
+struct RedactedToken(String);
+
+impl RedactedToken {
+    fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RedactedToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("RedactedToken(<redacted>)")
+    }
+}
+
+/// Version marker for the two-token bundle transported through the single
+/// `Option<String>` channel exposed by `ApprovalsView::new` (which lives in a
+/// file outside this change's scope). Env values cannot contain NUL, and the
+/// payload is JSON behind this marker, so plain legacy tokens stay unambiguous.
+const TOKEN_WIRE_PREFIX: &str = "jarvis-tokens-v1:";
+
+/// Tokens resolved for the two approval scopes.
+///
+/// Mirrors `jarvis-policy`: API routes (request/list/status) use `api_token`,
+/// while approve/deny use `admin_token` and fall back to `api_token` when no
+/// admin token is configured.
+#[derive(Clone)]
+pub struct PolicyTokens {
+    api_token: Option<String>,
+    admin_token: Option<String>,
+    /// True when only the deprecated env alias supplied the API token.
+    legacy_api_env_used: bool,
+}
+
+impl PolicyTokens {
+    fn new(api_token: Option<String>, admin_token: Option<String>) -> Self {
+        Self {
+            api_token,
+            admin_token,
+            legacy_api_env_used: false,
+        }
+    }
+
+    /// Effective token for approve/deny: admin token, else API token fallback.
+    /// Test-only: the runtime scope resolution lives on `PolicyClient`.
+    #[cfg(test)]
+    fn effective_admin_token(&self) -> Option<&str> {
+        self.admin_token.as_deref().or(self.api_token.as_deref())
+    }
+
+    /// Whether startup should warn about the deprecated env alias.
+    pub fn legacy_api_env_used(&self) -> bool {
+        self.legacy_api_env_used
+    }
+
+    /// Serialize both tokens into the single `Option<String>` channel.
+    /// Returns `None` when no token is configured at all.
+    pub fn encode(&self) -> Option<String> {
+        if self.api_token.is_none() && self.admin_token.is_none() {
+            return None;
+        }
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            api: Option<&'a str>,
+            admin: Option<&'a str>,
+        }
+        let wire = Wire {
+            api: self.api_token.as_deref(),
+            admin: self.admin_token.as_deref(),
+        };
+        let json = serde_json::to_string(&wire).expect("token wire is infallible");
+        Some(format!("{TOKEN_WIRE_PREFIX}{json}"))
+    }
+
+    /// Decode a channel value. Anything without the version marker is a plain
+    /// legacy token used for both scopes (the old single-token contract).
+    fn decode_or_legacy(raw: Option<String>) -> Self {
+        let Some(raw) = raw else {
+            return Self::new(None, None);
+        };
+        if let Some(json) = raw.strip_prefix(TOKEN_WIRE_PREFIX) {
+            #[derive(Deserialize)]
+            struct Wire {
+                api: Option<String>,
+                admin: Option<String>,
+            }
+            if let Ok(wire) = serde_json::from_str::<Wire>(json) {
+                return Self::new(wire.api, wire.admin);
+            }
+        }
+        Self::new(Some(raw), None)
+    }
+}
+
+impl fmt::Debug for PolicyTokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PolicyTokens")
+            .field("api_token", &self.api_token.as_ref().map(|_| "<redacted>"))
+            .field(
+                "admin_token",
+                &self.admin_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("legacy_api_env_used", &self.legacy_api_env_used)
+            .finish()
+    }
+}
+
+/// Resolve tokens from `std::env`. Called once at startup by `main`, which
+/// emits the deprecation warning when [`PolicyTokens::legacy_api_env_used`].
+pub fn tokens_from_env() -> PolicyTokens {
+    tokens_from_env_with(|key| std::env::var(key).ok())
+}
+
+/// Blank values count as unset, matching the policy service's blank-token
+/// startup guard. Pure so the env-name -> scope contract is testable without
+/// mutating the process environment.
+fn tokens_from_env_with(getter: impl Fn(&str) -> Option<String>) -> PolicyTokens {
+    fn non_blank(value: String) -> Option<String> {
+        (!value.trim().is_empty()).then_some(value)
+    }
+    let canonical = getter(ENV_APPROVAL_API_TOKEN).and_then(non_blank);
+    let legacy = getter(ENV_LEGACY_APPROVAL_TOKEN).and_then(non_blank);
+    let legacy_api_env_used = canonical.is_none() && legacy.is_some();
+    PolicyTokens {
+        api_token: canonical.or(legacy),
+        admin_token: getter(ENV_APPROVAL_ADMIN_TOKEN).and_then(non_blank),
+        legacy_api_env_used,
+    }
+}
 
 /// A pending approval request as returned by `jarvis-policy`.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -147,8 +290,21 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 #[derive(Clone)]
 pub struct PolicyClient {
     base_url: String,
-    token: Option<String>,
+    /// Guards the API scope (`GET /v1/approvals`).
+    api_token: Option<RedactedToken>,
+    /// Guards the admin scope (POST approve/deny); API token is the fallback.
+    admin_token: Option<RedactedToken>,
     agent: ureq::Agent,
+}
+
+impl fmt::Debug for PolicyClient {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PolicyClient")
+            .field("base_url", &self.base_url)
+            .field("api_token", &self.api_token)
+            .field("admin_token", &self.admin_token)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PolicyClient {
@@ -158,8 +314,31 @@ impl PolicyClient {
         Self::new_with_token(base_url, None)
     }
 
+    /// Single-token constructor kept for compatibility. `token` may be a full
+    /// [`PolicyTokens::encode`] bundle or a plain legacy token.
     pub fn new_with_token(base_url: impl Into<String>, token: Option<String>) -> Self {
-        Self::with_timeouts(base_url, token, REQUEST_TIMEOUT, CONNECT_TIMEOUT)
+        Self::with_tokens(
+            base_url,
+            PolicyTokens::decode_or_legacy(token),
+            REQUEST_TIMEOUT,
+            CONNECT_TIMEOUT,
+        )
+    }
+
+    /// Explicit two-token constructor (API scope vs admin scope).
+    /// Used by the env-name -> header contract tests and by embedders.
+    #[allow(dead_code)]
+    pub fn new_with_tokens(
+        base_url: impl Into<String>,
+        api_token: Option<String>,
+        admin_token: Option<String>,
+    ) -> Self {
+        Self::with_tokens(
+            base_url,
+            PolicyTokens::new(api_token, admin_token),
+            REQUEST_TIMEOUT,
+            CONNECT_TIMEOUT,
+        )
     }
 
     /// Constructor with explicit deadlines (used by timeout tests).
@@ -167,6 +346,20 @@ impl PolicyClient {
     fn with_timeouts(
         base_url: impl Into<String>,
         token: Option<String>,
+        request_timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Self {
+        Self::with_tokens(
+            base_url,
+            PolicyTokens::decode_or_legacy(token),
+            request_timeout,
+            connect_timeout,
+        )
+    }
+
+    fn with_tokens(
+        base_url: impl Into<String>,
+        tokens: PolicyTokens,
         request_timeout: Duration,
         connect_timeout: Duration,
     ) -> Self {
@@ -183,9 +376,15 @@ impl PolicyClient {
             .build();
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            token,
+            api_token: tokens.api_token.map(RedactedToken::new),
+            admin_token: tokens.admin_token.map(RedactedToken::new),
             agent: ureq::Agent::new_with_config(config),
         }
+    }
+
+    /// Effective token for approve/deny: admin token, else API token fallback.
+    fn effective_admin_token(&self) -> Option<&RedactedToken> {
+        self.admin_token.as_ref().or(self.api_token.as_ref())
     }
 
     /// Requests currently awaiting an operator decision.
@@ -196,8 +395,10 @@ impl PolicyClient {
     pub fn pending(&self) -> Result<Vec<ApprovalRequest>> {
         let url = format!("{}/v1/approvals", self.base_url);
         let mut request = self.agent.get(&url);
-        if let Some(token) = &self.token {
-            request = request.header("X-Jarvis-Approval-Token", token);
+        // API scope: the list endpoint is guarded by the API token, never by
+        // the admin token (jarvis-policy ApprovalScope::Api).
+        if let Some(token) = &self.api_token {
+            request = request.header("X-Jarvis-Approval-Token", token.expose());
         }
         let mut response = request
             .call()
@@ -232,8 +433,11 @@ impl PolicyClient {
     fn decide<B: Serialize + ?Sized>(&self, id: &str, verb: &str, body: &B) -> Result<Decision> {
         let url = format!("{}/v1/approval/{id}/{verb}", self.base_url);
         let mut request = self.agent.post(&url);
-        if let Some(token) = &self.token {
-            request = request.header("X-Jarvis-Approval-Token", token);
+        // Admin scope: approve/deny require the separate admin token when it
+        // is configured, otherwise the API token (same fallback as policy).
+        // The header name is unchanged; only the value is scope-specific.
+        if let Some(token) = self.effective_admin_token() {
+            request = request.header("X-Jarvis-Approval-Token", token.expose());
         }
         let mut response = request
             .send_json(body)
@@ -801,5 +1005,206 @@ mod tests {
             request_to_core(&with_bad_id).is_err(),
             "malformed id must fail explicitly"
         );
+    }
+
+    // --- R4-UI: env name -> header scope contract ---------------------------
+
+    fn env_getter<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| (*value).to_string())
+        }
+    }
+
+    #[test]
+    fn canonical_env_name_resolves_to_api_token() {
+        let pairs = [(ENV_APPROVAL_API_TOKEN, "canonical-api-value")];
+        let tokens = tokens_from_env_with(env_getter(&pairs));
+        assert_eq!(tokens.api_token.as_deref(), Some("canonical-api-value"));
+        assert_eq!(tokens.admin_token, None);
+        assert!(!tokens.legacy_api_env_used());
+    }
+
+    #[test]
+    fn legacy_env_name_falls_back_and_flags_deprecation() {
+        let pairs = [(ENV_LEGACY_APPROVAL_TOKEN, "legacy-api-value")];
+        let tokens = tokens_from_env_with(env_getter(&pairs));
+        assert_eq!(tokens.api_token.as_deref(), Some("legacy-api-value"));
+        assert!(tokens.legacy_api_env_used());
+
+        // The canonical name wins when both are set; no warning is then due.
+        let both_pairs = [
+            (ENV_APPROVAL_API_TOKEN, "canonical-api-value"),
+            (ENV_LEGACY_APPROVAL_TOKEN, "legacy-api-value"),
+        ];
+        let both = tokens_from_env_with(env_getter(&both_pairs));
+        assert_eq!(both.api_token.as_deref(), Some("canonical-api-value"));
+        assert!(!both.legacy_api_env_used());
+    }
+
+    #[test]
+    fn admin_env_token_is_scoped_and_falls_back_to_api() {
+        let admin_pairs = [
+            (ENV_APPROVAL_API_TOKEN, "api-value"),
+            (ENV_APPROVAL_ADMIN_TOKEN, "admin-value"),
+        ];
+        let with_admin = tokens_from_env_with(env_getter(&admin_pairs));
+        assert_eq!(with_admin.api_token.as_deref(), Some("api-value"));
+        assert_eq!(with_admin.admin_token.as_deref(), Some("admin-value"));
+        assert_eq!(with_admin.effective_admin_token(), Some("admin-value"));
+
+        let api_pairs = [(ENV_APPROVAL_API_TOKEN, "api-value")];
+        let without_admin = tokens_from_env_with(env_getter(&api_pairs));
+        assert_eq!(without_admin.admin_token, None);
+        assert_eq!(without_admin.effective_admin_token(), Some("api-value"));
+    }
+
+    #[test]
+    fn blank_env_values_are_treated_as_unset() {
+        let pairs = [
+            (ENV_APPROVAL_API_TOKEN, "   "),
+            (ENV_LEGACY_APPROVAL_TOKEN, "legacy-api-value"),
+            (ENV_APPROVAL_ADMIN_TOKEN, ""),
+        ];
+        let tokens = tokens_from_env_with(env_getter(&pairs));
+        assert_eq!(tokens.api_token.as_deref(), Some("legacy-api-value"));
+        assert!(tokens.legacy_api_env_used());
+        assert_eq!(tokens.admin_token, None);
+    }
+
+    #[test]
+    fn token_bundle_round_trips_through_single_string_channel() {
+        let tokens = PolicyTokens::new(Some("api".into()), Some("admin".into()));
+        let encoded = tokens.encode().expect("bundle encoded");
+        assert!(encoded.starts_with(TOKEN_WIRE_PREFIX));
+        let decoded = PolicyTokens::decode_or_legacy(Some(encoded));
+        assert_eq!(decoded.api_token.as_deref(), Some("api"));
+        assert_eq!(decoded.admin_token.as_deref(), Some("admin"));
+
+        let legacy = PolicyTokens::decode_or_legacy(Some("plain-legacy".into()));
+        assert_eq!(legacy.api_token.as_deref(), Some("plain-legacy"));
+        assert_eq!(legacy.admin_token, None);
+
+        let malformed_raw = format!("{TOKEN_WIRE_PREFIX}not-json");
+        let malformed = PolicyTokens::decode_or_legacy(Some(malformed_raw.clone()));
+        assert_eq!(malformed.api_token.as_deref(), Some(malformed_raw.as_str()));
+        assert_eq!(PolicyTokens::new(None, None).encode(), None);
+    }
+
+    #[test]
+    fn pending_sends_api_token_when_admin_token_is_separate() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                *seen_for_thread.lock().expect("lock") = Some(request);
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\r\n{\"pending\":[]}",
+                );
+            },
+            1,
+        );
+
+        let client = PolicyClient::new_with_tokens(
+            format!("http://{addr}"),
+            Some("api-scope-value".to_string()),
+            Some("admin-scope-value".to_string()),
+        );
+        assert!(client.pending().is_ok());
+        handle.join().expect("server thread");
+        let request = seen.lock().expect("lock").clone().expect("request seen");
+        assert_eq!(approval_token(&request).as_deref(), Some("api-scope-value"));
+        assert!(!request.contains("admin-scope-value"));
+    }
+
+    #[test]
+    fn approve_and_deny_send_admin_token_not_api_token() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = seen.clone();
+        let mut responses = [
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
+        ]
+        .into_iter();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                seen_for_thread.lock().expect("lock").push(request);
+                respond(stream, responses.next().expect("queued response"));
+            },
+            2,
+        );
+
+        let client = PolicyClient::new_with_tokens(
+            format!("http://{addr}"),
+            Some("api-scope-value".to_string()),
+            Some("admin-scope-value".to_string()),
+        );
+        assert!(client.approve("req-1", "koppe").is_ok());
+        assert!(client.deny("req-2", "because").is_ok());
+        handle.join().expect("server thread");
+        let requests = seen.lock().expect("lock");
+        assert_eq!(requests.len(), 2);
+        for request in requests.iter() {
+            assert_eq!(
+                approval_token(request).as_deref(),
+                Some("admin-scope-value")
+            );
+            assert!(!request.contains("api-scope-value"));
+        }
+    }
+
+    #[test]
+    fn decide_falls_back_to_api_token_without_admin_token() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                *seen_for_thread.lock().expect("lock") = Some(request);
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
+                );
+            },
+            1,
+        );
+
+        let client = PolicyClient::new_with_tokens(
+            format!("http://{addr}"),
+            Some("fallback-api-value".to_string()),
+            None,
+        );
+        assert!(client.deny("req-2", "because").is_ok());
+        handle.join().expect("server thread");
+        let request = seen.lock().expect("lock").clone().expect("request seen");
+        assert_eq!(
+            approval_token(&request).as_deref(),
+            Some("fallback-api-value")
+        );
+    }
+
+    #[test]
+    fn debug_output_redacts_every_token_value() {
+        let tokens = PolicyTokens::new(Some("api-secret".into()), Some("admin-secret".into()));
+        let client = PolicyClient::new_with_tokens(
+            "http://127.0.0.1:8081",
+            Some("api-secret".into()),
+            Some("admin-secret".into()),
+        );
+        let tokens_debug = format!("{tokens:?}");
+        let client_debug = format!("{client:?}");
+        for rendered in [&tokens_debug, &client_debug] {
+            assert!(!rendered.contains("api-secret"), "{rendered}");
+            assert!(!rendered.contains("admin-secret"), "{rendered}");
+            assert!(rendered.contains("redacted"), "{rendered}");
+        }
     }
 }

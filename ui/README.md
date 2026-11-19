@@ -35,7 +35,7 @@ CI の aarch64 クロスビルドを壊さないための独立クレートで�
 cd ~/ドキュメント/作業用/jarvis/jarvis/ui
 cargo build            # 開発ビルド
 cargo build --release  # リリースビルド
-cargo test             # 14 テスト（cargo test の実測値）
+cargo test             # 既存 27 件 + env 名→ヘッダ契約テスト 9 件（追加）
 cargo clippy --all-targets -- -D warnings
 ```
 
@@ -53,6 +53,10 @@ cargo run
 JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
 ```
 
+トークン認証を有効にする場合は、`JARVIS_POLICY_APPROVAL_API_TOKEN`
+（一覧取得用）と `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`（承認・却下用）を
+運用時の環境変数として注入してください（値はここに記載しません）。
+
 ## 使い方
 
 1. コンソールを起動すると「JARVIS 承認コンソール」ウィンドウが開きます。
@@ -69,15 +73,24 @@ JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
 ## セキュリティ
 
 - 接続先は `JARVIS_POLICY_HTTP_URL` のみ（既定は loopback）。
-- トークン注入経路は環境変数 `JARVIS_POLICY_APPROVAL_TOKEN` です。
-  `main.rs` が起動時に読み、`ApprovalsView` を経由して `PolicyClient` へ渡し、
-  一覧取得・承認・却下の全リクエストに `X-Jarvis-Approval-Token` ヘッダを
-  付与します（未設定時はヘッダを送信しません）。
-- jarvis-policy 側も同じ環境変数 `JARVIS_POLICY_APPROVAL_TOKEN` で
-  トークンを設定します。**両者には同じ値を設定してください**。値が一致しない
-  場合、policy 側でトークン必須に設定すると 401 になり、
-  一覧取得や決定が失敗します。トークン値はリポジトリへ書き込まず、
+- トークン注入経路は次の3つの環境変数です（`main.rs` が起動時に読み、
+  `ApprovalsView` を経由して `PolicyClient` へ渡します）:
+  - `JARVIS_POLICY_APPROVAL_API_TOKEN`: 一覧取得など API scope のトークン。
+  - `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`: 承認・却下（admin scope）の
+    トークン。未設定なら API トークンへフォールバックします
+    （`jarvis-policy` と同じ挙動）。
+  - `JARVIS_POLICY_APPROVAL_TOKEN`: 旧名。一時的なフォールバックとして
+    受け付けますが、起動時に非推奨警告を出します。
+- ヘッダ名は両 scope とも `X-Jarvis-Approval-Token` で共通ですが、送信する
+  **値を scope ごとに使い分けます**。一覧取得には API トークン、承認・却下に
+  は admin トークン（未設定時は API トークン）を送ります。未設定の scope では
+  ヘッダを送信しません。
+- policy 側の設定名は `JARVIS_POLICY_APPROVAL_API_TOKEN` /
+  `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN` です。**対応する scope の値を
+  一致させてください**。値が一致しない場合、トークン必須設定では 401 に
+  なり、一覧取得や決定が失敗します。トークン値はリポジトリへ書き込まず、
   運用時の環境変数として注入します。
+- トークン値はログ・エラー・`Debug` 出力に出しません（redaction）。
 - 特権操作・外部送信・秘密情報の読み取りは行いません。
 
 ### 決定者の識別 (`approved_by`) — P0-3 関連の設計判断
