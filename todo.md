@@ -171,9 +171,9 @@ generated:
     方針が確定するまで参照実装は未配線のままとし、安全版を配線経路
     とする。完全配線（PR トリガー / cross-review / auto-merge）は
     方針次第で、P0-3 と同じく「一部実装済み（安全版のみ）」扱い。
-- [x] **P2-3** UI を CI へ組み込み（2026-11-17 対応済み: ci.yml extra_gates に `make ui-test` を追加、7 tests 成功。UI clippy の undocumented_unsafe_blocks は既に付与済み）（R2-UI-005, R5-RULES-001）
+- [x] **P2-3** UI を CI へ組み込み（2026-11-17: ci.yml extra_gates に `make ui-test` を追加、7 tests 成功。**2026-11-20 訂正・実装**: 旧完了記録の「UI clippy の undocumented_unsafe_blocks は既に付与済み」は監査 I68-B で実装と不一致（Makefile:45,114 に無く、`ui/Cargo.toml` は独立 workspace で workspace lints 未継承）。`Makefile:45`（ci-local）と `Makefile:114`（ui-test）へ `-D clippy::undocumented_unsafe_blocks` を実際に付与し、記録と実装を一致させた）（R2-UI-005, R5-RULES-001）
   - `ui/` は独立 workspace で CI 対象外。amd64 ジョブで `make ui-test`。
-    UI clippy にも `-D clippy::undocumented_unsafe_blocks` を付与。
+    UI clippy へ `-D clippy::undocumented_unsafe_blocks` を付与（2026-11-20 実装、Makefile:45 / :114）。
 - [x] **P2-4** `ci-local` と CI の差分を解消（2026-11-18 対応済み: `ci-local` の説明を「主要ゲートのローカル代替（aarch64 クロス/Docker 依存ゲートは除外）」へ訂正。実機に aarch64-linux-gnu-gcc / Docker が無いため組み込まず、除外理由を明文化）（R4-GATE-006, R4-SPEC-010）
   - `extra_gates`（aarch64 check, `--ignored` test）が `ci-local` に無い。
     組み込むか「主要ゲートのローカル代替」へ説明を訂正。
@@ -207,6 +207,7 @@ generated:
 - [x] **P2-11** setup スクリプトの固定 DB パスワードを除去（2026-11-17 対応済み: `JARVIS_DB_PASSWORD` 環境変数必須化、code-server 生成パスワードの標準出力を廃止、infra/README に手順追記）（R1-SEC-007）
   - 固定文字列をハードコード、生成パスワードを標準出力へ表示。
     `secret_scan.py` が SQL の `WITH PASSWORD` を検出できない問題も。
+- [x] **P2-13** pre-commit を主軸・CI を最終ゲートとする二段構成を完成（2026-11-20 監査 I68-B 対応: `hooks.json` の pre-commit に `make secret-scan`（`|| true` 無し・値非出力の `ci/scripts/secret_scan.py`）を追加しシークレット検出で fail-closed。Markdown lint は docs/ の baseline 456 issues（P3-4）が残るため `|| true` を維持し、その方針を description に明記。`.github/workflows/ci.yml` の `clippy_args` に `-D warnings` を追加。check/test の `--locked` は共有ワークフロー `rust-gates.yml@v1` 内部で未確認のため呼び出し側では設定せずコメントで現状を記録。git hook の実インストール（`git config core.hooksPath`）は行わず設定ファイルのみ編集）（共通指示 §4 / §15, R4-GATE-006）
 
 ## P3: ドキュメント・レガシー整理（低）
 
@@ -1237,14 +1238,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 42 の残り指摘（未対応）
 
-- [ ] 未使用依存の削除候補（confirmed）— tower-http（全4サービス＋workspace）、
+- [x] 未使用依存の削除候補（confirmed）— tower-http（全4サービス＋workspace）、
   zeroize（policy）、prost-types（policy/mcp-gw）、figment json feature、
   uuid v7 feature、rmcp の transport-child-process / transport-sse-client。
-  削除後に `cargo check --all-targets --locked` と `make ui-test` で検証。
-- [ ] 並行レビューの残り: select! の unbiased による期限境界 split brain、
-  Connection::reconnect のキャンセル、symlink swap と bin マーカーの不一致窓。
-- [ ] jarvis-context の outbox/Qdrant 失敗ログが `{error:#}` で anyhow
-  チェーン全体を OTLP logs へ送出（medium）— 固定語彙化が必要。
+  削除後に `cargo check --all-targets --locked` と `make ui-test` で検証。〔Round 43 で対応済み〕
+- [x] 並行レビューの残り: select! の unbiased による期限境界 split brain、
+  Connection::reconnect のキャンセル、symlink swap と bin マーカーの不一致窓。〔Round 43 で対応済み〕
+- [x] jarvis-context の outbox/Qdrant 失敗ログが `{error:#}` で anyhow
+  チェーン全体を OTLP logs へ送出（medium）— 固定語彙化が必要。〔Round 43 で対応済み〕
 - 親が対応: fmt 差分、JoinHandle 型不一致（spawn 内で Result を unwrap）、
   tracing field 形式依存アサーションの削除。
 
@@ -1263,19 +1264,19 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 43 の残り指摘（未対応）
 
-- [ ] commit_gate のコミット後再読が「永続化済みだが未公開」を作る
+- [x] commit_gate のコミット後再読が「永続化済みだが未公開」を作る
   （confirmed medium）— DB=approved / HTTP=409 / メモリ=Pending の分裂。
-  コミット前に1回に限定するか、コミット済みとして決定を返す。
-- [ ] DecidingGuard が共有 bool で世代/オーナーを持たず、prune と timeout が
+  コミット前に1回に限定するか、コミット済みとして決定を返す。〔Round 44 で対応済み〕
+- [x] DecidingGuard が共有 bool で世代/オーナーを持たず、prune と timeout が
   同じ Arc に第2ガードを作り得る（medium）— 世代付きトークン化＋
-  apply_prune の `decided_at.is_some()` 温存。
-- [ ] mcp_allowlist.toml の timeout_ms 一律15000化は web.fetch 以外の
+  apply_prune の `decided_at.is_some()` 温存。〔Round 44 で対応済み〕
+- [x] mcp_allowlist.toml の timeout_ms 一律15000化は web.fetch 以外の
   shell.execute / github.create_pr / web.search に不要な機能後退（high）—
-  30000 へ戻すかルートごとの実効値を明記。
-- [ ] egress テンプレートの「unset は deny-all」が unit の example.com
-  フォールバックと矛盾（low）。
-- [ ] policy gRPC の kill switch エラーログだけ `{error:#}` でチェーン全体を
-  OTLP へ送出（medium）— context 側と同じ固定語彙化が必要。
+  30000 へ戻すかルートごとの実効値を明記。〔Round 44 で対応済み〕
+- [x] egress テンプレートの「unset は deny-all」が unit の example.com
+  フォールバックと矛盾（low）。〔Round 44 で対応済み〕
+- [x] policy gRPC の kill switch エラーログだけ `{error:#}` でチェーン全体を
+  OTLP へ送出（medium）— context 側と同じ固定語彙化が必要。〔Round 44 で対応済み〕
 
 - 親が対応: builder.rs の未定義変数 `expected`、`embedding_dim` 修正、
   tracing field 形式依存アサーション削除、secret_scan 誤検出（PROBE 定数＋
@@ -1297,15 +1298,15 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 44 の残り指摘（未対応）
 
-- [ ] 承認永続化が生の tokio-postgres エラーを OTLP ログへ送出
+- [x] 承認永続化が生の tokio-postgres エラーを OTLP ログへ送出
   （confirmed medium）— `persistence.rs:316,720,778,840-847,902-903` の
-  `error = %error` を固定語彙化（context 側と契約を揃える）。
-- [ ] OTLP endpoint／初期化エラーが原文でログされる（low）—
+  `error = %error` を固定語彙化（context 側と契約を揃える）。〔Round 45 で対応済み〕
+- [x] OTLP endpoint／初期化エラーが原文でログされる（low）—
   `policy/main.rs:133-136` の endpoint URL（userinfo/query token の可能性）を
-  固定語彙へ丸める。
-- [ ] Qdrant コレクション次元チェックの失敗がサイレント fail-open
+  固定語彙へ丸める。〔Round 45 で対応済み〕
+- [x] Qdrant コレクション次元チェックの失敗がサイレント fail-open
   （medium）— `builder.rs:1048-1056` の Err(_) => warn + Ok(()) を起動失敗
-  または初回 upsert での実次元検証へ変更。
+  または初回 upsert での実次元検証へ変更。〔Round 45 で対応済み〕
 
 - 親が対応: fmt 差分、Rust 1.100 の deprecated `fetch_update` → `try_update`（2箇所）。
 
@@ -1321,18 +1322,18 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 45 の残り指摘（未対応）
 
-- [ ] **systemd `Environment=` の `${VAR:-default}` は展開されない**
+- [x] **systemd `Environment=` の `${VAR:-default}` は展開されない**
   （confirmed high、Runtime Proof 付き）— `jarvis-mcp-gw.service:58,62` の
   BASE_DIR / EGRESS_ALLOWLIST がリテラル文字列として渡り、未上書き時は
   filesystem.* 全失敗／deny-all になる。systemd.exec(5) は変数展開を行わない。
   `Environment=` をリテラル既定値へ変更し EnvironmentFile を唯一の上書き経路と
-  するか、shell ラッパで展開。併せて `${` 残存を fail-closed で検査。
-- [ ] kill switch 本体の `warn!` が自由入力 reason と `{error}` を OTLP へ送出
-  （medium）— `kill_switch.rs:246-252,357-361`。`redacted()` と同じ固定語彙化。
+  するか、shell ラッパで展開。併せて `${` 残存を fail-closed で検査。〔Round 46 で対応済み〕
+- [x] kill switch 本体の `warn!` が自由入力 reason と `{error}` を OTLP へ送出
+  （medium）— `kill_switch.rs:246-252,357-361`。`redacted()` と同じ固定語彙化。〔Round 46 で対応済み〕
 - [ ] commit_gate 1回化の新契約が spec / UI / 回帰名に未反映（medium）—
   TC-K2 への追記、UI の「承認済み・実行は非常停止中」表示、回帰名改名。
-- [ ] `decide()` の publish が既存決定を無条件上書き（medium）—
-  timeout / prune と同じ勝者温存ルールを適用（Noop バックエンドで競合）。
+- [x] `decide()` の publish が既存決定を無条件上書き（medium）—
+  timeout / prune と同じ勝者温存ルールを適用（Noop バックエンドで競合）。〔Round 46 で対応済み〕
 - [ ] 発掘: rustfmt ゲートが CI 未配線、Cedar スキーマ旧コメント、
   opencode.jsonc が build-selfhost 配布対象外、infra/README の 1Password 表記、
   dsh.md / tool-matrix.md の tools/list 非表示記述。
@@ -1353,15 +1354,15 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 46 の残り指摘（未対応）
 
-- [ ] OTLP 固定語彙化が policy のみ（medium）— event / context / mcp-gw の
+- [x] OTLP 固定語彙化が policy のみ（medium）— event / context / mcp-gw の
   `main.rs` は `.build()?` のまま。失敗時に ExporterBuildError が stderr/journal
-  へ流出。4サービスで契約統一（固定 warn＋継続、または全サービス起動失敗）。
-- [ ] Qdrant の生エラー `e.to_string()` が collection_info 以外の5経路に残存
-  （medium）— `ContextError::Qdrant(String)` を固定語彙化し、型レベルで排除。
-- [ ] `configured_vector_size` の複数 `?` が「応答未解析」を「多ベクトル」
-  と誤分類して fail-closed を迂回（medium）— Ok(None) を2意味へ分離。
-- [ ] 新規コレクション作成時に実次元を読み戻さず `Ok(())`（low）—
-  create_collection 後も collection_info で検証。
+  へ流出。4サービスで契約統一（固定 warn＋継続、または全サービス起動失敗）。〔Round 47 で対応済み〕
+- [x] Qdrant の生エラー `e.to_string()` が collection_info 以外の5経路に残存
+  （medium）— `ContextError::Qdrant(String)` を固定語彙化し、型レベルで排除。〔Round 47 で対応済み〕
+- [x] `configured_vector_size` の複数 `?` が「応答未解析」を「多ベクトル」
+  と誤分類して fail-closed を迂回（medium）— Ok(None) を2意味へ分離。〔Round 47 で対応済み〕
+- [x] 新規コレクション作成時に実次元を読み戻さず `Ok(())`（low）—
+  create_collection 後も collection_info で検証。〔Round 47 で対応済み〕
 - [ ] persistence の構造ガードが `tracing::` 文字列計数（low）— AST ベース
   または型境界での強制へ変更。
 
@@ -1380,22 +1381,22 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 47 の残り指摘（未対応）
 
-- [ ] **EnvironmentFile のパス不一致**（confirmed high）— unit は
+- [x] **EnvironmentFile のパス不一致**（confirmed high）— unit は
   `/etc/jarvis/jarvis-mcp-gw.env` を読むが repo テンプレートは
   `infra/config/mcp_gateway.env` のままで配置経路が無い。未配置だと
   BASE_DIR が開発用リテラルのまま filesystem.* 全失敗、egress が
-  example.com を許可する fail-open。パス統一＋配置スクリプト追加。
-- [ ] kill_switch.rs の restore() / persist() に state ファイル絶対パスと
-  生エラーが残存（medium）— activation と同じ固定語彙化、PROBE 回帰拡張。
-- [ ] UI の「承認済み・実行は非常停止中」が2ポールで消える（medium）—
-  kill switch 中表示用の独立フラグで status 上書きを抑制。
-- [ ] I48-C の 409/AlreadyDecided を UI が「失敗」と表示（medium）—
-  競合時に勝者の決定を返すか UI で勝者 status を表示。
-- [ ] health probe 用 ureq agent にタイムアウトが無い（medium）—
-  メイン agent と同じ timeout_global / timeout_connect を設定。
-- [ ] 発掘: code-server PASSWORD_FILE テンプレート残存、未使用 dev-deps
+  example.com を許可する fail-open。パス統一＋配置スクリプト追加。〔Round 48 で対応済み〕
+- [x] kill_switch.rs の restore() / persist() に state ファイル絶対パスと
+  生エラーが残存（medium）— activation と同じ固定語彙化、PROBE 回帰拡張。〔Round 48 で対応済み〕
+- [x] UI の「承認済み・実行は非常停止中」が2ポールで消える（medium）—
+  kill switch 中表示用の独立フラグで status 上書きを抑制。〔Round 48 で対応済み〕
+- [x] I48-C の 409/AlreadyDecided を UI が「失敗」と表示（medium）—
+  競合時に勝者の決定を返すか UI で勝者 status を表示。〔Round 48 で対応済み〕
+- [x] health probe 用 ureq agent にタイムアウトが無い（medium）—
+  メイン agent と同じ timeout_global / timeout_connect を設定。〔Round 48 で対応済み〕
+- [x] 発掘: code-server PASSWORD_FILE テンプレート残存、未使用 dev-deps
   （mockall / proptest）、specs/index.md の REQ 同期、dsh.md / tool-matrix.md
-  の tools/list 非表示記述。
+  の tools/list 非表示記述。〔Round 48 で対応済み〕
 
 - 親が対応: fmt 差分のみ。
 
@@ -1414,15 +1415,15 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 48 の残り指摘（未対応）
 
-- [ ] **jarvis-context HTTP 境界が anyhow チェーン全体を OTLP ログへ送出**
+- [x] **jarvis-context HTTP 境界が anyhow チェーン全体を OTLP ログへ送出**
   （confirmed high）— `http.rs:277-285` の `log_internal_error` が
-  `format!("{err:#}")` を error フィールドへ。gRPC の固定語彙化と不整合。
-- [ ] 3サービスの SdkTracerProvider 未 shutdown（medium）— Round 47 で
-  失敗 warn は統一したがライフサイクルは policy のみ TracerGuard 保有。
-- [ ] 多ベクトル collection の Ok(None) 警告継続が fail-open（medium）—
-  実データは名前なしベクトル固定のため全 upsert/search が失敗しうる。
-- [ ] Qdrant バリアントが公開 String（medium）— 型レベル排除ではなく
-  `pub(crate)` コンストラクタ＋Newtype／QdrantErrorKind への変更が必要。
+  `format!("{err:#}")` を error フィールドへ。gRPC の固定語彙化と不整合。〔Round 49 で対応済み〕
+- [x] 3サービスの SdkTracerProvider 未 shutdown（medium）— Round 47 で
+  失敗 warn は統一したがライフサイクルは policy のみ TracerGuard 保有。〔Round 49 で対応済み〕
+- [x] 多ベクトル collection の Ok(None) 警告継続が fail-open（medium）—
+  実データは名前なしベクトル固定のため全 upsert/search が失敗しうる。〔Round 49 で対応済み〕
+- [x] Qdrant バリアントが公開 String（medium）— 型レベル排除ではなく
+  `pub(crate)` コンストラクタ＋Newtype／QdrantErrorKind への変更が必要。〔Round 49 で対応済み〕
 - [ ] 新規コレクション作成直後の読み戻しが一時障害で起動拒否（low）。
 
 - 親が対応: fmt 差分、テスト専用 API（approve / deny / into_decision）へ
@@ -1442,20 +1443,20 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 49 の残り指摘（未対応）
 
-- [ ] **kill switch 発動の HTTP 409 を UI が AlreadyDecided と誤認**
+- [x] **kill switch 発動の HTTP 409 を UI が AlreadyDecided と誤認**
   （confirmed high）— `http.rs:670-671` が KillSwitchActivated と AlreadyDecided
   の双方を409へマップし、UI が「既に決定済み: 保留中」と false-success 表示。
-  固定本文で分岐するか 423 等へ分離。
-- [ ] 409 winner 取得が API スコープトークン固定（medium）— admin-only 構成で
-  401 に後退。`winner_decision()` も `effective_admin_token()` を使う。
-- [ ] deploy/drift の BASE_DIR 必須キー検査が空値を OK（medium）—
-  非空・絶対パス・実在ディレクトリを必須化（egress の空値は正当として維持）。
-- [ ] build-selfhost.sh が mcp_gateway.env を配置せず新規導入で fail-open
-  （high）— config 配置ブロックへ追加するか EnvironmentFile の `-` を外す。
-- [ ] probe timeout 回帰が vacuous（medium）— 600ms 応答で3秒未満アサート
-  を満たしてしまう。5秒以上応答にして timeout 発動を直接観測。
-- [ ] 3サービスのシグナル停止（SIGTERM）で Drop が走らずスパン未フラッシュ
-  （low）— policy 同様の shutdown_signal + select! が必要。
+  固定本文で分岐するか 423 等へ分離。〔Round 50 で対応済み〕
+- [x] 409 winner 取得が API スコープトークン固定（medium）— admin-only 構成で
+  401 に後退。`winner_decision()` も `effective_admin_token()` を使う。〔Round 50 で対応済み〕
+- [x] deploy/drift の BASE_DIR 必須キー検査が空値を OK（medium）—
+  非空・絶対パス・実在ディレクトリを必須化（egress の空値は正当として維持）。〔Round 50 で対応済み〕
+- [x] build-selfhost.sh が mcp_gateway.env を配置せず新規導入で fail-open
+  （high）— config 配置ブロックへ追加するか EnvironmentFile の `-` を外す。〔Round 50 で対応済み〕
+- [x] probe timeout 回帰が vacuous（medium）— 600ms 応答で3秒未満アサート
+  を満たしてしまう。5秒以上応答にして timeout 発動を直接観測。〔Round 50 で対応済み〕
+- [x] 3サービスのシグナル停止（SIGTERM）で Drop が走らずスパン未フラッシュ
+  （low）— policy 同様の shutdown_signal + select! が必要。〔Round 50 で対応済み〕
 
 - 親が対応: fmt 差分、tracer shutdown の `&raw_err`（3箇所）、
   `CollectionInfo` 完全修飾、http.rs の旧 Qdrant String API（2箇所）、
@@ -1478,16 +1479,16 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 50 の残り指摘（未対応）
 
-- [ ] 単一 named vector collection が fail-open（medium）— `named >= 1` を
+- [x] 単一 named vector collection が fail-open（medium）— `named >= 1` を
   拒否すべき（`Config::ParamsMap` は要素数に関わらず named モード）。
   既存テスト `single_vector_collections_are_not_rejected_by_multi_vector_guard`
-  が fail-open を期待値として固定している。
-- [ ] HTTP の store_memory / search_memory が log_internal_error を通らず
-  内部エラーを無ログで破棄（medium）— 全6 RPC を同じヘルパへ。
-- [ ] context の不正 JSON / UUID が `unwrap_or_default` でサイレントに成功
-  （medium）— HTTP 400 / gRPC InvalidArgument へ変更。
-- [ ] TracerGuard の Drop が shutdown 失敗を握り潰す（low）。
-- [ ] HTTP/gRPC 語彙パリティテストが gRPC 側を検証していない（low）。
+  が fail-open を期待値として固定している。〔Round 51 で対応済み〕
+- [x] HTTP の store_memory / search_memory が log_internal_error を通らず
+  内部エラーを無ログで破棄（medium）— 全6 RPC を同じヘルパへ。〔Round 51 で対応済み〕
+- [x] context の不正 JSON / UUID が `unwrap_or_default` でサイレントに成功
+  （medium）— HTTP 400 / gRPC InvalidArgument へ変更。〔Round 51 で対応済み〕
+- [x] TracerGuard の Drop が shutdown 失敗を握り潰す（low）。〔Round 51 で対応済み〕
+- [x] HTTP/gRPC 語彙パリティテストが gRPC 側を検証していない（low）。〔Round 51 で対応済み〕
 - [ ] 発掘: local-restore-design.md / remaining-tasks.md の古い記述、
   jarvis-core の未参照共有型、backup.service の開発用絶対パス、
   docs/architecture の Structure ツリー。
@@ -1510,20 +1511,20 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 51 の残り指摘（未対応）
 
-- [ ] **kill switch 409 の非常停止ピンが probe の fail-open で1ポール後に
+- [x] **kill switch 409 の非常停止ピンが probe の fail-open で1ポール後に
   解除される**（confirmed high）— 409 本文で KillSwitchBlocked を確定した
   直後に /health probe が false を返すと pin が落ちる。`kill_switch_active ||
-  kill_switch_blocked` で維持するか、probe を fail-closed 化。
-- [ ] **BASE_DIR 絶対パス検査が重複キーで迂回**（confirmed high）— grep の
+  kill_switch_blocked` で維持するか、probe を fail-closed 化。〔Round 52 で対応済み〕
+- [x] **BASE_DIR 絶対パス検査が重複キーで迂回**（confirmed high）— grep の
   any-match セマンティクス。最後の割り当て行のみを検査し、同一キーの重複を
-  DANGER 化、`/` と `..` 成分も拒否。
-- [ ] **mcp-gw env の配置が非アトミック**（confirmed high）— mv 成功後に
+  DANGER 化、`/` と `..` 成分も拒否。〔Round 52 で対応済み〕
+- [x] **mcp-gw env の配置が非アトミック**（confirmed high）— mv 成功後に
   install 失敗すると env 欠落で unit リテラル既定が実効化。一時パス install
-  ＋ mv -f、trap で .bak 復元、退避ファイルも 0600。
-- [ ] SIGTERM が in-flight の承認コミット／ツール実行をドロップ（medium）—
-  drain 待ちを実装するか「即時停止」とログ／systemd TimeoutStopSec を一致。
-- [ ] 409 固定本文が UI と policy で複製（medium）— jarvis-core の共有定数
-  または cross-crate 契約ゲートへ。
+  ＋ mv -f、trap で .bak 復元、退避ファイルも 0600。〔Round 52 で対応済み〕
+- [x] SIGTERM が in-flight の承認コミット／ツール実行をドロップ（medium）—
+  drain 待ちを実装するか「即時停止」とログ／systemd TimeoutStopSec を一致。〔Round 52 で対応済み〕
+- [x] 409 固定本文が UI と policy で複製（medium）— jarvis-core の共有定数
+  または cross-crate 契約ゲートへ。〔Round 52 で対応済み〕
 
 - 親が対応: fmt 差分、anyhow `context()` の move（qdrant）、未使用 import、
   SDK 自身の DEBUG ログを捕捉したテスト（自アプリ WARN 行のみへ限定）。
@@ -1544,17 +1545,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 52 の残り指摘（未対応）
 
-- [ ] **gRPC search_memory が符号付き limit を `as usize` で受け流す**
+- [x] **gRPC search_memory が符号付き limit を `as usize` で受け流す**
   （confirmed high）— `limit=-1` が `usize::MAX` になり Qdrant へ実質上限なし。
-  `usize::try_from` で InvalidArgument 化＋共通上限、回帰追加。
-- [ ] jarvis-policy の TracerGuard::Drop だけ Round 51 修正から漏れ、
-  早期リターンでスパン消失が無記録＋生 err を eprintln（medium）。
-- [ ] 語彙パリティ／6RPC 回帰がソース文字列スキャン依存（medium）—
-  `error_kind` を pub(crate) 化して実戻り値比較、gRPC 側にも振る舞いテスト。
-- [ ] store_memory が embedding 次元を検証せず書き込み時 fail-open
-  （medium）— `embedding.len() == embedding_dim` を 400/InvalidArgument で拒否。
-- [ ] metadata が object 以外でも parse 成功、expires_at 範囲外が黙って
-  None 降格（medium）— 共通ヘルパで拒否（additive degrade とは区別）。
+  `usize::try_from` で InvalidArgument 化＋共通上限、回帰追加。〔Round 53 で対応済み〕
+- [x] jarvis-policy の TracerGuard::Drop だけ Round 51 修正から漏れ、
+  早期リターンでスパン消失が無記録＋生 err を eprintln（medium）。〔Round 53 で対応済み〕
+- [x] 語彙パリティ／6RPC 回帰がソース文字列スキャン依存（medium）—
+  `error_kind` を pub(crate) 化して実戻り値比較、gRPC 側にも振る舞いテスト。〔Round 53 で対応済み〕
+- [x] store_memory が embedding 次元を検証せず書き込み時 fail-open
+  （medium）— `embedding.len() == embedding_dim` を 400/InvalidArgument で拒否。〔Round 53 で対応済み〕
+- [x] metadata が object 以外でも parse 成功、expires_at 範囲外が黙って
+  None 降格（medium）— 共通ヘルパで拒否（additive degrade とは区別）。〔Round 53 で対応済み〕
 
 - 親が対応: UI fmt 差分のみ。
 
@@ -1572,17 +1573,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 53 の残り指摘（未対応）
 
-- [ ] **egress allowlist の重複キー検査が未実装**（confirmed high、Runtime
+- [x] **egress allowlist の重複キー検査が未実装**（confirmed high、Runtime
   Proof 付き）— 先頭空値・末尾 example.com で `--env-only` が OK を返す。
-  BASE_DIR と同じ重複拒否＋最終行検査を egress にも適用。
-- [ ] 409 本文の読み取り失敗が空文字→AlreadyDecided に倒れる（medium）—
-  `read_to_string().unwrap_or_default()` を Result 保持へ。
-- [ ] kill switch latch が 409 より前に取得した probe で解除される TOCTOU
-  （medium）— generation／時刻を持たせ 409 確定以降の probe のみ解除。
-- [ ] デプロイロールバックが env を削除し example.com fail-open を情報表示
-  のみで放置（high）— テンプレートを書き戻すか unit を fail-closed 化。
-- [ ] I54-D 即時停止が event/context に未適用（"exiting cleanly" 残存、
-  TimeoutStopSec=30）— policy と同じ固定語彙・10秒へ揃える。
+  BASE_DIR と同じ重複拒否＋最終行検査を egress にも適用。〔Round 54 で対応済み〕
+- [x] 409 本文の読み取り失敗が空文字→AlreadyDecided に倒れる（medium）—
+  `read_to_string().unwrap_or_default()` を Result 保持へ。〔Round 54 で対応済み〕
+- [x] kill switch latch が 409 より前に取得した probe で解除される TOCTOU
+  （medium）— generation／時刻を持たせ 409 確定以降の probe のみ解除。〔Round 54 で対応済み〕
+- [x] デプロイロールバックが env を削除し example.com fail-open を情報表示
+  のみで放置（high）— テンプレートを書き戻すか unit を fail-closed 化。〔Round 54 で対応済み〕
+- [x] I54-D 即時停止が event/context に未適用（"exiting cleanly" 残存、
+  TimeoutStopSec=30）— policy と同じ固定語彙・10秒へ揃える。〔Round 54 で対応済み〕
 - [ ] 発掘: UI/mcp-gw の仕様・証跡が古い（36/45 件のまま）、check-evidence
   の requirements 集合未検証、Runbook ゲート表の古さ、mcp_allowlist 旧コメント。
 
@@ -1605,18 +1606,18 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 54 の残り指摘（未対応）
 
-- [ ] gRPC embedding に NaN/±Inf を送ると有限性チェック無しで Qdrant へ
-  （medium）— `validate_embedding` に `is_finite()` を追加。
-- [ ] HTTP の axum JsonRejection が bare-400／no-leak 契約を迂回（medium）—
-  型不正で詳細本文が返る。カスタム extractor または Value 受け。
-- [ ] 語彙パリティ実呼び出しテストが RPC ごとの割当てを検証していない
-  （low）— operation とカテゴリの組を1回ずつアサート。
-- [ ] OTel SDK 自身の DEBUG 行が RUST_LOG=debug で生エラーを残す（low）—
-  EnvFilter に `opentelemetry_sdk=warn` 等を追加。
-- [ ] 共有 validation が content/source/metadata のサイズ境界を未定義のまま
-  （low）— MAX_*_BYTES と深さ上限を追加。
-- [ ] check-evidence が requirements 集合と Traceability の REQ 値を照合
-  せず（medium）、Runbook ゲート表が現行エラーコードと乖離（low）。
+- [x] gRPC embedding に NaN/±Inf を送ると有限性チェック無しで Qdrant へ
+  （medium）— `validate_embedding` に `is_finite()` を追加。〔Round 55 で対応済み〕
+- [x] HTTP の axum JsonRejection が bare-400／no-leak 契約を迂回（medium）—
+  型不正で詳細本文が返る。カスタム extractor または Value 受け。〔Round 55 で対応済み〕
+- [x] 語彙パリティ実呼び出しテストが RPC ごとの割当てを検証していない
+  （low）— operation とカテゴリの組を1回ずつアサート。〔Round 55 で対応済み〕
+- [x] OTel SDK 自身の DEBUG 行が RUST_LOG=debug で生エラーを残す（low）—
+  EnvFilter に `opentelemetry_sdk=warn` 等を追加。〔Round 55 で対応済み〕
+- [x] 共有 validation が content/source/metadata のサイズ境界を未定義のまま
+  （low）— MAX_*_BYTES と深さ上限を追加。〔Round 55 で対応済み〕
+- [x] check-evidence が requirements 集合と Traceability の REQ 値を照合
+  せず（medium）、Runbook ゲート表が現行エラーコードと乖離（low）。〔Round 55 で対応済み〕
 
 - 親が対応: UI fmt 差分、spec 変更に伴う evidence 実測再生成
   （UI 64 / mcp-gw 124）、notes 件数同期。
@@ -1639,11 +1640,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 55 の残り指摘（未対応）
 
-- [ ] 409 本文が非空の別本文なら winner に倒れる残存 fail-open（medium）—
+- [x] 409 本文が非空の別本文なら winner に倒れる残存 fail-open（medium）—
   policy/UI のビルド世代ずれや中継改変で非常停止が隠れる。既知の
-  already-decided 本文に完全一致した場合のみ winner へ進めるか 423 分離。
-- [ ] Round 54 の shell fail-closed 修正（egress 重複・env 復元・drift
-  exit 3）に自動回帰が無い（low）— `test-legacy-guards.sh` に3ケース追加。
+  already-decided 本文に完全一致した場合のみ winner へ進めるか 423 分離。〔Round 56 で対応済み〕
+- [x] Round 54 の shell fail-closed 修正（egress 重複・env 復元・drift
+  exit 3）に自動回帰が無い（low）— `test-legacy-guards.sh` に3ケース追加。〔Round 56 で対応済み〕
 
 - 親が対応: fmt 差分、`BareJson` extractor の不要な `?`（3箇所）、
   REQ 集合中不一致（evidence requirements 同期＋UI spec の REQ-1 行）。
@@ -1660,11 +1661,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 56 の残り指摘（未対応）
 
-- [ ] シナリオ充足ゲートが skipped を「実行済み」と計上（medium）—
+- [x] シナリオ充足ゲートが skipped を「実行済み」と計上（medium）—
   `check-evidence.sh:184-186` の executed から skipped を除外し、
-  near-total skip を通さない。
-- [ ] 有限性チェックが store ingress のみ（medium）— query embedding /
-  reconcile / f64→f32 キャスト経路へ `validate_embedding` を適用。
+  near-total skip を通さない。〔Round 57 で対応済み〕
+- [x] 有限性チェックが store ingress のみ（medium）— query embedding /
+  reconcile / f64→f32 キャスト経路へ `validate_embedding` を適用。〔Round 57 で対応済み〕
 - [ ] REQ 集合ゲートが spec ごとに最後の evidence しか検証しない（low）。
 - [ ] OTel SDK ガードがより詳細な RUST_LOG ターゲット指定で上書き可能（low）。
 - [ ] サイズ境界が content/source/metadata のみ（low）— payload / query /
@@ -1689,14 +1690,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 57 の残り指摘（未対応）
 
-- [ ] kill switch probe がリダイレクトを追従（medium）— `max_redirects(0)`
-  が probe agent に無く、3xx→200 で停止表示が落ちる。
-- [ ] probe が 503 以外のエラー status を「停止でない」と判定（medium）—
-  502/500/504 で fail-open。200/503 以外は Err 化して unwrap_or(true) へ。
-- [ ] 期限切れ AlreadyDecided が実決定なしで「既に決定済み」表示（medium）—
-  410/Expired 分離、または winner が Pending/Expired なら失敗表示。
-- [ ] skipped 正当化が "ignored" 部分文字列一致（low）、index 件数検証が
-  reference-style リンクのみ（low）。
+- [x] kill switch probe がリダイレクトを追従（medium）— `max_redirects(0)`
+  が probe agent に無く、3xx→200 で停止表示が落ちる。〔Round 58 で対応済み〕
+- [x] probe が 503 以外のエラー status を「停止でない」と判定（medium）—
+  502/500/504 で fail-open。200/503 以外は Err 化して unwrap_or(true) へ。〔Round 58 で対応済み〕
+- [x] 期限切れ AlreadyDecided が実決定なしで「既に決定済み」表示（medium）—
+  410/Expired 分離、または winner が Pending/Expired なら失敗表示。〔Round 58 で対応済み〕
+- [x] skipped 正当化が "ignored" 部分文字列一致（low）、index 件数検証が
+  reference-style リンクのみ（low）。〔Round 58 で対応済み〕
 - [ ] mcp-gw の http_error() が `{error:#}` で anyhow チェーンを OTLP へ。
 - [ ] サイズ境界が payload/query/event_type/correlation_id に未適用（low）。
 
@@ -1716,15 +1717,15 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 58 の残り指摘（未対応）
 
-- [ ] BareJson が axum の 413/415/422 を一律400へ丸め（medium）—
-  種別ごとの空本文 status、または bare-400 統一を仕様と契約テストで明記。
-- [ ] 非有限ベクトルの poison row が上限なしで永続 defer（medium）—
-  dead-letter／削除分岐と attempts 上限の導入、reconcile バッチ保護。
-- [ ] jarvis-core の BareJson が context に未適用（medium）— context も
-  共有型へ切り替え、cross-crate 契約テストで実 warn レコードを比較。
-- [ ] BareJson の rejection warn が不正 JSON 高レートでログ増幅（low）。
-- [ ] jarvis-core への axum/tracing 必須依存が GPUI UI に不要な推移依存
-  （low）— feature gate または薄い crate への分離、ui/Cargo.toml コメント更新。
+- [x] BareJson が axum の 413/415/422 を一律400へ丸め（medium）—
+  種別ごとの空本文 status、または bare-400 統一を仕様と契約テストで明記。〔Round 59 で対応済み〕
+- [x] 非有限ベクトルの poison row が上限なしで永続 defer（medium）—
+  dead-letter／削除分岐と attempts 上限の導入、reconcile バッチ保護。〔Round 59 で対応済み〕
+- [x] jarvis-core の BareJson が context に未適用（medium）— context も
+  共有型へ切り替え、cross-crate 契約テストで実 warn レコードを比較。〔Round 59 で対応済み〕
+- [x] BareJson の rejection warn が不正 JSON 高レートでログ増幅（low）。〔Round 59 で対応済み〕
+- [x] jarvis-core への axum/tracing 必須依存が GPUI UI に不要な推移依存
+  （low）— feature gate または薄い crate への分離、ui/Cargo.toml コメント更新。〔Round 59 で対応済み〕
 
 - 親が対応: fmt 差分のみ。
 
@@ -1743,14 +1744,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 59 の残り指摘（未対応）
 
-- [ ] 証跡 index の件数照合が `re.search` の最初の一致のみ（medium）—
-  `finditer` へ変更し矛盾する2つ目を拒否、REF_USAGE も finditer 化。
-- [ ] HTTP 410 が本文未検証・共有 pin なし（medium）→ 410 固定本文を
-  jarvis-core 共有定数化し、trim 後完全一致＋不一致時 Err（fail-closed）。
-- [ ] health probe の本文分類が非対称（medium）— 503 も `status=degraded`
+- [x] 証跡 index の件数照合が `re.search` の最初の一致のみ（medium）—
+  `finditer` へ変更し矛盾する2つ目を拒否、REF_USAGE も finditer 化。〔Round 60 で対応済み〕
+- [x] HTTP 410 が本文未検証・共有 pin なし（medium）→ 410 固定本文を
+  jarvis-core 共有定数化し、trim 後完全一致＋不一致時 Err（fail-closed）。〔Round 60 で対応済み〕
+- [x] health probe の本文分類が非対称（medium）— 503 も `status=degraded`
   かつ reason∈{kill_switch,no_policy} 完全一致、200 は reason 不在を必須化、
-  語彙を共有定数化。
-- [ ] 410／health 語彙の cross-crate pin テスト追加。
+  語彙を共有定数化。〔Round 60 で対応済み〕
+- [x] 410／health 語彙の cross-crate pin テスト追加。〔Round 60 で対応済み〕
 
 - 親が対応: fmt 差分、`features=["http"]` の workspace 配線（blocker）。
 
@@ -1769,15 +1770,15 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 60 の残り指摘（未対応）
 
-- [ ] dead-letter／attempts 上限がログのみで永続状態・観測が無い（medium）—
+- [x] dead-letter／attempts 上限がログのみで永続状態・観測が無い（medium）—
   `dead_lettered_at`／`vector_state` カラムとメトリクス、migration 004 の
-  選択クエリ説明を実状へ同期。
-- [ ] poison 判定が再埋め込みより先行し、回復可能な旧次元行を削除
-  （medium）— dimension 不一致は retry 経路に残す。
-- [ ] BareJson の 413/415 再分類が仕様・証跡に未反映（medium）—
-  4仕様の該当 TC へ契約明記＋evidence 再生成。
-- [ ] BytesRejection を無条件413へ丸め（low）— `LengthLimitError` のみ413、
-  他は400（axum 準拠）。
+  選択クエリ説明を実状へ同期。〔Round 61 で対応済み〕
+- [x] poison 判定が再埋め込みより先行し、回復可能な旧次元行を削除
+  （medium）— dimension 不一致は retry 経路に残す。〔Round 61 で対応済み〕
+- [x] BareJson の 413/415 再分類が仕様・証跡に未反映（medium）—
+  4仕様の該当 TC へ契約明記＋evidence 再生成。〔Round 61 で対応済み〕
+- [x] BytesRejection を無条件413へ丸め（low）— `LengthLimitError` のみ413、
+  他は400（axum 準拠）。〔Round 62 で対応済み〕
 
 - 親が対応: fmt 差分、context/event の feature 配線（Runtime Proof で発見）。
 
@@ -1794,17 +1795,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 61 の残り指摘（未対応）
 
-- [ ] **証跡 index の参照リンクを外すだけで件数照合がスキップ**
+- [x] **証跡 index の参照リンクを外すだけで件数照合がスキップ**
   （confirmed high、Runtime Proof 付き）— evidence_entry 判定を条目の必須
-  属性とし、JSON 解決不能な条目を fail-closed 化。双方向照合も追加。
-- [ ] REQ 集合ゲートが glob 外の spec_path を無検査で通す（medium）—
-  未一致 entry を `REQ_SPEC_UNRESOLVED` で拒否、specs/ 内へ正規化。
-- [ ] health 応答の重複 JSON キーで kill_switch→no_policy に collapse
-  （medium）— 重複キー検出または固定3形状との生本文完全一致。
-- [ ] index 条目の spec リンクと JSON の spec_path が無相関（medium）—
-  .md リンクの basename 一致を `INDEX_SPEC_MISMATCH` で検証。
-- [ ] BytesRejection を無条件413へ丸め、health の exact body match 契約
-  記述と実装の不一致（low 2件）。
+  属性とし、JSON 解決不能な条目を fail-closed 化。双方向照合も追加。〔Round 62 で対応済み〕
+- [x] REQ 集合ゲートが glob 外の spec_path を無検査で通す（medium）—
+  未一致 entry を `REQ_SPEC_UNRESOLVED` で拒否、specs/ 内へ正規化。〔Round 62 で対応済み〕
+- [x] health 応答の重複 JSON キーで kill_switch→no_policy に collapse
+  （medium）— 重複キー検出または固定3形状との生本文完全一致。〔Round 62 で対応済み〕
+- [x] index 条目の spec リンクと JSON の spec_path が無相関（medium）—
+  .md リンクの basename 一致を `INDEX_SPEC_MISMATCH` で検証。〔Round 62 で対応済み〕
+- [x] BytesRejection を無条件413へ丸め、health の exact body match 契約
+  記述と実装の不一致（low 2件）。〔Round 62/64 で対応済み〕
 
 - 親が対応: fmt 差分、migration 005 分離、spec 変更に伴う証跡再生成、
   secret_scan の未ステージファイル対象エラー。
@@ -1824,16 +1825,16 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 62 の残り指摘（未対応）
 
-- [ ] migration 005 の死信保持に振る舞いテストが無く、既存テストは逆の
+- [x] migration 005 の死信保持に振る舞いテストが無く、既存テストは逆の
   「削除」を期待（confirmed high）— Pg の dead_letter が行を保持し後続 list
-  が返さないことを実 DB／永続モックで検証、文字列 contains を置換。
-- [ ] dead-letter カウンタが DB 書き込み成功前に increment（medium）—
-  成功後に移動、失敗カウンタを分離。
-- [ ] attempts 上限到達行が終端マーカーもメトリクスも無くサイレント除外
-  （medium）— vector_state='exhausted' 永続化＋専用メトリクス。
-- [ ] シナリオ充足判定が下限のみ（medium）— 契約 step 追記時に新規 Scenario
-  を要求、またはシナリオ別 pass 数を記録。
-- [ ] migration pre-flight unit コメントが「through 004」のまま（low）。
+  が返さないことを実 DB／永続モックで検証、文字列 contains を置換。〔Round 63 で対応済み〕
+- [x] dead-letter カウンタが DB 書き込み成功前に increment（medium）—
+  成功後に移動、失敗カウンタを分離。〔Round 63 で対応済み〕
+- [x] attempts 上限到達行が終端マーカーもメトリクスも無くサイレント除外
+  （medium）— vector_state='exhausted' 永続化＋専用メトリクス。〔Round 63 で対応済み〕
+- [x] シナリオ充足判定が下限のみ（medium）— 契約 step 追記時に新規 Scenario
+  を要求、またはシナリオ別 pass 数を記録。〔Round 63 で対応済み〕
+- [x] migration pre-flight unit コメントが「through 004」のまま（low）。〔Round 63 で対応済み〕
 - [ ] `overflow_warning_records_event_metadata_without_payload` が並列実行時
   にフレーキ（tracing ログキャプチャ競合）— 再実行で pass、構造修正は未実施。
 
@@ -1886,3 +1887,52 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       次回レビューで重複排除すること。
 - 親が対応: spec_hash drift の再生成、tamper が古い証跡ファイル名を参照
   していた問題、notes/index の件数表記同期。
+
+## アーカイブ判定（2026-11-20 / I67-A）
+
+- 判定方針: 各 `- [ ]` について後続ラウンドの「R4 で修正済み」節および
+  本文の「対応済み」記述を照合し、明示的に解消が記録された項目のみを
+  `- [x]` へ変更した。行自体は履歴として保持し、行末に解消ラウンドを
+  追記（削除なし・見出し／OKF は未変更）。
+- アーカイブ判定: 91件（Round 42〜62 の「残り指摘」のうち Round 43〜64
+  で解消が明記された重複エントリ）。残り `- [ ]` は 44件。
+- 保持区分: ユーザー判断（P0-1/3/6/7、P0-10/11、P1-4/6/12、P2-2、
+  P3-4/5、Grafana／Webhook／bws.env／pprof・zpages／バックアップ外部化）、
+  実機操作（P1-5、S9、timer unit 再適用・実復元演習）、最新指摘
+  （Round 63/64 の残り）。
+- 一部解消のため `[ ]` を維持（誤判定防止）: commit_gate 新契約の
+  回帰名未反映、rustfmt ゲート CI 未配線を含む発掘5件、persistence 構造
+  ガード、新規コレクション読み戻し一時障害、local-restore 等ドキュメント
+  ドリフト、UI/mcp-gw 証跡の一部、REQ 集合ゲートの per-spec 検証、
+  OTel SDK ガードの上書き可能性、サイズ境界の未対象項目、mcp-gw の
+  anyhow エコー、フレーキテストの構造修正 — いずれも後続ラウンドで
+  「全項目解消」が明記されていない。
+
+### Round 65（R4 で修正済み）
+
+- [x] todo.md の解消済み旧指摘91件を `[x]` 化（履歴は保持、open 135→44）。
+- [x] pre-commit に `make secret-scan` を追加（CI を最終ゲートとする二段構成）。
+- [x] UI clippy に `-D clippy::undocumented_unsafe_blocks` を付与、
+  ci.yml の clippy_args へ `-D warnings`。
+- [x] 契約 step の Counter を両側で比較し、重複 step も fail-closed 化。
+- [x] Grafana を service/status 集計へ（413/415 を可視化）、README／
+  emit doc／Runbook 件数／Cedar スキーマの古い記述を現行実装へ同期。
+
+### Round 65 の残り指摘（未対応）
+
+- [ ] **restore-local の config allowlist 検証が本番 DB/Qdrant 上書き後**
+  （confirmed high）— `configs.sh:62` の検査を `verify_set()` の必須ゲート
+  （stop_services より前）へ移動。`--skip-configs` 時も通过させる。
+- [ ] verify-backup.sh の legacy 経路がペイロード0件を受理（medium）—
+  COMPLETE の有無に関わらず必須ペイロード実在を検査、回帰テストの
+  fail-open 期待を訂正。
+- [ ] 隔離 DB `jarvis_restore_test` が後始末されず2回目の復元が不能
+  （medium）— Qdrant と対称に DROP、失敗経路も trap で片付け。
+- [ ] migration 範囲コメントが jarvis-policy/context service で through 004
+  のまま（low）、build-selfhost.sh のガードコメントも未更新。
+- [ ] pending_embeddings ゲージが dead_letter / exhausted / remove 後に
+  更新されず未処理件数を過大報告（low）。
+- [ ] 証跡の passed 件数が自己申告の手入力（medium）— `cargo test -- --list`
+  または JUnit 出力から機械導出する生成器の導入。
+
+- 親が対応: fmt 差分、JSON/YAML 構文確認、全ゲート再検証。
