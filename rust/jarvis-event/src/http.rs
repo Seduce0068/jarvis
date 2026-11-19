@@ -8,7 +8,7 @@ use axum::{
     http::StatusCode,
     routing::{get, post},
 };
-use jarvis_core::{EventSource, UnifiedEvent};
+use jarvis_core::{BareJson, EventSource, UnifiedEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
@@ -235,8 +235,11 @@ async fn metrics() -> String {
 #[instrument(skip(normalizer, req))]
 async fn emit_event(
     State(normalizer): State<Arc<Normalizer>>,
-    Json(req): Json<EmitEventRequest>,
+    req: BareJson<EmitEventRequest>,
 ) -> Result<Json<EmitEventResponse>, StatusCode> {
+    // `BareJson` turns a type-mismatched body into an empty 400 before the
+    // handler body runs; only deserialized data reaches this line.
+    let BareJson(Json(req)) = req;
     let event = emit_event_from_request(req, uuid::Uuid::new_v4(), chrono::Utc::now(), || {
         uuid::Uuid::new_v4().to_string()
     });
@@ -429,6 +432,30 @@ mod tests {
         assert_eq!(
             AuthState::new(Some(" secret ")).token.as_deref(),
             Some("secret")
+        );
+    }
+
+    /// I59-C: `/v1/events` used stock `Json<T>`, so a wrong JSON type leaked
+    /// axum's rejection body. The shared `BareJson` must map every rejection
+    /// to a bare 400 with no detail.
+    #[tokio::test]
+    async fn tc_i59_c_emit_event_type_mismatch_is_a_bare_400() {
+        use axum::extract::FromRequest;
+
+        let request = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/v1/events")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"source":"android","event_type":42,"payload":{}}"#,
+            ))
+            .expect("request builds");
+        let state = ();
+        let outcome = BareJson::<EmitEventRequest>::from_request(request, &state).await;
+        assert_eq!(
+            outcome.unwrap_err(),
+            StatusCode::BAD_REQUEST,
+            "type mismatch must collapse to an empty 400"
         );
     }
 }

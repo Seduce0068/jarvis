@@ -6,6 +6,7 @@ use axum::{
     extract::State,
     routing::{get, post},
 };
+use jarvis_core::BareJson;
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use serde::{Deserialize, Serialize};
@@ -202,8 +203,11 @@ async fn metrics() -> String {
 #[instrument(skip(gateway, req))]
 async fn execute_tool(
     State(gateway): State<Arc<McpGateway>>,
-    Json(req): Json<ExecuteToolRequest>,
+    req: BareJson<ExecuteToolRequest>,
 ) -> Result<Json<ExecuteToolResponse>, (axum::http::StatusCode, Json<Value>)> {
+    // A type-mismatched body is collapsed to an empty 400 by `BareJson` before
+    // this line; no `JsonRejection` detail can reach the response.
+    let BareJson(Json(req)) = req;
     let result = gateway
         .execute_tool(&req.tool, req.args, &req.principal)
         .await
@@ -988,7 +992,7 @@ requires_approval = true
                 // Unknown tool: the policy check denies immediately, so no
                 // error text can carry the probe into an ERROR log. Any leak
                 // can only come from the instrumented span itself.
-                let _ = execute_tool(State(gateway), Json(req)).await;
+                let _ = execute_tool(State(gateway), BareJson(Json(req))).await;
             });
         });
 
@@ -1003,6 +1007,25 @@ requires_approval = true
         // many tests run in parallel, which made this test flaky under
         // `cargo test --all-targets` even though the single-test run passed.
         assert!(!logs.contains(PROBE), "request body leaked: {logs}");
+    }
+
+    /// I59-C: a wrong JSON type must be rejected by the shared extractor with
+    /// a bare 400, never axum's detailed `JsonRejection` body.
+    #[tokio::test]
+    async fn bare_json_rejects_type_mismatch_with_bare_400() {
+        use axum::extract::FromRequest;
+
+        let request = axum::extract::Request::builder()
+            .method("POST")
+            .uri("/v1/execute")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                r#"{"tool":42,"args":{},"principal":"opencode"}"#,
+            ))
+            .expect("request builds");
+        let state = ();
+        let outcome = BareJson::<ExecuteToolRequest>::from_request(request, &state).await;
+        assert_eq!(outcome.unwrap_err(), axum::http::StatusCode::BAD_REQUEST);
     }
 
     /// Static guard (I37-B): `#[instrument]` on `/v1/execute` must keep

@@ -43,6 +43,56 @@ pub const KILL_SWITCH_409_BODY: &str = "approval decisions are blocked by the ki
 /// updating the contract pins in both consumers.
 pub const ALREADY_DECIDED_409_BODY: &str = "approval request already decided";
 
+/// Fixed classification token emitted when a JSON body fails to deserialize.
+///
+/// The offending bytes and axum's `JsonRejection` detail are never formatted:
+/// only these static tokens reach tracing (and therefore OTLP/Grafana).
+pub const INVALID_JSON_BODY_ERROR_KIND: &str = "invalid_input";
+/// Static field label used by [`BareJson`]'s rejection log.
+pub const INVALID_JSON_BODY_FIELD: &str = "body";
+
+/// JSON body extractor that collapses every `JsonRejection` to the shared
+/// bare-400 / fixed-vocabulary contract.
+///
+/// axum's stock `Json<T>` rejects type-mismatched or malformed bodies (for
+/// example `limit: "abc"`, an embedding encoded as a string, or a syntax error)
+/// *before* the handler runs and returns a detailed `JsonRejection` body. That
+/// body bypasses each service's no-leak contract and makes HTTP asymmetric with
+/// gRPC's fixed `InvalidArgument`. Wrapping `Json<T>` here discards the rejection
+/// detail and emits one fixed-vocabulary log record (the same
+/// `error_kind = "invalid_input"` / `field = "body"` / "invalid client input"
+/// record the context service already emits) before returning an empty 400.
+/// Valid bodies reach the handler unchanged; all semantic validation stays in
+/// the owning service.
+///
+/// The tuple field is public so consumers can keep the existing
+/// `let BareJson(Json(body)) = req;` destructuring pattern.
+#[derive(Debug)]
+pub struct BareJson<T>(pub axum::Json<T>);
+
+#[axum::async_trait]
+impl<S, T> axum::extract::FromRequest<S> for BareJson<T>
+where
+    S: Send + Sync,
+    T: serde::de::DeserializeOwned,
+{
+    type Rejection = axum::http::StatusCode;
+
+    async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+        <axum::Json<T> as axum::extract::FromRequest<S>>::from_request(req, state)
+            .await
+            .map(Self)
+            .map_err(|_| {
+                tracing::warn!(
+                    error_kind = INVALID_JSON_BODY_ERROR_KIND,
+                    field = INVALID_JSON_BODY_FIELD,
+                    "invalid client input"
+                );
+                axum::http::StatusCode::BAD_REQUEST
+            })
+    }
+}
+
 /// Unified event type used across JARVIS services
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedEvent {
@@ -174,6 +224,16 @@ mod tests {
     #[test]
     fn context_token_header_pins_the_wire_contract() {
         assert_eq!(JARVIS_CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    }
+
+    /// The shared JSON rejection vocabulary must stay byte-identical to the
+    /// tokens the context service's `validation::log_invalid_input("body")`
+    /// emits, so switching that service onto the shared extractor is a no-op
+    /// for its log-based regression tests.
+    #[test]
+    fn bare_json_rejection_vocabulary_pins_the_wire_contract() {
+        assert_eq!(INVALID_JSON_BODY_ERROR_KIND, "invalid_input");
+        assert_eq!(INVALID_JSON_BODY_FIELD, "body");
     }
 
     /// Single canonical pin of the approval 409 wire body. Policy and UI

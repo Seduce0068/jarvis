@@ -3,7 +3,7 @@
 use crate::ports::{ContextProvider, PolicyGate};
 use anyhow::Result;
 use axum::{Json, Router, extract::State, routing::post};
-use jarvis_core::{EventSource, UnifiedEvent};
+use jarvis_core::{BareJson, EventSource, UnifiedEvent};
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -38,6 +38,43 @@ pub(crate) fn try_emit_event(sender: &mpsc::Sender<UnifiedEvent>, event: Unified
     }
 }
 
+/// Fixed-vocabulary classification of a failed event-processing chain.
+///
+/// `anyhow`'s `Display` / `{:#}` can carry context-provider URLs, Qdrant
+/// endpoints, policy details and raw event payloads straight into the tracing
+/// pipeline. Only the static token below is logged; the error text itself is
+/// never formatted, so a nested context layer cannot smuggle data into OTLP.
+fn error_kind(err: &anyhow::Error) -> &'static str {
+    if let Some(event_error) = err.downcast_ref::<crate::error::EventError>() {
+        return match event_error {
+            crate::error::EventError::HomeAssistant(_) => "home_assistant",
+            crate::error::EventError::AndroidMcp(_) => "android_mcp",
+            crate::error::EventError::Context(_) => "context",
+            crate::error::EventError::Config(_) => "config",
+            crate::error::EventError::Grpc(_) => "grpc",
+            crate::error::EventError::Serialization(_) => "serialization",
+            crate::error::EventError::Http(_) => "http",
+        };
+    }
+    if err
+        .downcast_ref::<jarvis_context::error::ContextError>()
+        .is_some()
+    {
+        return "context";
+    }
+    "other"
+}
+
+/// Emit the single fixed-vocabulary failure record for a processing error.
+fn log_processing_failure(event: &UnifiedEvent, err: &anyhow::Error) {
+    tracing::error!(
+        event_id = %event.id,
+        correlation_id = %event.correlation_id,
+        error_kind = error_kind(err),
+        "event processing failed"
+    );
+}
+
 pub struct Normalizer {
     config: crate::config::EventConfig,
     event_tx: mpsc::Sender<UnifiedEvent>,
@@ -62,13 +99,10 @@ impl Normalizer {
                 if let Err(e) =
                     Self::process_event(&context_provider, &policy_gate, &opencode, &event).await
                 {
-                    // Log correlation identifiers, never the event payload:
-                    // telemetry must not leak the raw event body.
-                    tracing::error!(
-                        event_id = %event.id,
-                        correlation_id = %event.correlation_id,
-                        "Event processing failed: {e}"
-                    );
+                    // Log correlation identifiers and a fixed error class only:
+                    // neither the anyhow chain nor the event payload may reach
+                    // journald -> otelcol -> OTLP/Grafana.
+                    log_processing_failure(&event, &e);
                 }
             }
         });
@@ -243,7 +277,10 @@ fn calendar_webhook_event(
 // message content and token-like strings into the tracing pipeline. Only the
 // handler name remains in the span; correlation ids are generated inside.
 #[instrument(skip(state, payload))]
-async fn ha_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
+async fn ha_webhook(State(state): State<Arc<Normalizer>>, payload: BareJson<Value>) {
+    // `BareJson` collapses a malformed/type-mismatched body to an empty 400
+    // before this line; the raw rejection text never reaches a response or a log.
+    let BareJson(Json(payload)) = payload;
     let event = ha_webhook_event(
         payload,
         uuid::Uuid::new_v4(),
@@ -254,7 +291,8 @@ async fn ha_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Va
 }
 
 #[instrument(skip(state, payload))]
-async fn android_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
+async fn android_webhook(State(state): State<Arc<Normalizer>>, payload: BareJson<Value>) {
+    let BareJson(Json(payload)) = payload;
     let event = android_webhook_event(
         payload,
         uuid::Uuid::new_v4(),
@@ -265,7 +303,8 @@ async fn android_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Js
 }
 
 #[instrument(skip(state, payload))]
-async fn gmail_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
+async fn gmail_webhook(State(state): State<Arc<Normalizer>>, payload: BareJson<Value>) {
+    let BareJson(Json(payload)) = payload;
     let event = gmail_webhook_event(
         payload,
         uuid::Uuid::new_v4(),
@@ -276,7 +315,8 @@ async fn gmail_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json
 }
 
 #[instrument(skip(state, payload))]
-async fn calendar_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
+async fn calendar_webhook(State(state): State<Arc<Normalizer>>, payload: BareJson<Value>) {
+    let BareJson(Json(payload)) = payload;
     let event = calendar_webhook_event(
         payload,
         uuid::Uuid::new_v4(),
@@ -581,13 +621,13 @@ mod tests {
                 let state = || State(Arc::new(Normalizer::with_event_tx(tx.clone())));
 
                 let ha_payload = json!({"event_type": "state_changed", "body": HA_SECRET});
-                ha_webhook(state(), Json(ha_payload)).await;
+                ha_webhook(state(), BareJson(Json(ha_payload))).await;
                 let android_payload = json!({"type": "device_update", "body": ANDROID_SECRET});
-                android_webhook(state(), Json(android_payload)).await;
+                android_webhook(state(), BareJson(Json(android_payload))).await;
                 let gmail_payload = json!({"message": {"body": GMAIL_SECRET}});
-                gmail_webhook(state(), Json(gmail_payload)).await;
+                gmail_webhook(state(), BareJson(Json(gmail_payload))).await;
                 let calendar_payload = json!({"event": {"body": CALENDAR_SECRET}});
-                calendar_webhook(state(), Json(calendar_payload)).await;
+                calendar_webhook(state(), BareJson(Json(calendar_payload))).await;
             });
         });
 
@@ -648,8 +688,16 @@ mod tests {
             let (tx, mut rx) = mpsc::channel(8);
             let state = || State(Arc::new(Normalizer::with_event_tx(tx.clone())));
 
-            ha_webhook(state(), Json(json!({"event_type": "state_changed"}))).await;
-            ha_webhook(state(), Json(json!({"event_type": "state_changed"}))).await;
+            ha_webhook(
+                state(),
+                BareJson(Json(json!({"event_type": "state_changed"}))),
+            )
+            .await;
+            ha_webhook(
+                state(),
+                BareJson(Json(json!({"event_type": "state_changed"}))),
+            )
+            .await;
 
             let first = rx.try_recv().expect("first event accepted");
             let second = rx.try_recv().expect("second event accepted");
@@ -699,12 +747,13 @@ mod tests {
 
     /// The failure branch lives inside `Normalizer::new`'s spawned task and
     /// requires live policy/context clients, so it cannot run in a unit test.
-    /// Guard its logging contract at the source level instead: the error must
-    /// carry both correlation identifiers and never the raw event body.
+    /// Guard its logging contract at the source level instead: the record must
+    /// carry both correlation identifiers plus a fixed `error_kind`, and must
+    /// never format the anyhow error (or the raw event body) into the log.
     #[test]
     fn processing_failure_log_keeps_correlation_ids_and_drops_payload() {
         const SRC: &str = include_str!("normalizer.rs");
-        const MSG: &str = "Event processing failed: {e}";
+        const MSG: &str = "event processing failed";
 
         let at = SRC.find(MSG).expect("failure log message exists");
         let start = SRC[..at].rfind("tracing::error!(");
@@ -719,7 +768,53 @@ mod tests {
             statement.contains("correlation_id = %event.correlation_id"),
             "failure log missing correlation_id"
         );
+        assert!(
+            statement.contains("error_kind = error_kind(err)"),
+            "failure log missing fixed error_kind"
+        );
         assert!(!statement.contains("payload"), "failure log leaks payload");
+        assert!(
+            !statement.contains("{e}"),
+            "anyhow Display leaked into the failure log"
+        );
+    }
+
+    /// I59-C PROBE: the old `"Event processing failed: {e}"` record sent the
+    /// entire anyhow chain (context text, config paths, PII-like bodies) to
+    /// OTLP. A hostile chain must now reduce to a fixed `error_kind` token,
+    /// with only the two correlation identifiers alongside it.
+    #[test]
+    fn i59_c_processing_failure_does_not_leak_error_chain() {
+        const CHAIN_PROBE: &str = "I59C-PROBE-do-not-log";
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let detail = format!("{CHAIN_PROBE} at /etc/jarvis/{CHAIN_PROBE}.toml");
+            let inner = anyhow::anyhow!(detail);
+            let err = anyhow::Error::from(crate::error::EventError::Config(inner))
+                .context("outer chain that must also stay out of the log");
+            log_processing_failure(&test_event(91, "chain_probe"), &err);
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(logs.contains("event processing failed"), "{logs}");
+        // Do not pin the textual rendering of structured fields: it depends on
+        // the tracing-subscriber formatter version. The contract here is that
+        // the raw anyhow chain never reaches the log.
+        assert!(logs.contains("event_id="), "{logs}");
+        assert!(logs.contains("correlation_id="), "{logs}");
+        assert!(!logs.contains(CHAIN_PROBE), "error chain leaked: {logs}");
+        assert!(
+            !logs.contains("outer chain"),
+            "anyhow context layer leaked: {logs}"
+        );
     }
 
     /// Injected ports that record calls and always deny, so no event is

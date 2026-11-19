@@ -8,6 +8,7 @@ use axum::{
     extract::{Path, State},
     routing::{get, post},
 };
+use jarvis_core::BareJson;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tracing::instrument;
@@ -439,8 +440,11 @@ async fn metrics(State(engine): State<Arc<PolicyEngine>>) -> String {
 #[instrument(skip(engine, req))]
 async fn check(
     State(engine): State<Arc<PolicyEngine>>,
-    Json(req): Json<CheckRequest>,
+    req: BareJson<CheckRequest>,
 ) -> Json<CheckResponse> {
+    // A type-mismatched body was already collapsed to a bare 400 by `BareJson`
+    // before this line; only deserialized data reaches the handler.
+    let BareJson(Json(req)) = req;
     // I14-B: same policy-side normalization as the gRPC handler. Cedar rejects
     // JSON `null`, so passing the wire context through verbatim made /v1/check
     // silently deny requests the gRPC client used to sanitize before sending.
@@ -559,8 +563,9 @@ impl PolicyEngine {
 #[instrument(skip(engine, req))]
 async fn request_approval(
     State(engine): State<Arc<PolicyEngine>>,
-    Json(req): Json<ApprovalRequestHttp>,
+    req: BareJson<ApprovalRequestHttp>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, &'static str)> {
+    let BareJson(Json(req)) = req;
     if let Some(id) = req.id.as_deref() {
         uuid::Uuid::parse_str(id).map_err(|_| bad_request_response())?;
     }
@@ -602,8 +607,9 @@ async fn request_approval(
 async fn approve_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Path(id): Path<String>,
-    Json(req): Json<ApproveRequestHttp>,
+    req: BareJson<ApproveRequestHttp>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, &'static str)> {
+    let BareJson(Json(req)) = req;
     let id = uuid::Uuid::parse_str(&id).map_err(|_| bad_request_response())?;
     let decision = engine
         .approve(id, &req.approved_by)
@@ -616,8 +622,9 @@ async fn approve_approval(
 async fn deny_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Path(id): Path<String>,
-    Json(req): Json<DenyRequestHttp>,
+    req: BareJson<DenyRequestHttp>,
 ) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, &'static str)> {
+    let BareJson(Json(req)) = req;
     let id = uuid::Uuid::parse_str(&id).map_err(|_| bad_request_response())?;
     let decision = engine
         .deny(id, &req.reason)
@@ -746,8 +753,9 @@ struct ActivateKillSwitchRequest {
 
 async fn activate_kill_switch(
     State(engine): State<Arc<PolicyEngine>>,
-    Json(req): Json<ActivateKillSwitchRequest>,
+    req: BareJson<ActivateKillSwitchRequest>,
 ) -> Result<&'static str, axum::http::StatusCode> {
+    let BareJson(Json(req)) = req;
     engine
         .activate_kill_switch(req.reason, &req.admin_token)
         .map(|_| "activated")
@@ -768,8 +776,9 @@ struct DeactivateKillSwitchRequest {
 
 async fn deactivate_kill_switch(
     State(engine): State<Arc<PolicyEngine>>,
-    Json(req): Json<DeactivateKillSwitchRequest>,
+    req: BareJson<DeactivateKillSwitchRequest>,
 ) -> Result<&'static str, axum::http::StatusCode> {
+    let BareJson(Json(req)) = req;
     engine
         .deactivate_kill_switch(&req.admin_token)
         .map(|_| "deactivated")
@@ -2212,6 +2221,68 @@ mod tests {
             post_approval(&client, &base, &past_expires_at).await,
             reqwest::StatusCode::BAD_REQUEST
         );
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I59-C: axum's stock `Json<T>` returned a detailed `JsonRejection` body
+    /// (and a 422) for a wrong JSON type, bypassing the fixed-vocabulary /
+    /// no-leak contract. Every JSON-accepting route must now answer a type
+    /// mismatch with an empty 400, before any handler body runs.
+    #[tokio::test]
+    async fn json_type_mismatch_is_rejected_with_bare_400_on_every_route() {
+        let (engine, dir) = test_engine("http-json-type-mismatch").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let id = uuid::Uuid::new_v4();
+        let approve_uri = format!("/v1/approval/{id}/approve");
+        let deny_uri = format!("/v1/approval/{id}/deny");
+
+        let cases: [(&str, serde_json::Value); 6] = [
+            (
+                "/v1/check",
+                json!({
+                    "principal": 42,
+                    "action": "execute",
+                    "resource": "tool:filesystem.read",
+                    "context": {},
+                }),
+            ),
+            (
+                "/v1/approval",
+                json!({
+                    "principal": 42,
+                    "action": "execute",
+                    "resource": "tool:filesystem.write",
+                    "context": {},
+                }),
+            ),
+            (&approve_uri, json!({ "approved_by": 42 })),
+            (&deny_uri, json!({ "reason": 42 })),
+            (
+                "/v1/kill-switch/activate",
+                json!({ "reason": 42, "admin_token": "I59C-PROBE-do-not-log" }),
+            ),
+            ("/v1/kill-switch/deactivate", json!({ "admin_token": 42 })),
+        ];
+        for (uri, body) in cases {
+            let response = client
+                .post(format!("{base}{uri}"))
+                .json(&body)
+                .send()
+                .await
+                .expect("request runs");
+            assert_eq!(
+                response.status(),
+                reqwest::StatusCode::BAD_REQUEST,
+                "{uri}: type mismatch must be a 400"
+            );
+            let bytes = response.bytes().await.expect("body reads");
+            assert!(
+                bytes.is_empty(),
+                "{uri}: rejection detail leaked: {bytes:?}"
+            );
+        }
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");
     }
