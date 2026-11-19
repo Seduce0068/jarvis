@@ -25,6 +25,45 @@ verify_dst="/opt/jarvis/scripts/verify-backup.sh"
 backup_dir="/var/lib/postgresql/jarvis-backups"
 ts="$(date +%Y%m%d-%H%M%S)"
 
+# Single source of truth for every configuration file this installer replaces.
+# Each entry is "dst:bak". Both backup_configs (before install) and
+# restore_configs (rollback) iterate this one array, so backup and restore can
+# never drift apart when a target is added or changed. It covers all targets:
+# the migration unit (I32-B) and the verify script are included alongside
+# service, timer and the backup script.
+restore_pairs=(
+  "$service_dst:$service_dst.bak-$ts"
+  "$timer_dst:$timer_dst.bak-$ts"
+  "$migrations_unit_dst:$migrations_unit_dst.bak-$ts"
+  "$script_dst:$script_dst.bak-$ts"
+  "$verify_dst:$verify_dst.bak-$ts"
+)
+
+backup_configs() {
+  local pair dst bak
+  for pair in "${restore_pairs[@]}"; do
+    dst="${pair%%:*}"
+    bak="${pair##*:}"
+    if [ -f "$dst" ]; then
+      cp -a "$dst" "$bak"
+    fi
+  done
+}
+
+restore_configs() {
+  local pair dst bak
+  for pair in "${restore_pairs[@]}"; do
+    dst="${pair%%:*}"
+    bak="${pair##*:}"
+    if [ -f "$bak" ]; then
+      mv -f "$bak" "$dst" || true
+    else
+      # No backup: this run created the file, so remove it on rollback.
+      rm -f "$dst" || true
+    fi
+  done
+}
+
 echo "== backup timer install (apply=$apply) =="
 if [ "$apply" -ne 1 ]; then
   echo "  DRY: install $script_src -> $script_dst (root:root 0755)"
@@ -55,9 +94,10 @@ rollback() {
     systemctl stop jarvis-backup.timer || true
     systemctl disable jarvis-backup.timer || true
   fi
-  if [ -f "$service_dst.bak-$ts" ]; then mv -f "$service_dst.bak-$ts" "$service_dst" || true; else rm -f "$service_dst" || true; fi
-  if [ -f "$timer_dst.bak-$ts" ]; then mv -f "$timer_dst.bak-$ts" "$timer_dst" || true; else rm -f "$timer_dst" || true; fi
-  if [ -f "$script_dst.bak-$ts" ]; then mv -f "$script_dst.bak-$ts" "$script_dst" || true; else rm -f "$script_dst" || true; fi
+  # Restore every configuration target from the same registry used for backup
+  # (service, timer, migrations unit, backup script and verify script). A
+  # missing backup means this run created the file, so it is removed.
+  restore_configs
   systemctl daemon-reload || true
 }
 
@@ -68,10 +108,13 @@ fail() {
   exit 1
 }
 
+# Back up all targets up front from the single registry, then install. Doing
+# this before the first write keeps rollback complete even when a later step
+# (e.g. post-install verification) fails mid-way.
+backup_configs
 install -o root -g root -m 0755 "$script_src" "$script_dst"
 for pair in "$service_src:$service_dst" "$timer_src:$timer_dst" "$migrations_unit_src:$migrations_unit_dst"; do
   src="${pair%%:*}"; dst="${pair##*:}"
-  [ -f "$dst" ] && cp -a "$dst" "$dst.bak-$ts"
   install -o root -g root -m 0644 "$src" "$dst"
 done
 mkdir -p "$backup_dir"
