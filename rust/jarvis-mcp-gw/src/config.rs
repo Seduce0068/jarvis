@@ -121,9 +121,38 @@ impl McpGatewayConfig {
             // of the field provider as well.
             .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
             .extract()?;
+        // R4-FIX (a): a configured-but-blank admin token would let an empty
+        // header/metadata match the configured value on both listeners. Fail
+        // closed at startup so the gateway never comes up with an effectively
+        // unauthenticated admin gate.
+        config.validate_admin_token()?;
         config.warn_if_legacy_sandbox_settings_are_ignored();
         config.log_egress_allowlist();
         Ok(config)
+    }
+
+    /// Fail-closed startup validation of the optional admin token (R4-FIX a).
+    ///
+    /// A token that is present but blank (empty or whitespace-only) is
+    /// rejected: both the gRPC `token_matches` and the HTTP
+    /// `require_admin_token` gate would otherwise compare a blank presented
+    /// value against a blank configured value and let any caller through.
+    /// `None` (unset) stays valid and keeps the legacy loopback behavior.
+    ///
+    /// The error is a fixed literal: no configured token value is ever
+    /// interpolated, so secrets cannot reach startup logs.
+    pub fn validate_admin_token(&self) -> Result<()> {
+        if self
+            .admin_token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            anyhow::bail!(
+                "admin_token is set but blank; set JARVIS_MCP_GW_ADMIN_TOKEN \
+                 to a non-empty secret or unset it before starting the gateway"
+            );
+        }
+        Ok(())
     }
 
     /// Emit the effective egress allowlist at startup so an operator can see
@@ -327,6 +356,64 @@ mcp_principal = "opencode"
 "#;
         let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
         assert_eq!(config.admin_token.as_deref(), Some("grpc-test-token"));
+    }
+
+    /// Unset remains the legacy compatibility case, and a real secret is
+    /// accepted. Only a present-but-blank value is a startup error.
+    #[test]
+    fn validate_admin_token_accepts_unset_and_non_blank() {
+        assert!(McpGatewayConfig::default().validate_admin_token().is_ok());
+        let config = McpGatewayConfig {
+            admin_token: Some("real-secret".to_owned()),
+            ..Default::default()
+        };
+        assert!(config.validate_admin_token().is_ok());
+    }
+
+    /// A blank (empty or whitespace-only) configured token must abort startup.
+    /// Non-breaking spaces are whitespace to `trim()` but visually distinct,
+    /// so an accidental interpolation into the error would be detectable.
+    #[test]
+    fn validate_admin_token_rejects_blank_and_never_echoes_value() {
+        for token in ["", "   ", "\t\n", "\u{00a0}\u{00a0}"] {
+            let config = McpGatewayConfig {
+                admin_token: Some(token.to_owned()),
+                ..Default::default()
+            };
+            let message = config
+                .validate_admin_token()
+                .expect_err("blank configured token must be rejected")
+                .to_string();
+            // All cases here are blank after trimming, so `contains(token)`
+            // would be trivially true for "". The fixed message itself is
+            // asserted above; it interpolates no configuration value.
+            assert!(
+                message.contains("admin_token is set but blank"),
+                "{message}"
+            );
+        }
+    }
+
+    /// The real startup path (`load` -> `load_from_path`) must enforce the
+    /// guard, not just an explicitly called helper.
+    #[test]
+    fn load_from_path_rejects_blank_admin_token() {
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-config-blank-token");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("mcp_gateway.toml");
+        std::fs::write(
+            &path,
+            format!("{}\nadmin_token = \"   \"\n", config_toml("none", "{}")),
+        )
+        .expect("write config");
+        let error = McpGatewayConfig::load_from_path(path.to_str().expect("utf8 path"))
+            .expect_err("blank configured token must abort startup");
+        assert!(
+            error.to_string().contains("admin_token is set but blank"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -42,6 +42,17 @@ struct ExecuteToolResponse {
 /// same `admin_token` configuration value.
 const ADMIN_TOKEN_HEADER: &str = "x-jarvis-admin-token";
 
+/// Fixed body text for gateway-side failures (R4-FIX b). The full error chain
+/// is logged server-side only; a 500 response must never carry sandbox paths,
+/// tokens or upstream text. Mirrors `grpc::INTERNAL_ERROR_MESSAGE` and
+/// `mcp_server::INTERNAL_ERROR_MESSAGE`.
+const INTERNAL_ERROR_MESSAGE: &str = "internal gateway error";
+
+/// Fixed wording for authorization denials. Tool/principal names are omitted
+/// as well: the caller already knows them, and interpolating backend text
+/// would reopen the disclosure channel this phrase is meant to close.
+const POLICY_DENIED_MESSAGE: &str = "request denied by policy";
+
 pub fn router(gateway: Arc<McpGateway>) -> Router {
     // OpenCode connects to this endpoint as a remote MCP server
     // (`oauth: false`); the principal is fixed server-side.
@@ -82,7 +93,9 @@ pub fn router(gateway: Arc<McpGateway>) -> Router {
 /// unauthenticated behavior so existing loopback clients keep working. Unlike
 /// gRPC's administrative RPCs, the HTTP data plane is deliberately *not*
 /// fail-closed when no token is configured. When a token is set, callers must
-/// send the exact value in the `x-jarvis-admin-token` header.
+/// send the exact value in the `x-jarvis-admin-token` header; a blank or
+/// whitespace-only header is never a credential, even against a blank
+/// configured value (which `load()` rejects at startup).
 ///
 /// This gate is intentionally separate from the policy service's
 /// approval-token middleware (`x-jarvis-approval-token`): the two protect
@@ -95,15 +108,26 @@ async fn require_admin_token(
     let Some(expected) = gateway.config.admin_token.as_deref() else {
         return Ok(next.run(request).await);
     };
+    // Startup validation rejects a blank configured token; this is the
+    // request-time backstop for programmatically built configs.
+    if expected.trim().is_empty() {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
     let provided = request
         .headers()
         .get(ADMIN_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok());
-    // Length-inclusive constant-time comparison, mirroring the gRPC gate and
-    // kill_switch::constant_time_eq: the length difference is folded into the
-    // accumulator and the loop always runs `max` bytes, so neither a content
-    // nor a length mismatch short-circuits.
+    // Length-inclusive comparison with no short-circuit on content or length,
+    // mirroring the gRPC gate and kill_switch::constant_time_eq. It is NOT
+    // constant-time: the loop runs `max` bytes, so the iteration count still
+    // depends on the input length (a fixed-length hash would be needed for
+    // that).
     let authorized = provided.is_some_and(|p| {
+        // A blank header must not authenticate an empty expected value
+        // through the padded XOR loop (R4-FIX a).
+        if p.trim().is_empty() {
+            return false;
+        }
         let a = p.as_bytes();
         let b = expected.as_bytes();
         let mut diff = a.len() ^ b.len();
@@ -171,11 +195,67 @@ async fn execute_tool(
     Ok(Json(ExecuteToolResponse { result }))
 }
 
+/// Reduce a caller-input failure to the same fixed vocabulary used by
+/// `mcp_server::safe_client_error_text` (kept in sync there; that helper is
+/// private, so this adapter carries a mirror). Several `client_error()`
+/// messages interpolate absolute sandbox paths, git stderr or raw URLs, so
+/// only known-static messages pass through verbatim.
+fn safe_client_error_text(message: &str) -> &'static str {
+    match message {
+        "missing 'url' argument" => "missing 'url' argument",
+        "url has no host" => "url has no host",
+        "credentials in URL are not allowed" => "credentials in URL are not allowed",
+        "redirect response has no Location header" => "redirect response has no Location header",
+        "redirect response has an empty Location header" => {
+            "redirect response has an empty Location header"
+        }
+        "web.fetch timed out" => "web.fetch timed out",
+        "web.fetch body timed out" => "web.fetch body timed out",
+        "MCP server name must not be empty" => "MCP server name must not be empty",
+        "MCP server command must not be empty" => "MCP server command must not be empty",
+        _ if message.starts_with("too many redirects (") => "too many redirects",
+        _ if message.starts_with("file too large to read (") => "file too large to read",
+        _ if message.starts_with("response too large (") => "response too large",
+        _ if message.starts_with("git output too large (") => "git output too large",
+        _ if message.starts_with("unsupported scheme '") => "unsupported scheme",
+        _ if message.starts_with("unsupported content type:") => "unsupported content type",
+        _ if message.starts_with("host '") => "host is not allowed by the egress policy",
+        _ if message.starts_with("refusing to fetch non-public address") => {
+            "refusing to fetch non-public address"
+        }
+        _ if message.contains("dns lookup") => "dns lookup failed",
+        _ if message.starts_with("no native handler for tool '") => "no native handler for tool",
+        _ if message.starts_with("MCP server '") => "upstream MCP server is unavailable",
+        _ => "invalid tool arguments",
+    }
+}
+
 /// Build a JSON error body alongside the mapped status so callers can
 /// distinguish denials (403), bad arguments (400), and internal failures.
+/// Both the status and the body come from `ErrorKind`, never from the raw
+/// error text (R4-FIX b): echoing `error.to_string()` leaked absolute paths
+/// from the sandbox into 500 responses.
 fn http_error(error: anyhow::Error) -> (axum::http::StatusCode, Json<Value>) {
-    let message = error.to_string();
-    (http_status_for(&error), Json(json!({ "error": message })))
+    use crate::error::ErrorKind;
+
+    let status = http_status_for(&error);
+    let kind = error
+        .downcast_ref::<crate::error::McpGatewayError>()
+        .map(crate::error::McpGatewayError::kind)
+        .unwrap_or(ErrorKind::Internal);
+    let message = match kind {
+        ErrorKind::ClientError => safe_client_error_text(&error.to_string()).to_string(),
+        ErrorKind::Forbidden => POLICY_DENIED_MESSAGE.to_string(),
+        ErrorKind::Internal => {
+            let detail = format!("{error:#}");
+            tracing::error!(
+                error = %detail,
+                "HTTP /v1/execute failed with internal gateway error"
+            );
+            INTERNAL_ERROR_MESSAGE.to_string()
+        }
+    };
+    (status, Json(json!({ "error": message })))
 }
 
 /// Map an error to an HTTP status purely by its concrete type.
@@ -466,7 +546,9 @@ requires_approval = true
         });
         let (status, body) = http_error(error);
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
-        assert!(body.0["error"].as_str().unwrap().contains("exceed"));
+        // Client errors now use the fixed vocabulary shared with /mcp; the
+        // interpolated "exceed N bytes" detail is not echoed back.
+        assert_eq!(body.0["error"].as_str().unwrap(), "invalid tool arguments");
     }
 
     /// Build a typed client error while preserving the original message.
@@ -497,30 +579,61 @@ requires_approval = true
         assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    /// Regression (I23-C): every caller-input failure that the sandbox now
-    /// types as `ClientError` must keep mapping to HTTP 400, while untyped
-    /// internal failures stay 500. The message is checked only as the body.
+    /// Regression (I23-C + R4-FIX b): every caller-input failure that the
+    /// sandbox types as `ClientError` must keep mapping to HTTP 400, while
+    /// untyped internal failures stay 500. Bodies now use the fixed shared
+    /// vocabulary, so interpolated paths (e.g. `stat /tmp/...`) are rounded
+    /// to a safe phrase instead of being echoed verbatim.
     #[test]
     fn typed_sandbox_failure_messages_map_to_400() {
         use crate::error::McpGatewayError;
 
-        for message in [
-            "too many redirects (> 3)",
-            "unsupported content type: 'application/octet-stream'",
-            "response too large (4096 bytes > 1024)",
-            "file too large to read (1048577 bytes)",
-            "stat /tmp/notes.txt: No such file or directory",
-            "read /tmp/notes.txt: permission denied",
-            "read_dir /tmp/notes: No such file or directory",
-            "dns lookup failed: missing.invalid",
-            "dns lookup returned no addresses for missing.invalid",
-            "host 'attacker.example' is not in the egress allowlist",
-            "host 'example.com' is denied: egress allowlist is empty or invalid",
+        for (message, safe) in [
+            ("too many redirects (> 3)", "too many redirects"),
+            (
+                "unsupported content type: 'application/octet-stream'",
+                "unsupported content type",
+            ),
+            (
+                "response too large (4096 bytes > 1024)",
+                "response too large",
+            ),
+            (
+                "file too large to read (1048577 bytes)",
+                "file too large to read",
+            ),
+            (
+                "stat /tmp/notes.txt: No such file or directory",
+                "invalid tool arguments",
+            ),
+            (
+                "read /tmp/notes.txt: permission denied",
+                "invalid tool arguments",
+            ),
+            (
+                "read_dir /tmp/notes: No such file or directory",
+                "invalid tool arguments",
+            ),
+            ("dns lookup failed: missing.invalid", "dns lookup failed"),
+            (
+                "dns lookup returned no addresses for missing.invalid",
+                "dns lookup failed",
+            ),
+            (
+                "host 'attacker.example' is not in the egress allowlist",
+                "host is not allowed by the egress policy",
+            ),
+            (
+                "host 'example.com' is denied: egress allowlist is empty or invalid",
+                "host is not allowed by the egress policy",
+            ),
         ] {
             let error: anyhow::Error = McpGatewayError::ClientError(message.to_owned()).into();
             let (status, body) = http_error(error);
             assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{message}");
-            assert_eq!(body.0["error"].as_str().unwrap(), message);
+            let text = body.0["error"].as_str().unwrap();
+            assert_eq!(text, safe, "{message}");
+            assert!(!text.contains("/tmp"), "path leaked for {message}");
         }
 
         for message in [
@@ -535,6 +648,32 @@ requires_approval = true
                 "{message}"
             );
         }
+    }
+
+    /// R4-FIX (b): internal details (sandbox absolute paths, upstream text)
+    /// must stay in the server log only; the caller sees a fixed phrase. The
+    /// same fixed wording applies to Forbidden denials.
+    #[test]
+    fn internal_error_details_never_reach_the_http_body() {
+        use crate::error::McpGatewayError;
+
+        let probe_path = "/home/koppe/secret-project/token.txt";
+        let errors: [anyhow::Error; 2] = [
+            McpGatewayError::Sandbox(probe_path.to_owned()).into(),
+            anyhow::anyhow!("canonicalize {probe_path}: permission denied"),
+        ];
+        for error in errors {
+            let (status, body) = http_error(error);
+            assert_eq!(status, axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            let text = body.0["error"].as_str().unwrap();
+            assert_eq!(text, INTERNAL_ERROR_MESSAGE);
+            assert!(!text.contains(probe_path), "path leaked: {text}");
+            assert!(!text.contains("permission denied"), "detail leaked: {text}");
+        }
+
+        let (status, body) = http_error(McpGatewayError::NotAllowed("echo".into()).into());
+        assert_eq!(status, axum::http::StatusCode::FORBIDDEN);
+        assert_eq!(body.0["error"].as_str().unwrap(), POLICY_DENIED_MESSAGE);
     }
 
     /// End-to-end status check: an argument rejected inside the native
@@ -639,6 +778,45 @@ requires_approval = true
             .await
             .expect("authorized request runs");
         assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+    }
+
+    /// A blank header must never authenticate (R4-FIX a), including against a
+    /// blank configured value. `load()` rejects blank config at startup; this
+    /// exercises the request-time backstop on programmatic configs.
+    #[tokio::test]
+    async fn admin_token_gate_rejects_blank_header_and_blank_config() {
+        let gateway =
+            test_gateway_with_admin_token("auth-blank-header", Some("secret-admin")).await;
+        let base = start_server(gateway).await;
+        let client = reqwest::Client::new();
+        let payload = json!({
+            "tool": "filesystem.read",
+            "args": { "path": "/tmp/example" },
+            "principal": "opencode",
+        });
+
+        for header in ["", " ", "   "] {
+            let response = client
+                .post(format!("{base}/v1/execute"))
+                .header(ADMIN_TOKEN_HEADER, header)
+                .json(&payload)
+                .send()
+                .await
+                .expect("blank-header request runs");
+            assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
+        }
+
+        // A programmatic config with a blank expected value is locked out too.
+        let blank_config = test_gateway_with_admin_token("auth-blank-config", Some("   ")).await;
+        let base = start_server(blank_config).await;
+        let response = client
+            .post(format!("{base}/v1/execute"))
+            .header(ADMIN_TOKEN_HEADER, "   ")
+            .json(&payload)
+            .send()
+            .await
+            .expect("blank-config request runs");
+        assert_eq!(response.status(), reqwest::StatusCode::UNAUTHORIZED);
     }
 
     /// With no admin token configured the HTTP data plane keeps its legacy

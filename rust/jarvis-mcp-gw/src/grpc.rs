@@ -51,21 +51,30 @@ pub struct GrpcMcpGatewayService {
     admin_token: Option<String>,
 }
 
-/// Constant-time token comparison that folds a length difference into the
-/// accumulator instead of short-circuiting on it.
+/// Length-inclusive token comparison with no short-circuit on content or
+/// length — but **not** constant-time: the loop runs `max(a.len(), b.len())`
+/// iterations, so the iteration count still depends on the input length. Only
+/// the early length-equality exit was removed. A truly fixed-work comparison
+/// would need a fixed-length hash (a larger change); the property guaranteed
+/// here is that neither a content mismatch nor a length mismatch exits early.
+/// Mirrors `jarvis_policy::kill_switch::constant_time_eq`, with the same
+/// iteration-count caveat. No `unsafe` code or extra dependency is involved.
 ///
-/// Mirrors `jarvis_policy::kill_switch::constant_time_eq`: the loop covers
-/// `max(a.len(), b.len())` bytes and pads the shorter input with zero bytes,
-/// so neither a content mismatch nor a length mismatch exits early. Seeding
-/// `diff` with `a.len() ^ b.len()` makes a length difference contribute even
-/// though the XOR loop only runs `max` iterations. No `unsafe` code and no
-/// extra dependency are involved.
-///
-/// A missing presented token is rejected without comparison. The unconfigured
-/// token and fail-closed decisions live in [`authorize_grpc`] and are
-/// unchanged; neither token value is ever logged.
+/// A missing or blank presented token is rejected without comparison. A blank
+/// configured value is rejected too: startup validation forbids it, and this
+/// is the request-time backstop for programmatically built configs. Neither
+/// token value is ever logged.
 fn token_matches(provided: Option<&str>, expected: &str) -> bool {
+    // Blank expected values are never credentials (defense in depth).
+    if expected.trim().is_empty() {
+        return false;
+    }
     provided.is_some_and(|p| {
+        // A blank header/metadata value must not authenticate an empty
+        // configured token through the padded XOR loop (R4-FIX a).
+        if p.trim().is_empty() {
+            return false;
+        }
         let a = p.as_bytes();
         let b = expected.as_bytes();
         let max = a.len().max(b.len());
@@ -233,16 +242,39 @@ requires_approval = false
         }
     }
 
-    /// `token_matches` must fold a length difference into the accumulator
-    /// instead of short-circuiting, matching `kill_switch::constant_time_eq`.
-    /// A shorter, a longer, and a same-length wrong token must all be
-    /// rejected, while exact matches (including empty/empty) still pass.
+    /// Blank metadata must never authenticate, not even when the configured
+    /// token is blank. `load()` now rejects blank config at startup; this is
+    /// the request-time backstop for programmatically built configs.
+    #[test]
+    fn authorize_grpc_rejects_blank_metadata_even_with_blank_config() {
+        for blank in ["", " ", "   "] {
+            let request = request_with_token((), Some(blank));
+            let status = authorize_grpc(&request, Some(""), false)
+                .expect_err("blank metadata must be rejected");
+            assert_eq!(status.code(), Code::Unauthenticated);
+        }
+
+        let request = request_with_token((), Some("correct-token"));
+        let status = authorize_grpc(&request, Some("   "), false)
+            .expect_err("blank configured token must be rejected");
+        assert_eq!(status.code(), Code::Unauthenticated);
+    }
+
+    /// `token_matches` folds a length difference into the accumulator instead
+    /// of short-circuiting, mirroring `kill_switch::constant_time_eq` (both
+    /// still iterate `max` bytes, so neither is truly constant-time). A
+    /// shorter, a longer, and a same-length wrong token must all be rejected,
+    /// as must blank values. An exact non-blank match still passes.
     #[test]
     fn token_matches_rejects_length_and_content_mismatches() {
         let expected = "correct-token";
 
         assert!(token_matches(Some(expected), expected));
-        assert!(token_matches(Some(""), ""));
+        // R4-FIX (a): this used to assert success for empty/empty. A blank
+        // presented token is never a credential, even when the configured
+        // value is blank (which startup validation now rejects as well).
+        assert!(!token_matches(Some(""), ""));
+        assert!(!token_matches(Some("   "), "   "));
 
         // Same-length content mismatch.
         assert!(!token_matches(Some("Correct-token"), expected));
