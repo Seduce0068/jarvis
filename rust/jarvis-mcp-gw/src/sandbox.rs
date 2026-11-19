@@ -140,17 +140,21 @@ impl Sandbox {
                 .context("web.fetch request timed out")?
                 .with_context(|| format!("GET {url}"))?;
             let status = resp.status();
-            if status.is_redirection()
-                && let Some(location) = resp
+            // A redirect must always carry a usable Location. Letting a 3xx
+            // without one fall through would return the intermediate body as
+            // though it were the fetched content (SSRF fail-open), so abort
+            // explicitly instead of continuing with the normal response path.
+            if status.is_redirection() {
+                let location = resp
                     .headers()
                     .get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-            {
+                    .and_then(|value| value.to_str().ok());
+                let next = redirect_target(&url, location)?;
                 redirects += 1;
                 if redirects > WEB_FETCH_MAX_REDIRECTS {
                     bail!("too many redirects (> {WEB_FETCH_MAX_REDIRECTS})");
                 }
-                url = resolve_redirect(&url, location)?;
+                url = next;
                 continue;
             }
             let content_type = resp
@@ -441,7 +445,24 @@ fn validate_http_url(raw: &str) -> Result<reqwest::Url> {
     Ok(url)
 }
 
+/// Resolve a redirect header into a target URL. `None` means the header was
+/// absent or not valid UTF-8; both are hard errors so a 3xx can never be
+/// mistaken for a successful fetch.
+fn redirect_target(base: &reqwest::Url, location: Option<&str>) -> Result<reqwest::Url> {
+    let Some(location) = location else {
+        return Err(client_error("redirect response has no Location header"));
+    };
+    resolve_redirect(base, location)
+}
+
 fn resolve_redirect(base: &reqwest::Url, location: &str) -> Result<reqwest::Url> {
+    // An empty (or whitespace-only) Location would resolve back to the base
+    // URL and spin until the redirect cap, or silently reuse the current hop.
+    if location.trim().is_empty() {
+        return Err(client_error(
+            "redirect response has an empty Location header",
+        ));
+    }
     let next = client_context(
         base.join(location),
         format!("invalid redirect location: {location}"),
@@ -592,6 +613,34 @@ mod tests {
         assert_eq!(next.as_str(), "https://example.com/c");
         let abs = resolve_redirect(&base, "https://other.example/d").unwrap();
         assert_eq!(abs.as_str(), "https://other.example/d");
+    }
+
+    #[test]
+    fn redirect_without_usable_location_fails_closed() {
+        let base = validate_http_url("https://example.com/a/b").unwrap();
+        // A missing header (or a non-UTF-8 value) surfaces as `None` and must
+        // abort instead of falling through to the normal 3xx response path.
+        let err = redirect_target(&base, None).unwrap_err();
+        assert!(err.to_string().contains("no Location"), "{err}");
+        // Empty and whitespace-only values are equally unusable.
+        for empty in ["", "   ", "\t"] {
+            let err = redirect_target(&base, Some(empty)).unwrap_err();
+            assert!(err.to_string().contains("empty Location"), "{err}");
+        }
+        // A valid relative Location still resolves exactly as before.
+        let ok = redirect_target(&base, Some("../c")).unwrap();
+        assert_eq!(ok.as_str(), "https://example.com/c");
+    }
+
+    #[test]
+    fn redirect_with_unparseable_location_is_rejected() {
+        let base = validate_http_url("https://example.com/a/b").unwrap();
+        for bad in ["http://[invalid", "http://", "file:///etc/passwd"] {
+            assert!(
+                resolve_redirect(&base, bad).is_err(),
+                "{bad} must be rejected as a redirect target"
+            );
+        }
     }
 
     #[test]
