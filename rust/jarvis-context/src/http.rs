@@ -38,12 +38,18 @@ struct BuildContextResponse {
 
 #[derive(Debug, Deserialize)]
 struct StoreMemoryRequest {
+    /// Accepted for backwards compatibility only; deliberately ignored (I7-E).
     id: Option<String>,
     content: String,
     embedding: Vec<f32>,
     metadata: String,
     source: String,
     expires_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoreMemoryResponse {
+    id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -138,16 +144,21 @@ async fn build_context(
     Ok(Json(BuildContextResponse { context }))
 }
 
-#[instrument(skip(builder))]
-async fn store_memory(
-    State(builder): State<Arc<ContextBuilder>>,
-    Json(req): Json<StoreMemoryRequest>,
-) -> Result<&'static str, axum::http::StatusCode> {
+/// Build the entry to persist together with the response describing it.
+///
+/// `builder::store_memory` performs `ON CONFLICT (id) DO UPDATE`, so honoring a
+/// client-supplied `id` would let any caller overwrite an existing memory
+/// (I7-E). Always mint a fresh server-side UUID, ignore `req.id`, and hand the
+/// generated id back so the caller can reference the new record. Every other
+/// field keeps its previous handling.
+fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryResponse) {
+    // I7-E: consumed and discarded so the ignore is explicit in code, not just
+    // in the docs above.
+    let _ignored_client_id = req.id;
+    let id = uuid::Uuid::new_v4();
+    let response = StoreMemoryResponse { id: id.to_string() };
     let memory = MemoryEntry {
-        id: req
-            .id
-            .and_then(|s| uuid::Uuid::parse_str(&s).ok())
-            .unwrap_or_else(uuid::Uuid::new_v4),
+        id,
         content: req.content,
         embedding: req.embedding,
         metadata: serde_json::from_str(&req.metadata).unwrap_or_default(),
@@ -158,11 +169,20 @@ async fn store_memory(
             .expires_at
             .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
     };
+    (memory, response)
+}
+
+#[instrument(skip(builder))]
+async fn store_memory(
+    State(builder): State<Arc<ContextBuilder>>,
+    Json(req): Json<StoreMemoryRequest>,
+) -> Result<Json<StoreMemoryResponse>, axum::http::StatusCode> {
+    let (memory, response) = prepare_store_memory(req);
     builder
         .store_memory(memory)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok("stored")
+    Ok(Json(response))
 }
 
 #[instrument(skip(builder))]
@@ -186,7 +206,7 @@ pub async fn serve(builder: Arc<ContextBuilder>, addr: std::net::SocketAddr) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::log_internal_error;
+    use super::{StoreMemoryRequest, log_internal_error, prepare_store_memory};
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -237,5 +257,64 @@ mod tests {
             "{logs}"
         );
         assert!(logs.contains("qdrant request timed out"), "{logs}");
+    }
+
+    fn store_request(id: Option<String>) -> StoreMemoryRequest {
+        StoreMemoryRequest {
+            id,
+            content: "sensitive content".into(),
+            embedding: vec![0.1_f32, 0.2, 0.3],
+            metadata: r#"{"kind":"test"}"#.into(),
+            source: "regression-test".into(),
+            expires_at: Some(1_800_000_000),
+        }
+    }
+
+    #[test]
+    fn store_memory_ignores_caller_id_and_returns_generated_id() {
+        let supplied = uuid::Uuid::new_v4().to_string();
+        let (memory, response) = prepare_store_memory(store_request(Some(supplied.clone())));
+
+        assert_ne!(
+            memory.id.to_string(),
+            supplied,
+            "a caller-supplied id must never become the stored id (I7-E)"
+        );
+        assert_ne!(
+            memory.id,
+            uuid::Uuid::nil(),
+            "the server must mint a real UUID"
+        );
+        assert_eq!(
+            response.id,
+            memory.id.to_string(),
+            "the response must carry the id that was actually stored"
+        );
+        let expected = memory.id.to_string();
+        let body = serde_json::to_value(&response).expect("response serializes");
+        assert_eq!(
+            body["id"].as_str(),
+            Some(expected.as_str()),
+            "the JSON body exposes the generated id to the caller"
+        );
+
+        let (second, _) = prepare_store_memory(store_request(Some(supplied)));
+        assert_ne!(
+            memory.id, second.id,
+            "repeated requests with the same id get distinct records"
+        );
+    }
+
+    #[test]
+    fn store_memory_preserves_all_other_fields() {
+        let (memory, _) = prepare_store_memory(store_request(None));
+        assert_eq!(memory.content, "sensitive content");
+        assert_eq!(memory.embedding, vec![0.1_f32, 0.2, 0.3]);
+        assert_eq!(memory.metadata, serde_json::json!({ "kind": "test" }));
+        assert_eq!(memory.source, "regression-test");
+        assert_eq!(
+            memory.expires_at,
+            chrono::DateTime::from_timestamp(1_800_000_000, 0)
+        );
     }
 }
