@@ -43,7 +43,15 @@ enum ListenerOutcome {
     /// existing one-error / both-errors aggregation.
     Finished((Result<()>, Result<()>)),
     /// A termination signal arrived first. `select!` dropped the listener
-    /// futures, which stops both accept loops before a clean exit.
+    /// futures, which stops both accept loops before the shutdown path below.
+    ///
+    /// I54-D — adopted policy: IMMEDIATE STOP, not a graceful drain. The HTTP
+    /// handlers (including an in-flight `ApprovalStore::decide` commit) are
+    /// spawned tasks not owned by these listener futures; they are not tracked
+    /// in a `JoinSet` here. This branch therefore does not wait for them, and
+    /// they are not guaranteed to finish before runtime teardown or the unit's
+    /// `TimeoutStopSec` SIGKILL. The shutdown log is worded accordingly and
+    /// must not claim a clean completion of in-flight work.
     Shutdown,
 }
 
@@ -191,6 +199,21 @@ async fn main() -> Result<()> {
     let grpc_addr = config.grpc_addr.parse()?;
     let http_addr = config.http_addr.parse()?;
 
+    // I54-D — approval commit boundary contract (unchanged by immediate stop):
+    // `ApprovalStore::decide` re-reads the synchronous `commit_gate` — the same
+    // authoritative kill-switch instance the transports arm/disarm — once
+    // immediately before the durable write, and the in-flight claim is held by
+    // a generation-tagged `DecidingGuard` whose `Drop` releases it even when a
+    // future is cancelled (a competing commit cannot clear another owner's
+    // generation). The gate is deliberately NOT re-read after a successful
+    // commit: the committed row is the authority and must be published. A
+    // later re-evaluation via `PolicyEngine::is_allowed` re-checks the kill
+    // switch and is fail-closed, so a decision that committed just before
+    // SIGTERM cannot grant tool execution while the stop is engaged; a retry
+    // on the same id stays `AlreadyDecided` (409), not a second commit.
+    // Immediate stop below does not alter this contract; it only means a
+    // spawned handler may be cut short at teardown / `TimeoutStopSec`.
+
     // `join!` polls both listeners to completion, so a failure in one never
     // drops the other's future. Racing it against the shutdown signal lets a
     // signal stop both listeners by dropping the `join!` future, while a
@@ -221,7 +244,15 @@ async fn main() -> Result<()> {
             )),
         },
         ListenerOutcome::Shutdown => {
-            info!("listeners stopped, exiting cleanly");
+            // I54-D: fixed vocabulary for the immediate-stop policy. Do not
+            // claim a clean exit: spawned handlers (including an in-flight
+            // approval commit) are not drained here and may still be running
+            // or be SIGKILLed at `TimeoutStopSec` after this line.
+            info!(
+                shutdown_policy = "immediate-stop",
+                in_flight_requests_drained = false,
+                "listeners stopped, exiting without draining in-flight requests"
+            );
             Ok(())
         }
     }

@@ -82,7 +82,17 @@ enum ListenerOutcome {
     /// preserved unchanged so its one-error aggregation stays intact.
     Finished(Result<()>),
     /// A termination signal arrived first. `select!` dropped the listener
-    /// futures, which stops every accept loop before a clean exit.
+    /// futures, which stops every accept loop before the shutdown path below.
+    ///
+    /// I54-D — adopted policy: IMMEDIATE STOP, not a graceful drain. The
+    /// axum/gRPC handler tasks spawned by `serve_http`/`serve_grpc` are not
+    /// owned by these listener futures and are not collected in a `JoinSet`,
+    /// so this branch neither awaits nor explicitly cancels them. In-flight
+    /// work — an approval commit in jarvis-policy or an already-approved
+    /// tool's external side effects — is NOT guaranteed to complete: it can be
+    /// cut short by runtime teardown or by the unit's `TimeoutStopSec` SIGKILL.
+    /// The shutdown log is worded accordingly and must not claim that in-flight
+    /// requests finished cleanly.
     Shutdown,
 }
 
@@ -126,7 +136,8 @@ async fn shutdown_signal() {
 /// `biased;` gives the listener branch priority so a real listener failure is
 /// reported instead of being masked by a coincident signal. When the signal
 /// wins, `select!` drops the pending listener future and every accept loop
-/// stops before the explicit shutdown below.
+/// stops before the explicit shutdown below. This is an immediate stop: see
+/// [`ListenerOutcome::Shutdown`] for why no in-flight drain is performed here.
 async fn race_listeners_with_shutdown<F, S>(listeners: F, signal: S) -> ListenerOutcome
 where
     F: std::future::Future<Output = Result<()>>,
@@ -156,7 +167,15 @@ fn complete_shutdown(outcome: ListenerOutcome, tracer: &TracerGuard) -> Result<(
     match outcome {
         ListenerOutcome::Finished(result) => result,
         ListenerOutcome::Shutdown => {
-            info!("listeners stopped, exiting cleanly");
+            // I54-D: fixed vocabulary for the immediate-stop policy. Never log
+            // "exiting cleanly" here: spawned handlers are not drained and may
+            // still be running (or be SIGKILLed at `TimeoutStopSec`) after this
+            // line, so claiming a clean completion of in-flight work is false.
+            info!(
+                shutdown_policy = "immediate-stop",
+                in_flight_requests_drained = false,
+                "listeners stopped, exiting without draining in-flight requests"
+            );
             Ok(())
         }
     }
@@ -282,10 +301,28 @@ async fn main() -> Result<()> {
     let grpc_addr = config.grpc_addr.parse()?;
     let http_addr = config.http_addr.parse()?;
 
+    // I54-D — approval commit boundary contract (aligned with jarvis-policy;
+    // deliberately left unchanged by the immediate-stop policy above/below):
+    // An approval only becomes authoritative when policy's
+    // `ApprovalStore::decide` durably commits it. That path re-reads the
+    // synchronous `commit_gate` — the authoritative kill-switch flag — once
+    // immediately before the write, and holds the in-flight claim with a
+    // generation-tagged `DecidingGuard` whose `Drop` releases it even when the
+    // future is cancelled. The gate is intentionally NOT re-read after a
+    // successful commit: the committed row is the authority and is published.
+    // Once committed, re-evaluation stays fail-closed — `execute_tool` calls
+    // `PolicyEngine::is_allowed` again after the human decision, and that path
+    // re-checks the kill switch, so a committed approval never bypasses an
+    // engaged emergency stop. An operator's retry on the same id resolves as
+    // `AlreadyDecided` (409) instead of committing a second time. This process
+    // exit neither commits nor invalidates a decision; it can only abandon a
+    // caller before that boundary, and no in-flight commit or tool side effect
+    // is guaranteed to finish.
+
     // Race both listeners against a termination signal. `biased;` keeps the
     // listener branch first so a real failure is reported instead of being
     // masked by a coincident signal; when the signal wins, the listener futures
-    // are dropped and both accept loops stop before a clean exit.
+    // are dropped and both accept loops stop before the shutdown path.
     let outcome = race_listeners_with_shutdown(
         async {
             tokio::try_join!(gateway.serve_grpc(grpc_addr), gateway.serve_http(http_addr),)

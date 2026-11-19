@@ -22,7 +22,12 @@ ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d4
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60
-TimeoutStopSec=30
+# I54-D: immediate stop — the engine does not drain in-flight handlers;
+# an in-flight ApprovalStore::decide commit is NOT guaranteed to finish.
+# 10s is only a bounded teardown budget for bws signal forwarding and
+# tracer flush, NOT a graceful-drain window; reaching it means SIGKILL.
+# The binary's shutdown log uses shutdown_policy=immediate-stop to match.
+TimeoutStopSec=10
 KillMode=mixed
 KillSignal=SIGTERM
 SendSIGKILL=yes
