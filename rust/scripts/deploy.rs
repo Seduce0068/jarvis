@@ -13,7 +13,7 @@
 /// Use `--dry-run` to print every remote command without executing it.
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use tracing::{info, warn};
 
@@ -25,6 +25,23 @@ const SERVICES: [&str; 5] = [
     "jarvis-context",
     "otelcol",
 ];
+
+/// Service binaries that must exist before a real (non-dry-run) deploy may
+/// proceed. A missing binary is a hard error so a deploy can never report
+/// success while shipping an incomplete build.
+const REQUIRED_BINARIES: [&str; 4] = [
+    "jarvis-policy",
+    "jarvis-mcp-gw",
+    "jarvis-event",
+    "jarvis-context",
+];
+
+/// Log line emitted when health checks are skipped during `--dry-run`.
+/// Deliberately avoids the word "healthy": no check ran, so no health is claimed.
+const DRY_RUN_HEALTH_SKIP_LOG: &str = "DRY RUN: health check skipped";
+
+/// HTTP health-check ports for the four required services.
+const HEALTH_PORTS: [u16; 4] = [8081, 8082, 8083, 8084];
 
 /// Environment files copied from infra/config/ that must be readable by the
 /// jarvis user (op.env is intentionally excluded: it holds the 1Password
@@ -285,8 +302,34 @@ fn build(runner: &Runner, rust_dir: &str) -> Result<()> {
     Ok(())
 }
 
+/// Return the paths of required binaries that are missing under `target_dir`.
+fn missing_binaries(target_dir: &Path) -> Vec<PathBuf> {
+    REQUIRED_BINARIES
+        .iter()
+        .map(|service| target_dir.join(service))
+        .filter(|path| !path.exists())
+        .collect()
+}
+
 fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Result<()> {
     info!("Deploying to {}...", args.host);
+
+    let target_dir = Path::new(rust_dir).join("target/aarch64-unknown-linux-gnu/release");
+
+    // Fail closed: a real deploy must not report success when a required
+    // binary is absent. `--dry-run` never builds, so skip the check there and
+    // only print the commands that would run.
+    if !runner.dry_run {
+        let missing = missing_binaries(&target_dir);
+        if !missing.is_empty() {
+            let list = missing
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("required binary(ies) missing: {list}; rebuild first");
+        }
+    }
 
     // Create remote directories owned by the deploy user
     let remote_base = format!("{}@{}", args.user, args.host);
@@ -296,18 +339,11 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
     )?;
 
     // Copy binaries
-    let target_dir = Path::new(rust_dir).join("target/aarch64-unknown-linux-gnu/release");
-    for service in [
-        "jarvis-policy",
-        "jarvis-mcp-gw",
-        "jarvis-event",
-        "jarvis-context",
-    ] {
+    for service in REQUIRED_BINARIES {
         info!("Deploying {}...", service);
         let binary_path = target_dir.join(service);
-        if !binary_path.exists() && !runner.dry_run {
-            warn!("Binary not found: {}", binary_path.display());
-            continue;
+        if runner.dry_run && !binary_path.exists() {
+            info!("[dry-run] binary not built: {}", binary_path.display());
         }
         runner.scp(
             &binary_path,
@@ -374,18 +410,21 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
         &format!("sudo systemctl restart {}", SERVICES.join(" ")),
     )?;
 
-    // Wait for health checks
-    info!("Waiting for services to be healthy...");
-    if !runner.dry_run {
+    // Wait for health checks. In `--dry-run` nothing was deployed or
+    // restarted, so do not run (or claim the result of) any health check.
+    if runner.dry_run {
+        info!("{DRY_RUN_HEALTH_SKIP_LOG}");
+    } else {
+        info!("Waiting for services to be healthy...");
         std::thread::sleep(std::time::Duration::from_secs(5));
-    }
 
-    for port in [8081, 8082, 8083, 8084] {
-        let url = format!("http://127.0.0.1:{}/health", port);
-        match runner.ssh_output(&remote_base, &format!("curl -sf {url}")) {
-            Ok(true) => info!("Service on port {} is healthy", port),
-            Ok(false) => warn!("Service on port {} not responding", port),
-            Err(err) => warn!("Health check on port {} failed: {err}", port),
+        for port in HEALTH_PORTS {
+            let url = format!("http://127.0.0.1:{port}/health");
+            match runner.ssh_output(&remote_base, &format!("curl -sf {url}")) {
+                Ok(true) => info!("Service on port {port} is healthy"),
+                Ok(false) => warn!("Service on port {port} not responding"),
+                Err(err) => warn!("Health check on port {port} failed: {err}"),
+            }
         }
     }
 
@@ -440,4 +479,52 @@ fn status(runner: &Runner, args: &Args) -> Result<()> {
         bail!("failed to get status");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_dir() -> PathBuf {
+        let n = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("jarvis-deploy-test-{}-{n}", std::process::id()))
+    }
+
+    #[test]
+    fn missing_binaries_detects_all_absent_required_binaries() {
+        let dir = unique_temp_dir();
+        fs::create_dir_all(&dir).expect("create temp dir");
+
+        let missing = missing_binaries(&dir);
+        let names: Vec<&str> = missing
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+        assert_eq!(names, REQUIRED_BINARIES);
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn missing_binaries_is_empty_when_all_required_binaries_exist() {
+        let dir = unique_temp_dir();
+        fs::create_dir_all(&dir).expect("create temp dir");
+        for service in REQUIRED_BINARIES {
+            fs::write(dir.join(service), b"stub").expect("write stub binary");
+        }
+
+        assert!(missing_binaries(&dir).is_empty());
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dry_run_health_log_never_claims_healthy() {
+        assert_eq!(DRY_RUN_HEALTH_SKIP_LOG, "DRY RUN: health check skipped");
+        assert!(!DRY_RUN_HEALTH_SKIP_LOG.to_lowercase().contains("healthy"));
+    }
 }
