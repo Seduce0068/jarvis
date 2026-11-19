@@ -252,6 +252,33 @@ else
   fi
 fi
 
+# Static-guard coverage: a look-alike of a SAFE_PATHS entry must NOT inherit
+# the exemption. With prefix matching, `AGENTS.md.bak` would be downgraded to
+# "review (safe path)" and the gate would pass silently (fail-open).
+scan_lookalike="$tmp/secret_scan_lookalike"
+mkdir -p "$scan_lookalike"
+if ! (cd "$scan_lookalike" \
+      && git init -q >/dev/null 2>&1 \
+      && printf 'BWS_ACCESS_TOKEN = %s\n' "$dummy_value" > AGENTS.md.bak \
+      && git add -f AGENTS.md.bak >/dev/null 2>&1); then
+  echo "  FAIL: could not prepare look-alike safe-path repo for secret scanner test"
+  fail=$((fail+1))
+else
+  # Copy the scanner only AFTER git add so it stays untracked and is not
+  # scanned itself (its own regex literals are legitimate VALUE-LIKE shapes).
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_lookalike/secret_scan.py"
+  out=$(cd "$scan_lookalike" && python3 secret_scan.py 2>&1); code=$?
+  if [ "$code" -eq 1 ] \
+     && printf '%s' "$out" | grep -q 'VALUE-LIKE' \
+     && ! printf '%s' "$out" | grep -q -- "$dummy_value"; then
+    echo "  PASS: secret_scan.py does not exempt SAFE_PATHS look-alikes"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: secret_scan.py exempted a SAFE_PATHS look-alike (exit=$code, output withheld)"
+    fail=$((fail+1))
+  fi
+fi
+
 # The gate must reject a spec that lost one required test-spec section. Reuse
 # the spec list from the index-negative case above; all temp trees use $tmp.
 section_tmp="$tmp/section_negative"

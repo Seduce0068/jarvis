@@ -38,5 +38,16 @@ else
   echo "  PASS: unknown flag rejected"; ok=$((ok+1))
 fi
 
+# 5) dsh backend: the non-default branch of build_runner_args was untested.
+# A stub named `dsh` on PATH exercises it without a real agent runtime, and
+# PATH="$tmp:$PATH" guarantees the stub wins over any installed `dsh` binary.
+cp "$tmp/stub-runner" "$tmp/dsh"
+out=$(JARVIS_REVIEW_RUNNER=dsh PATH="$tmp:$PATH" bash "$adapter" "/review-flow gate-check 42")
+check "dsh runner args" "ARGS=--profile headless /review-flow gate-check 42" "$(echo "$out" | grep '^ARGS=')"
+
+# 6) dsh backend: --json is placed before the task and the profile is overridable.
+out=$(JARVIS_REVIEW_RUNNER=dsh JARVIS_REVIEW_RUNNER_PROFILE=custom PATH="$tmp:$PATH" bash "$adapter" "/cross-review" --json)
+check "dsh runner json/profile args" "ARGS=--profile custom --json /cross-review" "$(echo "$out" | grep '^ARGS=')"
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

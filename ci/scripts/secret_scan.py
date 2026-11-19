@@ -36,6 +36,9 @@ PLACEHOLDER = re.compile(
 # docs/ is intentionally NOT a safe path (I7-B): placeholder examples in docs
 # are recognised via PLACEHOLDER, but a value-like literal in documentation
 # must fail the gate just like one in source code.
+# Membership is EXACT, not prefix-based: a look-alike path such as
+# `AGENTS.md.bak` or `ci/review-gate.yml.template` must not silently inherit
+# the exemption of its namesake (static-guard coverage gap).
 SAFE_PATHS = (
     # Scanners/pattern definitions legitimately contain credential-shaped
     # literals (e.g. `PRIVATE_KEY = re.compile(...)`); treat as review-only.
@@ -74,7 +77,7 @@ def main() -> int:
             # and exception class -- never file contents or a secret value.
             errors.append((path, type(exc).__name__))
             continue
-        safe = path.startswith(SAFE_PATHS)
+        safe = path in SAFE_PATHS  # exact match, never a prefix
         for lineno, line in enumerate(text.splitlines(), 1):
             if PRIVATE_KEY.search(line):
                 findings.append((path, lineno, "PRIVATE_KEY", "VALUE-LIKE"))
