@@ -105,7 +105,7 @@ generated:
     R3-DR-003）
   - manifest は平文 SHA-256 のみ、署名なし。`--retain-days` は opt-in で
     unit が渡していない。ディスク枯渇と改ざん検知不能のリスク。
-- [ ] **P1-7** 共有ドメインモデルを一本化（**2026-11-19 設計決定: 案A（jarvis-core を単一情報源、proto/HTTP DTO は境界契約として維持）を推奨。最初のスライスは core に `approval` モジュールを追加するだけ（他クレート無変更）。後続スライスは policy→mcp-gw→UI の順に後方互換で移行。詳細は Round 21 の設計結果を参照**。実装は未着手）（R2-ARCH-001, R2-ARCH-005,
+- [ ] **P1-7** 共有ドメインモデルを一本化（**2026-11-19 スライス1-2 対応済み: `jarvis-core/src/approval.rs` に正規形（Uuid/DateTime/4 variant）と旧型からの TryFrom を追加、policy のローカル定義を core 型の `pub use` へ置換。tagged JSON ゴールデン7件追加、workspace.dependencies に jarvis-core を追加。残るスライス: mcp-gw と UI の境界変換・旧 root 型の整理）（R2-ARCH-001, R2-ARCH-005,
     R2-ARCH-009）
   - `jarvis-core` が policy / mcp-gw / UI から未参照で、承認型が
     4 種類（`String+i64` / `Uuid+DateTime` / …）に分裂。core を真の
@@ -792,16 +792,16 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### 優先度 中
 
-- [ ] gRPC ハンドラが `ErrorKind` を無視し全エラーを `Status::internal` に変換 — `mcp-gw/src/grpc.rs:64-85` / B1 / 中。
-- [ ] tools/list の inputSchema 優先順位が実際のルーティングと逆転 — `mcp_server.rs:51-59`, `gateway.rs:223-234` / B1 / 中。
+- [x] gRPC ハンドラが `ErrorKind` を無視し全エラーを `Status::internal` に変換 — 2026-11-19 対応済み: `grpc_status_for()` で ClientError→InvalidArgument / Forbidden→PermissionDenied / Internal→Internal へマップ。Internal は固定メッセージ＋詳細は tracing ログへ隔離。HTTP/gRPC 合同契約テスト追加 / `mcp-gw/src/grpc.rs:64-85` / B1 / 中。
+- [x] tools/list の inputSchema 優先順位が実際のルーティングと逆転 — 2026-11-19 対応済み: `resolve_target()` ヘルパでルーティングとスキーマ選択を単一化し upstream 優先へ統一。旧テストの期待値を更新（理由コメント付き）/ `mcp_server.rs:51-59`, `gateway.rs:223-234` / B1 / 中。
 - [x] 承認 gauge / 一覧が期限切れ放棄エントリを prune せず過大報告 — 2026-11-19 対応済み: `list_pending()` の読取側で `now > deadline` をフィルタし副作用なしで実態を反映。回帰テスト追加 / `policy/approval.rs:155,249-256` / B2 / 中。
 - [x] kill switch status API が無認証で自由文字列 reason / actor を開示 — 2026-11-19 対応済み: HTTP は `x-jarvis-kill-switch-token` ヘッダ / gRPC は同名 metadata で dedicated admin token を検証。`KillSwitchStatus::redacted()` で reason/actor を固定語彙へ丸め、内部監査用 `status()` は生文字列維持 / B2 / 中。
 - [x] kill switch admin token 比較が非定数時間 — 2026-11-19 対応済み: `constant_time_eq` を kill_switch モジュールの `pub(crate)` 共通ヘルパへ集約し、HTTP 承認トークンゲートと kill switch の全比較が同じ実装を共有 / `kill_switch.rs:135,217` / B2 / 中。
 - [ ] 失効フィルタが Qdrant top-K 選択後に適用され recall が低下 — `context/builder.rs:228-259` / B3 / 中。
 - [ ] PII キー redact がキー衝突で別フィールドを上書き — `context/pii.rs:124-164` / B3 / 中。
-- [ ] check-deploy-drift がサービス停止時の E2E SKIP を OK と報告 — `check-deploy-drift.sh:169-182` / B4 / 中。
-- [ ] 日次バックアップが verify-backup を通さない（導入時のみ検証） — `install-backup-timer.sh:102-115`, `jarvis-backup.service:12` / B4 / 中。
-- [ ] check-shell が予測可能 `/tmp` パスを使用 — `check-shell.sh:25,27,39,43` / B4 / 中。
+- [x] check-deploy-drift がサービス停止時の E2E SKIP を OK と報告 — 2026-11-19 対応済み: サービス停止時を `DANGER: サービス停止` + `danger=1`（exit 2）へ変更。RESULT 文言も SKIP を OK と扱わない旨を明記。deploy の厳密 gate（:191）が exit 2 を受け取るため誤合格経路も閉じた / `check-deploy-drift.sh:169-182` / B4 / 中。
+- [x] 日次バックアップが verify-backup を通さない（導入時のみ検証） — 2026-11-19 対応済み: `jarvis-backup.service` に `ExecStartPost=` で `verify-backup.sh --latest` を追加（接頭辞 '-' なしで失敗時 unit failed）。`install-backup-timer.sh` は verify 作業コピー欠落時に jq と同じ fail-closed。`systemd-analyze verify` / bash -n OK / `jarvis-backup.service:12` / B4 / 中。
+- [x] check-shell が予測可能 `/tmp` パスを使用 — 2026-11-19 対応済み: `mktemp -d` + `trap 'rm -rf "$tmpdir"' EXIT` で出力先を隔離。旧 `/tmp/check-shell.err` 等への参照0件、shfmt 警告のみ・shellcheck 必須の挙動は維持 / `check-shell.sh:25,27,39,43` / B4 / 中。
 - [x] jarvis-backup.service に `Wants=postgresql.service qdrant.service` が欠落 — 2026-11-19 対応済み: repo unit へ追加し systemd-analyze verify exit 0。**実機への unit 再適用は root 必須・ユーザー実行が残る** / `jarvis-backup.service:4` / B7 / 中 / confirmed。
 - [ ] S9 のうち隔離先統合テストのみ自動化可能 — `docs/integration/local-restore-design.md:253-255` / B5 / 中。
 - [x] AGENTS.md の adr/ 一覧が ADR-0002/0003/0005 を欠落 — 2026-11-19 対応済み: Project Structure ツリーと References に実在する5件すべてを追記 / `AGENTS.md:37-39` / B8 / 中。
