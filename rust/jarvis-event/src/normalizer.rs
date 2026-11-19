@@ -59,9 +59,15 @@ impl Normalizer {
         tokio::spawn(async move {
             while let Some(event) = event_rx.recv().await {
                 if let Err(e) =
-                    Self::process_event(&policy_client, &context_client, &opencode, event).await
+                    Self::process_event(&policy_client, &context_client, &opencode, &event).await
                 {
-                    tracing::error!("Event processing failed: {}", e);
+                    // Log correlation identifiers, never the event payload:
+                    // telemetry must not leak the raw event body.
+                    tracing::error!(
+                        event_id = %event.id,
+                        correlation_id = %event.correlation_id,
+                        "Event processing failed: {e}"
+                    );
                 }
             }
         });
@@ -105,7 +111,7 @@ impl Normalizer {
         policy_client: &jarvis_policy::PolicyClient,
         context_client: &jarvis_context::ContextBuilder,
         opencode: &crate::opencode::OpenCodeClient,
-        event: UnifiedEvent,
+        event: &UnifiedEvent,
     ) -> Result<()> {
         info!(
             "Processing event: {} from {:?}",
@@ -113,7 +119,7 @@ impl Normalizer {
         );
 
         // Build context from memory (PII-filtered by jarvis-context)
-        let context = context_client.build_context(&event).await?;
+        let context = context_client.build_context(event).await?;
 
         // Check policy for automated response
         let resource = format!("event:{}", event.event_type);
@@ -134,7 +140,7 @@ impl Normalizer {
 
         // Hand the event to the agent runtime; tool execution stays behind
         // the MCP gateway and its policy enforcement.
-        opencode.dispatch(&event, &context).await?;
+        opencode.dispatch(event, &context).await?;
         Ok(())
     }
 
