@@ -155,18 +155,26 @@ if [ "$skip_db" -eq 0 ]; then
 fi
 
 if [ "$skip_qdrant" -eq 0 ]; then
-  curl -fsS -X POST "${qdrant_collection_url}/snapshots" >/dev/null
-  sleep 2
-  snapshot_name="$(curl -fsS "${qdrant_collection_url}/snapshots" \
-    | jq -r '.result[0].name // empty')"
+  # Use the name from the POST that creates the snapshot. Qdrant returns the
+  # SnapshotDescription of the snapshot it just created; the snapshot list can
+  # also hold older snapshots, so .result[0] may be a different one (I13-D).
+  create_response="$(curl -fsS -X POST "${qdrant_collection_url}/snapshots")" \
+    || { echo "ERROR: Qdrant snapshot creation request failed" >&2; exit 1; }
+  # Accept both the object form (.result.name) and the plain-string form
+  # (.result) used by older Qdrant versions. Anything else is a hard error.
+  snapshot_name="$(printf '%s' "$create_response" | jq -r '
+    if (.result | type) == "string" then .result
+    elif (.result.name? | type) == "string" then .result.name
+    else empty end' 2>/dev/null || true)"
   if [ -z "$snapshot_name" ]; then
-    echo "ERROR: no Qdrant snapshot returned" >&2
+    echo "ERROR: Qdrant snapshot create response has no snapshot name; aborting" >&2
     exit 1
   fi
+  sleep 2
   curl -fsS "${qdrant_collection_url}/snapshots/${snapshot_name}" \
     > "$set_dir/qdrant-snapshot.bin"
   record qdrant-snapshot.bin "$set_dir/qdrant-snapshot.bin"
-  echo "Qdrant snapshot OK (collection=${qdrant_collection})"
+  echo "Qdrant snapshot OK (collection=${qdrant_collection}, snapshot=${snapshot_name})"
 fi
 
 # Non-secret config allowlist. Never include .env / bws.env / token files.
