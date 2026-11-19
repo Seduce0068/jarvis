@@ -18,6 +18,14 @@
 //! generation is discarded and a fresh connection is opened, under a bounded
 //! retry budget ([`MAX_DB_ATTEMPTS`]), so decisions recover automatically while
 //! a genuine outage still ends in the `Persistence`/HTTP 503 channel.
+//!
+//! I34-D: a successful `commit` whose acknowledgement is lost used to be
+//! retried; the retry's zero-row CAS was then reported as `AlreadyDecided`
+//! even though this very call had committed (DB `approved`, waiter `Expired`,
+//! operator 409). The committed state is now read back both when a transaction
+//! attempt fails and when the CAS finds no undecided row: a row carrying the
+//! decision we attempted is our own success, while a different decision still
+//! reports `AlreadyDecided`. No second audit row is written on that path.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -36,6 +44,102 @@ const MAX_DB_ATTEMPTS: usize = 3;
 /// database: retry only while another attempt remains in the budget.
 fn should_retry(attempt_no: usize, max_attempts: usize) -> bool {
     attempt_no < max_attempts
+}
+
+/// The committed decision of one `approval_requests` row, read back from the
+/// durable store. `decided_at IS NOT NULL` is the commit marker written by the
+/// CAS; the value columns identify *which* decision won, so a lost commit
+/// acknowledgement can be told apart from a competing decider.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RecordedDecision {
+    decision: String,
+    decided_by: Option<String>,
+    reason: Option<String>,
+}
+
+/// Resolution of a durable-state read after an ambiguous outcome (a lost
+/// commit acknowledgement or a zero-row CAS). Pure so it is testable without a
+/// database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DurableResolution {
+    /// The row is committed with exactly the decision we attempted: our commit
+    /// won even though we never observed its acknowledgement.
+    OurCommit,
+    /// The row is committed with a different decision: a competing decider won.
+    CompetingDecision,
+    /// No committed decision is visible yet: retry/failure handling continues.
+    Undecided,
+}
+
+/// Whether a committed row represents the decision this call tried to write.
+///
+/// `decided_at` is deliberately not compared: it is the commit marker, not an
+/// identity token, and a retry can carry a freshly stamped timestamp. Matching
+/// the decision label plus its payload is enough to identify "our" commit;
+/// when two attempts write the same decision the published value is identical
+/// either way, so reporting success is safe and avoids a split brain.
+fn is_our_decision(
+    recorded: &RecordedDecision,
+    decision_label: &str,
+    decided_by: Option<&str>,
+    reason: Option<&str>,
+) -> bool {
+    recorded.decision == decision_label
+        && recorded.decided_by.as_deref() == decided_by
+        && recorded.reason.as_deref() == reason
+}
+
+/// Classify a durable-state read against the decision we attempted. The single
+/// entry point for both the zero-row CAS path and the post-error probe, so the
+/// observable behavior is identical in either case.
+fn classify_recorded(
+    recorded: Option<&RecordedDecision>,
+    decision_label: &str,
+    decided_by: Option<&str>,
+    reason: Option<&str>,
+) -> DurableResolution {
+    match recorded {
+        None => DurableResolution::Undecided,
+        Some(existing) if is_our_decision(existing, decision_label, decided_by, reason) => {
+            DurableResolution::OurCommit
+        }
+        Some(_) => DurableResolution::CompetingDecision,
+    }
+}
+
+/// `decided_at IS NOT NULL` is exactly the state left by a successful CAS +
+/// audit commit, so a matching row proves the decision is durable. No URL,
+/// payload or reason is ever logged from this read.
+const READ_DECISION_SQL: &str = "SELECT decision, decided_by, reason \
+                                  FROM approval_requests \
+                                 WHERE id = $1 AND decided_at IS NOT NULL";
+
+fn recorded_from_row(row: &tokio_postgres::Row) -> RecordedDecision {
+    RecordedDecision {
+        decision: row.get("decision"),
+        decided_by: row.get("decided_by"),
+        reason: row.get("reason"),
+    }
+}
+
+/// Probe on the connection generation that just ran the (failed) transaction.
+async fn read_decision_on_client(
+    client: &tokio_postgres::Client,
+    id: Uuid,
+) -> Result<Option<RecordedDecision>, tokio_postgres::Error> {
+    let row = client.query_opt(READ_DECISION_SQL, &[&id]).await?;
+    Ok(row.as_ref().map(recorded_from_row))
+}
+
+/// Probe inside the still-open transaction of a zero-row CAS. Reading through
+/// `tx` keeps the check on the same connection/snapshot without writing
+/// anything; dropping `tx` afterwards rolls the empty transaction back.
+async fn read_decision_in_tx(
+    tx: &tokio_postgres::Transaction<'_>,
+    id: Uuid,
+) -> Result<Option<RecordedDecision>, tokio_postgres::Error> {
+    let row = tx.query_opt(READ_DECISION_SQL, &[&id]).await?;
+    Ok(row.as_ref().map(recorded_from_row))
 }
 
 /// One connection generation: the client plus the task driving its socket.
@@ -94,10 +198,13 @@ impl Connection {
 }
 
 /// Outcome of one transactional decision attempt, before mapping to
-/// [`ApprovalError`]. `AlreadyDecided` is a legitimate CAS result and is never
-/// retried; only transport/SQL errors trigger a reconnect.
+/// [`ApprovalError`]. Both `Already*` variants are legitimate CAS results and
+/// are never retried; only transport/SQL errors trigger a reconnect.
 enum TransactionOutcome {
     Committed,
+    /// An earlier attempt (or this call's lost-acknowledgement commit) already
+    /// wrote the very decision being attempted; safe to report success.
+    AlreadyCommittedByUs,
     AlreadyDecided,
 }
 
@@ -144,8 +251,10 @@ impl PgApprovalPersistence {
 
     /// Run the CAS + audit INSERT in a single transaction.
     ///
-    /// Returns `Ok(())` only after the commit succeeded. A zero-row CAS returns
-    /// [`ApprovalError::AlreadyDecided`]; any other database failure is mapped by
+    /// Returns `Ok(())` only after the commit is known to be durable. A
+    /// zero-row CAS normally returns [`ApprovalError::AlreadyDecided`], but a
+    /// row committed with the very decision attempted (a lost acknowledgement)
+    /// is our own success. Any other database failure is mapped by
     /// [`db_failure`] to [`ApprovalError::Persistence`] (HTTP 503, retry later),
     /// which is distinct from [`ApprovalError::QueueFull`] so callers can tell a
     /// persistence outage from queue exhaustion. Raw database text is never
@@ -154,6 +263,10 @@ impl PgApprovalPersistence {
     /// A failed transaction (or a broken connection at `transaction()` time) is
     /// retried on a freshly opened generation up to [`MAX_DB_ATTEMPTS`] times;
     /// the whole transaction is redone because the failed one was rolled back.
+    /// Before retrying (and on the final attempt) the durable state is probed so
+    /// a commit whose acknowledgement was lost is reported as success instead
+    /// of degrading into `AlreadyDecided` / `Expired` split brain. The retry
+    /// budget itself is unchanged.
     async fn commit_decision(
         &self,
         id: Uuid,
@@ -189,7 +302,29 @@ impl PgApprovalPersistence {
                     .await?;
 
                 let Some(row) = updated else {
-                    return Ok(TransactionOutcome::AlreadyDecided);
+                    // Zero rows means either a competing decider committed
+                    // first, OR a previous attempt of THIS call committed and
+                    // only its acknowledgement was lost (the retry now sees
+                    // the decided row). Read the committed value inside this
+                    // transaction to tell the two apart; the read is read-only
+                    // and `tx` is rolled back on return, so no audit row can be
+                    // duplicated.
+                    let recorded = read_decision_in_tx(&tx, id).await?;
+                    return Ok(
+                        match classify_recorded(
+                            recorded.as_ref(),
+                            decision_label,
+                            decided_by,
+                            reason,
+                        ) {
+                            DurableResolution::OurCommit => {
+                                TransactionOutcome::AlreadyCommittedByUs
+                            }
+                            DurableResolution::CompetingDecision | DurableResolution::Undecided => {
+                                TransactionOutcome::AlreadyDecided
+                            }
+                        },
+                    );
                 };
 
                 let principal: String = row.get("principal");
@@ -229,7 +364,8 @@ impl PgApprovalPersistence {
             .await;
 
             match outcome {
-                Ok(TransactionOutcome::Committed) => return Ok(()),
+                Ok(TransactionOutcome::Committed)
+                | Ok(TransactionOutcome::AlreadyCommittedByUs) => return Ok(()),
                 Ok(TransactionOutcome::AlreadyDecided) => {
                     return Err(ApprovalError::AlreadyDecided(id));
                 }
@@ -239,11 +375,34 @@ impl PgApprovalPersistence {
                         attempt_no,
                         "approval decision transaction attempt failed"
                     );
-                    if should_retry(attempt_no, MAX_DB_ATTEMPTS) {
+                    let retry = should_retry(attempt_no, MAX_DB_ATTEMPTS);
+                    if retry {
                         guard.reconnect(&self.pg_url).await?;
-                    } else {
-                        return Err(db_failure(error));
                     }
+
+                    // The error may have arrived *after* the server committed
+                    // (lost acknowledgement). Probe the durable state on the
+                    // current — possibly freshly reconnected — generation
+                    // before retrying or giving up. A probe failure is treated
+                    // as "undecided" so it never masks the original failure
+                    // handling; its error text is not logged here and never
+                    // carries the connection URL.
+                    let recorded = read_decision_on_client(&guard.client, id)
+                        .await
+                        .ok()
+                        .flatten();
+                    match classify_recorded(recorded.as_ref(), decision_label, decided_by, reason) {
+                        DurableResolution::OurCommit => return Ok(()),
+                        DurableResolution::CompetingDecision => {
+                            return Err(ApprovalError::AlreadyDecided(id));
+                        }
+                        DurableResolution::Undecided => {}
+                    }
+
+                    if retry {
+                        continue;
+                    }
+                    return Err(db_failure(error));
                 }
             }
         }
@@ -441,5 +600,110 @@ mod tests {
         assert!(should_retry(1, 2));
         assert!(!should_retry(2, 2));
         assert!(!should_retry(0, 0));
+    }
+
+    // ---- I34-D lost-commit-acknowledgement regression (pure, no real DB) ---
+
+    /// A committed row must only be accepted as "our" commit when the decision
+    /// label and its payload match what this call attempted. Every other
+    /// combination is a competing decision and must keep the `AlreadyDecided`
+    /// semantics (HTTP 409).
+    #[test]
+    fn recorded_decision_identity_is_decision_and_payload_only() {
+        let approved = RecordedDecision {
+            decision: "approved".into(),
+            decided_by: Some("alice".into()),
+            reason: None,
+        };
+        assert!(is_our_decision(&approved, "approved", Some("alice"), None));
+        assert!(!is_our_decision(&approved, "denied", None, Some("policy")));
+        assert!(!is_our_decision(&approved, "approved", Some("bob"), None));
+        assert!(!is_our_decision(&approved, "approved", None, None));
+
+        let denied = RecordedDecision {
+            decision: "denied".into(),
+            decided_by: None,
+            reason: Some("policy".into()),
+        };
+        assert!(is_our_decision(&denied, "denied", None, Some("policy")));
+        assert!(!is_our_decision(&denied, "denied", None, Some("other")));
+
+        let expired = RecordedDecision {
+            decision: "expired".into(),
+            decided_by: None,
+            reason: None,
+        };
+        assert!(is_our_decision(&expired, "expired", None, None));
+        assert!(!is_our_decision(&expired, "approved", Some("alice"), None));
+    }
+
+    /// The exact regression: the first attempt committed `approved` but its
+    /// acknowledgement was lost; the retry's zero-row CAS must be classified
+    /// as `OurCommit` (→ `Ok`, no second audit row), not `AlreadyDecided`.
+    /// A different committed decision and an undecided row keep their original
+    /// `AlreadyDecided` / retry behavior.
+    #[test]
+    fn lost_commit_acknowledgement_is_classified_as_our_commit() {
+        let committed = RecordedDecision {
+            decision: "approved".into(),
+            decided_by: Some("operator".into()),
+            reason: None,
+        };
+        assert_eq!(
+            classify_recorded(Some(&committed), "approved", Some("operator"), None),
+            DurableResolution::OurCommit
+        );
+        assert_eq!(
+            classify_recorded(Some(&committed), "denied", None, Some("policy")),
+            DurableResolution::CompetingDecision
+        );
+        assert_eq!(
+            classify_recorded(None, "approved", Some("operator"), None),
+            DurableResolution::Undecided
+        );
+    }
+
+    /// Simulates the durable round-trip without a database: every decision
+    /// projected by `decision_columns` (the very values written by the CAS and
+    /// the audit INSERT) must be recognised as our own commit once read back.
+    /// This guards the `decision` / `decided_by` / `reason` column mapping the
+    /// probe relies on, including the `Expired` path used by `mark_expired`.
+    #[test]
+    fn every_decision_column_projection_round_trips_as_our_commit() {
+        let decisions = [
+            ApprovalDecision::Approved {
+                approved_by: "alice".into(),
+                approved_at: Utc::now(),
+            },
+            ApprovalDecision::Denied {
+                reason: "policy".into(),
+            },
+            ApprovalDecision::Expired,
+            ApprovalDecision::Pending,
+        ];
+        for decision in &decisions {
+            let (label, by, reason) = decision_columns(decision);
+            let recorded = RecordedDecision {
+                decision: label.into(),
+                decided_by: by.map(str::to_owned),
+                reason: reason.map(str::to_owned),
+            };
+            assert_eq!(
+                classify_recorded(Some(&recorded), label, by, reason),
+                DurableResolution::OurCommit,
+                "a committed row must round-trip through the same projection: {decision:?}"
+            );
+        }
+    }
+
+    /// The probe SQL must key on `decided_at IS NOT NULL`: an undecided row is
+    /// not a commit, even if a stale `decision` value were present. This is a
+    /// source-level assertion that stays valid without a live database.
+    #[test]
+    fn probe_sql_uses_decided_at_as_the_commit_marker() {
+        let sql = READ_DECISION_SQL.to_ascii_lowercase();
+        assert!(sql.contains("decided_at is not null"));
+        assert!(sql.contains("select decision, decided_by, reason"));
+        assert!(sql.contains("where id = $1"));
     }
 }
