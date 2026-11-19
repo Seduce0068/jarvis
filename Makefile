@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup timer-status check-shell check-toml check-evidence
+.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args timer-status check-shell check-toml check-evidence
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -50,6 +50,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-review-run.sh
 	@bash ci/scripts/test-verify-backup.sh
+	@bash ci/scripts/test-backup-args.sh
 	@echo "ci-local: all gates passed"
 
 secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は出力しない）
@@ -58,6 +59,7 @@ secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は�
 safety-test: ## レガシー fail-closed とバックアップ検証ロジックを検証
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-verify-backup.sh
+	@bash ci/scripts/test-backup-args.sh
 
 timer-status: ## バックアップ timer の状態を表示（読み取り専用）
 	@echo "== backup timer status =="
@@ -78,6 +80,9 @@ check-toml: ## 全 tracked *.toml の構文検証（tomllib/tomli、値は出力
 
 test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
 	@bash ci/scripts/test-verify-backup.sh
+
+test-backup-args: ## backup-local.sh の --retain-days 引数検証を検証（dry-run・失敗時はコードのみ）
+	@bash ci/scripts/test-backup-args.sh
 
 install-backup-timer: ## ローカルバックアップ timer を導入（既定は dry-run）
 	@bash infra/scripts/install-backup-timer.sh
