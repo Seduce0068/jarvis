@@ -5,10 +5,12 @@
 # any key placed after a table header belongs to that table, which would make
 # the configuration fail to parse.
 #
-# NOTE: the web.fetch native handler clamps timeout_ms to 1_000..=15_000 in
-# sandbox.rs (native_web_fetch), so a value above 15000 has no effect on that
-# route. Other execution routes use the raw value. Every timeout_ms here is
-# kept <= 15000 so the template never advertises an ineffective ceiling.
+# NOTE: the clamp to 1_000..=15_000 applies ONLY to the web.fetch native
+# handler (native_web_fetch, sandbox.rs:147); a value above 15000 has no effect
+# on that route, so web.fetch stays at 15000. Other execution routes use the
+# raw timeout_ms value with no clamp: shell.execute (sandbox.rs:299),
+# github.create_pr and web.search (gateway.rs:498). Those are kept at 30000 so
+# legitimate long-running calls are not cut off.
 
 # Principals allowed to use MCP Gateway
 principals = ["jarvis", "opencode", "user"]
@@ -42,7 +44,7 @@ name = "shell.execute"
 description = "Execute shell commands"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
-timeout_ms = 15000
+timeout_ms = 30000
 requires_approval = true
 
 [[tools]]
@@ -74,7 +76,7 @@ name = "github.create_pr"
 description = "Create GitHub pull request"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
-timeout_ms = 15000
+timeout_ms = 30000
 requires_approval = true
 
 [[tools]]
@@ -118,7 +120,7 @@ name = "web.search"
 description = "Search the web"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
-timeout_ms = 15000
+timeout_ms = 30000
 # ネイティブハンドラ未実装のため承認必須。
 # 現行は MCP-1 承認フロー実装済み: tools/list に表示され、呼び出しは人間承認を待つ。
 requires_approval = true
