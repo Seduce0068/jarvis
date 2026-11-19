@@ -78,7 +78,8 @@ description = "Get Home Assistant entity state"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
 timeout_ms = 5000
-# ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
+# ネイティブハンドラ未実装のため承認必須。
+# 現行は MCP-1 承認フロー実装済み: tools/list に表示され、呼び出しは人間承認を待つ。
 requires_approval = true
 
 [[tools]]
@@ -95,7 +96,8 @@ description = "Get Android device info via MCP"
 allowed_principals = ["jarvis"]
 max_args_size = 1048576
 timeout_ms = 10000
-# ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
+# ネイティブハンドラ未実装のため承認必須。
+# 現行は MCP-1 承認フロー実装済み: tools/list に表示され、呼び出しは人間承認を待つ。
 requires_approval = true
 
 [[tools]]
@@ -112,7 +114,8 @@ description = "Search the web"
 allowed_principals = ["jarvis", "opencode"]
 max_args_size = 1048576
 timeout_ms = 30000
-# ネイティブハンドラ未実装のため承認必須（tools/list からは非表示になる）
+# ネイティブハンドラ未実装のため承認必須。
+# 現行は MCP-1 承認フロー実装済み: tools/list に表示され、呼び出しは人間承認を待つ。
 requires_approval = true
 
 [[tools]]

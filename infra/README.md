@@ -265,15 +265,12 @@ variables each service expects. 旧デプロイ資産（`deploy.rs`）は
 `/etc/jarvis/` への配送を想定する記述/実装があるが、現行ローカル運用での
 適用可否・実際の配置は host/deploy 手順により異なるため確認が必要。
 
-### Backup & DR（レガシー記述 / ADR-0004 により要再設計）
+### Backup & DR（ADR-0004 準拠・ローカル完結）
 
-> 注: [ADR-0004](../adr/0004-local-only-no-oci.md) により OCI は使用しない。2026-11-15 時点で `jarvis-backup.timer` は未導入、バックアップジョブは未稼働。以下は OCI Object Storage / 旧パス前提のレガシー手順であり、現行運用ではそのまま使用しない。  
-> 現状の論点・再設計メモ: [docs/integration/backup-redesign-notes.md](../docs/integration/backup-redesign-notes.md)  
-> 関連タスク: [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md)（BK-1/BK-2/SEC-2）
-
-> **2026-11-19 現行状態（ADR-0004 準拠）**: `jarvis-backup.timer` を実機へ
-> 導入済みでバックアップジョブは稼働中。OCI を使用せず、ローカル完結の
-> backup / verify / restore パスへ移行した。
+[ADR-0004](../adr/0004-local-only-no-oci.md) により OCI は使用しない。
+現行状態（2026-11-19）: `jarvis-backup.timer` は実機へ導入済みで
+バックアップジョブは稼働中。OCI を使用せず、ローカル完結の
+backup / verify / restore パスへ移行済み。
 
 現行のローカルバックアップ運用（ADR-0004 準拠、OCI 不使用）:
 
@@ -283,16 +280,17 @@ variables each service expects. 旧デプロイ資産（`deploy.rs`）は
 - 設計: [local-restore-design.md](../docs/integration/local-restore-design.md)
 - 定期実行: `jarvis-backup.timer`（2026-11-19 実機導入、稼働中）
 
-Daily backups run via `jarvis-backup.timer`（旧構成）:
+履歴（2026-11-15 時点の旧 OCI 前提メモ。現行運用では使用しない）:
 
-- PostgreSQL dump → OCI Object Storage
-- Qdrant snapshot → OCI Object Storage
-- Config files → OCI Object Storage
-- Git bundles → OCI Object Storage
+- 当時は `jarvis-backup.timer` は未導入、バックアップジョブは未稼働だった。
+- 旧構成では PostgreSQL dump / Qdrant snapshot / Config files / Git bundles を
+  OCI Object Storage へ保存していた（Retention: 7 days local, 30 days remote）。
+- 現状の論点・再設計メモ:
+  [docs/integration/backup-redesign-notes.md](../docs/integration/backup-redesign-notes.md)
+- 関連タスク:
+  [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md)（BK-1/BK-2/SEC-2）
 
-Retention: 7 days local, 30 days remote（旧構成メモ）。
-
-To test disaster recovery（旧構成・要再設計。現行ローカル環境ではそのまま実行しない）:
+To test disaster recovery（履歴: 旧 OCI 構成の例。現行ローカル環境ではそのまま実行しない）:
 
 ```bash
 # Legacy example only (OCI/rclone/op/env, /opt/jarvis 配置, 旧ホスト前提)。現行ホストでは実行しないこと。
@@ -335,7 +333,7 @@ units and configs, restarts services, and runs health checks（旧リモート�
 
 ### Troubleshooting（環境依存・一部レガシー例を含む）
 
-> **注記**: `cloud-init` や `/opt/jarvis`、`jarvis-backup` の手動起動は旧 OCI/旧パス/未導入資産前提の例を含みます。現行ローカル systemd 環境では、対象サービス・ログ先・データ配置・Tailscale/UFW の有無に応じて読み替えてください（実機状態は read-only で確認）。
+> **注記**: `cloud-init` や `/opt/jarvis`、`jarvis-backup` の手動起動は旧 OCI/旧パス前提の例を含みます（`jarvis-backup.timer` は 2026-11-19 に導入済み）。現行ローカル systemd 環境では、対象サービス・ログ先・データ配置・Tailscale/UFW の有無に応じて読み替えてください（実機状態は read-only で確認）。
 
 ```bash
 # View cloud-init logs (legacy; local systemd host may not use cloud-init)
@@ -351,7 +349,7 @@ sudo ufw status
 # Check disk space (path depends on host layout; /opt/jarvis is a legacy example)
 df -h /
 
-# Manual backup (legacy/not-installed in current local setup; see BK-1/BK-2; do not run until BK-1/BK-2/SEC-2 are resolved and host state is verified)
+# Legacy manual start (jarvis-backup.timer is installed and running as of 2026-11-19; use the local backup scripts instead)
 # sudo systemctl start jarvis-backup
 ```
 

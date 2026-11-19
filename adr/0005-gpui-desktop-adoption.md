@@ -101,7 +101,7 @@ JARVIS のデスクトップ UI として **GPUI** を採用し、第一段階�
 - [x] 承認キュー UI（3 秒ポーリング・承認/却下ボタン）
 - [x] `cargo fmt` / `cargo clippy -- -D warnings` / `cargo test`（5 tests）
 - [x] 実機 Wayland 起動確認（プロセス生存・ダークテーマ描画）
-- [ ] Makefile に `ui-build` / `ui-run` ターゲットを追加
+- [x] Makefile に `ui-build` / `ui-run` ターゲットを追加
 - [ ] 本番運用時の自動起動（systemd user unit 等）は別判断
 
 ## 関連資料

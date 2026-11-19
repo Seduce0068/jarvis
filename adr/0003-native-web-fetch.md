@@ -32,12 +32,15 @@ ADR-0002で「読み取り系ツールはゲートウェイ内のRust実装で�
 
 ## セキュリティ上の注意
 
-- **配備済みの `/etc/jarvis/mcp_allowlist.toml` にも `web.fetch` が既に存在**し、
-  `requires_approval = false`（`check-deploy-drift.sh`で確認）。
-  したがって**新バイナリのデプロイで（allowlist同期なしでも）有効化される**。
-- データ持ち出し（URLに秘密を埋めて外部へGET）を防ぐには、
-  `requires_approval = true` に変更するか、宛先ドメインのallowlistを導入する。
-- 承認フローが未実装の間は `requires_approval = true` が安全（呼び出しは拒否される）。
+- **配備済みの `/etc/jarvis/mcp_allowlist.toml` では `web.fetch` は
+  `requires_approval = true` で登録済み**（`check-deploy-drift.sh` で確認）。
+  新バイナリのデプロイ時も allowlist の同期状態を確認すること。
+- データ持ち出し（URLに秘密を埋めて外部へGET）を防ぐため、
+  `requires_approval = true` による人間承認が必須。宛先ドメインの
+  allowlist 導入も検討する。
+- （履歴）承認フロー実装前は `requires_approval = true` の呼び出しは拒否
+  されていた。MCP-1 の承認フロー実装後は人間承認を待つ挙動へ変更された
+  （下記 2026-11-15 追記を参照）。
 
 ## 代替案
 
@@ -49,7 +52,10 @@ ADR-0002で「読み取り系ツールはゲートウェイ内のRust実装で�
 - 既存の`web.search`は未実装のまま（呼ぶと400 `no native handler`）。
 - デプロイ前に allowlist の `requires_approval` をレビューすること。
 
-## 補足: 承認必須ツールの見え方
+## 補足: 承認必須ツールの見え方（履歴）
+
+> 以下の記述は 2026-11-15 の MCP-1 承認フロー実装以前の暫定挙動であり、
+> 現行の挙動は下部の追記を参照のこと。
 
 `requires_approval = true` のツールは `AllowList::tools_for_principal` のフィルタにより
 **MCPの`tools/list`に表示されない**（呼び出しも`ApprovalRequired`で403）。

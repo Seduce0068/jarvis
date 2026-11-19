@@ -36,7 +36,10 @@ generated:
 jarvis/
 ├── adr/                          # Architecture Decision Records
 │   ├── 0001-unified-architecture.md
-│   └── 0004-local-only-no-oci.md
+│   ├── 0002-runtime-agnostic.md
+│   ├── 0003-native-web-fetch.md
+│   ├── 0004-local-only-no-oci.md
+│   └── 0005-gpui-desktop-adoption.md
 ├── rust/                         # JARVIS Rust Services (Cargo Workspace)
 │   ├── Cargo.toml                # Workspace root
 │   ├── jarvis-policy/            # Policy Engine (Cedar/Casbin, Kill Switch)
@@ -215,6 +218,8 @@ deploy scripts.
 ## References
 
 - [ADR-0001: Unified Architecture](adr/0001-unified-architecture.md)
+- [ADR-0002: Runtime-agnostic architecture](adr/0002-runtime-agnostic.md)
+- [ADR-0003: web.fetch native implementation](adr/0003-native-web-fetch.md)
 - [ADR-0004: Local-only (no OCI)](adr/0004-local-only-no-oci.md)
 - [ADR-0005: GPUI desktop adoption](adr/0005-gpui-desktop-adoption.md)
 - [OpenCode V2 Docs](https://opencode.ai/v2/docs)
