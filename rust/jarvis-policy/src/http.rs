@@ -8,7 +8,10 @@ use axum::{
     extract::{Path, State},
     routing::{get, post},
 };
-use jarvis_core::BareJson;
+use jarvis_core::{
+    BareJson, HEALTH_REASON_KILL_SWITCH, HEALTH_REASON_NO_POLICY, HEALTH_STATUS_DEGRADED,
+    HEALTH_STATUS_OK,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tracing::instrument;
@@ -365,10 +368,9 @@ struct HealthResponse {
     reason: Option<&'static str>,
 }
 
-const HEALTH_STATUS_OK: &str = "ok";
-const HEALTH_STATUS_DEGRADED: &str = "degraded";
-const HEALTH_REASON_KILL_SWITCH: &str = "kill_switch";
-const HEALTH_REASON_NO_POLICY: &str = "no_policy";
+// I62-C: the wire vocabulary is owned by `jarvis-core` and imported above, so
+// the emit side and the UI classifier cannot drift into different strings.
+// Both consumers pin these constants against their own observed wire values.
 
 /// Lightweight check that at least one configured policy source is still
 /// present. `PolicyEngine` loads Cedar rules from `cedar_policy_dir` and Casbin
@@ -659,24 +661,28 @@ async fn list_approvals(State(engine): State<Arc<PolicyEngine>>) -> Json<serde_j
 /// `Persistence` share HTTP 503 but carry different fixed messages, so a
 /// retrying client can tell queue exhaustion from a persistence outage.
 ///
-/// Both 409 bodies are sourced from `jarvis-core` (I54-C, I58-B): this module
-/// owns neither literal, so the approval UI can classify the exact same wire
-/// body without keeping a local copy that could silently drift. Only the
-/// already-decided body may resolve to a winner; every other 409 must pin the
-/// halt in the UI.
+/// All three fixed bodies below (the two 409 literals and the 410 literal) are
+/// sourced from `jarvis-core` (I54-C, I58-B, I62-B): this module owns none of
+/// them, so the approval UI can classify the exact same wire body without
+/// keeping a local copy that could silently drift. Only the already-decided
+/// body may resolve to a winner; every other 409 must pin the halt in the UI,
+/// and an unverified 410 must fail closed instead of claiming expiry.
 ///
-/// I60-B: expiry is a separate 410 Gone response with its own fixed body. It
-/// deliberately does not reuse either shared 409 literal: there is no winner to
-/// read back, so an expired approve/deny must never take the UI's already-decided
-/// path. This constant is local to the policy transport; no shared boundary
-/// constant was added or changed.
+/// I60-B / I62-B: expiry is a separate 410 Gone response with its own fixed
+/// body. It deliberately does not reuse either shared 409 literal: there is no
+/// winner to read back, so an expired approve/deny must never take the UI's
+/// already-decided path. Since I62-B this body is shared from `jarvis-core` too,
+/// so the UI can confirm the exact wire body before surfacing the terminal
+/// `Expired` decision.
 pub(crate) mod approval_error_reasons {
     pub const BAD_REQUEST: &str = "invalid approval request";
     pub const NOT_FOUND: &str = "approval request not found";
     pub const ALREADY_DECIDED: &str = jarvis_core::ALREADY_DECIDED_409_BODY;
     pub const KILL_SWITCH: &str = jarvis_core::KILL_SWITCH_409_BODY;
-    /// I60-B: fixed 410 body for a request whose decision window elapsed.
-    pub const EXPIRED: &str = "approval request expired";
+    /// I60-B / I62-B: fixed 410 body for a request whose decision window
+    /// elapsed. Sourced from `jarvis-core` so the UI verifies the same literal
+    /// before surfacing the terminal `Expired` decision.
+    pub const EXPIRED: &str = jarvis_core::APPROVAL_EXPIRED_BODY;
     pub const QUEUE_FULL: &str = "approval queue is full; retry later";
     pub const PERSISTENCE: &str = "approval persistence is unavailable; retry later";
 }
@@ -1644,6 +1650,41 @@ mod tests {
         std::fs::remove_dir_all(dir).expect("clean temp dir");
     }
 
+    /// I62-C cross-crate pin: the emit side must serialize the exact literals
+    /// defined once in `jarvis-core` and used by the UI classifier. A one-sided
+    /// edit to either consumer's vocabulary shows up here or in the UI pin.
+    #[tokio::test]
+    async fn health_wire_vocabulary_matches_core_constants() {
+        let (engine, _dir) = test_engine("http-health-core-pin").await;
+        let base = start_server(engine.clone()).await;
+        let client = reqwest::Client::new();
+
+        let ok: Value = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request")
+            .json()
+            .await
+            .expect("health body is JSON");
+        assert_eq!(ok["status"], jarvis_core::HEALTH_STATUS_OK);
+        assert!(ok.get("reason").is_none(), "200 must omit reason");
+
+        engine
+            .activate_kill_switch("pin".into(), "test-admin-token")
+            .expect("activate kill switch");
+        let degraded: Value = client
+            .get(format!("{base}/health"))
+            .send()
+            .await
+            .expect("health request")
+            .json()
+            .await
+            .expect("health body is JSON");
+        assert_eq!(degraded["status"], jarvis_core::HEALTH_STATUS_DEGRADED);
+        assert_eq!(degraded["reason"], jarvis_core::HEALTH_REASON_KILL_SWITCH);
+    }
+
     /// P0-1 opt-in guard: with no token configured, approval endpoints fail
     /// closed with 503 while public endpoints keep working.
     #[tokio::test]
@@ -2539,12 +2580,18 @@ mod tests {
         );
     }
 
-    /// I60-B regression: an expired approve/deny maps to 410 Gone with a fixed
-    /// body that is neither shared 409 literal. The UI therefore cannot route
-    /// it through the winner readback that produced "既に決定済み: 保留中", and
-    /// the two 409 contracts stay byte-for-byte intact.
+    /// I60-B / I62-B regression: an expired approve/deny maps to 410 Gone with a
+    /// fixed body that is neither shared 409 literal. The UI therefore cannot
+    /// route it through the winner readback that produced "既に決定済み: 保留中",
+    /// and the two 409 contracts stay byte-for-byte intact. I62-B adds an
+    /// independent fixture pin so a one-sided wording change is caught here, in
+    /// core and in the UI.
     #[test]
     fn expired_approval_maps_to_gone_without_reusing_409_bodies() {
+        // Independent fixture: the literal `jarvis-policy` is contracted to put
+        // on the 410 wire. Not a second production definition — core owns it.
+        const POLICY_EXPIRED_410_WIRE_BODY: &str = "approval request expired";
+
         let (status, body) = approval_error_response(ApprovalError::Expired(uuid::Uuid::nil()));
         assert_eq!(status, axum::http::StatusCode::GONE);
         assert_eq!(body, approval_error_reasons::EXPIRED);
@@ -2553,6 +2600,18 @@ mod tests {
         assert!(
             !body.contains('/'),
             "fixed body must not contain a path or URL"
+        );
+        // I62-B: the emitted 410 body must be the shared constant, never a
+        // policy-local literal the UI cannot verify.
+        assert_eq!(
+            approval_error_reasons::EXPIRED,
+            jarvis_core::APPROVAL_EXPIRED_BODY,
+            "policy must emit the shared expired 410 body"
+        );
+        assert_eq!(
+            approval_error_reasons::EXPIRED,
+            POLICY_EXPIRED_410_WIRE_BODY,
+            "policy must emit the contracted expired 410 wire body"
         );
         // The shared constants themselves must not have been rewritten.
         assert_eq!(

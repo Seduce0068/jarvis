@@ -43,6 +43,39 @@ pub const KILL_SWITCH_409_BODY: &str = "approval decisions are blocked by the ki
 /// updating the contract pins in both consumers.
 pub const ALREADY_DECIDED_409_BODY: &str = "approval request already decided";
 
+/// Fixed HTTP 410 body emitted by `jarvis-policy` when an approval request's
+/// decision window has elapsed.
+///
+/// Expiry is a terminal outcome with no winning operator, so the approval UI may
+/// surface the canonical `Expired` decision from a 410 *only* after this exact
+/// body is confirmed (trimmed exact match). An unverified body — rewritten by a
+/// relay, changed by a one-sided policy wording edit, empty, or unreadable —
+/// must fail closed instead of fabricating a terminal decision or falling into
+/// the 409 winner readback. The policy transport and the approval UI both alias
+/// this constant, and the contract pins in all three crates catch a one-sided
+/// change rather than silently turning a rewritten 410 into "期限切れ". The wire
+/// text is stable: changing it requires updating the contract pins in both
+/// consumers.
+pub const APPROVAL_EXPIRED_BODY: &str = "approval request expired";
+
+/// Closed vocabulary of the policy service's `GET /health` wire contract (I62-C).
+///
+/// A healthy service answers `200 {"status":"ok"}` (no `reason` key); a degraded
+/// service answers `503 {"status":"degraded","reason":<reason>}`. `jarvis-policy`
+/// emits these literals and the approval UI classifies the same probe against
+/// them. Keeping one definition here makes a one-sided wording change visible
+/// as a failing pin in both consumers instead of silently turning an active
+/// kill switch into a false "switch lifted" display. The wire text is stable:
+/// changing it requires updating the pins in both consumers.
+pub const HEALTH_STATUS_OK: &str = "ok";
+/// Degraded `status` value of the `503` health response. See
+/// [`HEALTH_STATUS_OK`] for the shared-contract rationale.
+pub const HEALTH_STATUS_DEGRADED: &str = "degraded";
+/// `503` health `reason` for an active emergency stop.
+pub const HEALTH_REASON_KILL_SWITCH: &str = "kill_switch";
+/// `503` health `reason` for a missing policy source.
+pub const HEALTH_REASON_NO_POLICY: &str = "no_policy";
+
 /// Fixed classification token emitted when a JSON body fails to deserialize.
 ///
 /// The offending bytes and axum's `JsonRejection` detail are never formatted:
@@ -370,6 +403,38 @@ mod tests {
     fn already_decided_409_body_pins_the_wire_contract() {
         assert_eq!(ALREADY_DECIDED_409_BODY, "approval request already decided");
         assert_ne!(ALREADY_DECIDED_409_BODY, KILL_SWITCH_409_BODY);
+    }
+
+    /// Single canonical pin of the expired 410 wire body. Policy emits
+    /// [`APPROVAL_EXPIRED_BODY`] and the UI confirms a trimmed exact match before
+    /// surfacing the terminal `Expired` decision; each consumer keeps an
+    /// independent external fixture so a one-sided wording change is caught.
+    #[test]
+    fn approval_expired_body_pins_the_wire_contract() {
+        assert_eq!(APPROVAL_EXPIRED_BODY, "approval request expired");
+        assert_ne!(APPROVAL_EXPIRED_BODY, ALREADY_DECIDED_409_BODY);
+        assert_ne!(APPROVAL_EXPIRED_BODY, KILL_SWITCH_409_BODY);
+    }
+
+    /// Single canonical pin of the `/health` status vocabulary. Policy emits
+    /// and the UI classifies these exact literals via these constants; both
+    /// consumers keep an independent contract fixture so a change here is
+    /// observable as a failing test on either side (I62-C).
+    #[test]
+    fn health_status_vocabulary_pins_the_wire_contract() {
+        assert_eq!(HEALTH_STATUS_OK, "ok");
+        assert_eq!(HEALTH_STATUS_DEGRADED, "degraded");
+        assert_ne!(HEALTH_STATUS_OK, HEALTH_STATUS_DEGRADED);
+    }
+
+    /// Single canonical pin of the `/health` degraded reason vocabulary. The
+    /// set is closed: the UI must classify any other reason as an incomplete
+    /// probe and fail closed (I62-C).
+    #[test]
+    fn health_reason_vocabulary_pins_the_wire_contract() {
+        assert_eq!(HEALTH_REASON_KILL_SWITCH, "kill_switch");
+        assert_eq!(HEALTH_REASON_NO_POLICY, "no_policy");
+        assert_ne!(HEALTH_REASON_KILL_SWITCH, HEALTH_REASON_NO_POLICY);
     }
 
     fn all_sources() -> [EventSource; 7] {

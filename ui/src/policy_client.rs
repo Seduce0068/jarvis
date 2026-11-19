@@ -69,6 +69,22 @@ const KILL_SWITCH_409_BODY: &str = jarvis_core::KILL_SWITCH_409_BODY;
 /// benign "already decided" result.
 const ALREADY_DECIDED_409_BODY: &str = jarvis_core::ALREADY_DECIDED_409_BODY;
 
+/// Fixed 410 body emitted by `jarvis-policy` when a decision window elapsed.
+/// Aliased from `jarvis-core` (I62-B) so the UI verifies the exact same literal
+/// the policy emits before surfacing the terminal `Expired` decision. An
+/// unverified body (read error, empty, rewritten by a relay, or a one-sided
+/// wording change) must fail closed: no winner readback and no fabricated
+/// "期限切れ" outcome.
+const APPROVAL_EXPIRED_BODY: &str = jarvis_core::APPROVAL_EXPIRED_BODY;
+
+// Closed `/health` vocabulary (I62-C), aliased from `jarvis-core` so this
+// classifier cannot drift from what `jarvis-policy` emits. An unexpected status
+// or reason is never a release: the probe fails closed (Err -> `unwrap_or(true)`).
+const HEALTH_STATUS_OK: &str = jarvis_core::HEALTH_STATUS_OK;
+const HEALTH_STATUS_DEGRADED: &str = jarvis_core::HEALTH_STATUS_DEGRADED;
+const HEALTH_REASON_KILL_SWITCH: &str = jarvis_core::HEALTH_REASON_KILL_SWITCH;
+const HEALTH_REASON_NO_POLICY: &str = jarvis_core::HEALTH_REASON_NO_POLICY;
+
 /// Classify the bounded read of a 409 response body (I56-B, I58-B).
 ///
 /// `true` pins the halt ([`DecisionOutcome::KillSwitchBlocked`]); only `false`
@@ -95,6 +111,19 @@ fn kill_switch_body_blocks<E>(body: &std::result::Result<String, E>) -> bool {
             body != ALREADY_DECIDED_409_BODY
         }
         Err(_) => true,
+    }
+}
+
+/// Confirm the bounded read of a 410 response body (I62-B).
+///
+/// Returns `true` only for an exact (trimmed) match to the shared expired
+/// literal. Every other case — a read failure, an empty/whitespace body, or a
+/// body rewritten by an older peer or a relay — returns `false` so the caller
+/// fails closed. The body is never returned, displayed or logged.
+fn expired_body_confirms<E>(body: &std::result::Result<String, E>) -> bool {
+    match body {
+        Ok(body) => body.trim() == APPROVAL_EXPIRED_BODY,
+        Err(_) => false,
     }
 }
 
@@ -288,9 +317,11 @@ pub fn decision_from_json(value: &serde_json::Value) -> Result<Decision> {
 /// Outcome of an approve/deny POST.
 ///
 /// A `2xx` body crosses the canonical decision boundary and yields [`Self::Decided`].
-/// An HTTP 410 (I60-B) is likewise reported as [`Self::Decided`] carrying the
-/// canonical `Expired` decision: the store stamped nothing, but expiry is a
-/// real terminal decision with no winner to read back.
+/// An HTTP 410 (I60-B, hardened in I62-B) is likewise reported as
+/// [`Self::Decided`] carrying the canonical `Expired` decision: the store
+/// stamped nothing, but expiry is a real terminal decision with no winner to
+/// read back — provided its shared fixed body is confirmed. An unverified 410
+/// is an error instead (fail-closed).
 /// An HTTP 409 is classified by its fixed body (I52-A, I58-B): only the
 /// already-decided literal means the row was settled by a competing winner, so
 /// the authoritative decision is read back and reported as [`Self::AlreadyDecided`]
@@ -546,24 +577,25 @@ impl PolicyClient {
     }
 
     /// Read-only, unauthenticated probe of the policy service's emergency-stop
-    /// state (I48-D, I60-A). `GET /health` answers `503` with the fixed body
-    /// `{"status":"degraded","reason":"kill_switch"}` while the kill switch is
-    /// active, `503` with another reason such as `no_policy` when degraded for
-    /// another reason, and `200 {"status":"ok"}` otherwise. This is a *display*
-    /// signal only: the decision POST still returns `200 Approved` when a stop
-    /// lands mid-commit, while `jarvis-mcp-gw` re-checks the kill switch before
-    /// the tool runs.
+    /// state (I48-D, I60-A, I62-C). `GET /health` answers `503` with the fixed
+    /// body `{"status":"degraded","reason":"kill_switch"}` while the kill switch
+    /// is active, `503` with `reason=no_policy` when a policy source is missing,
+    /// and `200 {"status":"ok"}` otherwise. This is a *display* signal only: the
+    /// decision POST still returns `200 Approved` when a stop lands mid-commit,
+    /// while `jarvis-mcp-gw` re-checks the kill switch before the tool runs.
     ///
-    /// Only two definitive answers exist: a `503 reason=kill_switch` reports
-    /// `true`; a `200 status=ok` and any other `503` reason are an explicit
-    /// release and report `false`. Everything else is an *incomplete* probe and
-    /// **fails closed**: a timeout, a connection error, an unreadable or
-    /// unexpected body, a redirect, or any status other than `200`/`503`
-    /// (including a proxy `500`/`502`/`504`) returns `Err`, which this method
-    /// projects to `true` through `unwrap_or(true)` (I54-A, I60-A). Otherwise a
-    /// transient failure right after a kill-switch 409 would masquerade as
-    /// "switch lifted" and drop the halt pin. No reason text, token, or request
-    /// data is surfaced.
+    /// Only three definitive answers exist, all requiring an exact body match:
+    /// `503` + `status=degraded` + `reason=kill_switch` reports `true`; the same
+    /// with `reason=no_policy` and `200` + `status=ok` (no `reason` key) report
+    /// `false`. Everything else is an *incomplete* probe and **fails closed**:
+    /// a timeout, a connection error, an unreadable body, a missing/unknown
+    /// `status` or `reason`, a 200 carrying a `reason`, a redirect, or any status
+    /// other than `200`/`503` (including a proxy `500`/`502`/`504`) returns
+    /// `Err`, which this method projects to `true` through `unwrap_or(true)`
+    /// (I54-A, I60-A, I62-C). Otherwise a transient failure or a proxy that
+    /// strips `status`/`reason` right after a kill-switch 409 would masquerade
+    /// as "switch lifted" and drop the halt pin. No reason text, token, or
+    /// request data is surfaced.
     pub fn kill_switch_active(&self) -> bool {
         self.kill_switch_probe().unwrap_or(true)
     }
@@ -596,18 +628,25 @@ impl PolicyClient {
             .body_mut()
             .read_json::<serde_json::Value>()
             .with_context(|| format!("invalid health JSON from GET {url}"))?;
+        let wire_status = value.get("status").and_then(|status| status.as_str());
+        let wire_reason = value.get("reason").and_then(|reason| reason.as_str());
         if status == 200 {
-            // The healthy body is exactly `{"status":"ok"}` with no reason.
-            // A 200 carrying any other status is not an explicit release and
-            // must not clear a halt pin (I60-A).
-            if value.get("status").and_then(|s| s.as_str()) == Some("ok") {
+            // I62-C: a 200 is a release only for the exact `{"status":"ok"}`
+            // body. Any `reason` key (even a null value) makes it unclassifiable
+            // so a rewritten degraded answer cannot become a false release.
+            if wire_status == Some(HEALTH_STATUS_OK) && value.get("reason").is_none() {
                 return Ok(false);
             }
             bail!("unexpected health body from GET {url}");
         }
-        // 503 is degraded: only the fixed kill-switch reason means "stopped";
-        // every other reason (e.g. `no_policy`) is an explicit release.
-        Ok(value.get("reason").and_then(|reason| reason.as_str()) == Some("kill_switch"))
+        // I62-C: a 503 is definitive only when BOTH fields match the shared
+        // closed vocabulary. A missing status, an unknown reason, or a 200 body
+        // reused under a 503 is an incomplete probe and must fail closed.
+        match (wire_status, wire_reason) {
+            (Some(HEALTH_STATUS_DEGRADED), Some(HEALTH_REASON_KILL_SWITCH)) => Ok(true),
+            (Some(HEALTH_STATUS_DEGRADED), Some(HEALTH_REASON_NO_POLICY)) => Ok(false),
+            _ => bail!("unexpected health body from GET {url}"),
+        }
     }
 
     /// Approve the request `id` as `approved_by`.
@@ -686,12 +725,22 @@ impl PolicyClient {
             }
             return Ok(DecisionOutcome::AlreadyDecided(self.winner_decision(id)?));
         }
-        // I60-B: the policy service maps a post-deadline approve/deny to 410
-        // Gone with its own fixed body. No decision was committed and no winner
-        // exists, so surface the canonical `Expired` decision directly. This
-        // keeps expiry out of the 409 winner branch that used to render
-        // "既に決定済み: 保留中" and never touches the shared 409 bodies.
+        // I60-B / I62-B: the policy service maps a post-deadline approve/deny to
+        // 410 Gone with its shared fixed body. No decision was committed and no
+        // winner exists, so a *verified* 410 surfaces the canonical `Expired`
+        // decision directly. Confirming the body with a trimmed exact match keeps
+        // a rewritten response or a one-sided policy wording change from being
+        // reported as a terminal "期限切れ" outcome, and keeps expiry out of the
+        // 409 winner readback. The body itself is never surfaced or logged.
         if status.as_u16() == 410 {
+            let expired_body = response
+                .body_mut()
+                .with_config()
+                .limit(256)
+                .read_to_string();
+            if !expired_body_confirms(&expired_body) {
+                bail!("POST {url} returned HTTP 410 with an unexpected body");
+            }
             return Ok(DecisionOutcome::Decided(Decision::Expired));
         }
         // A 401/500/3xx must not be reported to the operator as a successful
@@ -756,6 +805,11 @@ mod tests {
     use std::io::{Read as _, Write as _};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::thread::JoinHandle;
+
+    /// Independent fixture for the 410 wire body `jarvis-policy` is contracted
+    /// to emit (I62-B). Not a second production definition: `jarvis-core` owns
+    /// the shared literal; this pin makes a one-sided wording change observable.
+    const POLICY_EXPIRED_410_WIRE_BODY: &str = "approval request expired";
 
     /// Bind a loopback server, accept `requests` connections and let `handle`
     /// decide what to answer. Used by every mock policy endpoint below so the
@@ -1866,6 +1920,12 @@ mod tests {
             r#"{"status":"degraded","reason":"kill_switch"}"#,
             r#"{}"#,
             "",
+            // I62-C: a 200 is never a release when a `reason` key is present,
+            // even if `status=ok`. Otherwise a proxy could rewrite a degraded
+            // answer into a false "switch lifted" display.
+            r#"{"status":"ok","reason":"kill_switch"}"#,
+            r#"{"status":"ok","reason":"no_policy"}"#,
+            r#"{"status":"ok","reason":null}"#,
         ] {
             let body = body.to_string();
             let label = body.clone();
@@ -1881,6 +1941,95 @@ mod tests {
             assert!(
                 client.kill_switch_active(),
                 "an unexpected 200 body must fail closed: {label}"
+            );
+            server.join().expect("server thread");
+        }
+    }
+
+    /// I62-C: a 503 is only definitive when `status=degraded` and the reason is
+    /// one of the two shared literals. A proxy dropping `status`, reusing a 200
+    /// body, or carrying an unknown reason must fail closed instead of being
+    /// read as an explicit release (Err -> `unwrap_or(true)`).
+    #[test]
+    fn health_probe_unexpected_503_body_fails_closed() {
+        // Missing status, a reused 200 body, a missing reason, an unknown
+        // reason, and a wrong status are all unclassifiable.
+        for body in [
+            r#"{"reason":"kill_switch"}"#,
+            r#"{"status":"ok"}"#,
+            r#"{"status":"degraded"}"#,
+            r#"{"status":"degraded","reason":"x"}"#,
+            r#"{"status":"ok","reason":"kill_switch"}"#,
+        ] {
+            let body = body.to_string();
+            let label = body.clone();
+            let (addr, server) = spawn_test_server(
+                move |stream, _request| {
+                    respond_json(stream, "HTTP/1.1 503 Service Unavailable", body.as_str())
+                },
+                2,
+            );
+            let client = PolicyClient::new(format!("http://{addr}"));
+            assert!(
+                client.kill_switch_probe().is_err(),
+                "raw probe must reject an unexpected 503 body: {label}"
+            );
+            assert!(
+                client.kill_switch_active(),
+                "an unexpected 503 body must fail closed: {label}"
+            );
+            server.join().expect("server thread");
+        }
+    }
+
+    /// I62-C cross-crate pin: the classifier accepts exactly what
+    /// `jarvis-policy` emits from the shared `jarvis-core` vocabulary. Literal
+    /// fixtures are independent of the constants, so a one-sided vocabulary
+    /// change fails here instead of silently flipping a halt display.
+    #[test]
+    fn health_vocabulary_matches_core_wire_contract() {
+        const OK_BODY: &str = r#"{"status":"ok"}"#;
+        const KILL_SWITCH_BODY: &str = r#"{"status":"degraded","reason":"kill_switch"}"#;
+        const NO_POLICY_BODY: &str = r#"{"status":"degraded","reason":"no_policy"}"#;
+
+        assert_eq!(HEALTH_STATUS_OK, jarvis_core::HEALTH_STATUS_OK);
+        assert_eq!(jarvis_core::HEALTH_STATUS_OK, "ok");
+        assert_eq!(HEALTH_STATUS_DEGRADED, jarvis_core::HEALTH_STATUS_DEGRADED);
+        assert_eq!(jarvis_core::HEALTH_STATUS_DEGRADED, "degraded");
+        assert_eq!(
+            HEALTH_REASON_KILL_SWITCH,
+            jarvis_core::HEALTH_REASON_KILL_SWITCH
+        );
+        assert_eq!(jarvis_core::HEALTH_REASON_KILL_SWITCH, "kill_switch");
+        assert_eq!(
+            HEALTH_REASON_NO_POLICY,
+            jarvis_core::HEALTH_REASON_NO_POLICY
+        );
+        assert_eq!(jarvis_core::HEALTH_REASON_NO_POLICY, "no_policy");
+        assert!(OK_BODY.contains(jarvis_core::HEALTH_STATUS_OK));
+        assert!(KILL_SWITCH_BODY.contains(jarvis_core::HEALTH_STATUS_DEGRADED));
+        assert!(KILL_SWITCH_BODY.contains(jarvis_core::HEALTH_REASON_KILL_SWITCH));
+        assert!(NO_POLICY_BODY.contains(jarvis_core::HEALTH_REASON_NO_POLICY));
+
+        for (status_line, body, expected) in [
+            ("HTTP/1.1 200 OK", OK_BODY, false),
+            ("HTTP/1.1 503 Service Unavailable", KILL_SWITCH_BODY, true),
+            ("HTTP/1.1 503 Service Unavailable", NO_POLICY_BODY, false),
+        ] {
+            let status_line = status_line.to_string();
+            let body = body.to_string();
+            let label = body.clone();
+            let (addr, server) = spawn_test_server(
+                move |stream, _request| respond_json(stream, status_line.as_str(), body.as_str()),
+                1,
+            );
+            let client = PolicyClient::new(format!("http://{addr}"));
+            assert_eq!(
+                client
+                    .kill_switch_probe()
+                    .expect("shared wire value is definitive"),
+                expected,
+                "shared vocabulary body must classify as {expected}: {label}"
             );
             server.join().expect("server thread");
         }
@@ -2409,10 +2558,12 @@ mod tests {
         );
     }
 
-    /// I60-B regression: a 410 from approve/deny is a terminal expiry with no
-    /// winner. It must not surface as a generic transport error and must never
-    /// issue a status GET — the old already-decided 409 path is what rendered
-    /// "既に決定済み: 保留中" for an expired request.
+    /// I60-B / I62-B regression: a 410 from approve/deny is a terminal expiry
+    /// with no winner. It must not surface as a generic transport error and must
+    /// never issue a status GET — the old already-decided 409 path is what
+    /// rendered "既に決定済み: 保留中" for an expired request. The stub serves an
+    /// independent fixture of the shared wire body, so a one-sided change breaks
+    /// this test.
     #[test]
     fn expired_410_reports_expired_without_winner_fetch() {
         use std::sync::{Arc, Mutex};
@@ -2422,7 +2573,7 @@ mod tests {
         let (addr, handle) = spawn_test_server(
             move |stream, request| {
                 seen_for_thread.lock().expect("lock").push(request);
-                respond_json(stream, "HTTP/1.1 410 Gone", "approval request expired");
+                respond_json(stream, "HTTP/1.1 410 Gone", POLICY_EXPIRED_410_WIRE_BODY);
             },
             2,
         );
@@ -2445,6 +2596,114 @@ mod tests {
         assert!(
             requests.iter().all(|r| r.starts_with("POST /v1/approval/")),
             "only decision POSTs may be sent: {requests:?}"
+        );
+    }
+
+    /// I62-B contract pin: the UI's shared 410 body must keep matching the
+    /// independent policy fixture, and must stay distinct from both 409 bodies
+    /// so expiry can never be routed into the winner readback.
+    #[test]
+    fn expired_410_body_pins_wire_contract() {
+        assert_eq!(
+            APPROVAL_EXPIRED_BODY, POLICY_EXPIRED_410_WIRE_BODY,
+            "shared expired body must still match the policy wire contract"
+        );
+        assert_ne!(
+            APPROVAL_EXPIRED_BODY, ALREADY_DECIDED_409_BODY,
+            "the expired 410 body must not reuse the already-decided 409 body"
+        );
+        assert_ne!(
+            APPROVAL_EXPIRED_BODY, KILL_SWITCH_409_BODY,
+            "the expired 410 body must not reuse the kill-switch 409 body"
+        );
+    }
+
+    /// I62-B: pure confirmation of the bounded 410 body read. Only the exact
+    /// shared literal (after trimming) confirms expiry; a read error, an
+    /// empty/whitespace body and any rewritten body fail closed.
+    #[test]
+    fn expired_410_body_confirmation_fails_closed() {
+        type Body = std::result::Result<String, ()>;
+        let canonical: Body = Ok(APPROVAL_EXPIRED_BODY.to_string());
+        let canonical_padded: Body = Ok(format!(" {APPROVAL_EXPIRED_BODY} "));
+        let empty: Body = Ok(String::new());
+        let whitespace: Body = Ok("  \n\t ".to_string());
+        let read_error: Body = Err(());
+        let rewritten: Body = Ok(format!("{APPROVAL_EXPIRED_BODY} (v2)"));
+        let kill_switch: Body = Ok(KILL_SWITCH_409_BODY.to_string());
+        let already_decided: Body = Ok(ALREADY_DECIDED_409_BODY.to_string());
+        assert!(expired_body_confirms(&canonical));
+        assert!(expired_body_confirms(&canonical_padded));
+        assert!(!expired_body_confirms(&empty));
+        assert!(!expired_body_confirms(&whitespace));
+        assert!(!expired_body_confirms(&read_error));
+        assert!(!expired_body_confirms(&rewritten));
+        assert!(!expired_body_confirms(&kill_switch));
+        assert!(!expired_body_confirms(&already_decided));
+    }
+
+    /// I62-B: a 410 whose body was rewritten by a relay or an older peer is an
+    /// explicit error — never a fabricated "期限切れ" and never a winner GET.
+    #[test]
+    fn expired_410_rewritten_body_is_an_error() {
+        use std::sync::{Arc, Mutex};
+
+        const REWRITTEN_BODY: &str = "approval request expired (rewritten by relay)";
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                seen_for_thread.lock().expect("lock").push(request);
+                respond_json(stream, "HTTP/1.1 410 Gone", REWRITTEN_BODY);
+            },
+            1,
+        );
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let outcome = client.approve_outcome("req-1", "koppe");
+        handle.join().expect("server thread");
+
+        assert!(outcome.is_err(), "an unverified 410 must fail closed");
+        assert_eq!(
+            seen.lock().expect("lock").len(),
+            1,
+            "no winner GET may follow an unverified 410"
+        );
+    }
+
+    /// I62-B: a 410 body that cannot be decoded as UTF-8 is unreadable and must
+    /// be an error, not a terminal `Expired` outcome. Wire-level counterpart of
+    /// the `Err` arm of the pure confirmation test.
+    #[test]
+    fn expired_410_unreadable_body_is_an_error() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                seen_for_thread.lock().expect("lock").push(request);
+                // Declared length matches the raw bytes: the read fails on
+                // invalid UTF-8, not on a truncated transfer.
+                stream
+                    .write_all(
+                        b"HTTP/1.1 410 Gone\r\nContent-Length: 2\r\nConnection: close\r\n\r\n\xff\xfe",
+                    )
+                    .expect("write");
+            },
+            1,
+        );
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let outcome = client.approve_outcome("req-1", "koppe");
+        handle.join().expect("server thread");
+
+        assert!(outcome.is_err(), "an unreadable 410 must fail closed");
+        assert_eq!(
+            seen.lock().expect("lock").len(),
+            1,
+            "no winner GET may follow an unreadable 410"
         );
     }
 }
