@@ -139,10 +139,37 @@ struct SearchMemoryRequest {
     limit: usize,
 }
 
+/// Minimal backend surface used by the HTTP handlers.
+///
+/// The trait exists so the instrumented handlers can be exercised with an
+/// in-memory stub in tests; production wiring uses the real [`ContextBuilder`].
+#[async_trait::async_trait]
+trait MemoryBackend: Send + Sync {
+    async fn build(&self, event: &UnifiedEvent) -> anyhow::Result<serde_json::Value>;
+    async fn store(&self, memory: MemoryEntry) -> anyhow::Result<()>;
+    async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<MemoryEntry>>;
+}
+
+#[async_trait::async_trait]
+impl MemoryBackend for ContextBuilder {
+    async fn build(&self, event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+        ContextBuilder::build_context(self, event).await
+    }
+
+    async fn store(&self, memory: MemoryEntry) -> anyhow::Result<()> {
+        ContextBuilder::store_memory(self, memory).await
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+        ContextBuilder::search_memory(self, query, limit).await
+    }
+}
+
 pub fn router(builder: Arc<ContextBuilder>) -> Router {
     // `ContextBuilder.config` is visible here because `http` is a child module
     // of the crate root where that field is declared.
     let auth = AuthState::new(builder.config.admin_token());
+    let backend: Arc<dyn MemoryBackend> = builder;
     // `/health` and `/metrics` stay public so Prometheus scraping keeps
     // working without credentials (same convention as jarvis-policy).
     let protected = Router::new()
@@ -157,7 +184,7 @@ pub fn router(builder: Arc<ContextBuilder>) -> Router {
         .route("/health", get(health))
         .route("/metrics", get(metrics))
         .merge(protected)
-        .with_state(builder)
+        .with_state(backend)
         .layer(axum::middleware::from_fn(track_metrics))
 }
 
@@ -221,7 +248,7 @@ fn log_internal_error<T>(
 
 #[instrument(skip(builder, req))]
 async fn build_context(
-    State(builder): State<Arc<ContextBuilder>>,
+    State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<BuildContextRequest>,
 ) -> Result<Json<BuildContextResponse>, axum::http::StatusCode> {
     let event = UnifiedEvent {
@@ -232,7 +259,7 @@ async fn build_context(
         timestamp: chrono::Utc::now(),
         correlation_id: req.correlation_id,
     };
-    let context = log_internal_error(builder.build_context(&event).await, "build_context")?;
+    let context = log_internal_error(builder.build(&event).await, "build_context")?;
     Ok(Json(BuildContextResponse { context }))
 }
 
@@ -264,26 +291,26 @@ fn prepare_store_memory(req: StoreMemoryRequest) -> (MemoryEntry, StoreMemoryRes
     (memory, response)
 }
 
-#[instrument(skip(builder))]
+#[instrument(skip(builder, req))]
 async fn store_memory(
-    State(builder): State<Arc<ContextBuilder>>,
+    State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<StoreMemoryRequest>,
 ) -> Result<Json<StoreMemoryResponse>, axum::http::StatusCode> {
     let (memory, response) = prepare_store_memory(req);
     builder
-        .store_memory(memory)
+        .store(memory)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(response))
 }
 
-#[instrument(skip(builder))]
+#[instrument(skip(builder, req))]
 async fn search_memory(
-    State(builder): State<Arc<ContextBuilder>>,
+    State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<SearchMemoryRequest>,
 ) -> Result<Json<Vec<MemoryEntry>>, axum::http::StatusCode> {
     let memories = builder
-        .search_memory(&req.query, req.limit)
+        .search(&req.query, req.limit)
         .await
         .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(memories))
@@ -299,8 +326,9 @@ pub async fn serve(builder: Arc<ContextBuilder>, addr: std::net::SocketAddr) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_TOKEN_HEADER, AuthState, StoreMemoryRequest, constant_time_eq, log_internal_error,
-        prepare_store_memory, require_admin_token,
+        ADMIN_TOKEN_HEADER, AuthState, MemoryBackend, MemoryEntry, StoreMemoryRequest,
+        UnifiedEvent, build_context, constant_time_eq, log_internal_error, prepare_store_memory,
+        require_admin_token, search_memory, store_memory,
     };
     use axum::{
         Router,
@@ -311,6 +339,7 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use tower::util::ServiceExt;
+    use tracing_subscriber::fmt::format::FmtSpan;
 
     /// In-memory `MakeWriter` target: no new dependency and no global
     /// subscriber, so other tests can still install their own.
@@ -572,5 +601,104 @@ mod tests {
             !logs.contains(TOKEN),
             "the token must never be logged: {logs}"
         );
+    }
+
+    struct StubBackend;
+
+    #[async_trait::async_trait]
+    impl MemoryBackend for StubBackend {
+        async fn build(&self, _event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({"memories": []}))
+        }
+
+        async fn store(&self, _memory: MemoryEntry) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn instrumented_handlers_do_not_log_request_bodies() {
+        const PROBE: &str = "private-memory-content-9c3f";
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_span_events(FmtSpan::NEW)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime builds");
+            runtime.block_on(async {
+                let app = Router::new()
+                    .route("/v1/context/build", post(build_context))
+                    .route("/v1/memory", post(store_memory))
+                    .route("/v1/memory/search", post(search_memory))
+                    .with_state(Arc::new(StubBackend) as Arc<dyn MemoryBackend>);
+
+                let requests = [
+                    (
+                        "/v1/context/build",
+                        serde_json::json!({
+                            "event_id": "00000000-0000-0000-0000-000000000001",
+                            "event_type": "state_changed",
+                            "payload": {"body": PROBE},
+                            "correlation_id": "corr-1",
+                        })
+                        .to_string(),
+                    ),
+                    (
+                        "/v1/memory",
+                        serde_json::json!({
+                            "content": PROBE,
+                            "embedding": [0.1, 0.2],
+                            "metadata": "{\"kind\":\"test\"}",
+                            "source": "regression-test",
+                        })
+                        .to_string(),
+                    ),
+                    (
+                        "/v1/memory/search",
+                        serde_json::json!({"query": PROBE, "limit": 5}).to_string(),
+                    ),
+                ];
+
+                for (uri, body) in requests {
+                    let status = app
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method("POST")
+                                .uri(uri)
+                                .header("content-type", "application/json")
+                                .body(Body::from(body))
+                                .expect("request builds"),
+                        )
+                        .await
+                        .expect("service responds")
+                        .status();
+                    assert_eq!(status, StatusCode::OK, "{uri} should succeed");
+                }
+            });
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(!logs.contains(PROBE), "request body leaked: {logs}");
+        let handlers = ["build_context", "store_memory", "search_memory"];
+        for handler in handlers {
+            assert!(
+                logs.contains(handler),
+                "span for {handler} not captured: {logs}"
+            );
+        }
     }
 }

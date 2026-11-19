@@ -106,10 +106,8 @@ impl HomeAssistantClient {
             .await
             .map_err(|error| ListenFailure::transient(error, false))?;
         if hello["type"] != "auth_required" {
-            return Err(ListenFailure::transient(
-                anyhow::anyhow!("unexpected Home Assistant banner: {hello}"),
-                false,
-            ));
+            let error = unexpected_banner_error(&hello);
+            return Err(ListenFailure::transient(error, false));
         }
         send_json(
             &mut socket,
@@ -124,16 +122,11 @@ impl HomeAssistantClient {
         match auth["type"].as_str() {
             Some("auth_ok") => {}
             Some("auth_invalid") => {
-                return Err(ListenFailure::Fatal(anyhow::anyhow!(
-                    "Home Assistant rejected the access token: {}",
-                    auth["message"].as_str().unwrap_or("no details")
-                )));
+                return Err(ListenFailure::Fatal(rejected_token_error(&auth)));
             }
-            other => {
-                return Err(ListenFailure::transient(
-                    anyhow::anyhow!("unexpected auth response: {other:?}"),
-                    false,
-                ));
+            _ => {
+                let error = unexpected_auth_response_error(&auth);
+                return Err(ListenFailure::transient(error, false));
             }
         }
 
@@ -148,10 +141,8 @@ impl HomeAssistantClient {
             .await
             .map_err(|error| ListenFailure::transient(error, false))?;
         if subscription["type"] != "result" || subscription["success"] != true {
-            return Err(ListenFailure::transient(
-                anyhow::anyhow!("Home Assistant rejected the subscription: {subscription}"),
-                false,
-            ));
+            let error = rejected_subscription_error(&subscription);
+            return Err(ListenFailure::transient(error, false));
         }
         tracing::info!("Subscribed to Home Assistant state_changed events");
 
@@ -251,6 +242,36 @@ fn decode_ha_message(text: &str) -> Result<Value> {
     })
 }
 
+/// Metadata-only description of a Home Assistant handshake frame.
+///
+/// Handshake frames can carry the bearer token or device details. Following
+/// the same rule as [`decode_ha_message`], only a category label and the
+/// serialized byte length are ever recorded - never a value from the frame.
+fn handshake_context(category: &'static str, message: &Value) -> String {
+    let bytes = message.to_string().len();
+    format!("source=home_assistant, handshake={category}, bytes={bytes}")
+}
+
+fn unexpected_banner_error(message: &Value) -> anyhow::Error {
+    let context = handshake_context("banner", message);
+    anyhow::anyhow!("unexpected Home Assistant banner ({context})")
+}
+
+fn rejected_token_error(message: &Value) -> anyhow::Error {
+    let context = handshake_context("auth_invalid", message);
+    anyhow::anyhow!("Home Assistant rejected the access token ({context})")
+}
+
+fn unexpected_auth_response_error(message: &Value) -> anyhow::Error {
+    let context = handshake_context("auth_response", message);
+    anyhow::anyhow!("unexpected auth response ({context})")
+}
+
+fn rejected_subscription_error(message: &Value) -> anyhow::Error {
+    let context = handshake_context("subscription", message);
+    anyhow::anyhow!("Home Assistant rejected the subscription ({context})")
+}
+
 /// Read the next text message as JSON, skipping non-text frames.
 ///
 /// Pong replies to ping frames are queued automatically by tungstenite and
@@ -316,6 +337,8 @@ impl AndroidClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn derives_websocket_url_from_http_base() {
@@ -421,5 +444,76 @@ mod tests {
             rendered.contains(&format!("bytes={}", body.len())),
             "length metadata missing: {rendered}"
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self.0.lock().expect("log buffer mutex");
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn handshake_errors_and_logs_omit_raw_frames() {
+        const TOKEN_MARKER: &str = "ha-token-9c3f-should-never-be-logged";
+        const DEVICE_MARKER: &str = "living-room-sensor-secret";
+
+        let banner = json!({"type": "auth", "access_token": TOKEN_MARKER});
+        let auth_invalid = json!({
+            "type": "auth_invalid",
+            "message": DEVICE_MARKER,
+            "access_token": TOKEN_MARKER,
+        });
+        let auth_unexpected = json!({"type": TOKEN_MARKER, "message": DEVICE_MARKER});
+        let subscription = json!({
+            "type": "result",
+            "success": false,
+            "error": {"message": TOKEN_MARKER},
+        });
+        let errors = [
+            unexpected_banner_error(&banner),
+            rejected_token_error(&auth_invalid),
+            unexpected_auth_response_error(&auth_unexpected),
+            rejected_subscription_error(&subscription),
+        ];
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            for error in &errors {
+                tracing::warn!("Home Assistant WebSocket disconnected: {error:#}");
+            }
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        for marker in [TOKEN_MARKER, DEVICE_MARKER] {
+            assert!(!logs.contains(marker), "handshake frame leaked: {logs}");
+        }
+        let categories = ["banner", "auth_invalid", "auth_response", "subscription"];
+        for category in categories {
+            assert!(
+                logs.contains(category),
+                "handshake category {category} missing: {logs}"
+            );
+        }
+        assert!(
+            logs.contains("source=home_assistant"),
+            "source metadata missing: {logs}"
+        );
+        assert!(logs.contains("bytes="), "length metadata missing: {logs}");
     }
 }

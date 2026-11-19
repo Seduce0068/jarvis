@@ -233,7 +233,10 @@ fn calendar_webhook_event(
     }
 }
 
-#[instrument(skip(state))]
+// Webhook spans must not record `payload`: Gmail/Calendar/HA bodies can carry
+// message content and token-like strings into the tracing pipeline. Only the
+// handler name remains in the span; correlation ids are generated inside.
+#[instrument(skip(state, payload))]
 async fn ha_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
     let event = ha_webhook_event(
         payload,
@@ -244,7 +247,7 @@ async fn ha_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Va
     state.emit(event);
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, payload))]
 async fn android_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
     let event = android_webhook_event(
         payload,
@@ -255,7 +258,7 @@ async fn android_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Js
     state.emit(event);
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, payload))]
 async fn gmail_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
     let event = gmail_webhook_event(
         payload,
@@ -266,7 +269,7 @@ async fn gmail_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json
     state.emit(event);
 }
 
-#[instrument(skip(state))]
+#[instrument(skip(state, payload))]
 async fn calendar_webhook(State(state): State<Arc<Normalizer>>, Json(payload): Json<Value>) {
     let event = calendar_webhook_event(
         payload,
@@ -281,6 +284,9 @@ async fn calendar_webhook(State(state): State<Arc<Normalizer>>, Json(payload): J
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing_subscriber::fmt::format::FmtSpan;
 
     fn fixed_id() -> uuid::Uuid {
         uuid::Uuid::from_u128(1)
@@ -516,5 +522,76 @@ mod tests {
         assert!(tx.is_closed());
 
         try_emit_event(&tx, test_event(1, "state_changed"));
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self.0.lock().expect("log buffer mutex");
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn webhook_spans_do_not_record_raw_payloads() {
+        const HA_SECRET: &str = "ha-body-secret-4f1a";
+        const ANDROID_SECRET: &str = "android-body-secret-4f1a";
+        const GMAIL_SECRET: &str = "gmail-body-secret-4f1a";
+        const CALENDAR_SECRET: &str = "calendar-body-secret-4f1a";
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime builds");
+            runtime.block_on(async {
+                let (tx, _rx) = mpsc::channel(8);
+                let state = || State(Arc::new(Normalizer::with_event_tx(tx.clone())));
+
+                let ha_payload = json!({"event_type": "state_changed", "body": HA_SECRET});
+                ha_webhook(state(), Json(ha_payload)).await;
+                let android_payload = json!({"type": "device_update", "body": ANDROID_SECRET});
+                android_webhook(state(), Json(android_payload)).await;
+                let gmail_payload = json!({"message": {"body": GMAIL_SECRET}});
+                gmail_webhook(state(), Json(gmail_payload)).await;
+                let calendar_payload = json!({"event": {"body": CALENDAR_SECRET}});
+                calendar_webhook(state(), Json(calendar_payload)).await;
+            });
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        for secret in [HA_SECRET, ANDROID_SECRET, GMAIL_SECRET, CALENDAR_SECRET] {
+            assert!(!logs.contains(secret), "webhook payload leaked: {logs}");
+        }
+        // Span creation must have been captured for this to be a meaningful check.
+        let handlers = [
+            "ha_webhook",
+            "android_webhook",
+            "gmail_webhook",
+            "calendar_webhook",
+        ];
+        for handler in handlers {
+            assert!(
+                logs.contains(handler),
+                "span for {handler} not captured: {logs}"
+            );
+        }
     }
 }

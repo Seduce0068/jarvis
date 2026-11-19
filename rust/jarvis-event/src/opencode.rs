@@ -25,6 +25,25 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::info;
 
+/// Summarize a failed upstream HTTP call without echoing its response body.
+///
+/// Upstream bodies can contain tokens, prompts or other secret-bearing text.
+/// Following the `safe_error_summary()` convention in `jarvis-mcp-gw`, keep
+/// only structural metadata (status, coarse kind, byte length) so operators can
+/// triage failures without a disclosure channel into logs.
+fn upstream_error_summary(status: reqwest::StatusCode, body: &str) -> String {
+    let kind = if status.is_client_error() {
+        "client_error"
+    } else if status.is_server_error() {
+        "server_error"
+    } else {
+        "unexpected_status"
+    };
+    let status_code = status.as_u16();
+    let body_bytes = body.len();
+    format!("upstream=opencode, status={status_code}, kind={kind}, bytes={body_bytes}")
+}
+
 pub struct OpenCodeClient {
     http: reqwest::Client,
     base_url: String,
@@ -88,7 +107,10 @@ impl OpenCodeClient {
             }
             status => {
                 let body = response.text().await.unwrap_or_default();
-                bail!("OpenCode rejected the event prompt ({status}): {body}");
+                bail!(
+                    "OpenCode rejected the event prompt ({})",
+                    upstream_error_summary(status, &body)
+                );
             }
         }
     }
@@ -104,7 +126,10 @@ impl OpenCodeClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            bail!("OpenCode rejected the event prompt ({status}): {body}");
+            bail!(
+                "OpenCode rejected the event prompt ({})",
+                upstream_error_summary(status, &body)
+            );
         }
         Ok(())
     }
@@ -130,7 +155,10 @@ impl OpenCodeClient {
         let status = response.status();
         if !status.is_success() {
             let body = response.text().await.unwrap_or_default();
-            bail!("OpenCode session creation failed ({status}): {body}");
+            bail!(
+                "OpenCode session creation failed ({})",
+                upstream_error_summary(status, &body)
+            );
         }
 
         let body: Value = response
@@ -177,6 +205,8 @@ pub fn format_prompt(event: &UnifiedEvent, context: &Value) -> String {
 mod tests {
     use super::*;
     use jarvis_core::EventSource;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
 
     fn sample_event() -> UnifiedEvent {
         UnifiedEvent {
@@ -211,5 +241,67 @@ mod tests {
     fn prompt_renders_non_object_context() {
         let prompt = format_prompt(&sample_event(), &json!("plain"));
         assert!(prompt.contains("\"plain\""));
+    }
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self.0.lock().expect("log buffer mutex");
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn upstream_error_summary_never_leaks_body_into_logs() {
+        const TOKEN: &str = "sk-opencode-secret-9c3f";
+        const BODY_TEXT: &str = "private meeting notes about the user";
+        let body = format!("{{\"error\":\"{TOKEN}\",\"detail\":\"{BODY_TEXT}\"}}");
+
+        let summary = upstream_error_summary(reqwest::StatusCode::UNAUTHORIZED, &body);
+        assert!(summary.contains("upstream=opencode"), "{summary}");
+        assert!(summary.contains("status=401"), "{summary}");
+        assert!(summary.contains("kind=client_error"), "{summary}");
+        let has_length = summary.contains(&format!("bytes={}", body.len()));
+        assert!(has_length, "{summary}");
+        assert!(!summary.contains(TOKEN), "{summary}");
+        assert!(!summary.contains(BODY_TEXT), "{summary}");
+
+        let server = upstream_error_summary(reqwest::StatusCode::BAD_GATEWAY, &body);
+        assert!(server.contains("status=502"), "{server}");
+        assert!(server.contains("kind=server_error"), "{server}");
+        assert!(!server.contains(TOKEN), "{server}");
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(
+                "Event processing failed: {}",
+                format!("OpenCode rejected the event prompt ({summary})")
+            );
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(
+            !logs.contains(TOKEN),
+            "upstream body leaked into logs: {logs}"
+        );
+        assert!(!logs.contains(BODY_TEXT), "upstream body leaked: {logs}");
+        assert!(
+            logs.contains("status=401"),
+            "summary missing from logs: {logs}"
+        );
     }
 }
