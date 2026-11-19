@@ -31,7 +31,10 @@
 //! split brain (durable `Approved` vs memory `Expired`). `apply_prune` also
 //! preserves any decision stamped by a competing winner while its durable
 //! commit was in flight, instead of sending `Expired` over it and evicting it.
-//! User notification (HA/phone) will be layered on top later.
+//! I48-C extends that same winner-preservation rule to `decide`'s post-commit
+//! publish: a decision stamped by a concurrent timeout/prune/lost-ack recovery
+//! is kept, and the losing decide reports `AlreadyDecided` without a second
+//! watch send. User notification (HA/phone) will be layered on top later.
 //!
 //! Approval is intentionally HTTP-only: the gRPC surface is limited to
 //! authorization and kill-switch operations so a long-running human decision
@@ -1099,12 +1102,25 @@ impl ApprovalStore {
     /// ([`Self::with_commit_gate`]) is re-read exactly once, immediately
     /// before invoking the durable backend. A kill switch activation that
     /// lands after the transport's pre-check therefore cannot commit a
-    /// decision. Once the commit succeeds it is the authority and is always
-    /// published: a stop landing during the commit no longer produces a 409
+    /// decision. A stop landing during the commit no longer produces a 409
     /// over an already-committed row (which made later retries fail with
     /// `AlreadyDecided` and left UI/DB inconsistent). This is additive: every
     /// pre-existing constructor installs no gate, so the timeout, lost-ack,
     /// RAII-claim and prune paths are untouched.
+    ///
+    /// I48-C: the publish after a successful commit honours the same
+    /// winner-preservation rule as the timeout and prune paths. The store
+    /// lock is deliberately released across `record_decision`, so a competing
+    /// timeout / prune / lost-ack recovery can stamp a decision and announce
+    /// it on the watch channel first — with [`NoopPersistence`] there is no
+    /// CAS to serialise the two commits. That stamp is the decision waiters
+    /// already observed, so this method keeps it and reports
+    /// [`ApprovalError::AlreadyDecided`] instead of overwriting it and sending
+    /// a second, different decision. This matches the pre-commit
+    /// `decision.is_some()` rejection and keeps the `Result<(), ApprovalError>`
+    /// contract; returning the committed decision instead would be a breaking
+    /// change for every transport. The kill-switch gate is still read exactly
+    /// once, before the commit.
     pub async fn decide(&self, id: Uuid, decision: ApprovalDecision) -> Result<(), ApprovalError> {
         let decided_at = Utc::now();
 
@@ -1154,15 +1170,34 @@ impl ApprovalStore {
             // A failed commit must leave the entry pending so no waiter can
             // observe a rolled-back decision.
             commit?;
-            // I46-A: no second gate read here. The durable commit succeeded,
-            // so it is the authority: publish it unconditionally. A post-commit
-            // stop used to return `KillSwitchActivated` (409) while the DB row
-            // was already `Approved`; lifting the stop then made the retry hit
-            // the CAS with zero rows and become `AlreadyDecided` (409), so the
+            // I46-A: no second gate read here. A post-commit stop used to
+            // return `KillSwitchActivated` (409) while the DB row was already
+            // `Approved`; lifting the stop then made the retry hit the CAS
+            // with zero rows and become `AlreadyDecided` (409), so the
             // operator response, UI and DB disagreed. Tool execution stays
-            // fail-closed: `PolicyEngine::is_allowed` re-checks the kill switch
-            // independently of this publish. The error vocabulary is unchanged
-            // (no id, path, URL or decision body is added).
+            // fail-closed: `PolicyEngine::is_allowed` re-checks the kill
+            // switch independently of this publish. The error vocabulary is
+            // unchanged (no id, path, URL or decision body is added).
+            //
+            // I48-C: winner preservation on publish. While the store lock was
+            // released for `record_decision`, a concurrent timeout / prune /
+            // lost-ack recovery may have stamped a decision under the lock and
+            // announced it on the watch channel. With `NoopPersistence` there
+            // is no CAS to serialise the two commits, so this is reachable.
+            // That stamp is the winner waiters already observed: keep it, send
+            // nothing, and return `AlreadyDecided(id)` — the same contract as
+            // the pre-commit `decision.is_some()` rejection, with the
+            // `Result<(), ApprovalError>` signature unchanged. Returning the
+            // committed decision instead would be a breaking API change for
+            // every transport. Overwriting here would publish a second,
+            // different decision and split `status()` from the watch stream.
+            if entry.decision.is_some() {
+                tracing::warn!(
+                    request_id = %id,
+                    "decide commit lost to a concurrent settlement; keeping existing decision"
+                );
+                return Err(ApprovalError::AlreadyDecided(id));
+            }
             entry.decision = Some(decision.clone());
             entry.decided_at = Some(decided_at);
             let _ = entry.tx.send(Some(decision));
@@ -4192,5 +4227,230 @@ mod tests {
 
         decide_after_registration(&store, next_id, approved()).await;
         let _ = fresh_waiter.await.expect("fresh waiter task");
+    }
+
+    // ---- I48-C: decide keeps the winner stamped during its commit ---------
+
+    /// Noop-like double: every durable hook succeeds immediately (no database
+    /// and no CAS) and `record_decision` can be held on a oneshot so the test
+    /// can stamp a competing winner under the store lock while the commit is
+    /// in flight — the shape of a timeout / prune / lost-ack recovery racing a
+    /// decide that used `NoopPersistence`.
+    #[derive(Debug, Default)]
+    struct WinnerRacePersistence {
+        entered: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+        gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for WinnerRacePersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.store(true, Ordering::SeqCst);
+            if let Some(rx) = self.gate.lock().await.take() {
+                let _ = rx.await;
+            }
+            // Noop-like: always commits, never a CAS rejection.
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
+        async fn mark_expired(
+            &self,
+            _id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+    }
+
+    /// I48-C regression: a decide whose durable commit succeeded must not
+    /// overwrite (or re-announce over) a decision stamped by a concurrent
+    /// timeout / prune winner while the store lock was released. Ordering is
+    /// fixed by the gated mock; no real DB is contacted.
+    #[tokio::test]
+    async fn decide_keeps_winner_stamped_during_commit_and_does_not_double_send() {
+        let winners = [
+            ApprovalDecision::Expired,
+            ApprovalDecision::Denied {
+                reason: "authoritative recovery".into(),
+            },
+        ];
+
+        for winner in winners {
+            let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+            let entered = Arc::new(AtomicBool::new(false));
+            let calls = Arc::new(AtomicUsize::new(0));
+            let persistence = Arc::new(WinnerRacePersistence {
+                entered: entered.clone(),
+                calls: calls.clone(),
+                gate: tokio::sync::Mutex::new(Some(gate_rx)),
+            });
+            let store = ApprovalStore::with_persistence(
+                Duration::from_secs(5),
+                DEFAULT_MAX_PENDING,
+                persistence.clone(),
+            );
+            let request = make_request();
+            let id = request.id;
+            let waiter = {
+                let store = store.clone();
+                tokio::spawn(async move { store.request(request).await })
+            };
+            wait_for_registration(&store, id).await;
+
+            // Subscribed before the race: this receiver sees exactly the
+            // decisions announced on the watch channel from here on.
+            let mut observer = {
+                let entries = store.inner.entries.read().await;
+                entries.get(&id).expect("entry registered").tx.subscribe()
+            };
+
+            let loser = ApprovalDecision::Denied {
+                reason: "losing decide".into(),
+            };
+            let decider = {
+                let store = store.clone();
+                tokio::spawn(async move { store.decide(id, loser).await })
+            };
+            for _ in 0..200 {
+                if entered.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(
+                entered.load(Ordering::SeqCst),
+                "decide must be blocked in the gated commit"
+            );
+            assert!(
+                matches!(store.status(id).await, Ok(ApprovalDecision::Pending)),
+                "an in-flight commit must stay invisible"
+            );
+
+            // A concurrent timeout / prune / lost-ack recovery wins while the
+            // decide commit is in flight: stamp under the lock and announce
+            // it, exactly as `apply_prune` / the recovered timeout do.
+            {
+                let mut entries = store.inner.entries.write().await;
+                let entry = entries
+                    .get_mut(&id)
+                    .expect("entry is pending while the commit is gated");
+                entry.decision = Some(winner.clone());
+                entry.decided_at = Some(Utc::now());
+                let _ = entry.tx.send(Some(winner.clone()));
+            }
+            assert!(observer.changed().await.is_ok(), "winner was announced");
+            assert_eq!(
+                observer.borrow_and_update().as_ref(),
+                Some(&winner),
+                "the watch must carry the first (winning) decision"
+            );
+
+            gate_tx.send(()).expect("release decide commit gate");
+            let result = decider.await.expect("decide task");
+            assert!(
+                matches!(result, Err(ApprovalError::AlreadyDecided(_))),
+                "the loser decide must report AlreadyDecided, not Ok: {result:?}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            {
+                let entries = store.inner.entries.read().await;
+                let entry = entries.get(&id).expect("winner entry is retained");
+                assert!(
+                    !entry.is_deciding(),
+                    "the losing decide must still release its claim"
+                );
+            }
+
+            assert_eq!(
+                store.status(id).await.expect("winner survives"),
+                winner,
+                "the post-commit publish must not overwrite the winner"
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), observer.changed())
+                    .await
+                    .is_err(),
+                "the losing decide must not send a second, different decision"
+            );
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(2), waiter)
+                    .await
+                    .expect("waiter completes")
+                    .expect("waiter task"),
+                winner,
+                "the waiter must observe the winner, not the losing decide"
+            );
+        }
+    }
+
+    /// Noop-backend contract check: an entry already settled by the timeout
+    /// path stays terminal, and a later `decide` returns `AlreadyDecided`
+    /// without announcing a second decision. No database is involved.
+    #[tokio::test]
+    async fn noop_backend_decide_does_not_overwrite_timeout_winner() {
+        let store = ApprovalStore::new(Duration::from_secs(5));
+        let request = make_request();
+        let id = request.id;
+        let (tx, mut rx) = watch::channel(None);
+        let _ = tx.send(Some(ApprovalDecision::Expired));
+        {
+            let mut entries = store.inner.entries.write().await;
+            entries.insert(
+                id,
+                Entry {
+                    request,
+                    decision: Some(ApprovalDecision::Expired),
+                    decided_at: Some(Utc::now()),
+                    deadline: Utc::now() + chrono::Duration::seconds(30),
+                    deciding: new_deciding(),
+                    tx,
+                },
+            );
+        }
+
+        assert!(matches!(
+            store.decide(id, approved()).await,
+            Err(ApprovalError::AlreadyDecided(_))
+        ));
+        assert!(matches!(
+            store.status(id).await.expect("status"),
+            ApprovalDecision::Expired
+        ));
+        assert_eq!(
+            rx.borrow_and_update().as_ref(),
+            Some(&ApprovalDecision::Expired)
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rx.changed())
+                .await
+                .is_err(),
+            "the rejected decide must not announce a second decision"
+        );
     }
 }
