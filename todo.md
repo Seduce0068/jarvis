@@ -661,7 +661,7 @@ generated:
   - 復元演習の前に、`restore.rs` をローカルバックアップ体系へ接続する
     （またはレガシー rclone 経路を明示的に廃止する）必要がある。
 
-- [ ] **timer unit が `--repo-dir` を渡さず Git バックアップがスキップされる** — 根拠
+- [ ] **timer unit が `--repo-dir` を渡さず Git バックアップがスキップされる**（2026-11-19 repo 側対応済み: `jarvis-backup.service` の `ExecStart` に `--repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis` を追加し、`ProtectHome=yes` → `read-only` へ変更して git repo を読めるようにした（`jarvis-mcp-gw.service` と同じ境界）。`systemd-analyze verify` exit 0。**実機への unit 再適用は root 必須・ユーザー実行が残る**） — 根拠
   `infra/systemd/jarvis-backup.service:11`, `infra/scripts/backup-local.sh:112-127` /
   R4 レビュー（イテレーション4） / 重大度 high / confirmed。
   - `backup-local.sh` は既定で `git archive HEAD` を生成するが、
