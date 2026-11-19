@@ -941,6 +941,12 @@ requires_approval = true
     #[test]
     fn execute_tool_span_does_not_log_request_arguments() {
         const PROBE: &str = "I33B_PROBE_ARGUMENT_CANARY";
+        // Positive control (I37-B): an EVENT proves the thread-local subscriber
+        // is capturing output. An empty log would make the `!contains(PROBE)`
+        // assertion below vacuously pass even if `#[instrument(skip(req))]`
+        // regressed. Kept distinct from PROBE so capturing it cannot mask a
+        // real leak.
+        const SUBSCRIBER_PROBE: &str = "subscriber-sanity-probe-4f1a";
 
         #[derive(Clone, Default)]
         struct LogBuffer(Arc<Mutex<Vec<u8>>>);
@@ -967,6 +973,7 @@ requires_approval = true
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(marker = SUBSCRIBER_PROBE, "subscriber sanity check");
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -987,10 +994,28 @@ requires_approval = true
 
         let captured = buffer.0.lock().expect("log buffer mutex").clone();
         let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(
+            logs.contains(SUBSCRIBER_PROBE),
+            "subscriber did not capture the sanity event: {logs}"
+        );
         // The non-leak assertion is the contract. Do not assert that the span
         // itself was captured: the thread-local subscriber can miss spans when
         // many tests run in parallel, which made this test flaky under
         // `cargo test --all-targets` even though the single-test run passed.
         assert!(!logs.contains(PROBE), "request body leaked: {logs}");
+    }
+
+    /// Static guard (I37-B): `#[instrument]` on `/v1/execute` must keep
+    /// `skip(req)` so caller payloads never become span fields. `concat!`
+    /// keeps the expected text out of this file's literal source, which
+    /// `include_str!` also reads, so the guard cannot self-match.
+    #[test]
+    fn execute_tool_instrument_attribute_skips_request() {
+        const SRC: &str = include_str!("http.rs");
+        let attribute = concat!("#[instrument(skip(gateway, ", "req))]");
+        assert!(
+            SRC.contains(attribute),
+            "execute_tool must skip the request body in its span"
+        );
     }
 }

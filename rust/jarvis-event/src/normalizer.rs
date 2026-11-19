@@ -554,6 +554,12 @@ mod tests {
         const ANDROID_SECRET: &str = "android-body-secret-4f1a";
         const GMAIL_SECRET: &str = "gmail-body-secret-4f1a";
         const CALENDAR_SECRET: &str = "calendar-body-secret-4f1a";
+        // Positive control (I37-B): an EVENT proves the thread-local subscriber
+        // is capturing output. An empty log would make every `!contains`
+        // assertion below vacuously pass even if `#[instrument(skip(...))]`
+        // regressed. Kept distinct from the four leak canaries so capturing it
+        // cannot mask a real leak.
+        const SUBSCRIBER_PROBE: &str = "subscriber-sanity-probe-4f1a";
 
         let buffer = LogBuffer::default();
         let writer = buffer.clone();
@@ -565,6 +571,7 @@ mod tests {
             .finish();
 
         tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(marker = SUBSCRIBER_PROBE, "subscriber sanity check");
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
@@ -586,13 +593,33 @@ mod tests {
 
         let captured = buffer.0.lock().expect("log buffer mutex").clone();
         let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(
+            logs.contains(SUBSCRIBER_PROBE),
+            "subscriber did not capture the sanity event: {logs}"
+        );
         for secret in [HA_SECRET, ANDROID_SECRET, GMAIL_SECRET, CALENDAR_SECRET] {
             assert!(!logs.contains(secret), "webhook payload leaked: {logs}");
         }
         // Do not assert that the spans themselves were captured: the
         // thread-local subscriber can miss spans under parallel execution,
-        // which made this test flaky. The non-leak assertions above are the
+        // which made this test flaky. The SUBSCRIBER_PROBE event above is the
+        // deterministic liveness check; the non-leak assertions are the
         // contract being verified.
+    }
+
+    /// Static guard (I37-B): the four webhook handlers must keep skipping the
+    /// raw `payload` in their `#[instrument]` spans. The expected text is
+    /// assembled with `concat!` so it does not appear verbatim in this file,
+    /// which `include_str!` also reads, and cannot match its own literal.
+    #[test]
+    fn webhook_instrument_attributes_skip_payload() {
+        const SRC: &str = include_str!("normalizer.rs");
+        let attribute = concat!("#[instrument(skip(state, ", "payload))]");
+        assert_eq!(
+            SRC.matches(attribute).count(),
+            4,
+            "every webhook handler must skip the raw payload in its span"
+        );
     }
 
     #[test]
