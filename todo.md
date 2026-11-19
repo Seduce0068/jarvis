@@ -1675,3 +1675,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、shellcheck の SC2329（eval 間接呼び出し）、
   spec 変更に伴う evidence 実測再生成（UI 67）。
+
+### Round 57（R4 で修正済み）
+
+- [x] シナリオ充足ゲートが skipped を実行済みと計上（medium）→ executed を
+  passed+failed のみとし tamper 2件（skipped 水増し・同一 spec 複製証跡）追加。
+- [x] 有限性チェックが store ingress のみ（medium）→ parse 後の f32 検証、
+  query/pending/reconcile/search の全5経路へ validate_embedding 適用。
+- [x] policy/mcp-gw/event の JsonRejection 迂回（medium）→ jarvis-core へ
+  BareJson を集約し全 JSON ハンドラを置換。event の生 anyhow ログも固定語彙化。
+- [x] jarvis-core/Cargo.toml に axum/tracing 追加（共有 extractor の必須依存、
+  Cargo.lock も更新）。
+
+### Round 57 の残り指摘（未対応）
+
+- [ ] kill switch probe がリダイレクトを追従（medium）— `max_redirects(0)`
+  が probe agent に無く、3xx→200 で停止表示が落ちる。
+- [ ] probe が 503 以外のエラー status を「停止でない」と判定（medium）—
+  502/500/504 で fail-open。200/503 以外は Err 化して unwrap_or(true) へ。
+- [ ] 期限切れ AlreadyDecided が実決定なしで「既に決定済み」表示（medium）—
+  410/Expired 分離、または winner が Pending/Expired なら失敗表示。
+- [ ] skipped 正当化が "ignored" 部分文字列一致（low）、index 件数検証が
+  reference-style リンクのみ（low）。
+- [ ] mcp-gw の http_error() が `{error:#}` で anyhow チェーンを OTLP へ。
+- [ ] サイズ境界が payload/query/event_type/correlation_id に未適用（low）。
+
+- 親が対応: fmt 差分、Cargo.lock 更新（offline）、tracing field 形式依存
+  アサーション削除、shellcheck SC2181（heredoc の $? 判定）。
