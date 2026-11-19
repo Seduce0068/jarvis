@@ -176,4 +176,40 @@ pub(crate) mod test_support {
             err.context(SENSITIVE_PROBE)
         }
     }
+
+    /// Assert that `logs` holds exactly one record whose structured fields carry
+    /// both `operation=<operation>` and `error_kind=<kind>`.
+    ///
+    /// Each RPC is driven with its own subscriber/buffer so the (operation,
+    /// category) pair is checked in isolation. An aggregate token count (the old
+    /// `matches(token).count() == 3` assertion) cannot detect one RPC emitting a
+    /// wrong category while another emits the expected token twice; counting
+    /// records that carry *both* fields per RPC can. Quotes are stripped so the
+    /// check stays stable across `tracing-subscriber` formatter versions.
+    pub(crate) fn assert_single_operation_kind(
+        logs: &str,
+        operation: &str,
+        kind: &str,
+        label: &str,
+    ) {
+        let normalized = logs.replace('"', "");
+        let op_field = format!("operation={operation}");
+        let kind_field = format!("error_kind={kind}");
+        let has_field = |field: &str, line: &str| -> bool {
+            line.match_indices(field).any(|(idx, _)| {
+                let rest = &line[idx + field.len()..];
+                rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace())
+            })
+        };
+        let count = normalized
+            .lines()
+            .filter(|line| {
+                has_field(op_field.as_str(), line) && has_field(kind_field.as_str(), line)
+            })
+            .count();
+        assert_eq!(
+            count, 1,
+            "{label}: expected exactly one log record with '{op_field}' + '{kind_field}', found {count}: {logs}"
+        );
+    }
 }

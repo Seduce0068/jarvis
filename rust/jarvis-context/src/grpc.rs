@@ -533,6 +533,42 @@ mod tests {
         assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
     }
 
+    /// I57-C: the gRPC ingress maps the shared byte/depth bounds to the fixed
+    /// `InvalidArgument` status, with no offending data in the message.
+    #[test]
+    fn i57_c_oversized_and_deep_fields_are_invalid_argument() {
+        let mut req = store_request("ignored");
+        req.content = "x".repeat(validation::MAX_CONTENT_BYTES + 1);
+        let status = prepare_store_memory(req, 3).expect_err("oversized content");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+
+        let mut req = store_request("ignored");
+        req.source = "s".repeat(validation::MAX_SOURCE_BYTES + 1);
+        let status = prepare_store_memory(req, 3).expect_err("oversized source");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+
+        let mut req = store_request("ignored");
+        req.metadata = format!(
+            r#"{{"k":"{}"}}"#,
+            "m".repeat(validation::MAX_METADATA_BYTES)
+        );
+        let status = prepare_store_memory(req, 3).expect_err("oversized metadata");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+
+        let mut req = store_request("ignored");
+        req.metadata = format!(
+            "{}0{}",
+            r#"{"a":"#.repeat(validation::MAX_METADATA_DEPTH + 1),
+            "}".repeat(validation::MAX_METADATA_DEPTH + 1)
+        );
+        let status = prepare_store_memory(req, 3).expect_err("deep metadata");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+    }
+
     #[test]
     fn i53_c_invalid_input_logs_fixed_vocabulary_without_offending_value() {
         let buffer = LogBuffer::default();
@@ -804,70 +840,76 @@ mod tests {
         }
     }
 
-    /// I55-C: behavioural proof for the gRPC side. Each of the three RPCs is
-    /// really invoked with an injected error; it must return the fixed status
-    /// message and emit a log record carrying the category of that error. A
-    /// discarded result or a stale source literal cannot satisfy this.
+    /// I55-C / I57-B: behavioural proof for the gRPC side. Each of the three
+    /// RPCs is really invoked with an injected error, under its *own* subscriber
+    /// and log buffer. For every one of the seven categories we assert that the
+    /// single emitted record carries the matching (`operation`, `error_kind`)
+    /// pair — 3 RPCs x 7 categories = 21 independently checked pairs. A wrong
+    /// category on one RPC can no longer hide behind a duplicate on another.
+    /// A discarded result or a stale source literal still cannot satisfy this.
     #[test]
     fn grpc_handlers_log_fixed_kind_for_all_seven_error_vocabularies() {
-        use crate::error::test_support::{ErrorCase, SENSITIVE_PROBE};
+        use crate::error::test_support::{
+            ErrorCase, SENSITIVE_PROBE, assert_single_operation_kind,
+        };
 
         for case in ErrorCase::ALL {
-            let buffer = LogBuffer::default();
-            let writer = buffer.clone();
-            let subscriber = tracing_subscriber::fmt()
-                .without_time()
-                .with_target(false)
-                .with_writer(move || writer.clone())
-                .finish();
+            for op in ["build_context", "store_memory", "search_memory"] {
+                let buffer = LogBuffer::default();
+                let writer = buffer.clone();
+                let subscriber = tracing_subscriber::fmt()
+                    .without_time()
+                    .with_target(false)
+                    .with_writer(move || writer.clone())
+                    .finish();
 
-            tracing::subscriber::with_default(subscriber, || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("runtime builds");
-                runtime.block_on(async {
-                    let service =
-                        GrpcContextService::with_backend(Arc::new(ErrorBackend(case)), None);
+                tracing::subscriber::with_default(subscriber, || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .expect("runtime builds");
+                    runtime.block_on(async {
+                        let service =
+                            GrpcContextService::with_backend(Arc::new(ErrorBackend(case)), None);
 
-                    let build = service
-                        .build_context(Request::new(build_context_request(
-                            "home_assistant",
-                            1_700_000_000,
-                        )))
-                        .await
-                        .expect_err("injected error must fail the RPC");
-                    assert_eq!(build.code(), tonic::Code::Internal);
-                    assert_eq!(build.message(), INTERNAL_ERROR_MESSAGE);
-
-                    let store = service
-                        .store_memory(Request::new(store_request("ignored")))
-                        .await
-                        .expect_err("injected error must fail the RPC");
-                    assert_eq!(store.code(), tonic::Code::Internal);
-                    assert_eq!(store.message(), INTERNAL_ERROR_MESSAGE);
-
-                    let search = service
-                        .search_memory(Request::new(SearchMemoryRequest {
-                            query: "probe".into(),
-                            limit: 5,
-                        }))
-                        .await
-                        .expect_err("injected error must fail the RPC");
-                    assert_eq!(search.code(), tonic::Code::Internal);
-                    assert_eq!(search.message(), INTERNAL_ERROR_MESSAGE);
+                        let status = match op {
+                            "build_context" => service
+                                .build_context(Request::new(build_context_request(
+                                    "home_assistant",
+                                    1_700_000_000,
+                                )))
+                                .await
+                                .expect_err("injected error must fail the RPC"),
+                            "store_memory" => service
+                                .store_memory(Request::new(store_request("ignored")))
+                                .await
+                                .expect_err("injected error must fail the RPC"),
+                            "search_memory" => service
+                                .search_memory(Request::new(SearchMemoryRequest {
+                                    query: "probe".into(),
+                                    limit: 5,
+                                }))
+                                .await
+                                .expect_err("injected error must fail the RPC"),
+                            other => panic!("unknown operation {other}"),
+                        };
+                        assert_eq!(status.code(), tonic::Code::Internal);
+                        assert_eq!(status.message(), INTERNAL_ERROR_MESSAGE);
+                    });
                 });
-            });
 
-            let captured = buffer.0.lock().expect("log buffer mutex").clone();
-            let logs = String::from_utf8(captured).expect("logs are utf-8");
-            assert_eq!(
-                logs.matches(case.token()).count(),
-                3,
-                "each gRPC RPC must log the injected category {case:?}: {logs}"
-            );
-            assert!(logs.contains("internal context error"), "{case:?}: {logs}");
-            assert!(!logs.contains(SENSITIVE_PROBE), "gRPC leak: {logs}");
+                let captured = buffer.0.lock().expect("log buffer mutex").clone();
+                let logs = String::from_utf8(captured).expect("logs are utf-8");
+                assert_single_operation_kind(&logs, op, case.token(), "gRPC");
+                assert!(
+                    logs.contains("internal context error"),
+                    "{case:?}/{op}: {logs}"
+                );
+                assert!(
+                    !logs.contains(SENSITIVE_PROBE),
+                    "gRPC leak: {case:?}/{op}: {logs}"
+                );
+            }
         }
     }
 }
