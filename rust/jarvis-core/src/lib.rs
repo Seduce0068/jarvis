@@ -1,8 +1,7 @@
 //! JARVIS Core - Shared types and traits
 
-// Canonical approval domain types (P1-7, 案A). The legacy `ApprovalRequest` /
-// `ApprovalDecision` below are intentionally kept at the crate root for source
-// compatibility; `approval` is the new single source of truth.
+// Canonical approval domain types live in `approval` (P1-7, 案A); that module is
+// the single source of truth shared by policy, transports and the UI.
 pub mod approval;
 
 use chrono::{DateTime, Utc};
@@ -76,25 +75,6 @@ pub struct PolicyCheckResponse {
     /// keys by default so older readers can still consume new payloads.
     #[serde(default)]
     pub reason: String,
-}
-
-/// Approval request
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalRequest {
-    pub id: String,
-    pub principal: String,
-    pub action: String,
-    pub resource: String,
-    pub context: Value,
-    pub requested_at: i64,
-    pub expires_at: i64,
-}
-
-/// Approval decision
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ApprovalDecision {
-    Approved,
-    Denied { reason: String },
 }
 
 /// Kill switch status
