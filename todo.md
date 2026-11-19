@@ -1143,27 +1143,57 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 38 のレビュー結果（未対応）
 
-- [ ] **3Way select が durable 再読の Ok(None)/Err で早期 Expired を返し
-  split brain が復活**（likely high）— `approval.rs:593-608,655-659`。
+- [x] **3Way select が durable 再読の Ok(None)/Err で早期 Expired を返し
+  split brain が復活**（likely high）— 2026-11-20 対応済み: 即座採用は `Ok(Some(LoadedDecision))` のみに限定。`Ok(None)`/`Err` は durable_fallback に記録して RECOVERY_GRACE 満了まで watch 再確認ループを継続。「durable 即 Err ＋遅延 watch」回帰2件追加。 `approval.rs:593-608,655-659`。
   `Race::Durable` の Ok(None)/Err が grace 満了前に関数を `Ok(Expired)` で
   終了する。Ok(Some) のみ早期採用し、None/Err は grace 完了後の最終手段へ
   格下げ。「durable が即 Err + watch が遅れて届く」回帰を追加。
-- [ ] **Race::Grace の reread.await にタイムアウトが無く期限後待機が無界**
+- [x] **Race::Grace の reread.await にタイムアウトが無く期限後待機が無界** — 2026-11-20 対応済み: 共有締切＋`tokio::time::timeout(RECOVERY_GRACE, &mut reread)` で最大1回だけ追加待機。タイムアウト時は request_id のみの固定 warn＋Expired 収束。stalled re-read の回帰テスト追加。
   （likely medium）— `approval.rs:586,609-630`。`tokio::time::timeout(残予算, reread)`
   で包み、タイムアウト時は固定語彙 warn＋Expired フォールバック。
-- [ ] **SQL 入れ替えの unit stop が Wants= で再起動され partial tree を読める**
+- [x] **SQL 入れ替えの unit stop が Wants= で再起動され partial tree を読める** — 2026-11-20 対応済み: versioned ツリー（`migrations.d/<commit>-<ts>-<pid>`）を完成させてから固定 `--source` パスの symlink を `mv -Tf` の1回の rename で切替。入替え中は unit を mask（EXIT トラップで unmask）し Wants= 再起動も防止。`--source` パス契約は不変、`bash -n` / shellcheck OK。
   （likely medium）— `build-selfhost.sh:236-264` と policy/context の
   `Wants=jarvis-migrations.service` + `Restart=on-failure`。入れ替え中は
   mask するか policy/context も停止、あるいは symlink/atomic rename で
   reader 停止に依存しない切替へ。
-- [ ] **deploy-mcp-gw の provenance gate がマーカー未添付を許容**
+- [x] **deploy-mcp-gw の provenance gate がマーカー未添付を許容** — 2026-11-20 対応済み: build-selfhost.sh が配置元 `rust/target/release/.jarvis-build-commit` にコミット＋4バイナリの SHA-256 を記録。deploy 側は欠落・空・HEAD 不一致・sha レコード欠落・不正 hex・バイナリ不一致をすべて fail-closed で拒否。
   （confirmed medium）— `deploy-mcp-gw-safe.sh:110-121`。build-selfhost.sh は
   `/opt/jarvis/bin/` にのみマーカーを置き `rust/target/release/` には置かない。
   配置対象と同ディレクトリへのマーカー生成を必須化し、欠落・空・HEAD 不一致を
   fail-closed で拒否（可能なら SHA-256 も照合）。
-- [ ] **最終試行の probe retry が枯渇した generation で再実行され lost-ack
-  契約が死ぬ**（likely medium）— `persistence.rs:426-436`。budget 枯渇時は
+- [x] **最終試行の probe retry が枯渇した generation で再実行され lost-ack
+  契約が死ぬ**（likely medium）— 2026-11-20 対応済み: `GenerationBudget::take_for_probe()` を追加し通常 probe は最後の1枠を温存。最終 retry が予約枠で別 generation を開き1回だけ再 probe。最大3世代の上限は維持、pure 回帰3件追加 — `persistence.rs:426-436`。budget 枯渇時は
   壊れた同一接続で2回目の probe を読むため OurCommit を検出できない。
   最終試行用に reconnect スロットを1つ予約するか、契約を実態へ合わせる。
 
 - 親が対応: clippy の too_many_arguments、evidence/spec 実測再生成、index 件数同期。
+
+### Round 39 のレビュー／発掘結果（未対応）
+
+- [ ] **migration 世代ツリーの prune が現在の symlink 実体を削除しうる**
+  （confirmed high）— `build-selfhost.sh:218,285,292-296` の prune が
+  `sort`（辞書順）のため、commit SHA の辞書順で最新ツリーが古い側に入ると
+  symlink 先が `rm -rf` される。mtime 順（`find -printf '%T@ %f\n' | sort -n`）
+  にするか `readlink -f` の解決先を除外。
+- [ ] **タイムアウトが永続化前にメモリへ Expired を確定し prune が再試行しない**
+  （confirmed high）— `approval.rs:528-530,550,1010-1013`。mark_expired が
+  Persistence(503) を返しても Expired が確定し、次回 prune は `is_expired`
+  分支で mark_expired を呼ばず破棄。監査行が欠落。コミット成功後にのみ
+  decision/decided_at を確定するか、未確認フラグで再試行。
+- [ ] **check-evidence が型不一致で整合チェック全体を黙ってスキップ**
+  （confirmed medium）— `check-evidence.sh:95-99,106-107,157-158`。skipped が
+  str／notes が dict だと NOTES_* / skipped 検証が走らず、passed 捏造を通過。
+  型違反を `BAD_NOTES_TYPE` / `BAD_RESULTS_TYPE` で fail-closed に。
+- [ ] **backup 仕様とエビデンスでリスク ID 集合が不一致（R-8 欠落）**
+  （confirmed medium）— `specs/test-backup.md:59-67` は R-1〜R-7、evidence は
+  R-8 を含む。Risk & tier に R-8（T3）を追加し、集合一致をゲート化。
+- [ ] **prune だけが AlreadyDecided を失敗扱いしゴーストを永久保持**
+  （confirmed medium）— `approval.rs:1030-1046`。reconcile / timeout と挙動を
+  揃え、AlreadyDecided を成功扱いにして evict する。
+- [ ] **発掘: 自動修正可能な残タスク5件** — test-restore-local.sh が
+  Makefile / ci-local / CI に未配線、config テンプレート3件に実装済み
+  セキュリティ変数が未反映、Makefile の .PHONY が5ターゲット欠落、
+  ui-build コメントが「CI 対象外」のまま、dsh.md の通知／監査永続化が
+  「未実装・判断待ち」のまま（実際は判断済み／実装済み）。
+
+- 親が対応: tokio::select! の構文（カンマ2箇所＋ガードの `, if`）、rustfmt。
