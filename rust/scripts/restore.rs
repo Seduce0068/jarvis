@@ -12,6 +12,15 @@
 /// dirs = "5.0"
 /// ```
 
+// DEPRECATED / 非推奨: このスクリプトはレガシーとして保持されています。
+// 現行のローカルバックアップ（backup-local.sh の成果物）とは互換性がありません。
+// OCI Object Storage / rclone / `op inject` を前提とした旧方式の復元ツールです。
+// 新しい復元には `infra/scripts/restore-local.sh` の使用を推奨します。
+// 設計決定: [local-restore-design.md](../../docs/integration/local-restore-design.md) (Decision 6)。
+// 削除は別の決定事項です（ADR-0004 のレガシー資産「凍結」方針に従い保持）。
+// 実行経路は既に塞がれています（infra/scripts/restore.sh は fail-closed ガード）。
+// 以下は参照用に残す既存コードであり、挙動・テストは変更しないでください。
+
 /// JARVIS Restore Script - Rust version
 /// Run with: `rust-script restore.rs <date|latest>` or compile with `cargo build --release --bin restore`
 use anyhow::{Context, Result};
