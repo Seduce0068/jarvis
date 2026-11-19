@@ -26,6 +26,15 @@
 //! attempt fails and when the CAS finds no undecided row: a row carrying the
 //! decision we attempted is our own success, while a different decision still
 //! reports `AlreadyDecided`. No second audit row is written on that path.
+//!
+//! I36-B: a transport error that may have hidden a successful `commit` used to
+//! give up in two places — a failed reconnect returned `Persistence` before the
+//! read-back probe ran, and the probe treated its own errors as `Undecided`,
+//! returning `Persistence` on the final attempt without ever opening a fresh
+//! connection generation. The post-error read-back now runs on every attempt
+//! (including the last) across fresh generations bounded by
+//! [`MAX_DB_ATTEMPTS`], and a failed reconnect is not fatal to the probe. A
+//! genuine inability to read the durable state still ends in `Persistence`.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -104,6 +113,31 @@ fn classify_recorded(
             DurableResolution::OurCommit
         }
         Some(_) => DurableResolution::CompetingDecision,
+    }
+}
+
+/// Pure decision for one iteration of the post-error durable read-back.
+///
+/// `Ok(recorded)` is a definitive answer from a working connection generation:
+/// classify it (reusing [`classify_recorded`]) and stop probing with that
+/// resolution — even when it is `Undecided` (a working read showed no committed
+/// row, so probing more generations cannot reveal a commit that is not there).
+/// `Err(())` is a probe transport error: return `None` so the caller opens
+/// another generation and probes again, up to [`MAX_DB_ATTEMPTS`].
+fn probe_iteration_resolution(
+    probe: &Result<Option<RecordedDecision>, ()>,
+    decision_label: &str,
+    decided_by: Option<&str>,
+    reason: Option<&str>,
+) -> Option<DurableResolution> {
+    match probe {
+        Ok(recorded) => Some(classify_recorded(
+            recorded.as_ref(),
+            decision_label,
+            decided_by,
+            reason,
+        )),
+        Err(()) => None,
     }
 }
 
@@ -249,6 +283,47 @@ impl PgApprovalPersistence {
         })
     }
 
+    /// Read back the durable decision after an ambiguous transaction error, on
+    /// a sequence of fresh connection generations bounded by
+    /// [`MAX_DB_ATTEMPTS`].
+    ///
+    /// The generation that just failed the transaction may be broken, so every
+    /// iteration first tries to install a fresh one. A failed reconnect is
+    /// *not* fatal here: it only leaves the current (possibly stale) generation
+    /// in place, and the next iteration tries again. A probe transport error
+    /// likewise just moves us to the next generation. A definitive answer (our
+    /// commit, a competing decision, or a working read showing no committed
+    /// row) stops the loop early.
+    ///
+    /// No URL, SQL, decision label or payload is logged: a probe error is
+    /// discarded and a reconnect failure is logged generically inside
+    /// [`Connection::reconnect`].
+    async fn read_back_after_error(
+        &self,
+        guard: &mut Connection,
+        id: Uuid,
+        decision_label: &str,
+        decided_by: Option<&str>,
+        reason: Option<&str>,
+    ) -> DurableResolution {
+        for _ in 0..MAX_DB_ATTEMPTS {
+            // Fresh generation before each probe. `reconnect` logs the failure
+            // without the URL; never propagate it here — probing must continue
+            // even when a reconnect fails (I36-B).
+            let _ = guard.reconnect(&self.pg_url).await;
+
+            let probe = read_decision_on_client(&guard.client, id)
+                .await
+                .map_err(|_| ());
+            if let Some(resolution) =
+                probe_iteration_resolution(&probe, decision_label, decided_by, reason)
+            {
+                return resolution;
+            }
+        }
+        DurableResolution::Undecided
+    }
+
     /// Run the CAS + audit INSERT in a single transaction.
     ///
     /// Returns `Ok(())` only after the commit is known to be durable. A
@@ -375,34 +450,34 @@ impl PgApprovalPersistence {
                         attempt_no,
                         "approval decision transaction attempt failed"
                     );
-                    let retry = should_retry(attempt_no, MAX_DB_ATTEMPTS);
-                    if retry {
-                        guard.reconnect(&self.pg_url).await?;
-                    }
-
-                    // The error may have arrived *after* the server committed
-                    // (lost acknowledgement). Probe the durable state on the
-                    // current — possibly freshly reconnected — generation
-                    // before retrying or giving up. A probe failure is treated
-                    // as "undecided" so it never masks the original failure
-                    // handling; its error text is not logged here and never
-                    // carries the connection URL.
-                    let recorded = read_decision_on_client(&guard.client, id)
-                        .await
-                        .ok()
-                        .flatten();
-                    match classify_recorded(recorded.as_ref(), decision_label, decided_by, reason) {
+                    // The error is ambiguous: the server may have committed and
+                    // only the acknowledgement was lost. Resolve it by reading
+                    // back the durable state on fresh generations. This runs on
+                    // EVERY attempt, including the final one, so a lost commit
+                    // acknowledgement never degrades into a Persistence/503
+                    // split brain (I36-B). A failed reconnect does not skip the
+                    // probe — `read_back_after_error` keeps trying generations
+                    // up to MAX_DB_ATTEMPTS and only gives up when undecidable.
+                    let resolution = self
+                        .read_back_after_error(&mut guard, id, decision_label, decided_by, reason)
+                        .await;
+                    match resolution {
                         DurableResolution::OurCommit => return Ok(()),
                         DurableResolution::CompetingDecision => {
                             return Err(ApprovalError::AlreadyDecided(id));
                         }
-                        DurableResolution::Undecided => {}
+                        DurableResolution::Undecided => {
+                            // Either a working generation showed no committed
+                            // row, or no generation could be obtained within
+                            // the probe budget. Retry the whole transaction
+                            // while the attempt budget remains; otherwise this
+                            // is genuinely undecidable -> Persistence.
+                            if should_retry(attempt_no, MAX_DB_ATTEMPTS) {
+                                continue;
+                            }
+                            return Err(db_failure(error));
+                        }
                     }
-
-                    if retry {
-                        continue;
-                    }
-                    return Err(db_failure(error));
                 }
             }
         }
@@ -705,5 +780,97 @@ mod tests {
         assert!(sql.contains("decided_at is not null"));
         assert!(sql.contains("select decision, decided_by, reason"));
         assert!(sql.contains("where id = $1"));
+    }
+
+    // ---- I36-B lost-ack read-back across fresh generations (pure, no DB) ---
+
+    /// Drive the pure per-iteration read-back decision over a sequence of
+    /// simulated probe outcomes (one per connection generation) and return the
+    /// final resolution. Mirrors `read_back_after_error`'s bounded loop without
+    /// I/O, so the retry semantics are regression-testable without a database.
+    fn resolve_probe_sequence(
+        probes: &[Result<Option<RecordedDecision>, ()>],
+        label: &str,
+        by: Option<&str>,
+        reason: Option<&str>,
+    ) -> DurableResolution {
+        for probe in probes.iter().take(MAX_DB_ATTEMPTS) {
+            if let Some(resolution) = probe_iteration_resolution(probe, label, by, reason) {
+                return resolution;
+            }
+        }
+        DurableResolution::Undecided
+    }
+
+    #[test]
+    fn probe_transport_error_then_fresh_generation_finds_our_commit() {
+        let committed = Some(RecordedDecision {
+            decision: "approved".into(),
+            decided_by: Some("operator".into()),
+            reason: None,
+        });
+        // Generation 1: probe/reconnect transport error -> keep trying.
+        // Generation 2: a fresh generation reads the committed approved row.
+        let probes = [Err(()), Ok(committed)];
+        assert_eq!(
+            resolve_probe_sequence(&probes, "approved", Some("operator"), None),
+            DurableResolution::OurCommit
+        );
+    }
+
+    #[test]
+    fn probe_keeps_trying_generations_after_each_reconnect_failure() {
+        let committed = Some(RecordedDecision {
+            decision: "approved".into(),
+            decided_by: Some("operator".into()),
+            reason: None,
+        });
+        // Two failed generations/reconnects, then success on the third — still
+        // within MAX_DB_ATTEMPTS, so a transient outage cannot lose our commit.
+        let probes = [Err(()), Err(()), Ok(committed)];
+        assert_eq!(
+            resolve_probe_sequence(&probes, "approved", Some("operator"), None),
+            DurableResolution::OurCommit
+        );
+    }
+
+    #[test]
+    fn probe_exhausting_budget_stays_undecided_for_persistence() {
+        // Every generation's probe fails at the transport level: genuinely
+        // undecidable after MAX_DB_ATTEMPTS -> the caller returns Persistence.
+        let probes = [Err(()), Err(()), Err(())];
+        assert_eq!(
+            resolve_probe_sequence(&probes, "approved", Some("operator"), None),
+            DurableResolution::Undecided
+        );
+    }
+
+    #[test]
+    fn final_generation_probe_is_not_skipped_and_keeps_competing_semantics() {
+        // A definitive read on the last available generation must resolve
+        // OurCommit even when no transaction retry budget remains.
+        let probes = [
+            Err(()),
+            Err(()),
+            Ok(Some(RecordedDecision {
+                decision: "approved".into(),
+                decided_by: Some("operator".into()),
+                reason: None,
+            })),
+        ];
+        assert_eq!(
+            resolve_probe_sequence(&probes, "approved", Some("operator"), None),
+            DurableResolution::OurCommit
+        );
+        // A competing decision on any generation still keeps AlreadyDecided.
+        let competing = Ok(Some(RecordedDecision {
+            decision: "denied".into(),
+            decided_by: None,
+            reason: Some("policy".into()),
+        }));
+        assert_eq!(
+            resolve_probe_sequence(&[competing], "approved", Some("operator"), None),
+            DurableResolution::CompetingDecision
+        );
     }
 }
