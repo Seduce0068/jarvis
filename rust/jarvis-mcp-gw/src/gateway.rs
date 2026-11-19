@@ -10,6 +10,12 @@
 //!    and their declared input schemas are retained so the MCP `tools/list`
 //!    surface can advertise the upstream contract instead of a generic one.
 //!
+//! When an upstream advertises a name that also has a native handler, the
+//! upstream wins both at execution time and in schema advertisement. We chose
+//! to align the two orders (rather than reject such registrations) because
+//! collisions are legitimate upstream deployments and both decisions now flow
+//! through [`resolve_target`], which makes any future drift impossible.
+//!
 //! There is no agent-runtime CLI fallback (ADR-0002): tools with neither a
 //! native handler nor an upstream server return a clear error. [`Gateway`]
 //! is a low-level execution primitive: it routes a tool to a registered
@@ -157,6 +163,44 @@ struct RegisteredServer {
     liveness: ProcessLiveness,
 }
 
+/// Backend that actually serves a tool, together with the schema that must be
+/// advertised for it.
+///
+/// Both [`Gateway::execute`] (which backend runs `tools/call`) and the MCP
+/// `tools/list` surface (via [`Gateway::upstream_input_schema`]) derive their
+/// answer from [`resolve_target`]. This is intentional: an upstream that owns
+/// a tool name is also the backend that executes it, so the shown contract
+/// can never disagree with the code path that will validate the call.
+struct ToolTarget<'a> {
+    server: &'a Arc<RegisteredServer>,
+    input_schema: Option<&'a serde_json::Map<String, Value>>,
+}
+
+/// Single source of truth for "which backend owns `tool`".
+///
+/// The lookup is upstream-first: a registered server advertising `tool` wins
+/// over the native handler, exactly as execution routing has always done.
+/// The declared schema is read from that *same* server, so schema selection
+/// and routing are decided together here instead of being computed twice in
+/// different modules. A native tool therefore contributes a schema only when
+/// no upstream owns its name.
+///
+/// Registration-time conflict detection (see [`Gateway::register_transport_inner`])
+/// guarantees at most one upstream can own a given name, so this lookup is
+/// deterministic regardless of `HashMap` iteration order.
+fn resolve_target<'a>(
+    servers: &'a HashMap<String, Arc<RegisteredServer>>,
+    tool: &str,
+) -> Option<ToolTarget<'a>> {
+    let server = servers
+        .values()
+        .find(|server| server.tools.contains(tool))?;
+    Some(ToolTarget {
+        server,
+        input_schema: server.input_schemas.get(tool),
+    })
+}
+
 #[allow(dead_code)]
 pub struct Gateway {
     config: crate::config::McpGatewayConfig,
@@ -186,6 +230,10 @@ impl Gateway {
     /// entry cannot run even if a registered server advertises it. Registered
     /// servers take precedence over the sandbox fallback when they expose
     /// the tool name.
+    ///
+    /// Backend ownership is decided by [`resolve_target`], shared with schema
+    /// advertisement so `tools/list` never shows a native contract for a tool
+    /// this method routes to an upstream server.
     ///
     /// This method does not apply policy, principal, argument-size or approval
     /// checks; callers needing those guarantees must go through
@@ -220,10 +268,11 @@ impl Gateway {
                 )));
             }
 
-            servers
-                .values()
-                .find(|server| server.tools.contains(tool))
-                .map(Arc::clone)
+            // Upstream-first ownership comes from `resolve_target`, the same
+            // helper the MCP `tools/list` surface uses to select the schema.
+            // One decision point keeps the shown contract aligned with the
+            // backend that actually runs the call.
+            resolve_target(&servers, tool).map(|target| Arc::clone(target.server))
         };
 
         if let Some(server) = server {
@@ -234,21 +283,20 @@ impl Gateway {
         self.sandbox.execute(tool, args, &tool_config).await
     }
 
-    /// Input schema declared by an upstream MCP server for `tool`, captured
-    /// from that server's `tools/list` response at registration time.
+    /// Input schema clients must advertise for `tool`, captured from the
+    /// `tools/list` response of the upstream server that owns the name.
     ///
-    /// Only tools advertised by a registered server have an entry here.
-    /// Native tools are served by the hardcoded branch on the MCP surface
-    /// and therefore return `None` from this lookup.
+    /// The schema comes from [`resolve_target`] -- the very same ownership
+    /// decision [`Gateway::execute`] uses for routing -- so a tool executed by
+    /// an upstream is never advertised with a native schema. Only tools owned
+    /// by a registered server get an entry here; native tools are served by
+    /// the hardcoded branch on the MCP surface and therefore return `None`.
     pub(crate) async fn upstream_input_schema(
         &self,
         tool: &str,
     ) -> Option<serde_json::Map<String, Value>> {
-        self.servers
-            .read()
-            .await
-            .values()
-            .find_map(|server| server.input_schemas.get(tool).cloned())
+        let servers = self.servers.read().await;
+        resolve_target(&servers, tool)?.input_schema.cloned()
     }
 
     /// Spawn an upstream MCP server and register it with the gateway.

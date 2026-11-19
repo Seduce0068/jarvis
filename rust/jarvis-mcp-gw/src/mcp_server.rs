@@ -11,10 +11,16 @@
 //! localhost-only HTTP listener of the gateway.
 //!
 //! Tool schemas on `tools/list` come from three sources, in priority order:
-//! native tools keep their hardcoded argument contract, tools served by a
-//! registered upstream MCP server reuse the `inputSchema` that server
-//! declared at registration time, and everything else gets a permissive
-//! object schema.
+//! tools served by a registered upstream MCP server reuse the `inputSchema`
+//! that server declared at registration time, native tools keep their
+//! hardcoded argument contract, and everything else gets a permissive object
+//! schema.
+//!
+//! This order mirrors execution routing, where an upstream server always wins
+//! over the native handler. We adopted aligned ordering instead of rejecting
+//! colliding registrations: the single ownership decision lives in
+//! `gateway::resolve_target`, so the advertised contract always belongs to
+//! the backend that will actually run the call.
 
 use crate::McpGateway;
 use rmcp::model::{
@@ -41,21 +47,19 @@ impl JarvisMcpServer {
 
     /// Tools the endpoint principal may call, in stable order.
     ///
-    /// Native tools keep their hardcoded argument schema. For every other
-    /// tool, the `inputSchema` declared by the upstream server at
-    /// registration time is reused when available; tools with neither source
-    /// fall back to the permissive generic schema.
+    /// Schema selection uses the same upstream-first order as execution
+    /// routing (`gateway::resolve_target`): a tool owned by a registered
+    /// upstream server reuses the `inputSchema` that server declared at
+    /// registration time, because that server is also what `tools/call` will
+    /// execute. Native tools keep their hardcoded schema only when no
+    /// upstream owns the name; tools with neither source fall back to the
+    /// permissive generic schema.
     async fn tools(&self) -> Vec<Tool> {
         let mut tools = Vec::new();
         for tool in self.gateway.tools_for_principal(&self.principal) {
-            let schema = match native_input_schema(&tool.name) {
+            let schema = match self.gateway.gateway.upstream_input_schema(&tool.name).await {
                 Some(schema) => schema,
-                None => self
-                    .gateway
-                    .gateway
-                    .upstream_input_schema(&tool.name)
-                    .await
-                    .unwrap_or_else(generic_input_schema),
+                None => native_input_schema(&tool.name).unwrap_or_else(generic_input_schema),
             };
             tools.push(Tool::new(
                 tool.name.clone(),
@@ -423,21 +427,26 @@ requires_approval = true
         );
     }
 
-    /// Native tools keep their hardcoded schema even when an upstream server
-    /// happens to advertise the same tool name.
+    /// Regression: the advertised schema follows the same upstream-first
+    /// order as execution routing. An upstream that advertises `web.fetch`
+    /// also executes it (`Gateway::execute` prefers registered servers over
+    /// the native handler), so `tools/list` must show that upstream's declared
+    /// schema rather than the native `web.fetch` contract. The historical
+    /// test name is kept; only the expected value changed to mirror routing.
     #[tokio::test]
     async fn native_tool_schema_takes_precedence_over_upstream_schema() {
         let gateway = endpoint_gateway("native-precedence").await;
         allow_upstream_tool(&gateway, "web.fetch");
 
+        let declared = json!({
+            "type": "object",
+            "properties": { "from_upstream": { "type": "boolean" } }
+        });
         let (client_side, server_side) = tokio::io::duplex(8192);
         tokio::spawn(crate::gateway::run_mock_mcp_server_with_schema(
             server_side,
             "web.fetch",
-            json!({
-                "type": "object",
-                "properties": { "from_upstream": { "type": "boolean" } }
-            }),
+            declared.clone(),
         ));
         gateway
             .register_transport("mock", client_side)
@@ -449,10 +458,15 @@ requires_approval = true
         let advertised = tools
             .iter()
             .find(|tool| tool.name.as_ref() == "web.fetch")
-            .expect("native tool listed");
-        assert_eq!(
-            serde_json::Value::Object((*advertised.input_schema).clone()),
-            serde_json::Value::Object(tool_input_schema("web.fetch"))
+            .expect("tool listed");
+        let shown = serde_json::Value::Object((*advertised.input_schema).clone());
+        // The upstream owns the name and therefore runs the call: advertise
+        // its contract, never the native hard-coded `web.fetch` schema.
+        assert_eq!(shown, declared);
+        assert_ne!(
+            shown,
+            serde_json::Value::Object(tool_input_schema("web.fetch")),
+            "a native schema must not be shown for an upstream-owned tool"
         );
     }
 
