@@ -85,6 +85,68 @@ impl GrpcEventService {
     }
 }
 
+/// Validate a request and build the event to enqueue.
+///
+/// proto3 has no required fields: an absent string arrives as `""` and an
+/// absent `int64` as `0`. The handler therefore distinguishes "unspecified"
+/// from malformed instead of replacing every parse failure with a default:
+///
+/// - `id` must parse as a UUID (`""` from an absent field is rejected);
+/// - `source` must be non-empty and name a known [`EventSource`];
+/// - `payload` must contain a valid JSON document (`""` from an absent field
+///   is not JSON and is rejected, matching the HTTP endpoint where the field
+///   is mandatory);
+/// - `timestamp == 0` means "unspecified" and is replaced with the current
+///   time; any other value must be representable as a `DateTime<Utc>`.
+///
+/// `event_type` and `correlation_id` are free-form strings that pass through
+/// unchanged. No rejected value is logged, so a malicious payload never
+/// reaches telemetry.
+fn event_from_request(req: &EmitEventRequest) -> Result<UnifiedEvent, Status> {
+    let id = match uuid::Uuid::parse_str(&req.id) {
+        Ok(id) => id,
+        Err(_) => return Err(Status::invalid_argument("id must be a valid UUID")),
+    };
+
+    if req.source.trim().is_empty() {
+        return Err(Status::invalid_argument("source must not be empty"));
+    }
+    let source = match req.source.parse::<EventSource>() {
+        Ok(source) => source,
+        Err(_) => {
+            return Err(Status::invalid_argument(
+                "source must be a known event source",
+            ));
+        }
+    };
+
+    if req.payload.trim().is_empty() {
+        return Err(Status::invalid_argument("payload must be a JSON document"));
+    }
+    let payload = match serde_json::from_str::<serde_json::Value>(&req.payload) {
+        Ok(payload) => payload,
+        Err(_) => return Err(Status::invalid_argument("payload must be valid JSON")),
+    };
+
+    let timestamp = if req.timestamp == 0 {
+        chrono::Utc::now()
+    } else {
+        match chrono::DateTime::from_timestamp(req.timestamp, 0) {
+            Some(timestamp) => timestamp,
+            None => return Err(Status::invalid_argument("timestamp is out of range")),
+        }
+    };
+
+    Ok(UnifiedEvent {
+        id,
+        source,
+        event_type: req.event_type.clone(),
+        payload,
+        timestamp,
+        correlation_id: req.correlation_id.clone(),
+    })
+}
+
 #[tonic::async_trait]
 impl EventService for GrpcEventService {
     async fn emit_event(
@@ -93,15 +155,10 @@ impl EventService for GrpcEventService {
     ) -> Result<Response<EmitEventResponse>, Status> {
         authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
-        let event = UnifiedEvent {
-            id: uuid::Uuid::parse_str(&req.id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
-            source: req.source.parse().unwrap_or(EventSource::Manual),
-            event_type: req.event_type,
-            payload: serde_json::from_str(&req.payload).unwrap_or_default(),
-            timestamp: chrono::DateTime::from_timestamp(req.timestamp, 0)
-                .unwrap_or_else(chrono::Utc::now),
-            correlation_id: req.correlation_id,
-        };
+        // Reject malformed input before it can enter the bounded queue and be
+        // acknowledged with `success: true`. Auth stays first so unauthenticated
+        // callers cannot probe the validation rules.
+        let event = event_from_request(&req)?;
         submit_event(&self.normalizer.event_sender(), event)?;
         Ok(Response::new(EmitEventResponse { success: true }))
     }
@@ -186,5 +243,91 @@ mod tests {
         assert!(authorize(&request, None).is_ok());
         let with_token = request_with_token(Some("anything"));
         assert!(authorize(&with_token, None).is_ok());
+    }
+
+    fn valid_request() -> EmitEventRequest {
+        EmitEventRequest {
+            id: uuid::Uuid::from_u128(42).to_string(),
+            source: "web".into(),
+            event_type: "test_event".into(),
+            payload: r#"{"key":"value"}"#.into(),
+            timestamp: 1_700_000_000,
+            correlation_id: "corr-42".into(),
+        }
+    }
+
+    #[test]
+    fn event_from_request_accepts_a_valid_request() {
+        let event = event_from_request(&valid_request()).expect("valid request accepted");
+        assert_eq!(event.id, uuid::Uuid::from_u128(42));
+        assert_eq!(event.source, EventSource::Web);
+        assert_eq!(event.event_type, "test_event");
+        assert_eq!(event.payload, json!({"key": "value"}));
+        assert_eq!(
+            event.timestamp,
+            chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp")
+        );
+        assert_eq!(event.correlation_id, "corr-42");
+    }
+
+    #[test]
+    fn event_from_request_rejects_invalid_or_missing_id() {
+        for id in ["", "not-a-uuid", "00000000-0000-0000-0000-00000000000g"] {
+            let mut req = valid_request();
+            req.id = id.into();
+            let status = event_from_request(&req).expect_err("invalid id must be rejected");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn event_from_request_rejects_empty_or_unknown_source() {
+        for source in ["", "   ", "telepathy"] {
+            let mut req = valid_request();
+            req.source = source.into();
+            let status = event_from_request(&req).expect_err("invalid source must be rejected");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn event_from_request_rejects_invalid_or_missing_payload() {
+        for payload in ["", "   ", "{not json", "null trailing"] {
+            let mut req = valid_request();
+            req.payload = payload.into();
+            let status = event_from_request(&req).expect_err("invalid payload must be rejected");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn event_from_request_treats_zero_timestamp_as_unspecified() {
+        let mut req = valid_request();
+        req.timestamp = 0;
+        let before = chrono::Utc::now();
+        let event = event_from_request(&req).expect("zero timestamp means unspecified");
+        let after = chrono::Utc::now();
+        assert!(event.timestamp >= before && event.timestamp <= after);
+    }
+
+    #[test]
+    fn event_from_request_rejects_out_of_range_timestamp() {
+        for timestamp in [i64::MAX, i64::MIN] {
+            let mut req = valid_request();
+            req.timestamp = timestamp;
+            let status = event_from_request(&req).expect_err("out-of-range timestamp rejected");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn event_from_request_accepts_valid_pre_epoch_timestamp() {
+        let mut req = valid_request();
+        req.timestamp = -1;
+        let event = event_from_request(&req).expect("valid pre-epoch timestamp accepted");
+        assert_eq!(
+            event.timestamp,
+            chrono::DateTime::from_timestamp(-1, 0).expect("valid timestamp")
+        );
     }
 }
