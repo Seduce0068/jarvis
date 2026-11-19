@@ -169,6 +169,19 @@ elif mode in ('notes_count_conflict', 'notes_passed_conflict'):
     notes = data.get('notes', '')
     data['notes'] = (notes + ' ' + str(conflict) + ' ' + suffix + '.') \
         if isinstance(notes, str) else (str(conflict) + ' ' + suffix + '.')
+elif mode == 'ignored_no_number':
+    # Replace the numeric "N ignored" justification with a phrase that still
+    # contains the substring "ignored" but no count. The old gate only looked
+    # for that substring and accepted this; the fixed gate requires the number
+    # to equal results.skipped. Caller picks a skipped>0 source.
+    notes = data.get('notes', '')
+    if not isinstance(notes, str):
+        raise SystemExit('notes must be str for ignored_no_number')
+    new_notes, n = re.subn(r'\b\d+\s+ignored\b', 'no tests were ignored',
+                           notes, count=1, flags=re.IGNORECASE)
+    if n != 1:
+        raise SystemExit('numeric ignored phrase not found')
+    data['notes'] = new_notes
 elif mode == 'bad_notes_type':
     # notes must be a str. A dict previously turned both the skipped
     # justification and the notes-consistency checks into no-ops. Only the
@@ -400,6 +413,136 @@ PY
     fail=$((fail+1))
   fi
 fi
+
+# I60-C: a positive skipped count needs a numeric "N ignored" in notes, and
+# evidence index entries must resolve inline links and state passed/failed.
+# Use a fresh temp tree so the earlier tamper fixtures stay pristine.
+i60_tmp="$tmp/i60_negative"
+mkdir -p "$i60_tmp/ci/scripts" "$i60_tmp/evidence" "$i60_tmp/specs"
+i60_gate="$i60_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/ci/scripts/check-evidence.sh" "$i60_gate"
+cp "$repo/specs/index.md" "$i60_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$i60_tmp/evidence/index.md"
+cp "$repo/todo.md" "$i60_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$i60_tmp/evidence/"
+for spec in "${spec_files[@]}"; do
+  ln -s "$spec" "$i60_tmp/specs/$(basename "$spec")"
+done
+
+# The mcp-gw record is the existing evidence with skipped>0 and a numeric
+# ignored claim; it must still pass unchanged before any tampering.
+skipped_source=$(python3 - "${evidence_files[@]}" <<'PY'
+import json, re, sys
+for path in sys.argv[1:]:
+    d = json.load(open(path, encoding='utf-8'))
+    notes = d.get('notes', '')
+    if (type(d['results'].get('skipped')) is int
+            and d['results']['skipped'] > 0
+            and isinstance(notes, str)
+            and re.search(r'\d+\s+ignored', notes, re.IGNORECASE)):
+        print(path)
+        break
+PY
+)
+if [ -z "$skipped_source" ]; then
+  echo "  FAIL: no evidence with numeric ignored claim for I60-C"
+  fail=$((fail+1))
+else
+  skipped_copy="$i60_tmp/evidence/$(basename "$skipped_source")"
+  if bash "$i60_gate" >/dev/null 2>&1; then
+    echo "  PASS: skipped evidence with numeric ignored claim accepted"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: skipped evidence with numeric ignored claim rejected"
+    fail=$((fail+1))
+  fi
+  if ! tamper_evidence "$skipped_source" "$skipped_copy" ignored_no_number; then
+    echo "  FAIL: could not prepare ignored_no_number tamper"
+    fail=$((fail+1))
+  else
+    out=$(bash "$i60_gate" 2>&1); code=$?
+    if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'SKIPPED_TESTS'; then
+      echo "  PASS: check-evidence.sh rejects notes with no numeric ignored count"
+      ok=$((ok+1))
+    else
+      echo "  FAIL: check-evidence.sh accepted notes with no numeric ignored count (exit $code)"
+      printf '%s\n' "$out" | head -3 >&2
+      fail=$((fail+1))
+    fi
+  fi
+fi
+
+# Convert one evidence entry from "[text][run-mcp]" to an inline link. The
+# untouched conversion must stay accepted; a tampered count or a missing
+# count line must be rejected (INDEX_RESULT_MISMATCH / INDEX_RESULT_MISSING).
+for mode in inline_ok inline_tamper inline_no_counts; do
+  cp "$repo/evidence/index.md" "$i60_tmp/evidence/index.md"
+  cp "$repo"/evidence/test-run-*.json "$i60_tmp/evidence/"
+  if ! python3 - "$repo/evidence/index.md" "$i60_tmp/evidence/index.md" "$mode" <<'PY'
+import re, sys
+
+src, dst, mode = sys.argv[1:4]
+with open(src, encoding='utf-8') as fh:
+    text = fh.read()
+label = 'run-mcp'
+def_m = re.search(r'^\[' + re.escape(label) + r'\]:[ \t]*([^\s]+)[ \t]*$',
+                  text, re.MULTILINE)
+if not def_m:
+    raise SystemExit('run-mcp REF_DEF not found')
+target = def_m.group(1)
+starts = [m.start() for m in re.finditer(r'^[ \t]*-[ \t]+\[', text, re.MULTILINE)]
+for i, start in enumerate(starts):
+    end = starts[i + 1] if i + 1 < len(starts) else len(text)
+    block = text[start:end]
+    if '][' + label + ']' not in block:
+        continue
+    new = block.replace('][' + label + ']', '](' + target + ')', 1)
+    if mode == 'inline_tamper':
+        new, n = re.subn(r'\d+([ \t]+passed)', r'0\1', new, count=1)
+        if n != 1:
+            raise SystemExit('passed count not found in inline entry')
+    elif mode == 'inline_no_counts':
+        new, n = re.subn(r'^[ \t]*\d+[ \t]+passed[^\n]*\n?', '', new,
+                         count=1, flags=re.MULTILINE)
+        if n != 1:
+            raise SystemExit('counts line not found in inline entry')
+    text = text[:start] + new + text[end:]
+    break
+else:
+    raise SystemExit('index entry for run-mcp not found')
+with open(dst, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+  then
+    echo "  FAIL: could not prepare index variant $mode"
+    fail=$((fail+1))
+    continue
+  fi
+  out=$(bash "$i60_gate" 2>&1); code=$?
+  if [ "$mode" = inline_ok ]; then
+    if printf '%s' "$out" | grep -q '^ok=[0-9]* errors=0$'; then
+      echo "  PASS: inline-link index entry accepted when counts match"
+      ok=$((ok+1))
+    else
+      echo "  FAIL: inline-link index entry rejected (exit $code)"
+      printf '%s\n' "$out" | head -3 >&2
+      fail=$((fail+1))
+    fi
+    continue
+  fi
+  case "$mode" in
+    inline_tamper) pattern='INDEX_RESULT_MISMATCH' ;;
+    inline_no_counts) pattern='INDEX_RESULT_MISSING' ;;
+  esac
+  if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
+    echo "  PASS: check-evidence.sh rejects $mode index entry"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: check-evidence.sh accepted $mode index entry (exit $code)"
+    printf '%s\n' "$out" | head -3 >&2
+    fail=$((fail+1))
+  fi
+done
 
 # I59-A: two evidence files citing the same spec must BOTH have their
 # requirements checked. The old dict keyed by spec kept only the last entry,

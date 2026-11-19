@@ -21,11 +21,14 @@
 # hide behind a first one with the correct requirements. The executed total
 # (passed + failed only; skipped does not count) must cover every
 # `Scenario:` declared by the referenced spec, so a near-total skip or a run
-# that executes only part of a specification cannot pass. Index entry counts
-# ("N passed / N failed / N skipped") are resolved through reference-style link
-# definitions and must agree with the referenced JSON results, so tampering a
-# headline count cannot hide a failure. Values are withheld from error output;
-# no secret values are read.
+# that executes only part of a specification cannot pass. A positive skipped
+# count needs an explicit "N ignored" in notes whose number equals
+# results.skipped; the bare substring "ignored" is not sufficient. Index entry
+# counts ("N passed / N failed / N skipped") are resolved through both
+# reference-style definitions and inline links, must state at least passed and
+# failed, and must agree with the referenced JSON results, so changing the link
+# format or deleting a headline count cannot hide a failure. Values are withheld
+# from error output; no secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -115,14 +118,20 @@ for f in evidence_files:
     if not isinstance(notes, str):
         errors.append(f"{f}: BAD_NOTES_TYPE"); continue
     # A near-total skip must not satisfy the gate. A positive skipped count is
-    # accepted only when the evidence notes explicitly document it as
-    # `ignored` (e.g. Docker-only #[ignore] tests): silently rewriting the
-    # number to 0 would falsify the record. bool True == 1 is excluded so it
-    # cannot bypass. Only the error code is emitted; values are never printed.
+    # accepted only when the notes state the SAME number as "N ignored"
+    # (e.g. "1 ignored" for Docker-only #[ignore] tests). A bare substring such
+    # as "no tests were ignored" no longer justifies a skipped count: it was
+    # the old gate's fail-open hole. finditer checks every occurrence, so a
+    # second, contradictory count cannot hide behind a matching one. bool
+    # True == 1 is excluded above by BAD_RESULTS_TYPE. Only the error code is
+    # emitted; values are never printed.
     skipped = r.get("skipped", 0)
     if skipped is True or (type(skipped) is int and skipped > 0):
-        notes = d.get("notes", "")
-        if not isinstance(notes, str) or "ignored" not in notes.lower():
+        if not isinstance(notes, str):
+            errors.append(f"{f}: SKIPPED_TESTS"); continue
+        justified = any(int(m.group(1)) == skipped for m in
+                        re.finditer(r'(\d+)\s*ignored\b', notes, re.IGNORECASE))
+        if not justified:
             errors.append(f"{f}: SKIPPED_TESTS"); continue
     # Notes/results consistency. EVERY explicit "N passed", "N failed" or
     # "N ignored|skipped" phrase, plus EVERY headline count ("N 件", "N checks",
@@ -311,12 +320,15 @@ def index_targets(index_path):
             continue
         yield os.path.normpath(os.path.join(base, target))
 
-# Index result claims (review R4-A). Each evidence index entry cites a JSON
-# through a reference-style link ("[text][label]" plus a "[label]: file.json"
-# definition) and states "N passed / N failed / N skipped". Resolve the label
-# through REF_DEF, load that JSON and compare every stated field against its
-# results. Only fields actually printed in the entry are compared (many entries
-# omit skipped). Values are withheld: the error is value-less.
+# Index result claims (review R4-A, I60-C). Each evidence index entry cites a
+# JSON through a reference-style link ("[text][label]" plus a "[label]:
+# file.json" definition) or an inline link ("[text](file.json)") and states
+# "N passed / N failed / N skipped". Resolve both forms, load that JSON and
+# compare every stated field against its results. An evidence entry must state
+# at least passed and failed; a missing claim fails closed with
+# INDEX_RESULT_MISSING instead of being silently skipped. Entries in
+# specs/index.md point at .md files and carry no counts, so they are not
+# evidence entries. Values are withheld: errors are value-less.
 ENTRY_START = re.compile(r'^[ \t]*-[ \t]+\[', re.MULTILINE)
 REF_USAGE = re.compile(r'\]\[([^\]]+)\]')
 
@@ -329,13 +341,29 @@ def index_result_entries(index_path):
     for i, start in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else len(text)
         block = text[start:end]
+        # A block may hold both forms (the continuation line links the spec
+        # .md). Collect all candidates and prefer one resolving to JSON.
+        candidates = []
         usage = REF_USAGE.search(block)
-        if not usage:
+        if usage:
+            candidates.append(ref_defs.get(usage.group(1), ""))
+        candidates.extend(m.group(1) for m in INLINE_LINK.finditer(block))
+        json_path = None
+        evidence_entry = False
+        for item in candidates:
+            raw = unquote(item.strip()).split('#', 1)[0]
+            if not raw or raw.startswith(NON_LOCAL):
+                continue
+            if not (raw.endswith('.json') or 'test-run-' in raw):
+                continue
+            evidence_entry = True
+            resolved = os.path.normpath(os.path.join(base, raw))
+            if resolved.endswith('.json'):
+                json_path = resolved
+                break
+        if not evidence_entry:
             continue
-        target = ref_defs.get(usage.group(1))
-        if not target:
-            continue
-        json_path = os.path.normpath(os.path.join(base, unquote(target.strip())))
+        # None marks an evidence entry whose JSON target cannot be resolved.
         found = {}
         for key in ("passed", "failed", "skipped"):
             m = re.search(r'(\d+)[ \t]+' + key + r'\b', block, re.IGNORECASE)
@@ -359,11 +387,17 @@ for index_path, artifacts, kind in (
             errors.append(f"INDEX_BROKEN_LINK:{index_path}:{target}")
     # Every stated count must match the referenced evidence JSON. A tampered
     # index that lowers passed to 0 while the JSON still records a positive
-    # count must fail closed. A missing/unreadable target is already reported
-    # above as a broken link, so only well-formed JSON is compared here.
+    # count must fail closed. Missing claims are reported as INDEX_RESULT_MISSING;
+    # a broken file link is already reported by the link check above.
     for json_path, found in index_result_entries(index_path):
-        if not found or not os.path.isfile(json_path):
+        # Mandatory claims: an evidence entry without passed/failed, or one
+        # whose JSON target is unresolvable, fails closed. Previously such an
+        # entry was silently skipped, so deleting counts hid tampered results.
+        if json_path is None or "passed" not in found or "failed" not in found:
+            errors.append(f"INDEX_RESULT_MISSING:{index_path}")
             continue
+        if not os.path.isfile(json_path):
+            continue  # broken link already reported above
         try:
             with open(json_path, encoding="utf-8") as fh:
                 res = json.load(fh).get("results", {})

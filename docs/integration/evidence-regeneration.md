@@ -66,10 +66,13 @@ Traceability の Req 列集合の両方と一致させる。要件の追加・�
 - `timestamp`: RFC 3339（タイムゾーン付き、例 `2026-11-18T06:20:42+09:00`）。
 - `notes`: 検証した内容と未測定項目（カバレッジ等）を簡潔に記載する。
   秘密情報や実機固有の値は書かない。件数表記（`N passed` 等）は `results` と
-  一致させ、スキップがある場合は `ignored` と明記する。
-- `results.skipped`: 正の値にする場合は `notes` へ `ignored` の明記が必要。
+  一致させる。スキップがある場合は `N ignored` のように数値付きで明記し、
+  `N` を `results.skipped` と一致させる。`no tests were ignored` のような
+  文字列だけでは `SKIPPED_TESTS` で拒否される。
+- `results.skipped`: 正の値にする場合は `notes` へ数値付きの `N ignored` が必要。
   ただしスキップは実行済みに数えず、Scenario カバレッジの分子には入らない
-  （mcp-gw の `skipped=1` は `passed=124` でカバレッジを満たす）。
+  （mcp-gw の `skipped=1` は `notes` の `1 ignored` と `passed=124` で
+  カバレッジを満たす）。
 - `document_type`: 設定する場合は `test-execution-log` / `test-result` /
   `test-summary-report` のいずれか。
 - `environment.runtime`: 実行コマンドが変わった場合のみ更新する。
@@ -88,8 +91,11 @@ Traceability の Req 列集合の両方と一致させる。要件の追加・�
 - `specs/index.md`: 仕様の説明・要件の変更を反映する（仕様のファイル名自体は
   不変）。
 - `evidence/index.md`: ファイル名（参照定義 `[run-xxx]: test-run-*.json`
-  を含む）と件数（passed / failed）を更新する。
+  を含む）と件数（passed / failed）を更新する。各エントリには最低限
+  `N passed` と `N failed` を明記すること。参照スタイル `[text][run-xxx]` と
+  インライン `[text](test-run-*.json)` は等価に解決される。
 - 両 index は成果物を網羅し、リンク切れがないこと。ゲートが双方向で検証する。
+  件数表記を削除したエントリは `INDEX_RESULT_MISSING` で拒否される。
 
 ### 7. `make check-evidence` で検証する
 
@@ -111,7 +117,8 @@ make check-evidence
 | 要件 | `REQ_SET_MISMATCH` |
 | シナリオ | `SCENARIO_COUNT_MISMATCH` |
 | 仕様構造 | `MISSING_EVIDENCE`, `MISSING_SECTION`, `MISSING_TRACEABILITY`, `MISSING_INFO_ITEM`, `MISSING_CONFORMANCE` |
-| 索引 | `INDEX_NOT_FOUND`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK`, `INDEX_RESULT_MISMATCH` |
+| 索引 | `INDEX_NOT_FOUND`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK` |
+| 索引の件数 | `INDEX_RESULT_MISSING`, `INDEX_RESULT_MISMATCH` |
 
 ## ゲートが検証する項目
 
@@ -123,10 +130,12 @@ make check-evidence
 | `test_basis_ref.spec_hash` | トップレベルと一致（nested hash、不一致は `NESTED_HASH_MISMATCH`） |
 | `requirements` | 同一 spec を参照する**全証跡**の要件集合＝spec の `REQ-\d+` 定義集合＝Traceability の Req 列集合（不一致は `REQ_SET_MISMATCH`。エラーには対象証跡のパスを示すが要件値は出力しない） |
 | `results` | `failed=0` / `passed>0` / 厳密な非負整数型（型不正は `BAD_RESULTS_TYPE`） |
-| `results.skipped` | 正の値は `notes` に `ignored` の明記が必要（`SKIPPED_TESTS`） |
+| `results.skipped` | 正の値は `notes` に数値付き `N ignored`（`N` = `results.skipped`）が必要（`SKIPPED_TESTS`） |
 | `notes` | 文字列型（`BAD_NOTES_TYPE`）。`passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致（`NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH`） |
 | `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed のみ、skipped は除外）がその数以上（`SCENARIO_COUNT_MISMATCH`）。`ignored` 明記済みのスキップでもカバレッジは満たせない |
-| index | 両 index が全成果物をリンクし、リンク切れなし。見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
+| index | 両 index が全成果物をリンクし、リンク切れなし |
+| index のエントリ | 参照定義・インラインリンクを等価に解決し、`N passed` / `N failed` が必須（欠落は `INDEX_RESULT_MISSING`） |
+| index の件数 | 見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
 | `timestamp` / `signature` | RFC 3339 の実在日時（`BAD_TIMESTAMP`）/ `self-attested`（`BAD_SIGNATURE`） |
 | `document_type` | 設定時は `test-execution-log` / `test-result` / `test-summary-report` のいずれか（`BAD_DOCUMENT_TYPE`） |
 | 仕様構造 | 必須4セクション、7列 Traceability、Document map、6情報項目、`tailored`（`MISSING_SECTION` 等） |
