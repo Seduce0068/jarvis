@@ -9,7 +9,7 @@ JSON はテキスト形式のため、リンク先として記載しています
 
 - [policy-approval の実行ログ][run-policy]
   — [test-policy-approval.md](../specs/test-policy-approval.md) の実測結果。
-  144 passed / 0 failed。
+  193 passed / 0 failed。
 - [mcp-gateway の実行ログ][run-mcp]
   — [test-mcp-gateway.md](../specs/test-mcp-gateway.md) の実測結果。
   45 passed / 0 failed / 1 skipped。
@@ -26,7 +26,7 @@ JSON はテキスト形式のため、リンク先として記載しています
 
 - [specs/index.md](../specs/index.md): 対応するテスト仕様の索引。
 
-[run-policy]: test-run-20261119-90ef3ba0db8f.json
+[run-policy]: test-run-20261120-497d2283ef3e.json
 [run-mcp]: test-run-20261118-17ae667109d0.json
 [run-context]: test-run-20261119-511e048a9211.json
 [run-backup]: test-run-20261120-2275f47174ed.json
