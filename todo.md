@@ -451,14 +451,14 @@ generated:
 
 ### 優先度 中
 
-- [ ] `sandbox_type` / `sandbox_config` が `let _ =` で読み捨てられ no-op — `src/sandbox.rs:29-37` / R1-ST1,R1-CF01 / confirmed
-- [ ] 承認ウィンドウが gateway 側 300 秒固定で policy 設定と drift — `src/approval.rs:21-31`, `policy/src/config.rs:25` / R2-FG1,R1-CF01,R1-ST01 / confirmed
+- [x] `sandbox_type` / `sandbox_config` が `let _ =` で読み捨てられ no-op — 2026-11-19 対応済み: legacy パース互換を維持したまま doc に ADR-0002 と未使用を明記し、明示設定時に load で warn を発行。既定 none/{} ではノイズなし / `src/sandbox.rs:29-37` / R1-ST1,R1-CF01 / confirmed
+- [x] 承認ウィンドウが gateway 側 300 秒固定で policy 設定と drift — 2026-11-19 対応済み: `JARVIS_MCP_GW_APPROVAL_WINDOW_SECS` を追加し `expires_at` と HTTP timeout を単一値から算出。policy 側は共有定数 `DEFAULT_APPROVAL_TIMEOUT_SECS=300` と compile-time assert で同期。回帰テスト7件 / `src/approval.rs:21-31`, `policy/src/config.rs:25` / R2-FG1,R1-CF01,R1-ST01 / confirmed
 - [ ] HTTP と gRPC で context 正規化・エラー契約が不一致（内部エラーが空 context / 200 deny に潰れる）— `policy/src/grpc.rs:27`, `policy/src/http.rs:203-207`, `client.rs:80-86` / R2-ER1,R1-AP01 / confirmed
-- [ ] 設定ファイルが CWD 相対の `config/*.toml` — `policy/src/config.rs:51-58`, `mcp-gw/src/config.rs:38-46` / R1-CF01 / confirmed
-- [ ] 同名ツールの upstream 選択が HashMap 反復順依存 — `mcp-gw/src/gateway.rs:79-89,143-156` / R1-AR01 / confirmed
-- [ ] PII フィルタが JSON キー名を対象外のまま — `context/src/pii.rs:204` / R1-ST2 / likely（既存 P2-1 と別観点）
+- [x] 設定ファイルが CWD 相対の `config/*.toml` — 2026-11-19 対応済み: 既定を `/etc/jarvis/{policy,mcp_gateway}.toml` へ変更し `JARVIS_{POLICY,MCP_GW}_CONFIG_PATH` で上書き可能。smoke スクリプトも env 追随。実機は Env provider で設定供给のため既定ファイル不在でも起動可 / `policy/src/config.rs:51-58`, `mcp-gw/src/config.rs:38-46` / R1-CF01 / confirmed
+- [x] 同名ツールの upstream 選択が HashMap 反復順依存 — 2026-11-19 対応済み: 登録時に他サーバのツール名衝突を検出して拒否（最初の登録が優先）。check と insert を単一 write ガード内で実施し競合も防止。回帰テスト3件 / `mcp-gw/src/gateway.rs:79-89,143-156` / R1-AR01 / confirmed
+- [x] PII フィルタが JSON キー名を対象外のまま — 2026-11-19 対応済み: PII パターンに一致する object キーも `[REDACTED]` に置換（通常キーは保持、部分一致対応、深度 128 ガード）。回帰テスト5件追加、既存 fixture を非 PII キーへ更新 / `context/src/pii.rs:204` / R1-ST2 / likely（既存 P2-1 と別観点）
 - [ ] `embedding_model` は設定可能だが Qdrant 次元が 384 固定 — `context/src/builder.rs:253-255` / R1-CF11,R1-AR2 / confirmed
-- [ ] PostgreSQL 既定 URL に固定パスワード — `context/src/config.rs:54` / R1-CF11 / confirmed
+- [x] PostgreSQL 既定 URL に固定パスワード — 2026-11-19 対応済み: 既定値を `postgres://localhost:5432/jarvis` へ変更し認証を libpq へ委譲。LEGACY_TOML もパスワードレス化、回帰テスト3件追加 / `context/src/config.rs:54` / R1-CF11 / confirmed
 - [ ] `CheckResponse` が `allowed` 真偽値のみで拒否理由を返さない — `policy/proto/policy.proto:19-21` / R1-AP01 / confirmed
 - [ ] MCP `tools/list` が upstream inputSchema を破棄し cursor も無視 — `mcp-gw/src/mcp_server.rs:59-99,120-126` / R1-AP01,R5-DC1 / confirmed
 - [ ] otelcol 設定の配布経路がビルドスクリプトから欠落 — `infra/scripts/build-selfhost.sh:26-28` / R1-AR3 / confirmed（既存 P0-6 と関連）
