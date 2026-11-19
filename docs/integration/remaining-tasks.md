@@ -37,7 +37,8 @@ generated:
   4コンポーネント横断の契約テスト済み。
 - **承認 UI のトークン名・scope 整合（R4-UI）**: UI が
   `JARVIS_POLICY_APPROVAL_API_TOKEN`（旧 `JARVIS_POLICY_APPROVAL_TOKEN` は
-  警告付き一時フォールバック）と `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`
+  UI 側の一時フォールバックで、policy 側の実変数ではない）と
+  `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`
   （未設定時は API トークンへフォールバック）を読み、一覧取得に API
   トークン、承認・却下に admin トークンを `X-Jarvis-Approval-Token` で
   送信するよう修正。env 名→scope・ヘッダの契約テストを追加。
@@ -147,16 +148,16 @@ generated:
 
 #### 判断（P0-3）
 
-- P0-3 を「実装済み」とはしない（`/v1/execute` と gRPC が未対応）。
+- 既定状態では P0-3 を「実装済み」とはしない（`/v1/execute` と gRPC が未対応）。
+  後述の opt-in フラグ ON 時はこれら2経路もサーバ側固定値へ統一される。
 - `todo.md` の P0-3 に証跡を追記し、対応範囲を残る2経路へ絞って管理する。
   認証済み Identity からの導出等、設計判断は確定させない。
 
-### P0-3 安全な修正方針の調査（2026-11-18・要判断）
+### P0-3 安全な修正方針の実施状況（2026-11-19 更新）
 
-前節の現状確認を踏まえ、`require_server_side_principal`（既定 `false`）を
-軸にした後方互換な修正方針を読み取り専用で調査した。
-**結論: 要判断**。実装・設定変更・実機操作は行っていない。
-秘密情報の値は記載しない。
+前節の現状確認を踏まえた `require_server_side_principal`（既定 `false`）に
+よる後方互換な修正は **repo 側に実装済み**。残る判断は本番有効化と
+監査粒度の2点のみ。実機操作は行っていない。秘密情報の値は記載しない。
 
 #### principal の流れ（3経路の比較）
 
@@ -202,44 +203,32 @@ generated:
 - 承認側の `approved_by` は依然としてボディ由来
   （[ui/README.md](../../ui/README.md):80-90）で、本フラグの範囲外。
 
-#### opt-in フラグ案（require_server_side_principal / 既定 false）
+#### opt-in フラグの実装（require_server_side_principal / 既定 false）
 
-実装箇所（提案・未実装）:
+実装箇所（実装済み・既定 false）:
 
-- [config.rs](../../rust/jarvis-mcp-gw/src/config.rs):10-31 に
-  `#[serde(default)] pub require_server_side_principal: bool` を追加。
-  `Default`（:49-62）で `false`。Figment の
-  `Env::prefixed("JARVIS_MCP_GW_")`（:39）により
+- [config.rs](../../rust/jarvis-mcp-gw/src/config.rs):76-80 に
+  `#[serde(default)] pub require_server_side_principal: bool` が定義済み。
+  `Default`（:259）で `false`。Figment の
+  `Env::prefixed("JARVIS_MCP_GW_")` により
   `JARVIS_MCP_GW_REQUIRE_SERVER_SIDE_PRINCIPAL=true` で有効化できる。
   既存 config にキーが無くても parse 成功する（後方互換）。
-- [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):63-76 の
-  `execute_tool` 先頭で実効 principal を解決する（擬似コード）:
-
-  ```rust
-  let effective = if self.config.require_server_side_principal {
-      self.config.mcp_principal.as_str()
-  } else {
-      principal
-  };
-  ```
-
-  以降の `is_allowed` / `PolicyDenied` / `is_principal_allowed` /
-  `allowed_principals` / `PrincipalNotAllowed` / `request_approval` /
-  再 `is_allowed` / ログ（:73-184）をすべて `effective` へ差し替える。
-  `/mcp` は同一値を渡すので変化しない。
+- [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):95-103 の
+  `execute_tool` 先頭で caller 由来の `principal` を実効 principal
+  （フラグ ON 時は `mcp_principal`）でシャドーイングする。
+  以降の policy / allowlist / 承認リクエスト / ログの判定はすべて
+  同じ実効 principal を使う。`/mcp` は同一値を渡すので
+  フラグ ON でも挙動は不変（冪等）。
 - `http.rs` / `grpc.rs` / `mcp_gateway.proto` は変更しない。
   リクエストの `principal` は OFF で従来どおり有効、
   ON では無視される（wire 互換を維持するための選択）。
-- 設定テンプレート
-  [mcp_gateway.env](../../infra/config/mcp_gateway.env):14-19 に
-  コメント行として既定 `false` と切替手順を追記（値は書かない）。
-  実機は `bws run` + figment env 経由なので unit 更新は別判断。
-- 運用ドキュメント（[infra/README.md](../../infra/README.md):195,
-  [todo.md](../../todo.md):42-51, 本ファイル）に
-  「ON 時は全経路が `mcp_principal` に統一され、名乗りは無視される」
-  旨を明記。`mcp_principal` が allowlist の `principals` と
-  各 tool の `allowed_principals` に無い場合は全ツールが
-  fail-closed になる点も注記する。
+- 本番有効化時に必要な作業: 設定テンプレート
+  [mcp_gateway.env](../../infra/config/mcp_gateway.env) への
+  切替手順の注記、および `bws run` + figment env 経由の
+  unit 更新（値は記載しない）。
+- ON 時は全経路が `mcp_principal` に統一され、名乗りは無視される。
+  `mcp_principal` が allowlist の `principals` と各 tool の
+  `allowed_principals` に無い場合は全ツールが fail-closed になる。
 
 採用しない案（代替として検討・記録のみ）:
 
@@ -251,48 +240,33 @@ generated:
 - proto の `principal` field を削除する方式は wire 破壊のため、
   opt-in 段階では採用しない（将来の段階移行で判断）。
 
-#### テスト追加箇所（提案・未実装）
+#### テストの実装状況
 
-- [config.rs](../../rust/jarvis-mcp-gw/src/config.rs):81-153 に
-  `legacy_config_without_require_server_side_principal_still_loads`
-  （キー無し TOML が parse され `false`）と
-  `explicit_require_server_side_principal_is_honoured`（`true`）を追加。
-  既存の `legacy_config_without_*` 系と同じ型で書ける。
-- [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):217-404 に ON の
-  回帰テスト。`mcp_principal = "opencode"` の gateway へ
-  `execute_tool(..., "jarvis")` を渡し、ON なら成功・OFF なら
-  `PrincipalNotAllowed` になることを対で確認する。fixture は
-  `APPROVAL_ALLOWLIST` を参考に、`allowed_principals = ["opencode"]`
-  の非承認ツールを使う。
-- [http.rs](../../rust/jarvis-mcp-gw/src/http.rs):177-424 に
-  `execute_endpoint_ignores_request_principal_when_flag_enabled` を追加。
-  既存 `EXECUTE_ALLOWLIST`（`principals = ["opencode", "jarvis"]`、
-  `filesystem.read` は `opencode` のみ）を流用し、body の
-  `principal = "jarvis"` が ON で 200 / OFF で 403 になることを
-  確認する（mock MCP 登録は既存例どおり）。
-- `grpc.rs` には現状テストが無い。新規 `#[cfg(test)] mod tests` で
-  一時ポートの gRPC サーバ + 生成 client を使い、
-  `ExecuteToolRequest.principal = "jarvis"` で ON 成功 / OFF 失敗を
-  確認する（`testing::shipped_policy_client` を再利用）。
-- [mcp_server.rs](../../rust/jarvis-mcp-gw/src/mcp_server.rs):158-366
-  の既存 endpoint テストは固定 principal の回帰として維持し、
-  フラグ ON/OFF で `/mcp` の結果が不変なことを1件追加で担保する。
-- 実装時の検証コマンド: `cd rust && cargo fmt --all --check`,
+- [config.rs](../../rust/jarvis-mcp-gw/src/config.rs):455-487 に
+  `server_side_principal_guard_defaults_to_false` と
+  `explicit_server_side_principal_guard_is_honoured` を追加済み
+  （キー無し TOML は `false`、明示 `true` は保持）。
+- [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):601-616 に
+  `server_side_principal_guard_overrides_caller_principal` を追加済み。
+  `mcp_principal = "opencode"` の gateway へ `execute_tool(..., "jarvis")`
+  を渡し、ON では成功することを確認する。
+  :620 の `mcp_principal_stays_fixed_when_guard_is_enabled` で
+  `/mcp` が固定 principal を維持することも担保する。
+- 検証コマンド: `cd rust && cargo fmt --all --check`,
   `cargo test -p jarvis-mcp-gw -p jarvis-policy`,
   `cargo clippy --workspace -- -D warnings`, `make ci-local`。
-  今回は未実装のため実行していない。
+  ドキュメント更新のみの本タスクでは実行していない（親が検証）。
 
-#### 判断が必要な点（要判断）
+#### 残る判断（要判断）
 
-- フラグを入れて段階移行するか、認証 Identity 導出を待って
-  一括対応するか（P0-1 と方針を揃える必要がある）。
-- ON 時の固定値を `mcp_principal`（既定 `opencode`）のままとするか、
-  専用キー（例 `execute_principal`）を新設するか。
-- 監査ログの呼び出し者粒度を諦めるか、リクエスト値を
-  `claimed_principal` として別途記録するか。
-- 実機への env 注入（unit 更新・`bws run` 経路）と
-  `deploy-mcp-gw-safe.sh --apply` のタイミング。
-- **結論: 要判断**。上記方針が確定するまで実装しない。
+- **本番有効化**: `JARVIS_MCP_GW_REQUIRE_SERVER_SIDE_PRINCIPAL=true` の
+  適用可否とタイミング。実機への env 注入（unit 更新・`bws run` 経路）
+  と `deploy-mcp-gw-safe.sh --apply` を伴う。既定 `false` のままなら
+  現行の caller principal 動作が継続する。
+- **監査粒度**: ON 時は全呼び出しが同一 identity になり呼び出し者粒度が
+  失われるため、申告値を `claimed_principal` として別途記録するかを
+  決定する（認証 Identity 導出は P0-1 と同じ設計判断として別途）。
+- **結論**: フラグの実装は完了。判断は上記2点に限定する。
 
 ## 2. バックアップ / DR・OCI レガシー整理（優先度: 高）
 

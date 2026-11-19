@@ -99,10 +99,14 @@ JARVIS のデスクトップ UI として **GPUI** を採用し、第一段階�
 
 - [x] `ui/` 独立クレートの作成と実機ビルド検証
 - [x] 承認キュー UI（3 秒ポーリング・承認/却下ボタン）
-- [x] `cargo fmt` / `cargo clippy -- -D warnings` / `cargo test`（5 tests）
+- [x] `cargo fmt` / `cargo clippy -- -D warnings` / `cargo test`（件数は固定しない）
 - [x] 実機 Wayland 起動確認（プロセス生存・ダークテーマ描画）
 - [x] Makefile に `ui-build` / `ui-run` ターゲットを追加
 - [ ] 本番運用時の自動起動（systemd user unit 等）は別判断
+
+テスト件数は実装の増減に伴い変わるため固定値を記載しない。
+実測は `cargo test` の出力で確認する。仕様書側の件数はエビデンス
+生成時点のスナップショットとして扱う。
 
 ## 関連資料
 

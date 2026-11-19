@@ -1,0 +1,60 @@
+[Unit]
+Description=JARVIS shared DB migrations (sqlx)
+Documentation=https://github.com/Seduce0068/jarvis
+# Single owner of shared migrations (001-003). jarvis-policy.service and
+# jarvis-context.service both declare After/Wants on this unit, so no
+# policy <-> context ordering cycle is introduced. This unit itself only
+# waits for the local PostgreSQL instance and the network.
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Unprivileged service account: migrations never run as root.
+User=jarvis
+Group=jarvis
+WorkingDirectory=/opt/jarvis/rust
+EnvironmentFile=-/etc/jarvis/bws.env
+Environment=HOME=/opt/jarvis/data
+Environment=RUST_LOG=info
+
+# No credential value is stored in this unit. `bws run` injects the project
+# secrets into the child process; sqlx expects DATABASE_URL, so map the
+# injected JARVIS_CONTEXT_PG_URL inside a short-lived bash. The doubled `$$`
+# is required: systemd would otherwise expand `${...}` at unit-parse time,
+# before bws has injected anything. Migration sources come from the deployed
+# Rust workspace at /opt/jarvis/rust/migrations.
+ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /usr/bin/bash -c 'exec /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_CONTEXT_PG_URL:?JARVIS_CONTEXT_PG_URL is required}"'
+TimeoutStartSec=120
+
+# Security hardening (same baseline as the other jarvis units).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/jarvis/data
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+UMask=0077
+RemoveIPC=yes
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# Resource limits
+MemoryMax=1G
+CPUQuota=100%
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=jarvis-migrations
+
+[Install]
+WantedBy=multi-user.target

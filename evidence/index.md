@@ -26,7 +26,7 @@ JSON はテキスト形式のため、リンク先として記載しています
 
 - [specs/index.md](../specs/index.md): 対応するテスト仕様の索引。
 
-[run-policy]: test-run-20261119-cc55d64f971a.json
+[run-policy]: test-run-20261119-90ef3ba0db8f.json
 [run-mcp]: test-run-20261118-17ae667109d0.json
 [run-context]: test-run-20261118-aece518bbdca.json
 [run-backup]: test-run-20261118-ccd7dcb4b24f.json

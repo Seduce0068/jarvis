@@ -12,6 +12,12 @@ service_src="$repo/infra/systemd/jarvis-backup.service"
 timer_src="$repo/infra/systemd/jarvis-backup.timer"
 script_src="$repo/infra/scripts/backup-local.sh"
 verify_src="$repo/infra/scripts/verify-backup.sh"
+# Shared migration unit (I32-B): distributed with the same root:root 0644
+# framing as the backup units. It expects the deployed Rust workspace sources
+# at /opt/jarvis/rust/migrations (same root as the other jarvis services), and
+# is pulled in by Wants= from policy/context, so no separate enable is needed.
+migrations_unit_src="$repo/infra/systemd/jarvis-migrations.service"
+migrations_unit_dst="/etc/systemd/system/jarvis-migrations.service"
 service_dst="/etc/systemd/system/jarvis-backup.service"
 timer_dst="/etc/systemd/system/jarvis-backup.timer"
 script_dst="/opt/jarvis/scripts/backup-local.sh"
@@ -25,6 +31,8 @@ if [ "$apply" -ne 1 ]; then
   echo "  DRY: install $verify_src -> $verify_dst (root:root 0755)"
   echo "  DRY: install $service_src -> $service_dst (root:root 0644)"
   echo "  DRY: install $timer_src   -> $timer_dst   (root:root 0644)"
+  echo "  DRY: install $migrations_unit_src -> $migrations_unit_dst (root:root 0644)"
+  echo "  DRY: jarvis-migrations.service runs via Wants= from policy/context (no enable)"
   echo "  DRY: mkdir -p $backup_dir (owner postgres:postgres, mode 0700)"
   echo "  DRY: systemctl daemon-reload; systemctl enable --now jarvis-backup.timer"
   echo "  DRY: verify timer active + next elapse"
@@ -61,7 +69,7 @@ fail() {
 }
 
 install -o root -g root -m 0755 "$script_src" "$script_dst"
-for pair in "$service_src:$service_dst" "$timer_src:$timer_dst"; do
+for pair in "$service_src:$service_dst" "$timer_src:$timer_dst" "$migrations_unit_src:$migrations_unit_dst"; do
   src="${pair%%:*}"; dst="${pair##*:}"
   [ -f "$dst" ] && cp -a "$dst" "$dst.bak-$ts"
   install -o root -g root -m 0644 "$src" "$dst"

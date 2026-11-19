@@ -532,21 +532,19 @@ impl PolicyEngine {
 async fn request_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Json(req): Json<ApprovalRequestHttp>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let bad_request = axum::http::StatusCode::BAD_REQUEST;
-
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, &'static str)> {
     if let Some(id) = req.id.as_deref() {
-        uuid::Uuid::parse_str(id).map_err(|_| bad_request)?;
+        uuid::Uuid::parse_str(id).map_err(|_| bad_request_response())?;
     }
     let now = chrono::Utc::now();
     if let Some(requested_at) = req.requested_at {
-        chrono::DateTime::from_timestamp(requested_at, 0).ok_or(bad_request)?;
+        chrono::DateTime::from_timestamp(requested_at, 0).ok_or_else(bad_request_response)?;
     }
     let mut expires_at = engine.approvals.max_deadline(now);
     if let Some(hint) = req.expires_at {
-        let hint = chrono::DateTime::from_timestamp(hint, 0).ok_or(bad_request)?;
+        let hint = chrono::DateTime::from_timestamp(hint, 0).ok_or_else(bad_request_response)?;
         if hint <= now {
-            return Err(bad_request);
+            return Err(bad_request_response());
         }
         expires_at = std::cmp::min(hint, expires_at);
     }
@@ -568,7 +566,7 @@ async fn request_approval(
     let decision = engine
         .request_approval_http(approval_req)
         .await
-        .map_err(approval_error_status)?;
+        .map_err(approval_error_response)?;
     Ok(Json(approval_response(decision, &meta)))
 }
 
@@ -577,12 +575,12 @@ async fn approve_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Path(id): Path<String>,
     Json(req): Json<ApproveRequestHttp>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let id = uuid::Uuid::parse_str(&id).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, &'static str)> {
+    let id = uuid::Uuid::parse_str(&id).map_err(|_| bad_request_response())?;
     let decision = engine
         .approve(id, &req.approved_by)
         .await
-        .map_err(approval_error_status)?;
+        .map_err(approval_error_response)?;
     Ok(Json(serde_json::to_value(decision).unwrap_or_default()))
 }
 
@@ -591,12 +589,12 @@ async fn deny_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Path(id): Path<String>,
     Json(req): Json<DenyRequestHttp>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let id = uuid::Uuid::parse_str(&id).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, &'static str)> {
+    let id = uuid::Uuid::parse_str(&id).map_err(|_| bad_request_response())?;
     let decision = engine
         .deny(id, &req.reason)
         .await
-        .map_err(approval_error_status)?;
+        .map_err(approval_error_response)?;
     Ok(Json(serde_json::to_value(decision).unwrap_or_default()))
 }
 
@@ -604,18 +602,66 @@ async fn deny_approval(
 async fn approval_status(
     State(engine): State<Arc<PolicyEngine>>,
     Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
-    let id = uuid::Uuid::parse_str(&id).map_err(|_| axum::http::StatusCode::BAD_REQUEST)?;
+) -> Result<Json<serde_json::Value>, (axum::http::StatusCode, &'static str)> {
+    let id = uuid::Uuid::parse_str(&id).map_err(|_| bad_request_response())?;
     let decision = engine
         .approval_status(id)
         .await
-        .map_err(approval_error_status)?;
+        .map_err(approval_error_response)?;
     Ok(Json(serde_json::to_value(decision).unwrap_or_default()))
 }
 
 #[instrument(skip(engine))]
 async fn list_approvals(State(engine): State<Arc<PolicyEngine>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "pending": engine.pending_approvals().await }))
+}
+
+/// Closed vocabulary for approval error response bodies (I32-D).
+///
+/// These literals are the only strings ever written to an approval error body.
+/// None is derived from the error's payload: no database URL, filesystem path,
+/// SQL text or upstream error string can reach the caller. `QueueFull` and
+/// `Persistence` share HTTP 503 but carry different fixed messages, so a
+/// retrying client can tell queue exhaustion from a persistence outage.
+pub(crate) mod approval_error_reasons {
+    pub const BAD_REQUEST: &str = "invalid approval request";
+    pub const NOT_FOUND: &str = "approval request not found";
+    pub const ALREADY_DECIDED: &str = "approval request already decided";
+    pub const KILL_SWITCH: &str = "approval decisions are blocked by the kill switch";
+    pub const QUEUE_FULL: &str = "approval queue is full; retry later";
+    pub const PERSISTENCE: &str = "approval persistence is unavailable; retry later";
+}
+
+/// Fixed body for an approval error. Kept exhaustive so a future variant must
+/// be classified explicitly instead of silently inheriting a generic message.
+fn approval_error_message(error: &crate::approval::ApprovalError) -> &'static str {
+    use crate::approval::ApprovalError;
+    match error {
+        ApprovalError::NotFound(_) => approval_error_reasons::NOT_FOUND,
+        ApprovalError::AlreadyDecided(_) => approval_error_reasons::ALREADY_DECIDED,
+        ApprovalError::KillSwitchActivated => approval_error_reasons::KILL_SWITCH,
+        ApprovalError::QueueFull => approval_error_reasons::QUEUE_FULL,
+        ApprovalError::Persistence => approval_error_reasons::PERSISTENCE,
+    }
+}
+
+/// Fixed 400 response for malformed approval fields. Uses the same wire shape
+/// as `approval_error_response` so every approval error has a fixed body.
+fn bad_request_response() -> (axum::http::StatusCode, &'static str) {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        approval_error_reasons::BAD_REQUEST,
+    )
+}
+
+/// Wire response for an approval error: a fixed status plus a fixed,
+/// non-sensitive body. Both mappings are applied through the same function so
+/// no handler can accidentally echo an internal error string.
+fn approval_error_response(
+    error: crate::approval::ApprovalError,
+) -> (axum::http::StatusCode, &'static str) {
+    let message = approval_error_message(&error);
+    (approval_error_status(error), message)
 }
 
 fn approval_error_status(error: crate::approval::ApprovalError) -> axum::http::StatusCode {
@@ -626,6 +672,9 @@ fn approval_error_status(error: crate::approval::ApprovalError) -> axum::http::S
         // キュー枯渇は一時的な基盤エラー。通常の deny (200 の decision) と
         // 区別し、呼び出し側が後でリトライできるよう 503 を返す。
         crate::approval::ApprovalError::QueueFull => axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        // 永続化障害もリトライ可の 503 だが、キュー枯渇とは固定本文で区別する。
+        // 内部の DB 詳細（URL/パス/原文）は本文にもステータスにも載せない。
+        crate::approval::ApprovalError::Persistence => axum::http::StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 
@@ -712,6 +761,7 @@ pub async fn serve(engine: Arc<PolicyEngine>, addr: std::net::SocketAddr) -> any
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::approval::{ApprovalError, ApprovalPersistence, ApprovalStore};
     use crate::config::PolicyConfig;
     use serde_json::{Value, json};
     use std::path::{Path, PathBuf};
@@ -2189,6 +2239,122 @@ mod tests {
             status["activated_by"],
             crate::kill_switch::status_vocabulary::ACTOR_SYSTEM
         );
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    // ---- I32-D: persistence error HTTP mapping regressions -----------------
+
+    /// Every `ApprovalError` variant maps to a fixed status and a fixed body;
+    /// `Persistence` and `QueueFull` both return 503 but never share a message.
+    #[test]
+    fn approval_error_mapping_is_exhaustive_and_fixed() {
+        let cases = [
+            (
+                ApprovalError::NotFound(uuid::Uuid::nil()),
+                axum::http::StatusCode::NOT_FOUND,
+                approval_error_reasons::NOT_FOUND,
+            ),
+            (
+                ApprovalError::AlreadyDecided(uuid::Uuid::nil()),
+                axum::http::StatusCode::CONFLICT,
+                approval_error_reasons::ALREADY_DECIDED,
+            ),
+            (
+                ApprovalError::KillSwitchActivated,
+                axum::http::StatusCode::CONFLICT,
+                approval_error_reasons::KILL_SWITCH,
+            ),
+            (
+                ApprovalError::QueueFull,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                approval_error_reasons::QUEUE_FULL,
+            ),
+            (
+                ApprovalError::Persistence,
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                approval_error_reasons::PERSISTENCE,
+            ),
+        ];
+        for (error, expected_status, expected_body) in cases {
+            let (status, body) = approval_error_response(error);
+            assert_eq!(status, expected_status);
+            assert_eq!(body, expected_body);
+            assert!(
+                !body.contains('/'),
+                "fixed body must not contain a path or URL: {body}"
+            );
+        }
+        assert_ne!(
+            approval_error_reasons::PERSISTENCE,
+            approval_error_reasons::QUEUE_FULL
+        );
+    }
+
+    /// Backend double reporting the dedicated persistence failure on the
+    /// durable INSERT. No database is contacted.
+    #[derive(Debug)]
+    struct PersistenceFailurePersistence;
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for PersistenceFailurePersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ApprovalError> {
+            Err(ApprovalError::Persistence)
+        }
+
+        async fn record_decision(
+            &self,
+            _id: uuid::Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_expired(
+            &self,
+            _id: uuid::Uuid,
+            _expired_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+    }
+
+    /// I32-D: a backend DB failure reaches the wire as 503 with the fixed
+    /// persistence message, distinct from the queue-full message and with no
+    /// internal detail (no URL, path or raw error text).
+    #[tokio::test]
+    async fn approval_request_persistence_failure_returns_fixed_503_body() {
+        let (engine, dir) = test_engine("http-persistence-failure").await;
+        let mut engine = (*engine).clone();
+        engine.approvals = ApprovalStore::with_persistence(
+            std::time::Duration::from_secs(5),
+            crate::approval::DEFAULT_MAX_PENDING,
+            Arc::new(PersistenceFailurePersistence),
+        );
+        let base = start_server(Arc::new(engine)).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/approval"))
+            .json(&pending_request(chrono::Utc::now().timestamp() + 60))
+            .send()
+            .await
+            .expect("approval request runs");
+
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let body = response.text().await.expect("error body");
+        assert_eq!(body, approval_error_reasons::PERSISTENCE);
+        assert_ne!(body, approval_error_reasons::QUEUE_FULL);
+        for sentinel in ["postgres", "://", "jdbc", "/etc/", "SENTINEL"] {
+            assert!(!body.contains(sentinel), "internal detail leaked: {body}");
+        }
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");
     }

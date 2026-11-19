@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:cc55d64f971a60429d57fe1233404ca7d0509ba8281b59802358fd16f49a3fc2",
-  "timestamp": "2026-11-19T15:08:39+09:00",
+  "spec_hash": "sha256:90ef3ba0db8f5fee2ce310ed5abcab0338812168e812dd3d15546864ca362db4",
+  "timestamp": "2026-11-19T21:41:24+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-policy --lib",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 53,
+    "passed": 144,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 100,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-policy-approval.md",
-    "spec_hash": "sha256:cc55d64f971a60429d57fe1233404ca7d0509ba8281b59802358fd16f49a3fc2",
+    "spec_hash": "sha256:90ef3ba0db8f5fee2ce310ed5abcab0338812168e812dd3d15546864ca362db4",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -34,7 +34,10 @@
       "REQ-8",
       "REQ-9",
       "REQ-10",
-      "REQ-11"
+      "REQ-11",
+      "REQ-12",
+      "REQ-13",
+      "REQ-14"
     ]
   },
   "techniques": [
@@ -153,6 +156,18 @@
       "controls": [
         "SP800-53r5.2/AC-3"
       ]
+    },
+    {
+      "id": "R-9",
+      "tier": "T1",
+      "description": "承認 API トークンによる自己承認（api/admin 職務分離の欠如）",
+      "asvs": [
+        "v5.0.0-V8.3.1"
+      ],
+      "controls": [
+        "SP800-53r5.2/AC-3",
+        "SP800-53r5.2/IA-5"
+      ]
     }
   ],
   "assurance": {
@@ -163,5 +178,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-policy lib テスト 53 件の実測結果。REQ-7 をキュー枯渇の 503 挙動へ同期（ストア層 request() は Denied 互換、try_request() は ApprovalError::QueueFull、HTTP は 503）。A-M18 (TC-K4) は poison / persist 失敗 / remains activated エラー伝播でカバー済み。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
+  "notes": "jarvis-policy lib テスト 144 件の実測結果。REQ-7 をキュー枯渇の 503 挙動へ同期（ストア層 request() は Denied 互換、try_request() は ApprovalError::QueueFull、HTTP は 503）。REQ-12/13/14 と R-9 を追加し、approve/deny を admin トークンのみで許可し api トークン単独の自己承認を拒否する契約を検証。A-M18 (TC-K4) は poison / persist 失敗 / remains activated エラー伝播でカバー済み。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。"
 }

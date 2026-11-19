@@ -40,6 +40,16 @@ pub enum ApprovalError {
     /// instead of reporting a user/operator denial to the requester.
     #[error("approval queue is full; the request was not enqueued")]
     QueueFull,
+
+    /// A durable persistence backend operation failed (e.g. a database error).
+    ///
+    /// Like [`Self::QueueFull`] this is a transient infrastructure condition
+    /// that callers may retry, but it is a distinct variant so a client can tell
+    /// queue exhaustion from a persistence outage. It carries no payload: the
+    /// message is fixed and safe to log or render on the wire, with no URL,
+    /// path, SQL text or upstream error string.
+    #[error("approval persistence is unavailable; the request was not completed")]
+    Persistence,
 }
 
 /// Reason attached to the legacy `Denied` decision returned by
@@ -59,8 +69,10 @@ pub const QUEUE_FULL_REASON: &str = "approval queue full";
 /// Implementations must be `Send + Sync` because [`ApprovalStore`] is cloned
 /// across Tokio tasks. `record_request` and `mark_expired` errors are logged by
 /// [`ApprovalStore`]; a `record_request` failure additionally rolls back the
-/// in-memory registration and is surfaced as [`ApprovalError::QueueFull`] so an
-/// orphan hold can never later produce a zero-row CAS. With
+/// in-memory registration and surfaces a retryable error so an orphan hold can
+/// never later produce a zero-row CAS. A backend-reported persistence failure
+/// keeps its [`ApprovalError::Persistence`] identity; other backend errors keep
+/// the legacy [`ApprovalError::QueueFull`] classification. With
 /// [`NoopPersistence`] none of these paths can fail, so the memory-only default
 /// is unchanged. For `record_decision`, an error withholds the in-memory
 /// decision: the watch channel must not announce a decision that failed to
@@ -307,14 +319,13 @@ impl ApprovalStore {
         // returns Ok, so the memory-only default keeps its exact behavior.
         //
         // Choice (documented per R4-PERSIST): on `record_request` error we do
-        // BOTH undo the in-memory registration AND return
-        // `ApprovalError::QueueFull` (HTTP 503, retry). Leaving a pending entry
-        // with no durable row would make a later operator `decide` hit a
-        // zero-row CAS and be reported as `AlreadyDecided` (HTTP 409) with an
-        // empty audit trail. Rolling back plus a retryable error closes that
-        // gap: no orphan hold survives and the requester is asked to retry.
-        // This runs before the wait, so no `decide` CAS can race a committed
-        // row that does not exist.
+        // BOTH undo the in-memory registration AND return a retryable error
+        // (HTTP 503). Leaving a pending entry with no durable row would make a
+        // later operator `decide` hit a zero-row CAS and be reported as
+        // `AlreadyDecided` (HTTP 409) with an empty audit trail. Rolling back
+        // plus a retryable error closes that gap: no orphan hold survives and
+        // the requester is asked to retry. This runs before the wait, so no
+        // `decide` CAS can race a committed row that does not exist.
         if let Err(error) = self
             .inner
             .persistence
@@ -332,6 +343,13 @@ impl ApprovalStore {
             // would itself have failed with `AlreadyDecided` without publishing.
             let mut entries = self.inner.entries.write().await;
             entries.remove(&id);
+            // Keep the dedicated persistence failure (HTTP 503 with the fixed
+            // "persistence" body) so callers can distinguish a DB outage from
+            // queue exhaustion. Any other backend error retains the legacy
+            // retryable `QueueFull` classification; both stay fail-closed.
+            if matches!(error, ApprovalError::Persistence) {
+                return Err(error);
+            }
             return Err(ApprovalError::QueueFull);
         }
 
@@ -1583,6 +1601,74 @@ mod tests {
             store.list_pending().await.is_empty(),
             "the rolled-back hold must not be visible to operators"
         );
+    }
+
+    /// Backend double that reports the dedicated persistence failure on the
+    /// durable INSERT. No database is contacted; this mirrors what
+    /// `PgApprovalPersistence::db_failure` now returns.
+    #[derive(Debug, Default)]
+    struct PersistenceFailingPersistence {
+        record_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for PersistenceFailingPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.record_calls.fetch_add(1, Ordering::SeqCst);
+            Err(ApprovalError::Persistence)
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_expired(
+            &self,
+            _id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+    }
+
+    /// I32-D: a backend persistence failure must reach the caller as
+    /// `ApprovalError::Persistence` (not be collapsed into `QueueFull`) while
+    /// still rolling back the in-memory hold so no orphan survives.
+    #[tokio::test]
+    async fn record_request_persistence_failure_stays_distinct() {
+        let persistence = Arc::new(PersistenceFailingPersistence::default());
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let request = make_request();
+        let id = request.id;
+
+        let result = store.try_request(request).await;
+        assert!(
+            matches!(result, Err(ApprovalError::Persistence)),
+            "DB failure must stay distinct from queue exhaustion: {result:?}"
+        );
+        assert_eq!(persistence.record_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(store.status(id).await, Err(ApprovalError::NotFound(_))),
+            "no orphan in-memory entry may survive a failed durable INSERT"
+        );
+        assert!(store.list_pending().await.is_empty());
     }
 
     /// An injected `mark_expired` failure must be non-fatal for the timing-out

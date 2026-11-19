@@ -1,13 +1,12 @@
 [Unit]
 Description=JARVIS Policy Engine
 Documentation=https://github.com/Seduce0068/jarvis
-After=network.target postgresql.service qdrant.service
-Wants=postgresql.service qdrant.service
-# NOTE: shared migrations (001-003) are applied by jarvis-context at startup.
-# Do NOT add After=/Wants=jarvis-context.service here: that unit already
-# depends on this one, and systemd would report an ordering cycle. On a fresh
-# DB, start jarvis-context once (or run `cargo sqlx migrate run`) before
-# enabling approval persistence here.
+After=network.target postgresql.service qdrant.service jarvis-migrations.service
+Wants=postgresql.service qdrant.service jarvis-migrations.service
+# Shared migrations (001-003) are now applied by jarvis-migrations.service
+# (oneshot), ordered above. Do NOT add After=/Wants=jarvis-context.service:
+# jarvis-context already declares After=jarvis-policy.service, so doing so
+# would create an ordering cycle in systemd-analyze verify.
 
 [Service]
 Type=exec

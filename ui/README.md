@@ -35,9 +35,13 @@ CI の aarch64 クロスビルドを壊さないための独立クレートで�
 cd ~/ドキュメント/作業用/jarvis/jarvis/ui
 cargo build            # 開発ビルド
 cargo build --release  # リリースビルド
-cargo test             # 既存 27 件 + env 名→ヘッダ契約テスト 9 件（追加）
+cargo test             # 件数は固定しない。実測は cargo test の出力で確認する
 cargo clippy --all-targets -- -D warnings
 ```
+
+テスト件数は機能追加に伴い変わるため、ここには固定値を記載しません。
+実際の件数は `cargo test`（または `make ui-test`）の出力で確認してください。
+仕様書側のテスト件数はエビデンス生成時点のスナップショットです。
 
 ## 起動
 
@@ -73,14 +77,17 @@ JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
 ## セキュリティ
 
 - 接続先は `JARVIS_POLICY_HTTP_URL` のみ（既定は loopback）。
-- トークン注入経路は次の3つの環境変数です（`main.rs` が起動時に読み、
-  `ApprovalsView` を経由して `PolicyClient` へ渡します）:
-  - `JARVIS_POLICY_APPROVAL_API_TOKEN`: 一覧取得など API scope のトークン。
+- トークン注入経路は次の環境変数です（`main.rs` が起動時に読み、
+  `ApprovalsView` を経由して `PolicyClient` へ渡します）。
+  policy 側の実変数は API / admin の2つのみです。
+  - `JARVIS_POLICY_APPROVAL_API_TOKEN`: 一覧取得など API scope のトークン
+    （policy 側の実変数）。
   - `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN`: 承認・却下（admin scope）の
-    トークン。未設定なら API トークンへフォールバックします
-    （`jarvis-policy` と同じ挙動）。
-  - `JARVIS_POLICY_APPROVAL_TOKEN`: 旧名。一時的なフォールバックとして
-    受け付けますが、起動時に非推奨警告を出します。
+    トークン（policy 側の実変数）。未設定なら API トークンへ
+    フォールバックします（`jarvis-policy` と同じ挙動）。
+  - `JARVIS_POLICY_APPROVAL_TOKEN`: **policy 側の実変数ではありません**。
+    UI 側が旧名を一時的なフォールバックとして受け付け、起動時に
+    非推奨警告を出すためのエイリアスです。新規設定では使わないでください。
 - ヘッダ名は両 scope とも `X-Jarvis-Approval-Token` で共通ですが、送信する
   **値を scope ごとに使い分けます**。一覧取得には API トークン、承認・却下に
   は admin トークン（未設定時は API トークン）を送ります。未設定の scope では

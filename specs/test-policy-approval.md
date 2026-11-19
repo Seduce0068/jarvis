@@ -1,7 +1,7 @@
 ---
 type: Test Specification
 title: "jarvis-policy 承認フロー テスト仕様"
-description: "kill switch / トークン認証 / キュー上限 / 重複 ID の動的試験設計"
+description: "kill switch / API-admin トークン分離 / 自己承認拒否 / キュー上限 / 重複 ID の動的試験設計"
 tags:
   - test-spec
   - jarvis-policy
@@ -46,6 +46,9 @@ status: draft
 | REQ-9 | 同一 ID の再登録は元の保留を守り Denied する |
 | REQ-10 | 二重決定 409、未知名 404、不正 UUID 400、競合は決定優先 |
 | REQ-11 | RwLock poison / persist 失敗で arm し、解除失敗を返す |
+| REQ-12 | 承認トークンは API scope と admin scope に分離され、approve/deny は admin トークンでのみ成功する |
+| REQ-13 | API トークンのみの呼び出しは request/list/status で成功し、approve/deny では 401 となり自己承認が拒否される |
+| REQ-14 | admin トークン未設定時は API トークンへフォールバックし、起動時に警告を出す（職務分離は無効） |
 
 ## Risk & tier
 
@@ -59,6 +62,7 @@ status: draft
 | R-6 | 上限境界の off-by-one で fail-open する | T2 | unit >= 0.80 |
 | R-7 | 決定競合で誤応答・副作用が残る | T2 | unit >= 0.80 |
 | R-8 | A-M18: poison/永続化失敗が見えず解除扱いになる | T1 | unit >= 0.90 |
+| R-9 | API トークン保持者が自分の要求を承認し職務分離が効かない | T1 | int >= 0.80 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -78,7 +82,7 @@ TD3 (test case) の順で導出した。
 | --- | --- | --- |
 | equivalence partitioning | 5.2.1 | トークン正常/欠落/誤値、kill switch 状態 |
 | boundary value analysis | 5.2.3 | pending 0/cap-1/cap/cap+1、timeout 前後 |
-| decision table testing | 5.2.6 | kill switch x トークン x ID 状態 |
+| decision table testing | 5.2.6 | kill switch x トークン x ID 状態、scope(API/admin) x トークン x 決定種別 |
 | state transition testing | 5.2.8 | pending -> approved/denied/expired |
 | scenario testing | 5.2.9 | HTTP 往復 (request -> list -> decide) |
 | error guessing | 5.4.1 | 破損 state file、二重決定、同一 ID |
@@ -168,6 +172,38 @@ Scenario: TC-A2 認証スコープの境界
   Then 従来の loopback 動作が維持される
 ```
 
+### トークン scope 分離と自己承認拒否 (REQ-12〜REQ-14)
+
+```gherkin
+Scenario: TC-A3 API / admin の scope 分離
+  Given approval_api_token と approval_admin_token が異なる値で設定されている
+  When API トークンで /v1/approvals を呼ぶ
+  Then 200 と pending 一覧が返る
+  When admin トークンで /v1/approvals を呼ぶ
+  Then 401 を返す（admin トークンは API scope を開かない）
+  When API トークンで approve と deny を呼ぶ
+  Then いずれも 401 を返す
+  When admin トークンで approve を呼ぶ
+  Then 200 となり承認要求は Approved になる
+```
+
+```gherkin
+Scenario: TC-A4 自己承認の拒否
+  Given API トークンで発行した保留要求が存在する
+  When 同じ API トークンでその要求の approve を呼ぶ
+  Then 401 を返し、要求は pending のまま決定されない
+  When admin トークンで approve を呼ぶ
+  Then 200 となり approved_by は admin 側の値になる
+```
+
+```gherkin
+Scenario: TC-A5 admin トークン未設定時の互換挙動
+  Given approval_admin_token が未設定
+  When approve/deny を API トークンで呼ぶ
+  Then 従来どおり 200 で決定できる
+  Then 起動時にフォールバックと職務分離が無効である旨の警告が出る
+```
+
 ### キュー上限 (REQ-7, REQ-8)
 
 ```gherkin
@@ -227,6 +263,9 @@ Scenario: TC-D2 決定の排他とエラー応答
 | TC-K4 | REQ-11 | v5.0.0-V16.5.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-A1 | REQ-5 | v5.0.0-V8.3.1 | SP800-53r5.2/IA-5 | ATE_FUN.1 | 5.2.1 | T1 |
 | TC-A2 | REQ-6 | v5.0.0-V8.1.1 | SP800-53r5.2/AC-6 | ATE_FUN.1 | 5.2.1 | T2 |
+| TC-A3 | REQ-12 | v5.0.0-V8.3.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.9 | T1 |
+| TC-A4 | REQ-13 | v5.0.0-V8.3.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.9 | T1 |
+| TC-A5 | REQ-14 | v5.0.0-V16.5.3 | SP800-53r5.2/IA-5 | ATE_FUN.1 | 5.2.1 | T2 |
 | TC-Q1 | REQ-7 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.9 | T1 |
 | TC-Q2 | REQ-8 | v5.0.0-V2.3.2 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.3 | T2 |
 | TC-D1 | REQ-9 | v5.0.0-V15.4.2 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
@@ -244,5 +283,13 @@ ASVS は v5.0.0、SP 800-53 は Release 5.2、CC は ISO/IEC 15408-3:2022
 [http.rs](../rust/jarvis-policy/src/http.rs),
 [lib.rs](../rust/jarvis-policy/src/lib.rs) を参照。
 A-M18 (TC-K4) は poison 検知 / persist 失敗 / deactivate エラー伝播の
-回帰テストでカバー済み（49 テスト）。
-実行結果は `evidence/` の test-run JSON に記録する。
+回帰テストでカバー済み（49 テスト、エビデンス生成時点のスナップショット）。
+TC-A3〜A5 は `admin_token_splits_decision_authority_from_api_token` /
+`api_token_still_approves_when_admin_token_is_unset` /
+`blank_configured_admin_token_cannot_be_bypassed_with_empty_header`
+でカバーする。実行結果は `evidence/` の test-run JSON に記録する。
+
+文中のテスト件数（本ファイルおよび他 spec の「14 テスト」等）は
+エビデンス生成時点のスナップショットであり、現時点の実測値ではない。
+実測は `cargo test` の出力で確認し、エビデンス JSON の再生成は
+本タスクの範囲外（別途実施）とする。
