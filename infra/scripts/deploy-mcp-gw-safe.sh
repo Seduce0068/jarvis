@@ -4,7 +4,7 @@
 #   → バイナリ配置/再起動 → systemd 実行時E2E必須 → 失敗時は全変更をロールバック
 # 既定は乾燥実行。--apply で実行（要root）。--allow-web-fetch は後方互換用。
 set -uo pipefail
-apply=0; allow=0
+apply=0; allow=0; repo_allowlist_changed=0
 for arg in "$@"; do
   case "$arg" in
     --apply) apply=1 ;;
@@ -28,6 +28,10 @@ rollback() {
   fi
   if [ "${allowlist_changed:-0}" -eq 1 ] && [ -f "$allowlist.bak-$ts" ]; then
     install -o root -g root -m 0644 "$allowlist.bak-$ts" "$allowlist"
+  fi
+  # web.fetch 承認必須化で書き換えた repo 側 allowlist も元へ戻す（配備版だけの復元は不整合が残る）
+  if [ "${repo_allowlist_changed:-0}" -eq 1 ] && [ -f "$repo_allowlist.bak-$ts" ]; then
+    cp -a "$repo_allowlist.bak-$ts" "$repo_allowlist"
   fi
   if [ "${unit_changed:-0}" -eq 1 ] && [ -f "$unit.bak-$ts" ]; then
     install -o root -g root -m 0644 "$unit.bak-$ts" "$unit"
@@ -62,6 +66,7 @@ if grep -A8 'name = "web.fetch"' "$allowlist" 2>/dev/null | grep -q 'requires_ap
     echo "== 2. web.fetch承認必須化（repo + /etc） =="
     if [ "$apply" -eq 1 ]; then
       cp -a "$allowlist" "$allowlist.bak-$ts"
+      # repo 側 allowlist もここで .bak-$ts へ退避（ロールバック時に復元するため）
       cp -a "$repo_allowlist" "$repo_allowlist.bak-$ts" 2>/dev/null || true
       python3 - "$allowlist" "$repo_allowlist" <<'PY'
 import sys
@@ -78,6 +83,10 @@ requires_approval = false'''
         open(path, 'w').write(text.replace(old, new, 1))
         print('  patched:', path)
 PY
+      # repo 側が実際に書き換わった場合のみロールバック対象にする
+      if [ -f "$repo_allowlist.bak-$ts" ] && ! cmp -s "$repo_allowlist" "$repo_allowlist.bak-$ts"; then
+        repo_allowlist_changed=1
+      fi
     else
       echo "  DRY: would set requires_approval = true in repo and /etc"
     fi
