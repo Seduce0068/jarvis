@@ -77,11 +77,12 @@ const ALREADY_DECIDED_409_BODY: &str = jarvis_core::ALREADY_DECIDED_409_BODY;
 /// "期限切れ" outcome.
 const APPROVAL_EXPIRED_BODY: &str = jarvis_core::APPROVAL_EXPIRED_BODY;
 
-// Complete `/health` wire bodies (I62-C, hardened in I64-B), aliased from
+// Complete `/health` wire bodies (I62-C, hardened in I64-B/I66-C), aliased from
 // `jarvis-core` so this classifier cannot drift from what `jarvis-policy`
-// emits. Classification is a trimmed exact match on the whole body — never a
-// partial `Value` field read — so an extra key, a duplicate key or an unknown
-// shape is never a release: the probe fails closed (Err -> `unwrap_or(true)`).
+// emits. Classification is an exact byte match on the whole body, with no
+// trimming — never a partial `Value` field read — so an extra key, a duplicate
+// key, leading/trailing whitespace or an unknown shape is never a release: the
+// probe fails closed (Err -> `unwrap_or(true)`).
 const HEALTH_OK_BODY: &str = jarvis_core::HEALTH_OK_BODY;
 const HEALTH_KILL_SWITCH_BODY: &str = jarvis_core::HEALTH_KILL_SWITCH_BODY;
 const HEALTH_NO_POLICY_BODY: &str = jarvis_core::HEALTH_NO_POLICY_BODY;
@@ -586,17 +587,18 @@ impl PolicyClient {
     /// `200 Approved` when a stop lands mid-commit, while `jarvis-mcp-gw`
     /// re-checks the kill switch before the tool runs.
     ///
-    /// Only three definitive answers exist, each requiring a **trimmed exact
-    /// match of the entire body** against the fixed literals aliased from
-    /// `jarvis-core`: the kill-switch body on `503` reports `true`; the no-policy
-    /// body on `503` and the ok body on `200` report `false`. There is no partial
-    /// field interpretation: an extra key, a duplicate key (serde_json keeps the
-    /// last value, so a relay could rewrite `reason=no_policy` into a false
-    /// release), a whitespace variant of a known shape, an unknown shape, a read
-    /// failure, a timeout, a redirect, or any status other than `200`/`503`
-    /// (including a proxy `500`/`502`/`504`) is an *incomplete* probe and returns
-    /// `Err`, which this method projects to `true` through `unwrap_or(true)`
-    /// (I54-A, I60-A, I62-C, I64-B). No reason text, token, or request data is
+    /// Only three definitive answers exist, each requiring an **exact byte
+    /// match of the entire body, without trimming**, against the fixed literals
+    /// aliased from `jarvis-core`: the kill-switch body on `503` reports `true`;
+    /// the no-policy body on `503` and the ok body on `200` report `false`.
+    /// There is no partial field interpretation: an extra key, a duplicate key
+    /// (serde_json keeps the last value, so a relay could rewrite
+    /// `reason=no_policy` into a false release), leading/trailing whitespace,
+    /// an inner-whitespace variant, an unknown shape, a read failure, a timeout,
+    /// a redirect, or any status other than `200`/`503` (including a proxy
+    /// `500`/`502`/`504`) is an *incomplete* probe and returns `Err`, which this
+    /// method projects to `true` through `unwrap_or(true)` (I54-A, I60-A,
+    /// I62-C, I64-B, I66-C). No reason text, token, or request data is
     /// surfaced.
     pub fn kill_switch_active(&self) -> bool {
         self.kill_switch_probe().unwrap_or(true)
@@ -626,24 +628,25 @@ impl PolicyClient {
         if status != 200 && status != 503 {
             bail!("GET {url} returned unexpected HTTP {status}");
         }
-        // I64-B: classify the whole body, not individual JSON fields. The old
-        // `read_json::<Value>()` + `get("reason")` path let a relay append a
-        // second `reason` key: serde_json keeps the last value, so a rewritten
-        // kill-switch body reported `no_policy` and lifted the halt pin. A
-        // bounded exact match against the fixed literals has no such ambiguity.
+        // I64-B / I66-C: classify the whole body, not individual JSON fields.
+        // The old `read_json::<Value>()` + `get("reason")` path let a relay append
+        // a second `reason` key: serde_json keeps the last value, so a rewritten
+        // kill-switch body reported `no_policy` and lifted the halt pin. The old
+        // `.trim()` also accepted a padded healthy body as a release. A bounded
+        // exact byte match against the fixed literals has neither ambiguity.
         let body = response
             .body_mut()
             .with_config()
             .limit(256)
             .read_to_string()
             .with_context(|| format!("unreadable health body from GET {url}"))?;
-        let body = body.trim();
         match status {
             200 if body == HEALTH_OK_BODY => Ok(false),
             503 if body == HEALTH_KILL_SWITCH_BODY => Ok(true),
             503 if body == HEALTH_NO_POLICY_BODY => Ok(false),
-            // Extra keys, duplicate keys, unknown shapes, unknown reasons and a
-            // known body under the wrong status are all incomplete probes.
+            // Extra keys, duplicate keys, leading/trailing whitespace, unknown
+            // shapes, unknown reasons and a known body under the wrong status
+            // are all incomplete probes.
             _ => bail!("unexpected health body from GET {url}"),
         }
     }
@@ -2034,6 +2037,25 @@ mod tests {
         );
         // A known ok body under 503 is not an active stop.
         assert_health_status_fails_closed("HTTP/1.1 503 Service Unavailable", r#"{"status":"ok"}"#);
+    }
+
+    /// I66-C: the `/health` classifier compares the whole body byte-for-byte
+    /// now that the `.trim()` is gone. Leading/trailing whitespace is an
+    /// incomplete probe: the raw read returns `Err` and the public bool fails
+    /// closed, so a padded healthy/degraded body can never lift the halt pin.
+    #[test]
+    fn health_probe_padded_body_fails_closed() {
+        assert_health_status_fails_closed("HTTP/1.1 200 OK", " {\"status\":\"ok\"}");
+        assert_health_status_fails_closed("HTTP/1.1 200 OK", "{\"status\":\"ok\"} ");
+        assert_health_status_fails_closed("HTTP/1.1 200 OK", "\t{\"status\":\"ok\"}\n");
+        assert_health_status_fails_closed(
+            "HTTP/1.1 503 Service Unavailable",
+            " {\"status\":\"degraded\",\"reason\":\"kill_switch\"} ",
+        );
+        assert_health_status_fails_closed(
+            "HTTP/1.1 503 Service Unavailable",
+            " {\"status\":\"degraded\",\"reason\":\"no_policy\"} ",
+        );
     }
 
     /// I62-C / I64-B cross-crate pin: the classifier accepts exactly what

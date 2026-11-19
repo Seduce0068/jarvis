@@ -61,7 +61,7 @@ status: draft
 | REQ-24 | winner が読めない 409 はエラーとし、winner の理由本文は表示しない |
 | REQ-25 | kill switch 409 は共有本文一致または空/読取不能本文で停止を pin し、winner 取得をしない |
 | REQ-26 | probe は fail-closed。timeout・接続失敗・読み取り不能本文は active=true とする |
-| REQ-27 | 明示的な healthy 応答のみ active=false とし、latch と pin を解除する |
+| REQ-27 | 固定本文との完全バイト一致（trim なし）の healthy 応答のみ active=false とし、latch と pin を解除する |
 | REQ-28 | 409 の停止 latch は racing した healthy probe より優先する |
 
 トークン関連の REQ-11 / REQ-19 / REQ-20 は
@@ -76,6 +76,12 @@ API scope は `JARVIS_POLICY_APPROVAL_API_TOKEN`、レガシー
 `KILL_SWITCH_409_BODY`・空・読み取り不能・未知／改変本文はすべて非常停止側へ
 分類する。winner の取得は status 端点で API scope を優先し、未設定なら
 admin scope を使う。
+
+`/health` の分類も fail-closed である。`jarvis-core` が公開する
+`HEALTH_OK_BODY` / `HEALTH_KILL_SWITCH_BODY` / `HEALTH_NO_POLICY_BODY` を
+**トリムなしの完全バイト一致**で照合する（I66-C）。前後空白つきの本文、
+余分／重複キー、未知の形状、読み取り不能な本文、`200` / `503` 以外の status
+はすべて不完全 probe として `Err` → `true`（停止側）へ倒れる。
 
 ## Risk & tier
 
@@ -307,7 +313,10 @@ Scenario: TC-U18 probe の fail-closed と 409 優先
   Given probe が先に healthy を返した後に kill switch 409 本文が届く
   When 停止 latch を適用する
   Then 409 本文が probe に優先し停止表示が残る
-  Given /health が明示的に healthy を返す
+  Given /health が前後空白つきの healthy 本文を返す
+  When kill_switch_active を評価する
+  Then Err として fail-closed にし true を返し停止 pin を維持する
+  Given /health が固定本文 HEALTH_OK_BODY を完全バイト一致で返す
   When kill_switch_active を評価する
   Then false を返し latch と pin が解除される
 ```
@@ -367,6 +376,7 @@ TC-U13 の scope 別フォールバックと TC-U14 のレガシー ENV 警告�
 トークン未設定時にヘッダを送らない挙動は送信側の `if let Some` ガードに依存する。
 GPUI の実描画に依存する TC-U1 / TC-U6 は未検証のままとする。
 
-TC-U15〜TC-U18 は I50-C / I52-A / I54-A の回帰テストに対応する。
+TC-U15〜TC-U18 は I50-C / I52-A / I54-A / I66-C の回帰テストに対応する。
 `approvals.rs` の kill switch pin・409 分類と `policy_client.rs` の
-probe fail-closed・winner 取得が根拠。実測件数は evidence を参照。
+probe fail-closed・winner 取得が根拠。I66-C では `/health` 本文の前後空白が
+`Err` → 停止側へ倒れる回帰を追加した。実測件数は evidence を参照。
