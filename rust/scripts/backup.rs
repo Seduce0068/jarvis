@@ -23,7 +23,13 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use tracing::{info, warn};
+
+/// Default HTTP timeout (seconds) for Qdrant snapshot requests.
+const QDRANT_HTTP_TIMEOUT_SECS: u64 = 30;
+/// Optional environment variable to override the Qdrant HTTP timeout (seconds).
+const QDRANT_TIMEOUT_ENV: &str = "JARVIS_QDRANT_TIMEOUT_SECS";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -176,9 +182,25 @@ fn backup_postgres(backup_dir: &Path, date: &str) -> Result<()> {
     Ok(())
 }
 
+fn qdrant_http_timeout() -> Duration {
+    let secs = std::env::var(QDRANT_TIMEOUT_ENV)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|secs| *secs > 0)
+        .unwrap_or(QDRANT_HTTP_TIMEOUT_SECS);
+    Duration::from_secs(secs)
+}
+
+fn build_qdrant_client() -> Result<Client> {
+    Client::builder()
+        .timeout(qdrant_http_timeout())
+        .build()
+        .context("Failed to build Qdrant HTTP client")
+}
+
 fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
     info!("Backing up Qdrant...");
-    let client = Client::new();
+    let client = build_qdrant_client()?;
 
     // Create snapshot
     client
@@ -307,7 +329,7 @@ fn cleanup_local(backup_dir: &Path, dry_run: bool) -> Result<()> {
 
 fn cleanup_local_at(backup_dir: &Path, dry_run: bool, now: std::time::SystemTime) -> Result<()> {
     info!("Cleaning up old local backups (older than 7 days)...");
-    let count = fs::read_dir(backup_dir)?
+    let old_files = fs::read_dir(backup_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
         .filter(|e| {
@@ -321,24 +343,50 @@ fn cleanup_local_at(backup_dir: &Path, dry_run: bool, now: std::time::SystemTime
                 })
                 .unwrap_or(false)
         })
-        .inspect(|e| {
-            if dry_run {
-                info!(
-                    "[dry-run] Would remove old local backup: {}",
-                    e.path().display()
-                );
-            } else {
-                let _ = fs::remove_file(e.path());
-            }
-        })
-        .count();
+        .map(|e| e.path());
+
+    let remove = |path: &Path| fs::remove_file(path);
+    let removed = remove_old_backup_files(old_files, dry_run, remove);
 
     if dry_run {
-        info!("[dry-run] Would remove {} old local backups", count);
+        info!("[dry-run] Would remove {} old local backups", removed);
     } else {
-        info!("Cleaned up {} old local backups", count);
+        info!("Cleaned up {} old local backups", removed);
     }
     Ok(())
+}
+
+/// Deletes (or, in dry-run mode, only counts) the given old backup files.
+///
+/// The `remove` closure is injectable so the failure/count behavior can be
+/// exercised in tests without depending on filesystem permissions.
+fn remove_old_backup_files<I, F>(paths: I, dry_run: bool, mut remove: F) -> usize
+where
+    I: Iterator<Item = std::path::PathBuf>,
+    F: FnMut(&Path) -> std::io::Result<()>,
+{
+    let mut count = 0usize;
+    for path in paths {
+        if dry_run {
+            info!(
+                "[dry-run] Would remove old local backup: {}",
+                path.display()
+            );
+            count += 1;
+            continue;
+        }
+        match remove(&path) {
+            Ok(()) => count += 1,
+            Err(err) => {
+                warn!(
+                    "Failed to remove old local backup {}: {}",
+                    path.display(),
+                    err
+                );
+            }
+        }
+    }
+    count
 }
 
 fn cleanup_remote(args: &Args, hostname: &str, config_flag: &str, dry_run: bool) -> Result<()> {
@@ -402,5 +450,41 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_old_backup_files_counts_only_successful_removals() {
+        let paths = [
+            std::path::PathBuf::from("/tmp/jarvis-backup/ok"),
+            std::path::PathBuf::from("/tmp/jarvis-backup/fail"),
+        ];
+        let mut attempted = Vec::new();
+        let removed = remove_old_backup_files(paths.into_iter(), false, |path| {
+            attempted.push(path.to_path_buf());
+            if path.ends_with("fail") {
+                Err(std::io::ErrorKind::PermissionDenied.into())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(removed, 1, "failed removals not counted");
+        assert_eq!(attempted.len(), 2, "all files attempted");
+    }
+
+    #[test]
+    fn remove_old_backup_files_dry_run_skips_removal() {
+        let paths = [std::path::PathBuf::from("/tmp/jarvis-backup-dry-run")];
+        let removed = remove_old_backup_files(paths.into_iter(), true, |_| {
+            panic!("dry-run must not call remove")
+        });
+        assert_eq!(removed, 1, "dry-run counts files");
+    }
+
+    #[test]
+    fn qdrant_client_builds_with_configured_timeout() {
+        assert!(
+            build_qdrant_client().is_ok(),
+            "Qdrant HTTP client must build with the configured timeout"
+        );
     }
 }
