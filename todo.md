@@ -1120,23 +1120,50 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 37 のレビュー結果（未対応）
 
-- [ ] **evidence/index.md の実測件数が6件中5件で古い**（confirmed medium）—
+- [x] **evidence/index.md の実測件数が6件中5件で古い**（confirmed medium）— 2026-11-20 対応済み: index の policy 53→144、context 17→92、backup 23→29、event 24→70、ui 14→36 へ同期（mcp 45/0/1 は既に一致）。backup 証跡も spec 変更に伴い hash `7e4e4b859e57…` へ実測再生成（23+6=29）、index の参照も更新。check-evidence ok=6 errors=0。
   index の 53/17/23/24/14 に対し実際は 144/92/29/70/36。`check-evidence.sh:237-250`
   はリンク存在のみ検査し数値主張を検証しない。索引の N passed と JSON results を
   照合するゲートを追加し、6件を実測値へ再生成。
-- [ ] **specs/test-backup.md:286 の件数表記が evidence 29件と矛盾**
+- [x] **specs/test-backup.md:286 の件数表記が evidence 29件と矛盾** — 2026-11-20 対応済み: 件数表記を `test-verify-backup` 23 + `test-backup-args` 6 = 29 へ修正。あわせて TC-V2（REQ-4 / REQ-5）の Traceability 行2件を追加し、他5仕様とシナリオ一致。spec_hash 変更に伴う evidence 再生成も完了。
   （confirmed medium）— 23 checks + 22 checks と記載だが spec_hash は一致し
   ゲートが通る。29（23+6）へ更新して spec_hash／ファイル名／index を再生成。
-- [ ] **dirty gate が build-selfhost.sh 限定で deploy-mcp-gw-safe.sh が迂回**
+- [x] **dirty gate が build-selfhost.sh 限定で deploy-mcp-gw-safe.sh が迂回** — 2026-11-20 対応済み: `deploy-mcp-gw-safe.sh` の `--apply` 配置前に rev-parse / clean-tree（unstaged＋staged）を必須化。マーカーは添付時のみ照合（現行ビルド経路との整合で未添付は best-effort）。dry-run / root / ロールバック / 段階別バックアップは不変、`bash -n` / shellcheck OK。
   （confirmed medium）— `deploy-mcp-gw-safe.sh:18,80,176` は
   `rust/target/release/jarvis-mcp-gw` をそのまま install し rev-parse／diff／
   マーカー照合が無い。同じゲートを追加するか mcp-gw 配置を build-selfhost 経由へ。
-- [ ] **untracked 検査が `--exclude-standard` で ignore 済み SQL を通す**
+- [x] **untracked 検査が `--exclude-standard` で ignore 済み SQL を通す** — 2026-11-20 対応済み: 既存の untracked 検査は保持した上で、glob された各 `*.sql` を `git ls-files --error-unmatch` で追跡確認し、index に無いファイルは fail-closed（名前・差分は非出力）。`bash -n` / shellcheck OK。
   （likely low）— glob は全 `*.sql` を拾うのに git 側は ignore 済みを除外。
   ペイロード集合と照合対象を完全一致させる。
-- [ ] **試行予算の世代上限が契約と矛盾**（confirmed low）—
+- [x] **試行予算の世代上限が契約と矛盾**（confirmed low）— 2026-11-20 対応済み: `GenerationBudget` 共有カウンタを導入し初期世代込み MAX_DB_ATTEMPTS(=3) 世代＝2 reconnect に制限。最終試行の probe／I40-A retry はスロットが残らず現行世代で実行。doc を実装へ同期し、生成世代数の pure 回帰4件追加 —
   `persistence.rs:39-43` は MAX_DB_ATTEMPTS 世代と明記するが最終試行でも
   reconnect するため gen0+3=4（I40-A 追加で最大5）。最終試行では reconnect
   をスキップするか共有カウンタで真の上限にし、世代数をテストで検証。
 
 - 親が対応: clippy の manual map、型エラー（`rx.changed().is_ok()`）、rustfmt。
+
+### Round 38 のレビュー結果（未対応）
+
+- [ ] **3Way select が durable 再読の Ok(None)/Err で早期 Expired を返し
+  split brain が復活**（likely high）— `approval.rs:593-608,655-659`。
+  `Race::Durable` の Ok(None)/Err が grace 満了前に関数を `Ok(Expired)` で
+  終了する。Ok(Some) のみ早期採用し、None/Err は grace 完了後の最終手段へ
+  格下げ。「durable が即 Err + watch が遅れて届く」回帰を追加。
+- [ ] **Race::Grace の reread.await にタイムアウトが無く期限後待機が無界**
+  （likely medium）— `approval.rs:586,609-630`。`tokio::time::timeout(残予算, reread)`
+  で包み、タイムアウト時は固定語彙 warn＋Expired フォールバック。
+- [ ] **SQL 入れ替えの unit stop が Wants= で再起動され partial tree を読める**
+  （likely medium）— `build-selfhost.sh:236-264` と policy/context の
+  `Wants=jarvis-migrations.service` + `Restart=on-failure`。入れ替え中は
+  mask するか policy/context も停止、あるいは symlink/atomic rename で
+  reader 停止に依存しない切替へ。
+- [ ] **deploy-mcp-gw の provenance gate がマーカー未添付を許容**
+  （confirmed medium）— `deploy-mcp-gw-safe.sh:110-121`。build-selfhost.sh は
+  `/opt/jarvis/bin/` にのみマーカーを置き `rust/target/release/` には置かない。
+  配置対象と同ディレクトリへのマーカー生成を必須化し、欠落・空・HEAD 不一致を
+  fail-closed で拒否（可能なら SHA-256 も照合）。
+- [ ] **最終試行の probe retry が枯渇した generation で再実行され lost-ack
+  契約が死ぬ**（likely medium）— `persistence.rs:426-436`。budget 枯渇時は
+  壊れた同一接続で2回目の probe を読むため OurCommit を検出できない。
+  最終試行用に reconnect スロットを1つ予約するか、契約を実態へ合わせる。
+
+- 親が対応: clippy の too_many_arguments、evidence/spec 実測再生成、index 件数同期。
