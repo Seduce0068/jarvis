@@ -4,6 +4,7 @@ use anyhow::Result;
 use jarvis_context::ContextBuilder;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 /// Fixed category for a tracer-provider shutdown failure (I51-B).
 ///
@@ -200,6 +201,35 @@ fn warn_otlp_exporter_failure(endpoint_configured: bool, _endpoint: &str) {
     );
 }
 
+/// Log targets owned by the OpenTelemetry SDK/exporter (I57-C).
+///
+/// Their DEBUG records embed the raw shutdown/export error `Display`, which can
+/// carry the OTLP endpoint (and credentials in userinfo/query). Our own warnings
+/// use fixed vocabulary; these directives keep the SDK's own output quiet even
+/// when an operator sets `RUST_LOG=debug`. A target-bearing directive is more
+/// specific than the global one parsed from `RUST_LOG`, so it wins regardless of
+/// ordering, and `add_directive` replaces an equal-target directive.
+const OTEL_SDK_LOG_GUARD: [&str; 2] = ["opentelemetry_sdk=warn", "opentelemetry_otlp=warn"];
+
+/// Build the global [`EnvFilter`] from the optional `RUST_LOG` value with the
+/// OTel SDK guard directives applied on top (I57-C).
+///
+/// Kept pure over the supplied string so the regression test can prove
+/// suppression without mutating the process environment (edition 2024 makes
+/// `set_var` unsafe and parallel tests racy). `EnvFilter::new("")` preserves the
+/// historical `from_default_env()` default of ERROR when `RUST_LOG` is unset.
+fn build_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    let mut filter = EnvFilter::new(rust_log.unwrap_or(""));
+    for directive in OTEL_SDK_LOG_GUARD {
+        filter = filter.add_directive(
+            directive
+                .parse()
+                .expect("static OTel SDK log-guard directive must parse"),
+        );
+    }
+    filter
+}
+
 /// Initialise JSON logging with optional OTLP trace export.
 ///
 /// The collector endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT` and
@@ -212,6 +242,10 @@ fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     use opentelemetry_otlp::WithExportConfig;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+
+    // I57-C: read RUST_LOG once and route it through the pure filter builder so
+    // the SDK guard survives an operator-supplied `RUST_LOG=debug`.
+    let rust_log = std::env::var("RUST_LOG").ok();
 
     // I49-A: record only whether a custom endpoint was configured. The URL
     // itself may carry credentials and must never become a log field.
@@ -245,7 +279,7 @@ fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     tracing_subscriber::registry()
         .with(telemetry)
         .with(tracing_subscriber::fmt::layer().json())
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(build_env_filter(rust_log.as_deref()))
         .init();
 
     // Warn only after the fmt layer is installed; before that there is no

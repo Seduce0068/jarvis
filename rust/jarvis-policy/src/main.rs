@@ -5,6 +5,7 @@ use jarvis_policy::{PolicyEngine, config};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::sync::Arc;
 use tracing::info;
+use tracing_subscriber::EnvFilter;
 
 /// Fixed category for a tracer-provider shutdown failure (I55-B; same contract
 /// as I51-B in jarvis-event / jarvis-context / jarvis-mcp-gw).
@@ -152,6 +153,35 @@ fn warn_otlp_exporter_failure(endpoint_configured: bool, _endpoint: &str) {
     );
 }
 
+/// Log targets owned by the OpenTelemetry SDK/exporter (I57-C).
+///
+/// Their DEBUG records embed the raw shutdown/export error `Display`, which can
+/// carry the OTLP endpoint (and credentials in userinfo/query). Our own warnings
+/// use fixed vocabulary; these directives keep the SDK's own output quiet even
+/// when an operator sets `RUST_LOG=debug`. A target-bearing directive is more
+/// specific than the global one parsed from `RUST_LOG`, so it wins regardless of
+/// ordering, and `add_directive` replaces an equal-target directive.
+const OTEL_SDK_LOG_GUARD: [&str; 2] = ["opentelemetry_sdk=warn", "opentelemetry_otlp=warn"];
+
+/// Build the global [`EnvFilter`] from the optional `RUST_LOG` value with the
+/// OTel SDK guard directives applied on top (I57-C).
+///
+/// Kept pure over the supplied string so the regression test can prove
+/// suppression without mutating the process environment (edition 2024 makes
+/// `set_var` unsafe and parallel tests racy). `EnvFilter::new("")` preserves the
+/// historical `from_default_env()` default of ERROR when `RUST_LOG` is unset.
+fn build_env_filter(rust_log: Option<&str>) -> EnvFilter {
+    let mut filter = EnvFilter::new(rust_log.unwrap_or(""));
+    for directive in OTEL_SDK_LOG_GUARD {
+        filter = filter.add_directive(
+            directive
+                .parse()
+                .expect("static OTel SDK log-guard directive must parse"),
+        );
+    }
+    filter
+}
+
 /// Initialise JSON logging with optional OTLP trace export.
 ///
 /// The collector endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT` and
@@ -164,6 +194,10 @@ fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     use opentelemetry_otlp::WithExportConfig;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
+
+    // I57-C: read RUST_LOG once and route it through the pure filter builder so
+    // the SDK guard survives an operator-supplied `RUST_LOG=debug`.
+    let rust_log = std::env::var("RUST_LOG").ok();
 
     // I47-B: record only whether a custom endpoint was configured. The URL
     // itself may carry credentials and must never become a log field.
@@ -196,7 +230,7 @@ fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     tracing_subscriber::registry()
         .with(telemetry)
         .with(tracing_subscriber::fmt::layer().json())
-        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(build_env_filter(rust_log.as_deref()))
         .init();
 
     // Warn only after the fmt layer is installed; before that there is no
@@ -535,6 +569,54 @@ mod tests {
         assert!(
             !log.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
             "benign AlreadyShutdown must stay silent: {log}"
+        );
+    }
+
+    /// I57-C regression: with `RUST_LOG=debug`, the SDK's own DEBUG line (whose
+    /// `Display` can carry the OTLP endpoint / credentials) must stay filtered,
+    /// while ordinary application DEBUG and SDK WARN remain visible. The helper
+    /// is pure, so no environment variable is mutated by this test.
+    #[test]
+    fn otel_sdk_debug_is_suppressed_even_with_rust_log_debug() {
+        const SDK_DEBUG: &str = "SDK-DEBUG-I57C-probe";
+        const OTLP_DEBUG: &str = "OTLP-DEBUG-I57C-probe";
+        const SDK_WARN: &str = "SDK-WARN-I57C-probe";
+        const APP_DEBUG: &str = "APP-DEBUG-I57C-probe";
+
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry()
+                .with(super::build_env_filter(Some("debug")))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(buffer.clone()),
+                );
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::debug!(target: "opentelemetry_sdk::trace", "{}", SDK_DEBUG);
+                tracing::debug!(target: "opentelemetry_otlp::exporter", "{}", OTLP_DEBUG);
+                tracing::warn!(target: "opentelemetry_sdk::trace", "{}", SDK_WARN);
+                tracing::debug!(target: "jarvis_policy", "{}", APP_DEBUG);
+            });
+        }
+        let log = String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8");
+
+        assert!(
+            !log.contains(SDK_DEBUG),
+            "OTel SDK DEBUG leaked with RUST_LOG=debug: {log}"
+        );
+        assert!(
+            !log.contains(OTLP_DEBUG),
+            "OTLP exporter DEBUG leaked with RUST_LOG=debug: {log}"
+        );
+        assert!(
+            log.contains(SDK_WARN),
+            "SDK WARN must still be emitted: {log}"
+        );
+        assert!(
+            log.contains(APP_DEBUG),
+            "RUST_LOG=debug must still enable application DEBUG: {log}"
         );
     }
 }
