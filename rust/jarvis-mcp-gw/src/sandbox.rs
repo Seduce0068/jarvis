@@ -6,6 +6,7 @@
 //! fallback; the former firejail/bwrap/docker/gvisor wrappers around the
 //! `opencode` CLI were removed (ADR-0002).
 
+use crate::error::McpGatewayError;
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,24 @@ const NATIVE_MAX_OUTPUT: usize = 1024 * 1024;
 const WEB_FETCH_DEFAULT_MAX_BYTES: usize = 256 * 1024;
 const WEB_FETCH_HARD_MAX_BYTES: usize = 1024 * 1024;
 const WEB_FETCH_MAX_REDIRECTS: usize = 3;
+
+/// Caller-input failures are typed as `McpGatewayError::ClientError` so the
+/// transport adapters keep mapping them to HTTP 400. `ClientError` renders as
+/// its message verbatim, so existing error-text expectations stay unchanged.
+fn client_error(message: impl Into<String>) -> anyhow::Error {
+    McpGatewayError::ClientError(message.into()).into()
+}
+
+/// Attach context to a caller-input failure without losing the typed 400
+/// mapping. The context text becomes the complete, unchanged error message.
+fn client_context<T, E>(result: std::result::Result<T, E>, context: String) -> Result<T>
+where
+    E: std::error::Error + Send + Sync + 'static,
+{
+    result
+        .with_context(|| context)
+        .map_err(|err| client_error(err.to_string()))
+}
 
 #[derive(Clone)]
 pub struct Sandbox {
@@ -59,7 +78,10 @@ impl Sandbox {
         // Runtime-agnostic fallback (ADR-0002): there is no agent-runtime CLI
         // to shell out to. Unimplemented tools are delegated to upstream MCP
         // servers registered with the gateway, and error out clearly here.
-        bail!("no native handler for tool '{tool}'; register an upstream MCP server for it")
+        // The tool name came from the caller, so this is a 400-class mistake.
+        Err(client_error(format!(
+            "no native handler for tool '{tool}'; register an upstream MCP server for it"
+        )))
     }
 
     async fn execute_native(
@@ -77,9 +99,9 @@ impl Sandbox {
             }
             "git.diff" => self.native_git(&args, tool_config, &["diff"]).await,
             "web.fetch" => self.native_web_fetch(&args, tool_config).await,
-            other => bail!(
+            other => Err(client_error(format!(
                 "no native handler for tool '{other}'; register an upstream MCP server for it"
-            ),
+            ))),
         }
     }
 
@@ -93,7 +115,7 @@ impl Sandbox {
         let raw = args
             .get("url")
             .and_then(Value::as_str)
-            .context("missing 'url' argument")?;
+            .ok_or_else(|| client_error("missing 'url' argument"))?;
         let mut url = validate_http_url(raw)?;
         let max_bytes = web_max_bytes(args);
         let timeout_ms = tool_config.timeout_ms.clamp(1_000, 15_000);
@@ -180,7 +202,8 @@ impl Sandbox {
         let path = self.resolve_path(args)?;
         let meta = std::fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
         if meta.is_dir() {
-            bail!("path is a directory: {}", path.display());
+            let message = format!("path is a directory: {}", path.display());
+            return Err(client_error(message));
         }
         if meta.len() > NATIVE_MAX_OUTPUT as u64 {
             bail!("file too large to read ({} bytes)", meta.len());
@@ -280,7 +303,8 @@ impl Sandbox {
                 || component.ends_with(".pem")
                 || component.ends_with(".key");
             if is_gcloud_config || is_sensitive_dir || is_sensitive_name {
-                bail!("refusing to read sensitive file: {}", path.display());
+                let message = format!("refusing to read sensitive file: {}", path.display());
+                return Err(client_error(message));
             }
         }
         Ok(())
@@ -296,10 +320,15 @@ impl Sandbox {
         } else {
             base.join(requested)
         };
-        let resolved = std::fs::canonicalize(&joined)
-            .with_context(|| format!("canonicalize {}", joined.display()))?;
+        // A caller-supplied path that cannot be canonicalized (e.g. it does
+        // not exist) is invalid input; the base directory itself is config.
+        let resolved = client_context(
+            std::fs::canonicalize(&joined),
+            format!("canonicalize {}", joined.display()),
+        )?;
         if !resolved.starts_with(&base) {
-            bail!("path escapes workspace: {}", resolved.display());
+            let message = format!("path escapes workspace: {}", resolved.display());
+            return Err(client_error(message));
         }
         Self::reject_sensitive_path(&resolved)?;
         Ok(resolved)
@@ -318,24 +347,28 @@ fn web_max_bytes(args: &Value) -> usize {
 }
 
 fn validate_http_url(raw: &str) -> Result<reqwest::Url> {
-    let url = reqwest::Url::parse(raw).with_context(|| format!("invalid url: {raw}"))?;
+    let url = client_context(reqwest::Url::parse(raw), format!("invalid url: {raw}"))?;
     match url.scheme() {
         "http" | "https" => {}
-        other => bail!("unsupported scheme '{other}' (http/https only)"),
+        other => {
+            let message = format!("unsupported scheme '{other}' (http/https only)");
+            return Err(client_error(message));
+        }
     }
     if !url.username().is_empty() || url.password().is_some() {
-        bail!("credentials in URL are not allowed");
+        return Err(client_error("credentials in URL are not allowed"));
     }
     if url.host_str().is_none() {
-        bail!("url has no host");
+        return Err(client_error("url has no host"));
     }
     Ok(url)
 }
 
 fn resolve_redirect(base: &reqwest::Url, location: &str) -> Result<reqwest::Url> {
-    let next = base
-        .join(location)
-        .with_context(|| format!("invalid redirect location: {location}"))?;
+    let next = client_context(
+        base.join(location),
+        format!("invalid redirect location: {location}"),
+    )?;
     validate_http_url(next.as_str())
 }
 
@@ -366,13 +399,16 @@ fn is_public_ip(ip: &std::net::IpAddr) -> bool {
 }
 
 async fn ensure_public_host(url: &reqwest::Url) -> Result<()> {
-    let host = url.host_str().context("url has no host")?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| client_error("url has no host"))?;
     let port = url.port_or_known_default().unwrap_or(80);
     // Literal IPs (including bracketed IPv6) are checked directly without DNS.
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
         if !is_public_ip(&ip) {
-            bail!("refusing to fetch non-public address {ip} for host {host}");
+            let message = format!("refusing to fetch non-public address {ip} for host {host}");
+            return Err(client_error(message));
         }
         return Ok(());
     }
@@ -383,10 +419,11 @@ async fn ensure_public_host(url: &reqwest::Url) -> Result<()> {
     for addr in addrs {
         any = true;
         if !is_public_ip(&addr.ip()) {
-            bail!(
+            let message = format!(
                 "refusing to fetch non-public address {} for host {host}",
                 addr.ip()
             );
+            return Err(client_error(message));
         }
     }
     if !any {

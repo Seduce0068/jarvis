@@ -19,6 +19,7 @@
 //! widens the allowlist: the allowlist file remains the single source of
 //! truth for which tools may run at all.
 
+use crate::error::McpGatewayError;
 use anyhow::{Context, Result};
 use rmcp::model::CallToolRequestParam;
 use rmcp::service::RunningService;
@@ -35,6 +36,13 @@ use tracing::info;
 /// Upper bound for the MCP `initialize` handshake plus `tools/list`
 /// discovery while registering an upstream server.
 const SERVER_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Caller-input failures are typed as `McpGatewayError::ClientError` so the
+/// transport adapters keep mapping them to HTTP 400. `ClientError` renders as
+/// its message verbatim, so existing error-text expectations stay unchanged.
+fn client_error(message: impl Into<String>) -> anyhow::Error {
+    McpGatewayError::ClientError(message.into()).into()
+}
 
 /// An upstream MCP server registered with the gateway.
 struct RegisteredServer {
@@ -109,11 +117,11 @@ impl Gateway {
     /// `mcp_allowlist.toml` before it can be executed.
     pub async fn register_mcp_server(&self, name: &str, command: Vec<String>) -> Result<()> {
         if name.trim().is_empty() {
-            anyhow::bail!("MCP server name must not be empty");
+            return Err(client_error("MCP server name must not be empty"));
         }
         let (program, args) = command
             .split_first()
-            .context("MCP server command must not be empty")?;
+            .ok_or_else(|| client_error("MCP server command must not be empty"))?;
 
         let mut cmd = Command::new(program);
         cmd.args(args);
@@ -185,7 +193,11 @@ async fn call_registered_tool(
     let arguments = match args {
         Value::Null => None,
         Value::Object(arguments) => Some(arguments),
-        other => anyhow::bail!("Tool '{tool}' arguments must be a JSON object, got: {other}"),
+        // The payload came from the caller, so this is a 400-class mistake.
+        other => {
+            let message = format!("Tool '{tool}' arguments must be a JSON object, got: {other}");
+            return Err(client_error(message));
+        }
     };
 
     let timeout = Duration::from_millis(tool_config.timeout_ms);
