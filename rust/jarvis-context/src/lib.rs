@@ -37,6 +37,11 @@ impl ContextBuilder {
             .await?,
         );
 
+        // (a/P1-2) Retry vector upserts that were queued after a Qdrant
+        // failure. Reconcile never fails startup: it warns and leaves failed
+        // rows in `pending_embeddings` for the next start.
+        builder.reconcile_pending_embeddings().await;
+
         Ok(Self {
             config,
             builder,

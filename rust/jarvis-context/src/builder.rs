@@ -99,6 +99,251 @@ fn entries_from_raw_points(points: Vec<(Option<String>, QdrantPayload)>) -> Vec<
         .collect()
 }
 
+/// Maximum number of outbox rows retried in one startup pass. A larger backlog
+/// is drained over successive starts instead of blocking startup indefinitely.
+const RECONCILE_BATCH_LIMIT: usize = 100;
+
+/// One queued vector upsert (P1-2).
+///
+/// Only the fields Qdrant needs are persisted. The full row already lives in
+/// `memories`, so id/content/metadata plus the captured vector are enough to
+/// rebuild its point during reconcile.
+#[derive(Clone, Debug)]
+struct PendingEmbedding {
+    id: Uuid,
+    content: String,
+    metadata: Value,
+    embedding: Vec<f32>,
+}
+
+/// Qdrant upsert seam. A trait keeps the outbox/reconcile decision testable
+/// with an injected failure and without a live Qdrant server.
+#[async_trait::async_trait]
+trait VectorSink: Send + Sync {
+    async fn upsert(&self, memory: &MemoryEntry) -> Result<()>;
+}
+
+/// `pending_embeddings` persistence seam, likewise injectable in tests.
+#[async_trait::async_trait]
+trait PendingStore: Send + Sync {
+    async fn record(&self, memory: &MemoryEntry, embedding: &[f32]) -> Result<()>;
+    async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>>;
+    async fn remove(&self, id: Uuid) -> Result<()>;
+}
+
+struct QdrantVectorSink {
+    client: Arc<Qdrant>,
+    collection: String,
+}
+
+#[async_trait::async_trait]
+impl VectorSink for QdrantVectorSink {
+    async fn upsert(&self, memory: &MemoryEntry) -> Result<()> {
+        memory::upsert_vector(&self.client, &self.collection, memory).await
+    }
+}
+
+struct PgPendingStore {
+    pool: Arc<deadpool_postgres::Pool>,
+}
+
+#[async_trait::async_trait]
+impl PendingStore for PgPendingStore {
+    async fn record(&self, memory: &MemoryEntry, embedding: &[f32]) -> Result<()> {
+        let client = self.pool.get().await?;
+        let embedding_json = serde_json::to_value(embedding)
+            .context("serializing embedding for the pending_embeddings outbox")?;
+        client
+            .execute(
+                "INSERT INTO pending_embeddings (id, content, metadata, embedding, created_at)
+                 VALUES ($1, $2, $3, $4, NOW())
+                 ON CONFLICT (id) DO UPDATE SET
+                     content = EXCLUDED.content,
+                     metadata = EXCLUDED.metadata,
+                     embedding = EXCLUDED.embedding,
+                     created_at = NOW()",
+                &[
+                    &memory.id,
+                    &memory.content,
+                    &memory.metadata,
+                    &embedding_json,
+                ],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
+        let client = self.pool.get().await?;
+        let rows = client
+            .query(
+                "SELECT id, content, metadata, embedding FROM pending_embeddings
+                 ORDER BY created_at ASC LIMIT $1",
+                &[&(limit as i64)],
+            )
+            .await?;
+        rows.into_iter()
+            .map(|row| {
+                let embedding_json: Value = row.get(3);
+                let embedding =
+                    serde_json::from_value::<Vec<f32>>(embedding_json).unwrap_or_default();
+                Ok(PendingEmbedding {
+                    id: row.get(0),
+                    content: row.get(1),
+                    metadata: row.get(2),
+                    embedding,
+                })
+            })
+            .collect()
+    }
+
+    async fn remove(&self, id: Uuid) -> Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute("DELETE FROM pending_embeddings WHERE id = $1", &[&id])
+            .await?;
+        Ok(())
+    }
+}
+
+/// Attempt the vector upsert after the PostgreSQL write has succeeded (P1-2).
+///
+/// A Qdrant failure is recorded in the outbox instead of being lost: the PG
+/// row is already durable and a later startup will retry the upsert. A stale
+/// outbox row for the same id is cleared after a successful upsert.
+async fn store_memory_with_sinks(
+    memory: &MemoryEntry,
+    sink: &dyn VectorSink,
+    outbox: &dyn PendingStore,
+) -> Result<()> {
+    match sink.upsert(memory).await {
+        Ok(()) => {
+            if let Err(error) = outbox.remove(memory.id).await {
+                warn!(
+                    id = %memory.id,
+                    error = %format!("{error:#}"),
+                    "vector upsert succeeded but a stale pending_embeddings row could not be removed"
+                );
+            }
+            Ok(())
+        }
+        Err(error) => {
+            warn!(
+                id = %memory.id,
+                error = %format!("{error:#}"),
+                "Qdrant upsert failed; queuing memory in pending_embeddings for retry"
+            );
+            outbox
+                .record(memory, &memory.embedding)
+                .await
+                .context("queuing a failed Qdrant upsert in pending_embeddings")?;
+            Err(error)
+        }
+    }
+}
+
+/// Choose the vector used to retry a queued upsert (P1-2).
+///
+/// The vector captured when the upsert failed is preferred: retrying is then
+/// deterministic and does not depend on the embedding endpoint being up. If
+/// that vector is absent or no longer matches the configured dimension, the
+/// content is re-embedded when an endpoint is configured.
+async fn vector_for_pending(
+    pending: &PendingEmbedding,
+    embedder: Option<&crate::embedding::EmbeddingClient>,
+    embedding_dim: usize,
+) -> Result<Vec<f32>> {
+    if embedding_dim > 0 && pending.embedding.len() == embedding_dim {
+        return Ok(pending.embedding.clone());
+    }
+
+    let Some(embedder) = embedder.filter(|client| client.is_enabled()) else {
+        anyhow::bail!(
+            "pending memory {} has no stored vector of dimension {embedding_dim} \
+             and no embedding endpoint is configured",
+            pending.id
+        );
+    };
+
+    let vector = embedder
+        .embed(&pending.content)
+        .await
+        .context("re-embedding a pending memory during reconcile")?;
+    if vector.len() != embedding_dim {
+        anyhow::bail!(
+            "re-embedded pending memory {} produced {} dimensions, expected {embedding_dim}",
+            pending.id,
+            vector.len()
+        );
+    }
+    Ok(vector)
+}
+
+/// Startup reconcile of queued vector upserts (P1-2). Never fails the whole
+/// startup: a transient Qdrant/embedding failure leaves the row queued with a
+/// warning so the next startup retries it.
+async fn reconcile_pending(
+    outbox: &dyn PendingStore,
+    sink: &dyn VectorSink,
+    embedder: Option<&crate::embedding::EmbeddingClient>,
+    embedding_dim: usize,
+) {
+    let pending = match outbox.list(RECONCILE_BATCH_LIMIT).await {
+        Ok(pending) => pending,
+        Err(error) => {
+            warn!(
+                error = %format!("{error:#}"),
+                "could not read pending_embeddings; deferring reconcile to next startup"
+            );
+            return;
+        }
+    };
+
+    for item in pending {
+        let vector = match vector_for_pending(&item, embedder, embedding_dim).await {
+            Ok(vector) => vector,
+            Err(error) => {
+                warn!(
+                    id = %item.id,
+                    error = %format!("{error:#}"),
+                    "could not produce a vector for a pending memory; leaving it queued"
+                );
+                continue;
+            }
+        };
+
+        let memory = MemoryEntry {
+            id: item.id,
+            content: item.content,
+            embedding: vector,
+            metadata: item.metadata,
+            source: String::new(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at: None,
+        };
+
+        match sink.upsert(&memory).await {
+            Ok(()) => {
+                if let Err(error) = outbox.remove(memory.id).await {
+                    warn!(
+                        id = %memory.id,
+                        error = %format!("{error:#}"),
+                        "reconciled upsert succeeded but the pending row could not be deleted"
+                    );
+                }
+            }
+            Err(error) => {
+                warn!(
+                    id = %memory.id,
+                    error = %format!("{error:#}"),
+                    "reconciled Qdrant upsert failed; keeping the row for the next startup"
+                );
+            }
+        }
+    }
+}
+
 pub struct Builder {
     config: crate::config::ContextConfig,
     pg_pool: Arc<deadpool_postgres::Pool>,
@@ -194,10 +439,38 @@ impl Builder {
             ],
         ).await?;
 
-        // Store embedding in Qdrant
-        memory::upsert_vector(&self.qdrant_client, &self.config.collection_name, &memory).await?;
+        // Store embedding in Qdrant. If that fails, queue the memory in
+        // `pending_embeddings` so the next startup can reconcile it (P1-2).
+        let sink = QdrantVectorSink {
+            client: self.qdrant_client.clone(),
+            collection: self.config.collection_name.clone(),
+        };
+        let outbox = PgPendingStore {
+            pool: self.pg_pool.clone(),
+        };
+        store_memory_with_sinks(&memory, &sink, &outbox).await
+    }
 
-        Ok(())
+    /// Retry vector upserts queued after a Qdrant failure (P1-2).
+    ///
+    /// Called once from [`crate::ContextBuilder::new`] at startup. Reconcile
+    /// never fails startup: a failed retry warns and leaves its row for the
+    /// next start.
+    pub(crate) async fn reconcile_pending_embeddings(&self) {
+        let sink = QdrantVectorSink {
+            client: self.qdrant_client.clone(),
+            collection: self.config.collection_name.clone(),
+        };
+        let outbox = PgPendingStore {
+            pool: self.pg_pool.clone(),
+        };
+        reconcile_pending(
+            &outbox,
+            &sink,
+            Some(&self.embedding),
+            self.config.embedding_dim,
+        )
+        .await;
     }
 
     pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
@@ -390,11 +663,35 @@ pub mod memory {
             tokio_postgres::NoTls,
         )?;
 
-        // Run migrations
-        let client = pool.get().await?;
-        client
-            .batch_execute(include_str!("../../migrations/001_initial.sql"))
-            .await?;
+        // Run migrations (P1-3).
+        //
+        // sqlx already has the `migrate` feature enabled in the workspace
+        // dependency (`runtime-tokio-rustls`, `postgres`, `migrate`), so no new
+        // dependency is introduced. A short-lived `sqlx::PgConnection` is used
+        // only for migration bookkeeping; the service keeps the deadpool pool
+        // for all queries. `Pool::connect` is an inherent API, so no extra
+        // trait import is needed here.
+        //
+        // Baseline for existing databases: deployments that previously ran
+        // `batch_execute(001_initial.sql)` already own the 001 tables but have
+        // no `_sqlx_migrations` table. On the first start of this build sqlx
+        // replays 001; every statement there is `CREATE ... IF NOT EXISTS` or
+        // `INSERT ... ON CONFLICT DO NOTHING`, so the replay is a no-op whose
+        // only effect is recording version 1 as the baseline. The same applies
+        // to 002 (the outbox table, also `IF NOT EXISTS`). No data is lost and
+        // no manual step is required.
+        //
+        // Optional explicit baseline for operators who prefer to prepare the
+        // database before deploying (requires sqlx-cli; otherwise let the
+        // first startup do it as above):
+        //   sqlx migrate baseline --version 1 \
+        //     --source rust/migrations \
+        //     --url "$JARVIS_CONTEXT_PG_URL"
+        // Never delete rows from `_sqlx_migrations`: doing so makes sqlx replay
+        // every migration and can break on already-existing versioned changes.
+        let migration_pool = sqlx::PgPool::connect(config.pg_url()).await?;
+        sqlx::migrate!("../migrations").run(&migration_pool).await?;
+        drop(migration_pool);
 
         Ok(pool)
     }
@@ -926,6 +1223,194 @@ mod tests {
             message.contains("Qdrant"),
             "the error must name the failing dependency: {message}"
         );
+    }
+
+    // --- P1-2 outbox / reconcile regression harness (no live services) ---
+
+    /// Scripted Qdrant sink. `true` = successful upsert, `false` = injected
+    /// failure. No network is touched, so the failure is deterministic.
+    struct ScriptedSink {
+        results: std::sync::Mutex<Vec<bool>>,
+    }
+
+    impl ScriptedSink {
+        fn new(results: Vec<bool>) -> Self {
+            Self {
+                results: std::sync::Mutex::new(results),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl VectorSink for ScriptedSink {
+        async fn upsert(&self, _memory: &MemoryEntry) -> Result<()> {
+            let ok = self.results.lock().expect("script lock").remove(0);
+            if ok {
+                Ok(())
+            } else {
+                anyhow::bail!("injected Qdrant upsert failure")
+            }
+        }
+    }
+
+    /// In-memory stand-in for the `pending_embeddings` table.
+    #[derive(Default)]
+    struct MemoryOutbox {
+        rows: std::sync::Mutex<Vec<PendingEmbedding>>,
+    }
+
+    impl MemoryOutbox {
+        fn with_rows(rows: Vec<PendingEmbedding>) -> Self {
+            Self {
+                rows: std::sync::Mutex::new(rows),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.rows.lock().expect("outbox lock").len()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PendingStore for MemoryOutbox {
+        async fn record(&self, memory: &MemoryEntry, embedding: &[f32]) -> Result<()> {
+            self.rows
+                .lock()
+                .expect("outbox lock")
+                .push(PendingEmbedding {
+                    id: memory.id,
+                    content: memory.content.clone(),
+                    metadata: memory.metadata.clone(),
+                    embedding: embedding.to_vec(),
+                });
+            Ok(())
+        }
+
+        async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
+            Ok(self
+                .rows
+                .lock()
+                .expect("outbox lock")
+                .iter()
+                .take(limit)
+                .cloned()
+                .collect())
+        }
+
+        async fn remove(&self, id: Uuid) -> Result<()> {
+            self.rows
+                .lock()
+                .expect("outbox lock")
+                .retain(|row| row.id != id);
+            Ok(())
+        }
+    }
+
+    fn pending_entry() -> PendingEmbedding {
+        PendingEmbedding {
+            id: Uuid::new_v4(),
+            content: "queued after a Qdrant failure".into(),
+            metadata: json!({ "kind": "outbox-regression" }),
+            embedding: vec![0.1; 384],
+        }
+    }
+
+    fn disabled_embedder() -> crate::embedding::EmbeddingClient {
+        let config = crate::config::ContextConfig::default();
+        let client = crate::embedding::EmbeddingClient::from_config(&config)
+            .expect("client builds without a configured endpoint");
+        assert!(!client.is_enabled());
+        client
+    }
+
+    #[tokio::test]
+    async fn qdrant_failure_queues_memory_in_outbox() {
+        let memory = entry_with_expiry(None);
+        let outbox = MemoryOutbox::default();
+        let sink = ScriptedSink::new(vec![false]);
+
+        let err = store_memory_with_sinks(&memory, &sink, &outbox)
+            .await
+            .expect_err("an injected Qdrant failure must surface");
+        assert!(format!("{err:#}").contains("injected Qdrant upsert failure"));
+
+        let queued = outbox.list(10).await.expect("list outbox");
+        assert_eq!(queued.len(), 1, "the failed upsert must be queued");
+        assert_eq!(queued[0].id, memory.id);
+        assert_eq!(queued[0].content, memory.content);
+        assert_eq!(queued[0].metadata, memory.metadata);
+    }
+
+    #[tokio::test]
+    async fn successful_upsert_does_not_queue_memory() {
+        let memory = entry_with_expiry(None);
+        let outbox = MemoryOutbox::default();
+        let sink = ScriptedSink::new(vec![true]);
+
+        store_memory_with_sinks(&memory, &sink, &outbox)
+            .await
+            .expect("upsert succeeds");
+        assert_eq!(outbox.count(), 0, "no failure means nothing to reconcile");
+    }
+
+    #[tokio::test]
+    async fn reconcile_removes_pending_row_only_after_success() {
+        let pending = pending_entry();
+        let outbox = MemoryOutbox::with_rows(vec![pending.clone()]);
+        let embedder = disabled_embedder();
+        let dim = pending.embedding.len();
+
+        // First pass: Qdrant still fails, the row must survive.
+        reconcile_pending(
+            &outbox,
+            &ScriptedSink::new(vec![false]),
+            Some(&embedder),
+            dim,
+        )
+        .await;
+        assert_eq!(outbox.count(), 1, "a failed retry must remain queued");
+
+        // Second pass: upsert succeeds and the row is deleted.
+        reconcile_pending(
+            &outbox,
+            &ScriptedSink::new(vec![true]),
+            Some(&embedder),
+            dim,
+        )
+        .await;
+        assert_eq!(outbox.count(), 0, "a successful retry must clear the row");
+    }
+
+    #[tokio::test]
+    async fn reconcile_without_vector_or_endpoint_keeps_row() {
+        let mut pending = pending_entry();
+        pending.embedding.clear();
+        let outbox = MemoryOutbox::with_rows(vec![pending]);
+        let embedder = disabled_embedder();
+
+        // The sink is scripted empty; if it were called the test would panic.
+        reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
+        assert_eq!(
+            outbox.count(),
+            1,
+            "no vector and no endpoint means retry later"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_clears_stale_row_after_a_direct_store_success() {
+        let memory = entry_with_expiry(None);
+        let outbox = MemoryOutbox::with_rows(vec![PendingEmbedding {
+            id: memory.id,
+            content: memory.content.clone(),
+            metadata: memory.metadata.clone(),
+            embedding: Vec::new(),
+        }]);
+
+        store_memory_with_sinks(&memory, &ScriptedSink::new(vec![true]), &outbox)
+            .await
+            .expect("upsert succeeds");
+        assert_eq!(outbox.count(), 0, "a stale queued row must be cleared");
     }
 }
 
