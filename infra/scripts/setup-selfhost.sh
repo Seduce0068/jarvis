@@ -30,6 +30,27 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
   postgresql postgresql-client firejail bubblewrap \
   curl unzip jq ca-certificates
 
+# --- Release artifact integrity (R4-DP3, supply chain) -------------------
+# The third-party release artifacts fetched in this script (Qdrant below, plus
+# the otelcol-contrib .deb and bws .zip further down, and the code-server
+# install.sh that is piped to sh) are retrieved over HTTPS but are NOT
+# checksum/signature verified.
+#
+# As of this revision the repository has NO authoritative verification source
+# for these artifacts: there is no SHA256SUMS/.sha256 file, no published
+# expected digest, and no signing key or signature in README/docs/release
+# config. Verification therefore cannot be turned on without inventing a hash
+# or adding an untrusted fetch, so none is done here (no value is hardcoded).
+#
+# Recommended follow-up (blocked on the release side): publish a vendor-signed
+# checksum manifest (e.g. SHA256SUMS, ideally with a GPG/sigstore signature) for
+# each pinned release, pin that manifest in this repo (or fetch it from the same
+# trusted release), and abort before install when `sha256sum -c` / signature
+# verification fails. Until such a source exists, these downloads remain
+# unverified by design. See todo.md (R4-DP3) and
+# docs/integration/remaining-tasks.md ("supply chain リスク").
+# -------------------------------------------------------------------------
+
 # Qdrant (musl static binary)
 curl -fsSL -o /tmp/qdrant.tar.gz \
   "https://github.com/qdrant/qdrant/releases/download/${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-musl.tar.gz"
