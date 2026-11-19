@@ -14,7 +14,7 @@ generated:
 本ドキュメントは、リポジトリ内容・設定・実装・ローカル systemd 実態・ドキュメント記載を点検して整理した「現時点で残っている/判断待ちのタスク」の一覧です。
 **安全第一**の観点で、破壊的操作や未確認の前提に依存する作業は「要判断」として分離しています。
 
-## 最新状態（2026-11-17 確認・下記の確認前提より新しい）
+## 最新状態（2026-11-19 時点・下記の確認前提は 2026-11-17 のスナップショット）
 
 - 作業ツリー: クリーン、`origin/master` と同期（unpushed 0）。
 - コア4サービス: すべて `active`、health 200（8081〜8084）。
@@ -25,11 +25,14 @@ generated:
   fmt/check/test/clippy + 追加 gate をローカル `make ci-local` と同等に実行）。
   ローカルゲート `make ci-local` は全成功。
 - **バックアップ**: ローカル実装が完了し実バックアップ検証済み
-  （[backup-redesign-notes.md](backup-redesign-notes.md)）。ただし timer は
-  **未導入 / inactive**。sudo が対話認証を要求し、このセッションからは
-  特権適用不可（non-interactive sudo / pkexec ともに不可を確認）。
-  ユーザーが `sudo bash infra/scripts/install-backup-timer.sh --apply` を実行すると
-  配置・有効化・手動実行・整合性検証まで自動実施される。
+  （[backup-redesign-notes.md](backup-redesign-notes.md)）。
+  2026-11-19 にユーザーが `sudo -n bash infra/scripts/install-backup-timer.sh --apply`
+  を実行し、timer は**実機で active / enabled**、手動バックアップの整合性検証は
+  ok=30 fail=0。ただし repo 側で `--repo-dir` 追加と `ProtectHome=read-only` 変更を
+  行ったため、**修正済み unit の実機再適用は未**（root 必須・ユーザー実行待ち）。
+- **復元（S9）**: `infra/scripts/test-restore-local.sh` を追加し、
+  合成フィクスチャで dry-run / apply 経路を自動検証（**47 tests pass**、
+  本番リソース非接触を多重ガード）。**実機の隔離先復元演習は承認待ち**。
 - **承認 API**: オプションのトークン認証を追加（既定は無効で後方互換）。
   4コンポーネント横断の契約テスト済み。
 - **読み取りツールの機微ファイル拒否**: `sandbox.rs` のパス解決で `.env`,
@@ -44,12 +47,13 @@ generated:
   コメントアウトされており、デプロイ時に誤って有効化されることはない。
   `policy_http_addr` は config 既定値が実機の `:8081` と一致。
 
-## 確認前提（この洗い出し時点）
+## 確認前提（2026-11-17 の洗い出し時点・履歴として保持）
 
 - ブランチ/作業ツリー: `master...origin/master`、未コミット変更なし
 - GitHub Issues: オープン 0 件（`gh issue list --state open`）
 - ローカル稼働サービス: `jarvis-policy` / `jarvis-mcp-gw` / `jarvis-event` / `jarvis-context` は `active` / `enabled`
-- バックアップ: `jarvis-backup.service` / `jarvis-backup.timer` は repo に存在するがローカル未導入（not-installed）
+- バックアップ（2026-11-17 時点）: 両 unit は repo に存在したが未導入（not-installed）。
+  現在の状態は「最新状態」節を参照。
 - 方針: OCI は使用しない（[adr/0004-local-only-no-oci.md](../../adr/0004-local-only-no-oci.md)）
 
 ## 1. MCP Gateway / ツール機能（優先度: 高）
@@ -288,9 +292,14 @@ generated:
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
 | BK-1 | バックアップ保存先の再決定と実装更新 | **2026-11-17 実装済み**: 保存先を `/var/lib/postgresql/jarvis-backups`（ローカル、postgres:postgres 0700）と決定。[backup-local.sh](../../infra/scripts/backup-local.sh) が PostgreSQL dump + Qdrant snapshot + 非 secret 設定 + SHA-256 manifest を生成。実バックアップ1回成功、[verify-backup.sh](../../infra/scripts/verify-backup.sh) で整合性・完全性を検証（合成テスト6件）。旧実装は OCI/rclone/op 前提のレガシーで、ランチャーは fail-closed 化済み。 | 保存先の外部化（NAS/別ホスト）・暗号化は要件が出た時点で別途対応。現在はローカル保存で ADR-0004 に準拠。 |
-| BK-2 | バックアップ timer/service のローカル運用化 | **2026-11-17 repo 側完了**: unit を現行化（`User=postgres`、OCI/rclone/op 依存撤去、`ProtectSystem=strict` + `ReadWritePaths`）。`install-backup-timer.sh`（dry-run 既定・rollback 付き・適用後に手動実行＋整合性検証まで実施）を追加。`systemd-analyze verify` 成功。**実機は未導入 / inactive**（sudo 対話認証のため当セッションから適用不可）。 | ユーザーが `make timer-status` で事前確認後、`sudo bash infra/scripts/install-backup-timer.sh --apply` を実行。適用後に `make timer-status` / `make verify-backup` で確認。 |
+| BK-2 | バックアップ timer/service のローカル運用化 | **2026-11-17 repo 側完了**: unit を現行化（`User=postgres`、OCI/rclone/op 依存撤去、`ProtectSystem=strict` + `ReadWritePaths`）。`install-backup-timer.sh`（dry-run 既定・rollback 付き・適用後に手動実行＋整合性検証まで実施）を追加。`systemd-analyze verify` 成功。**実機は active / enabled（2026-11-19 ユーザー適用済み）**。ただし repo 側 unit 変更（`--repo-dir` 追加）の再適用は未。 | 「承認待ち実機タスクの実行手順」節の BK-2 に従い、確認 → 修正 → 再確認を実施。 |
 | BK-3 | OpenTofu/OCI 後始末資産の扱い決定 | [infra/opentofu/](../../infra/opentofu/) は未使用レガシー（[infra/opentofu/README.md](../../infra/opentofu/README.md)）。後始末用に [infra/scripts/decommission-oci.sh](../../infra/scripts/decommission-oci.sh) あり（既定は dry-run、`--apply` で destroy 実行。`tofu`/OCI CLI 設定/`infra/opentofu/environments/prod` の init/state 等が前提。実行時は `tofu init`・`state list`・最終 state バックアップ（`$HOME/jarvis-oci-state-<ts>.json`）・`destroy` plan 作成を行う）。2026-11-15 確認: `infra/opentofu/environments/prod/.terraform/terraform.tfstate` がローカルに存在（内容は未確認）。 | 「保持」「削除」「OCI リソース削除実行」の方針決定。**実行判断/実行前の確認例（read-only・dry-run優先）**: (1) `tofu`/OCI CLI/認証情報・対象 tenancy/region・`terraform.tfvars` 等の前提を確認し、state の所在・鮮度・バックアップ（別保管含む）を確保する。(2) OCI コンソール/CLI で実リソース有無・保護すべきデータ（Object Storage/Block Volume 等）の残存を確認し、未追跡リソースや state 不整合がないか点検する（A1 Free 枠再取得不可等の影響も考慮）。(3) まず dry-run（既定）で `state list` と destroy plan の対象を確認し、出力を保存/レビューしてから `--apply` の要否を判断する。(4) 実削除時のロールバック困難性・Tailscale 管理画面の後処理等を手順化し、必要な承認/権限のもとで実施する（実削除/OCI 操作は別判断・手順）。 |
 | BK-4 | レガシー設定テンプレートの整理 | 全6テンプレートを棚卸し（2026-11-17）。`policy/context/event/otel.env` は既に legacy 注記済み。`code_server.env` / `mcp_gateway.env` に残っていた「Populated by 1Password CLI at runtime」注記を、実機の `bws run` + `/etc/jarvis/bws.env` 前提へ訂正。値の変更・削除は行わず、secret scan もクリーン。 | ファイル単位の廃止/削除は実機設定の確定後に別判断（現状は参照テンプレートとして維持）。 |
+
+**BK 関連の 2026-11-19 更新**: BK-1/BK-2 のローカル実装に加え、
+`restore-local.sh` と `test-restore-local.sh`（47 tests pass）を追加した。
+timer は実機で active / enabled だが、repo 側 unit 変更の再適用は未実施。
+S9 の実機復元演習とバックアップ外部化（P1-4）は承認待ち。
 
 ### レガシー op:// テンプレートの判断記録（P3-5 一部、2026-11-18）
 
@@ -336,9 +345,11 @@ generated:
   を追加。実バックアップ1回成功（PG dump/Qdrant snapshot/非 secret 設定/
   SHA-256 manifest、secret 不在・0700 を確認）。`systemd-analyze verify` 成功。
 - **復旧 runbook を追加**: [backup-restore-runbook.md](backup-restore-runbook.md)（隔離先での非破壊検証手順）。
-- **timer の実機有効化は未完了**: このセッションで sudo が対話認証を要求し
-  特権適用不可。ユーザーが `sudo bash infra/scripts/install-backup-timer.sh --apply`
-  を実行する必要がある（[backup-redesign-notes.md](backup-redesign-notes.md) 参照）。
+- **timer の実機有効化は 2026-11-19 完了**: ユーザーが
+  `sudo -n bash infra/scripts/install-backup-timer.sh --apply` を実行し
+  exit 0、active / enabled、手動バックアップ整合性検証 ok=30 fail=0
+  （[backup-redesign-notes.md](backup-redesign-notes.md) 参照）。
+  ただし repo 側 unit 変更の実機再適用は未実施（後述の実行手順を参照）。
 
 - **レガシー backup.sh / restore.sh は fail-closed 化済み**: `--dry-run` でも
   ローカル削除が走る backup.rs / 破壊的な restore.rs への委譲を止め、
@@ -745,7 +756,204 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
 **判断**: 保留（要判断）。既存 DB の有無と baseline 登録方針、および
 デプロイ手順の実行主体を確定してから選択する。実機 DB は未確認。
 
+## 承認待ち実機タスクの実行手順（確認 → 修正 → 再確認）
+
+ここに、ユーザーが承認すれば実行できる実機タスクの手順を一元化する。
+エージェントはこれらの操作を実行しない。
+**値は一切記載しない**。必要な変数は利用者が `export VAR=...` 形式で設定し、
+終了コードは `$?` で確認する。権限昇格が必要なコマンドは `sudo` を明示する。
+各ブロックは「確認 → 修正 → 再確認」の順で、コピー&ペーストで実行できる。
+
+### 共通前提（Kubuntu ローカル / repo ルート・読み取り専用）
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+# 必要な変数は利用者が export VAR=... で設定する（値はこの文書に書かない）
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+
+echo "== 実行環境: Kubuntu ローカル / repo ルート =="
+cd "$JARVIS_REPO"
+
+echo "== 確認: 作業ツリー =="
+git status --short
+
+echo "== 確認: ローカルゲート（CI 停止時の代替）=="
+rc=0
+make ci-local || rc=$?
+echo "ci-local exit: $rc"
+[ "$rc" -eq 0 ]
+
+echo "== 確認: 秘密スキャン =="
+rc=0
+make secret-scan || rc=$?
+echo "secret-scan exit: $rc"
+[ "$rc" -eq 0 ]
+```
+
+### BK-2: timer unit の再適用（Kubuntu ローカル → 実機 systemd）
+
+repo 側 unit は `--repo-dir` 追加と `ProtectHome=read-only` 変更済み。
+実機への再適用は root 必須で未実施（配置・有効化は 2026-11-19 済み）。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+
+echo "== 実行環境: Kubuntu ローカル（実機 systemd を root で操作）=="
+cd "$JARVIS_REPO"
+
+echo "== 確認: 現状の timer 状態 =="
+rc=0
+make timer-status || rc=$?
+echo "timer-status exit: $rc"
+
+echo "== 確認: 配置済み unit の ExecStart =="
+systemctl cat jarvis-backup.service || true
+
+echo "== 修正: 修正済み unit の再適用（root 必須・daemon-reload/再起動を含む）=="
+sudo bash infra/scripts/install-backup-timer.sh --apply
+
+echo "== 再確認: timer 状態 =="
+make timer-status
+systemctl is-active jarvis-backup.timer
+systemctl is-enabled jarvis-backup.timer
+
+echo "== 再確認: バックアップ整合性（読み取り専用）=="
+rc=0
+make verify-backup || rc=$?
+echo "verify-backup exit: $rc"
+[ "$rc" -eq 0 ]
+```
+
+### S9: 実復元演習（隔離先・本番リソース非接触）
+
+自動テストは 47 tests pass 済み。実機の隔離先復元演習はユーザー承認待ち。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+
+echo "== 実行環境: Kubuntu ローカル / 隔離先 =="
+cd "$JARVIS_REPO"
+
+echo "== 確認: 自動テスト（合成フィクスチャ・47 tests）=="
+bash infra/scripts/test-restore-local.sh
+
+echo "== 確認: バックアップ整合性（読み取り専用）=="
+rc=0
+make verify-backup || rc=$?
+echo "verify-backup exit: $rc"
+[ "$rc" -eq 0 ]
+
+echo "== 修正: 隔離先へ復元（dry-run が既定、--apply で隔離先のみ上書き）=="
+bash infra/scripts/restore-local.sh --latest
+bash infra/scripts/restore-local.sh --latest --apply
+
+echo "== 再確認: 隔離先の健全性（件数のみ・値は設定に依存）=="
+: "${QDRANT_URL:?Qdrant の URL を設定}"
+: "${RESTORE_COLLECTION:?隔離コレクション名を設定}"
+curl -fsS "$QDRANT_URL/collections/$RESTORE_COLLECTION" | jq '.result.points_count'
+
+echo "== 本番反映は別途承認・チェックリスト満たす場合のみ =="
+# 本番上書きは破壊的。以下をすべて満たした場合のみ手動で実行する。
+# - make verify-backup が fail=0
+# - 隔離先での復元検証が成功
+# - 関連サービスの停止予定共有・旧データの退避先確保
+# - bws.env の再配置方法を確認
+# bash infra/scripts/restore-local.sh --latest --apply --confirm
+```
+
+### P1-4: バックアップ外部化（設計決定が先）
+
+保全先・RPO/RTO が未決定のため、方針確定後に値を設定して実行する。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+: "${JARVIS_BACKUP_ROOT:?バックアップ保存先ルートを設定}"
+
+echo "== 実行環境: Kubuntu ローカル =="
+cd "$JARVIS_REPO"
+
+echo "== 確認: 現状はローカル保存（単一ディスク）=="
+make backup-preflight
+df -h "$JARVIS_BACKUP_ROOT"
+
+echo "== 修正: 別媒体へ 1 世代コピー（保存先決定後に値を設定）=="
+: "${BACKUP_SRC:?取得元 set のパスを設定}"
+: "${BACKUP_DST:?外部保存先のパスを設定}"
+rc=0
+rsync -a -- "$BACKUP_SRC/" "$BACKUP_DST/" || rc=$?
+echo "rsync exit: $rc"
+[ "$rc" -eq 0 ]
+
+echo "== 再確認: バックアップ整合性（コピー元・読み取り専用）=="
+# コピー先の検証は保全先と RPO/RTO の決定後に手順を定める。
+make verify-backup
+```
+
+### P0-7: Grafana 認証の供給経路（設計のみ・実装未実施）
+
+現状は `GRAFANA_CLOUD_AUTH` がどの経路からも注入されていない。
+A / B / C の方針決定後に unit / 設定を編集し、root で再起動・送信成功を確認する。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+
+echo "== 実行環境: Kubuntu ローカル / 読み取り専用確認 =="
+cd "$JARVIS_REPO"
+
+echo "== 確認: 設定側の参照 =="
+grep -n 'GRAFANA_CLOUD_AUTH' infra/config/otelcol-config.yaml || true
+
+echo "== 確認: 稼働 unit の起動経路 =="
+systemctl cat otelcol.service || true
+
+echo "== 確認: env の有無のみ（値は出力しない）=="
+if [ -n "${GRAFANA_CLOUD_AUTH+x}" ]; then
+  echo "GRAFANA_CLOUD_AUTH: set"
+else
+  echo "GRAFANA_CLOUD_AUTH: unset"
+fi
+```
+
+### P1-12: Webhook の公開範囲（設計のみ・未実装）
+
+現状は loopback bind + Tailscale の信頼境界を前提とし、認証・署名はない。
+Tailscale 外へ公開する場合は認証・署名検証・レート制限を再設計してから適用する。
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${JARVIS_REPO:?repo ルートを JARVIS_REPO に設定してから実行}"
+
+echo "== 実行環境: Kubuntu ローカル / 読み取り専用確認 =="
+cd "$JARVIS_REPO"
+
+echo "== 確認: 登録済み webhook ルート =="
+grep -n 'webhook/' rust/jarvis-event/src/normalizer.rs || true
+
+echo "== 確認: 待ち受け先（repo 既定値）=="
+grep -n '127.0.0.1' rust/jarvis-event/src/config.rs || true
+
+echo "== 確認: 実機のリスニング状態（root 必須・値は出力しない）=="
+sudo ss -ltnp
+```
+
 ## メモ
 
 - 本一覧は「実装タスク」だけでなく「方針決定が先に必要な項目」を含みます（特に BK-1, MCP-1, SEC-1, CI-1）。
 - 実機変更・デプロイ・秘密情報変更・外部サービス操作を伴う項目は、別途の確認と手順に従って進めてください。
+- 承認待ち項目の実行窓は「承認待ち実機タスクの実行手順」節を参照してください。

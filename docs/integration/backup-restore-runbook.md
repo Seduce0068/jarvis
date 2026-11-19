@@ -84,7 +84,8 @@ sudo -u postgres bash /opt/jarvis/scripts/verify-backup.sh
 最新 set のパスを確認し、以降の手順で `$SET` に設定する。
 
 ```bash
-SET="/var/lib/postgresql/jarvis-backups/<host>-<timestamp>"
+# 利用者が最新 set のパスを設定する（値はここに書かない）
+: "${SET:?最新バックアップ set のパスを SET に設定してから実行}"
 ```
 
 ## 手順1: PostgreSQL を隔離 DB へ復元（非破壊）
@@ -145,12 +146,12 @@ curl -fsS \
 curl -fsS -X DELETE "http://127.0.0.1:6333/collections/${COLLECTION}"
 ```
 
-**現状**: 隔離復元の自動スクリプトは未実装。手動検証が必要
-（BK-1 の残課題として追跡）。
-
-**注**: その後 [restore-local.sh](../../infra/scripts/restore-local.sh) が追加され、
-隔離復元を `--apply` で自動化可能になった（現行推奨節・
-[ローカル復元設計](local-restore-design.md) を参照）。
+**現状（2026-11-19 時点）**: 隔離復元は
+[restore-local.sh](../../infra/scripts/restore-local.sh) の `--apply` で自動化済み。
+さらに `infra/scripts/test-restore-local.sh` が合成フィクスチャで
+dry-run / apply 経路を自動検証し、47 tests pass（本番リソース非接触を多重ガード）。
+実機の隔離先復元演習（S9）は残る（自動テストは完了、実機演習はユーザー承認待ち）。
+詳細は [ローカル復元設計](local-restore-design.md) を参照。
 
 ## 手順3: 設定ファイルを一時ディレクトリへ展開（非破壊）
 
@@ -211,12 +212,22 @@ rm -rf "$TMP"
 - 運用方針の詳細は
   [local-operations-runbook.md](local-operations-runbook.md) を参照。
 
-## 未実装・残課題
+## 未実装・残課題（2026-11-19 時点）
 
-- Qdrant 隔離復元の自動スクリプト
-- 本番反映の自動化（意図的に未実装: 破壊的操作は手動確認のまま）
+- 実機の隔離先復元演習（S9: 自動テスト47件 pass 済み、実機演習は承認待ち）
+- 本番反映の自動化（意図的に未実装: 破壊的操作は `--confirm` + ユーザー承認のまま）
 - restore 演習の定期実施（`backup-redesign-notes.md` の安全ゲート参照）
+- バックアップ保全先の外部化（P1-4: 現状はローカル保存、別媒体への保全が未決定）
+- timer unit の実機再適用（repo 側は `--repo-dir` 対応済み、実機は未再適用）
 
 **注**: Qdrant 隔離復元の自動スクリプトは
-[restore-local.sh](../../infra/scripts/restore-local.sh) として実装済み
-（本番反映は `--confirm` + ユーザー承認時のみ）。
+[restore-local.sh](../../infra/scripts/restore-local.sh) として実装済みのため、
+上記の残課題からは除外した（本番反映は `--confirm` + ユーザー承認時のみ）。
+
+## 承認待ち実機タスクの実行手順
+
+timer unit 再適用・S9 実復元演習・バックアップ外部化・Grafana 認証・
+Webhook 公開範囲の「確認 → 修正 → 再確認」手順は、
+[残タスク一覧](remaining-tasks.md) の「承認待ち実機タスクの実行手順」節に
+一元化した。復元に固有の操作は本 Runbook の「現行推奨」および
+「手順1〜3」を参照する。
