@@ -1336,4 +1336,50 @@ mod tests {
             );
         }
     }
+
+    /// TC-U13 real send path through the *startup* wiring: an API-only
+    /// configuration encoded by `PolicyTokens::encode` and decoded by
+    /// `new_with_token` must fall back to the API scope on both POSTs. This
+    /// exercises `decode_or_legacy -> effective_admin_token -> POST`, the same
+    /// path production takes via `ApprovalsView::new`.
+    #[test]
+    fn tc_u13_api_scope_fallback_via_encoded_bundle_on_real_send_path() {
+        let requests = capture_decide_requests(|base_url| {
+            let tokens = PolicyTokens::new(Some(TC_U13_API_SCOPE_TOKEN.into()), None);
+            let encoded = tokens.encode().expect("bundle encodes");
+            PolicyClient::new_with_token(base_url, Some(encoded))
+        });
+        for request in &requests {
+            assert!(
+                approval_token(request).as_deref() == Some(TC_U13_API_SCOPE_TOKEN),
+                "decisions must fall back to the API-scope token via the encoded bundle"
+            );
+            assert!(
+                !request.contains(TC_U13_ADMIN_SCOPE_TOKEN),
+                "decisions must not send the admin-scope token when it is unset"
+            );
+        }
+    }
+
+    /// TC-U13 real send path through the *startup* wiring: an admin-only
+    /// configuration encoded by `PolicyTokens::encode` and decoded by
+    /// `new_with_token` must send the admin scope on both POSTs.
+    #[test]
+    fn tc_u13_admin_only_scope_via_encoded_bundle_on_real_send_path() {
+        let requests = capture_decide_requests(|base_url| {
+            let tokens = PolicyTokens::new(None, Some(TC_U13_ADMIN_SCOPE_TOKEN.into()));
+            let encoded = tokens.encode().expect("bundle encodes");
+            PolicyClient::new_with_token(base_url, Some(encoded))
+        });
+        for request in &requests {
+            assert!(
+                approval_token(request).as_deref() == Some(TC_U13_ADMIN_SCOPE_TOKEN),
+                "decisions must send the admin-scope token via the encoded bundle"
+            );
+            assert!(
+                !request.contains(TC_U13_API_SCOPE_TOKEN),
+                "decisions must not send the API-scope token when it is unset"
+            );
+        }
+    }
 }
