@@ -221,6 +221,23 @@ impl Gateway {
     }
 }
 
+/// Build a safe, non-echoing description of an upstream MCP error result.
+///
+/// The raw `CallToolResult` body can carry tokens, filesystem paths, URL query
+/// strings or other server-supplied secrets. Embedding it verbatim in an error
+/// leaks those values into API responses and logs. Return only a coarse
+/// classification derived from structural metadata - never any string taken
+/// from the body itself - so callers still learn that the tool failed and what
+/// shape the result had, without a disclosure channel.
+fn safe_error_summary(value: &Value) -> String {
+    let content_blocks = value
+        .get("content")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let has_structured = value.get("structuredContent").is_some();
+    format!("{content_blocks} content block(s), structured payload = {has_structured}")
+}
+
 /// Call `tool` on a registered server, converting between the gateway's
 /// JSON representation and the MCP model.
 async fn call_registered_tool(
@@ -258,7 +275,10 @@ async fn call_registered_tool(
 
     let value = serde_json::to_value(&result)?;
     if result.is_error.unwrap_or(false) {
-        anyhow::bail!("MCP tool '{tool}' returned an error: {value}");
+        // Never embed `value` (or any of its strings) in the error: upstream
+        // bodies may contain secrets that would flow to callers and logs.
+        let summary = safe_error_summary(&value);
+        anyhow::bail!("MCP tool '{tool}' returned an error ({summary})");
     }
     Ok(value)
 }
@@ -479,6 +499,72 @@ requires_approval = false
             .await
             .expect_err("MCP error results are surfaced");
         assert!(error.to_string().contains("returned an error"));
+    }
+
+    /// A unit-level guard on the redaction helper: server-supplied strings
+    /// (tokens, paths, URL queries, content types) must never appear in the
+    /// summary, while the coarse classification is retained.
+    #[test]
+    fn mcp_error_summary_does_not_echo_server_supplied_text() {
+        let probe_token = "FAKE-TOKEN-DO-NOT-USE";
+        let body_text = format!(
+            "auth failed token={probe_token} at /home/alice/.config/appdata https://example.invalid/cb?token={probe_token}&state=xyz"
+        );
+        let body = json!({
+            "content": [{ "type": "private-type", "text": body_text }],
+            "isError": true,
+            "structuredContent": { "token": probe_token }
+        });
+
+        let summary = safe_error_summary(&body);
+        assert!(!summary.contains(probe_token), "token leaked: {summary}");
+        assert!(!summary.contains("/home/alice"), "path leaked: {summary}");
+        assert!(!summary.contains("https://"), "URL leaked: {summary}");
+        assert!(!summary.contains("private-type"), "type leaked: {summary}");
+        assert!(
+            summary.contains("1 content block"),
+            "block count kept: {summary}"
+        );
+        assert!(
+            summary.contains("structured payload = true"),
+            "structured kept: {summary}"
+        );
+    }
+
+    /// Integration guard: the error returned to callers must not carry the
+    /// upstream body text or its raw JSON structure, only the redacted summary.
+    #[tokio::test]
+    async fn upstream_error_body_is_not_embedded_in_the_error_message() {
+        let gateway = test_gateway("error-redaction").await;
+
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        // `fail_calls = true` makes the mock answer with an error result whose
+        // content text is "pong" (see `run_mock_mcp_server`).
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", true));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .unwrap();
+
+        let error = gateway
+            .execute("echo", json!({ "message": "hi" }))
+            .await
+            .expect_err("MCP error results are surfaced");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("returned an error"),
+            "error surfaced: {message}"
+        );
+        assert!(!message.contains("pong"), "body text leaked: {message}");
+        assert!(
+            !message.contains("isError"),
+            "result JSON leaked: {message}"
+        );
+        assert!(
+            !message.contains("\"content\""),
+            "content key leaked: {message}"
+        );
     }
 
     /// `Gateway::new` must not spawn configured upstreams by itself: startup
