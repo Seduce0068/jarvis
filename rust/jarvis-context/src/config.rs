@@ -255,6 +255,11 @@ pub(crate) mod validation {
     /// and reached Qdrant's upsert and distance computation. Rejecting here
     /// covers both ingress paths and the core store recheck, which all call
     /// this same helper.
+    ///
+    /// The builder also calls this at every Qdrant boundary (query embedding,
+    /// pending-vector replay, reconcile upsert and pre-search) so an embedding
+    /// produced upstream — including a finite f64 that saturated to infinity
+    /// on the f32 cast — cannot reach Qdrant through a non-ingress route.
     pub(crate) fn validate_embedding(
         embedding: &[f32],
         embedding_dim: usize,
@@ -422,6 +427,20 @@ pub(crate) mod validation {
             }
             // A fully finite vector of the right size remains valid.
             assert!(validate_embedding(&[0.1, 0.2, 0.3], 3).is_ok());
+        }
+
+        /// `embedding.rs` rejects the f64 -> f32 saturation at parse time, but
+        /// every Qdrant boundary also gates the resulting vector through this
+        /// shared validator. A saturated value must therefore be rejected here
+        /// too, with the same fixed `InvalidInput { field: "embedding" }`.
+        #[test]
+        fn embedding_rejects_f64_saturated_f32_value() {
+            let saturated = 1e100_f64 as f32;
+            assert_eq!(saturated, f32::INFINITY, "test premise: saturation");
+            assert_eq!(
+                validate_embedding(&[saturated, 0.2, 0.3], 3),
+                Err(InvalidInput { field: "embedding" })
+            );
         }
 
         /// The defense-in-depth core recheck goes through `validate_embedding`,

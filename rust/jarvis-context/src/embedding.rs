@@ -83,10 +83,18 @@ pub fn parse_embedding_response(body: &Value) -> Result<Vec<f32>> {
     values
         .iter()
         .map(|value| {
-            value
+            let float = value
                 .as_f64()
-                .map(|float| float as f32)
-                .ok_or_else(|| anyhow::anyhow!("embedding contains a non-numeric value"))
+                .ok_or_else(|| anyhow::anyhow!("embedding contains a non-numeric value"))?;
+            // A perfectly finite f64 (e.g. 1e100) saturates to +/-Inf on the
+            // narrowing cast. Validate the *f32* result so a saturated vector
+            // can never reach Qdrant's upsert/distance computation. The message
+            // is fixed vocabulary: no component value is ever rendered.
+            let cast = float as f32;
+            if !cast.is_finite() {
+                anyhow::bail!("embedding contains a non-finite value after f32 conversion");
+            }
+            Ok(cast)
         })
         .collect()
 }
@@ -115,6 +123,30 @@ mod tests {
         assert!(parse_embedding_response(&json!({ "foo": 1 })).is_err());
         assert!(parse_embedding_response(&json!({ "embeddings": [[]] })).is_err());
         assert!(parse_embedding_response(&json!({ "embedding": ["x"] })).is_err());
+    }
+
+    /// A finite f64 far above `f32::MAX` saturates to `f32::INFINITY` on the
+    /// narrowing cast. The post-cast `is_finite()` check must reject it, so no
+    /// saturated vector can enter the query-search path. Pure: no HTTP client
+    /// and no live embedding endpoint are involved.
+    #[test]
+    fn rejects_finite_f64_values_that_saturate_to_non_finite_f32() {
+        assert_eq!(1e100_f64 as f32, f32::INFINITY, "test premise: saturation");
+
+        for body in [
+            json!({ "embeddings": [[1e100_f64, 0.2, 0.3]] }),
+            json!({ "embedding": [-1e100_f64, 0.2, 0.3] }),
+        ] {
+            let err = parse_embedding_response(&body)
+                .expect_err("f64 -> f32 saturation must be rejected at parse time");
+            assert!(
+                format!("{err:#}").contains("non-finite"),
+                "fixed rejection reason must be reported: {err:#}"
+            );
+        }
+
+        // Ordinary finite values keep working.
+        assert!(parse_embedding_response(&json!({ "embedding": [0.1, 0.2, 0.3] })).is_ok());
     }
 
     #[test]

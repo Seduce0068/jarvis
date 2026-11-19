@@ -1,5 +1,6 @@
 //! Context building core
 
+use crate::config::validation::validate_embedding;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use jarvis_core::{MemoryEntry, UnifiedEvent};
@@ -164,18 +165,37 @@ fn select_top_valid(
 /// `Some(Err(..))` is a genuine `embed()` failure and is propagated with
 /// context, so no caller can mistake a failed embedding for a search that
 /// simply found no results.
+///
+/// `Some(Ok(vector))` is gated through the shared embedding validator with the
+/// configured dimension. The embedding service is an upstream dependency, so a
+/// non-finite component (including a finite f64 saturated by the f32 cast) can
+/// still arrive here; letting it through would reach `search_vectors` and
+/// Qdrant's distance computation. The returned `InvalidInput` keeps the fixed
+/// 400 / `InvalidArgument` vocabulary instead of a bare internal failure.
 fn query_embedding_outcome(
     embed_result: Option<anyhow::Result<Vec<f32>>>,
+    embedding_dim: usize,
 ) -> anyhow::Result<Option<Vec<f32>>> {
     match embed_result {
         None => {
             warn!("memory vector search skipped: embedding endpoint not configured");
             Ok(None)
         }
-        Some(result) => result
-            .context("producing query embedding for memory vector search")
-            .map(Some),
+        Some(result) => {
+            let embedding = result.context("producing query embedding for memory vector search")?;
+            validate_embedding(&embedding, embedding_dim)?;
+            Ok(Some(embedding))
+        }
     }
+}
+
+/// Gate the query vector immediately before `search_vectors`. Kept as a pure
+/// helper so this boundary's non-finite rejection is testable without a live
+/// Qdrant client. The `InvalidInput` keeps the fixed 400 / `InvalidArgument`
+/// vocabulary at both transports.
+fn validate_search_vector(embedding: &[f32], embedding_dim: usize) -> Result<()> {
+    validate_embedding(embedding, embedding_dim)?;
+    Ok(())
 }
 
 /// Payload fields of a Qdrant scored point, keyed by payload name.
@@ -447,12 +467,18 @@ async fn store_memory_with_sinks(
 /// deterministic and does not depend on the embedding endpoint being up. If
 /// that vector is absent or no longer matches the configured dimension, the
 /// content is re-embedded when an endpoint is configured.
+///
+/// Both the replayed and the re-embedded vector pass the shared embedding
+/// validator. A queued vector can be non-finite (an f64 that saturated on the
+/// f32 cast before it was persisted); replaying it would feed a poisoned value
+/// straight into Qdrant, so the row must be deferred instead.
 async fn vector_for_pending(
     pending: &PendingEmbedding,
     embedder: Option<&crate::embedding::EmbeddingClient>,
     embedding_dim: usize,
 ) -> Result<Vec<f32>> {
     if embedding_dim > 0 && pending.embedding.len() == embedding_dim {
+        validate_embedding(&pending.embedding, embedding_dim)?;
         return Ok(pending.embedding.clone());
     }
 
@@ -475,6 +501,7 @@ async fn vector_for_pending(
             vector.len()
         );
     }
+    validate_embedding(&vector, embedding_dim)?;
     Ok(vector)
 }
 
@@ -546,6 +573,22 @@ async fn reconcile_pending(
             expires_at: None,
             score: None,
         };
+
+        // Last line of defense immediately before Qdrant: `vector_for_pending`
+        // already validates, but gate again so no future caller can feed a
+        // non-finite vector into the upsert/distance computation. A bad row is
+        // deferred (not deleted), exactly like a transient upsert failure, and
+        // only the fixed `error_kind` vocabulary is logged.
+        if validate_embedding(&memory.embedding, embedding_dim).is_err() {
+            warn!(
+                id = %memory.id,
+                attempts = attempts,
+                error_kind = ErrorKind::Embedding.as_str(),
+                "pending memory has an invalid vector; deferring this row"
+            );
+            defer_failed(outbox, memory.id, attempts).await;
+            continue;
+        }
 
         match sink.upsert(&memory).await {
             Ok(()) => {
@@ -725,10 +768,17 @@ impl Builder {
         } else {
             None
         };
-        let embedding = match query_embedding_outcome(embed_result)? {
+        let embedding = match query_embedding_outcome(embed_result, self.config.embedding_dim)? {
             Some(embedding) => embedding,
             None => return Ok(Vec::new()),
         };
+
+        // Defense in depth: re-gate the query vector with the configured
+        // dimension immediately before the Qdrant search. `query_embedding_outcome`
+        // already validates it, but this keeps the sink boundary safe even if a
+        // future caller bypasses that helper. The `InvalidInput` keeps the
+        // fixed 400 / `InvalidArgument` mapping at both transports.
+        validate_search_vector(&embedding, self.config.embedding_dim)?;
 
         // Search Qdrant with an over-fetched limit (Round 19 B3): expired hits
         // must not consume the caller's top-K slots. Keep the score alongside
@@ -1527,7 +1577,7 @@ mod tests {
     #[test]
     fn tc_e_embed_failure_is_not_silently_reported_as_empty_success() {
         let failed = Err(anyhow::anyhow!("embedding endpoint returned HTTP 500"));
-        let err = query_embedding_outcome(Some(failed))
+        let err = query_embedding_outcome(Some(failed), 3)
             .expect_err("a configured endpoint that fails must produce an error");
         let message = format!("{err:#}");
         assert!(message.contains("query embedding"), "{message}");
@@ -1537,15 +1587,50 @@ mod tests {
     #[test]
     fn tc_e_disabled_embedding_is_an_explicit_skip() {
         let outcome =
-            query_embedding_outcome(None).expect("disabled endpoint is a documented skip");
+            query_embedding_outcome(None, 3).expect("disabled endpoint is a documented skip");
         assert_eq!(outcome, None);
     }
 
     #[test]
     fn tc_e_successful_embedding_is_passed_through() {
         let vector = vec![0.1_f32, 0.2, 0.3];
-        let outcome = query_embedding_outcome(Some(Ok(vector.clone()))).expect("embed succeeds");
+        let outcome = query_embedding_outcome(Some(Ok(vector.clone())), 3).expect("embed succeeds");
         assert_eq!(outcome, Some(vector));
+    }
+
+    /// Non-finite query embeddings (including an f64 that saturated to f32
+    /// infinity) must be rejected before the vector can reach `search_vectors`
+    /// and Qdrant's distance computation. Pure: no DB or Qdrant is involved.
+    /// The rejection is a shared `InvalidInput`, so the fixed 400 /
+    /// `InvalidArgument` vocabulary is preserved.
+    #[test]
+    fn tc_e_non_finite_query_embedding_is_rejected() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e100_f64 as f32] {
+            let err = query_embedding_outcome(Some(Ok(vec![bad, 0.2, 0.3])), 3)
+                .expect_err("a non-finite query embedding must not reach search");
+            assert!(
+                err.downcast_ref::<crate::config::validation::InvalidInput>()
+                    .is_some(),
+                "the fixed InvalidInput contract must be preserved: {err:#}"
+            );
+        }
+    }
+
+    /// The gate immediately before `search_vectors` rejects non-finite vectors
+    /// with the configured dimension, without needing a Qdrant connection.
+    #[test]
+    fn search_vector_gate_rejects_non_finite_vectors() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e100_f64 as f32] {
+            let err = validate_search_vector(&[bad, 0.2, 0.3], 3)
+                .expect_err("a non-finite search vector must not reach Qdrant");
+            assert!(
+                err.downcast_ref::<crate::config::validation::InvalidInput>()
+                    .is_some(),
+                "the fixed InvalidInput contract must be preserved: {err:#}"
+            );
+        }
+        assert!(validate_search_vector(&[0.1, 0.2, 0.3], 3).is_ok());
+        assert!(validate_search_vector(&[0.1, 0.2], 3).is_err());
     }
 
     #[test]
@@ -2337,6 +2422,53 @@ mod tests {
         )
         .await;
         assert_eq!(outbox.count(), 0, "a successful retry must clear the row");
+    }
+
+    /// The dimension-match replay branch of `vector_for_pending` must validate
+    /// the stored vector. A non-finite component (including an f32 saturation)
+    /// is rejected with the shared `InvalidInput` instead of being replayed into
+    /// Qdrant. Mock embedder only; no endpoint, DB or Qdrant is touched.
+    #[tokio::test]
+    async fn vector_for_pending_rejects_non_finite_stored_vector() {
+        let embedder = disabled_embedder();
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e100_f64 as f32] {
+            let mut pending = pending_entry();
+            pending.embedding[0] = bad;
+            let err = vector_for_pending(&pending, Some(&embedder), 384)
+                .await
+                .expect_err("a non-finite stored vector must not be replayed");
+            assert!(
+                err.downcast_ref::<crate::config::validation::InvalidInput>()
+                    .is_some(),
+                "the fixed InvalidInput contract must be preserved: {err:#}"
+            );
+        }
+    }
+
+    /// Reconcile must never upsert a non-finite pending vector: the row is
+    /// deferred instead (caught by the replay gate, with the pre-upsert check
+    /// as the last line of defense). The sink has no scripted result, so any
+    /// upsert attempt would panic; the in-memory outbox and mock sink keep this
+    /// free of live DB/Qdrant access.
+    #[tokio::test]
+    async fn reconcile_defers_pending_row_with_non_finite_vector() {
+        let mut pending = pending_entry();
+        pending.embedding[0] = f32::INFINITY;
+        let outbox = MemoryOutbox::with_backoff_filter(vec![pending.clone()]);
+        let embedder = disabled_embedder();
+
+        reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
+
+        let rows = outbox.snapshot();
+        assert_eq!(rows.len(), 1, "the row must remain queued, not upserted");
+        assert_eq!(
+            rows[0].attempts, 1,
+            "a rejected vector is recorded as a deferred failure"
+        );
+        assert!(
+            rows[0].next_retry_at.is_some_and(|at| at > Utc::now()),
+            "the row must be deferred out of the next batch"
+        );
     }
 
     #[tokio::test]
