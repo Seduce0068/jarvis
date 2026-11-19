@@ -53,6 +53,42 @@ if [[ -z "${BUILD_COMMIT}" || "${BUILD_COMMIT}" == "unknown" ]]; then
   exit 1
 fi
 
+# I39-C: HEAD alone is not provenance. The rev-parse above names a commit, but
+# without a clean-tree gate the built binaries and the globbed
+# `rust/migrations/*.sql` can still contain uncommitted edits while both
+# markers record that HEAD; the reconciliation below then compares BUILD_COMMIT
+# with itself and always passes. Make a clean tracked-file tree a mandatory
+# pre-build gate so the pair is genuinely reproducible from HEAD.
+# `git diff --quiet` covers unstaged edits to tracked files and
+# `git diff --cached --quiet` covers staged edits; both fail closed here.
+# --quiet prints no diff/patch, so no change contents are leaked on refusal.
+if ! git -C "${REPO_DIR}" diff --quiet; then
+  echo "working tree has unstaged changes at ${REPO_DIR}; refusing to build/deploy an uncommitted pair" >&2
+  exit 1
+fi
+if ! git -C "${REPO_DIR}" diff --cached --quiet; then
+  echo "index has staged changes at ${REPO_DIR}; refusing to build/deploy an uncommitted pair" >&2
+  exit 1
+fi
+
+# I39-C: untracked policy -- deliberately NOT a repo-wide untracked gate.
+# Generated products (target/, generated configs, local scratch files) often
+# remain untracked, so a global `git status --porcelain` / `git ls-files
+# --others` check would fail every build on an otherwise clean checkout. The
+# narrow exception is the migration source tree: those *.sql files are globbed
+# directly from the working tree into the payload, so one untracked
+# `rust/migrations/*.sql` would be deployed under this HEAD's markers and break
+# the one-commit guarantee. Check untracked files only there, excluding ignored
+# files via --exclude-standard, and capture the result without printing it.
+untracked_in_migrations="$(git -C "${MIGRATIONS_SRC}" ls-files --others --exclude-standard -- .)" || {
+  echo "git ls-files failed at ${MIGRATIONS_SRC}; refusing to deploy" >&2
+  exit 1
+}
+if [[ -n "${untracked_in_migrations}" ]]; then
+  echo "untracked files in ${MIGRATIONS_SRC}; refusing to deploy an uncommitted SQL pair" >&2
+  exit 1
+fi
+
 cd "${REPO_DIR}/rust"
 cargo build --release --workspace
 
@@ -79,8 +115,8 @@ install -m 0644 "${MIGRATION_SQL_FILES[@]}" "${STAGE_MIG}/"
 
 # Record the build commit immediately after the build, before any binary
 # install. Both markers are derived from the single HEAD resolved above; that
-# single-checkout provenance, plus the fail-closed rev-parse, is what makes
-# the binary/migration pair a one-commit pair.
+# single-checkout provenance, plus the fail-closed rev-parse and the clean-tree
+# gate above, is what makes the binary/migration pair a one-commit pair.
 bin_commit_file="${STAGE_BIN}/.jarvis-build-commit"
 mig_commit_file="${STAGE_MIG}/.jarvis-source-commit"
 printf '%s\n' "${BUILD_COMMIT}" > "${bin_commit_file}"
