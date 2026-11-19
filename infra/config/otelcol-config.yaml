@@ -46,12 +46,17 @@ receivers:
           static_configs:
             - targets: ['localhost:6333']
 
-  # File log receiver for systemd journals
-  filelog:
-    include:
-      - /var/log/jarvis/*.log
-    include_file_path: true
-    include_file_name: false
+  # journald receiver for JARVIS systemd units
+  # 全サービスが journal へ出力するため /var/log/jarvis/*.log は空だった。
+  journald:
+    directory: /var/log/journal
+    units:
+      - jarvis-policy.service
+      - jarvis-mcp-gw.service
+      - jarvis-event.service
+      - jarvis-context.service
+      - jarvis-backup.service
+      - jarvis-backup.timer
 
 processors:
   # Batch processor for efficient export
@@ -149,7 +154,7 @@ service:
       exporters: [prometheusremotewrite, debug]
 
     logs:
-      receivers: [otlp, filelog]
+      receivers: [otlp, journald]
       processors: [memory_limiter, batch, resource]
       exporters: [debug]
 
