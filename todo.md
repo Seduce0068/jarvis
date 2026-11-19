@@ -424,7 +424,7 @@ generated:
   `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
   `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
   event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
-- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
+- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1 対応済み: `ApprovalPersistence` トレイト＋`NoopPersistence` 既定実装、`ApprovalStore::with_persistence()`、config に `pg_url` / `require_approval_persistence` と fail-closed validate を追加。既存 API・挙動は不変（backward compatible seams）。回帰テスト10件追加、policy 121 tests pass。残るスライス: PgPersistence／起動リコンサイル／opt-in ロールアウト** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
   重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
 - [x] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる**（2026-11-19 対応済み: id と requested_at はサーバ生成、expires_at は server timeout でクランプし生成値をレスポンスで返却。不正値は 400 で拒否。回帰テスト6件追加、policy 73 tests pass） — 根拠
@@ -849,8 +849,42 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   「隔離復元未実装」記述を現行状態（restore-local + 47 tests pass）へ更新。
   値・秘密情報・推測日付は記載せず、sudo が必要なコマンドを明示。
   実機操作・外部送信は行っていない。
-- [ ] **追跡 TOML の構文パース gate 追加（提案・未実装）**
-  — `ci-local` は secret_scan / check-shell / check-evidence / test-* のみで
-  `rust/Cargo.toml` や `infra/config/*.toml` をパースしない。
-  Python `tomllib` の CI 利用可否を確認した上で `ci/scripts/check-toml.sh`
-  を追加し Makefile / ci.yml へ配線する案。担当外のため未実施。
+- [x] **追跡 TOML の構文パース gate 追加** — 2026-11-19 対応済み:
+  `ci/scripts/check-toml.sh` を新規作成（tomllib → tomli → fail-closed、
+  `git ls-files -z '*.toml'` を NUL 区切りでパース、失敗時はファイル名のみ出力）。
+  Makefile の `ci-local` と `make check-toml`、ci.yml の `extra_gates` に配線。
+  追跡 TOML 9件すべてパース成功、bash -n / shellcheck / ci-local OK。
+
+## 完了記録 / 新規指摘（2026-11-19 Round 26）
+
+### R4 で修正した指摘
+
+- [x] 承認トークンの空文字設定が fail-open — `config.rs::validate_approval_tokens()`
+  で起動時拒否、`http.rs::require_approval_token` で空ヘッダを常に 401。
+  回帰8件追加。
+- [x] mcp-gw の gRPC / HTTP admin token 比較が長さ不一致で短絡 —
+  両方を長さ包含型の定数時間比較へ統一（kill_switch と同等）。
+- [x] MCP `tools/call` が anyhow チェーン全体をクライアントへエコー —
+  `McpGatewayError::kind()` で分類し Internal は固定メッセージのみ、
+  詳細は tracing ログへ隔離。upstream 本文は `safe_error_summary` 経由に統一。
+
+### 新規指摘（未対応）
+
+- [ ] Qdrant outbox reconcile の head-of-line blocking — `builder.rs` の
+  `RECONCILE_BATCH_LIMIT=100` が `created_at ASC` のため、先頭100行が恒久失敗すると
+  101行目以降が永久に再試行されない。attempts / next_retry_at 列または
+  created_at カーソルによるラウンドロビン＋dead-letter が必要（likely）。
+- [ ] UI の core 境界変換がデッドコード化 — `decision_from_json` /
+  `request_to_core` が `#[allow(dead_code)]` で実 RUN 経路から呼ばれず、
+  doc の「legacy fallback を受ける」記述も実装（明示拒否）と矛盾（confirmed）。
+
+### 設計決定（実装は未着手）
+
+- **jarvis-event のサイドカー境界**: 案A（完全 sidecar 化）を推奨。
+  スライス1で `ContextProvider` / `PolicyGate` トレイト seams、スライス2で
+  context gRPC クライアント（BuildContextRequest に source/timestamp を加算追加）、
+  スライス3で既定 grpc 化と in-process 依存削除、スライス4で policy も型依存削除。
+  ADR-0001/0002 は経過措置を明記後、スライス3完了時に例外条項を削除。
+- **バックアップ外部化**: 案C（USB短期＋HDD中長期の2世代）を段階導入推奨。
+  まず USB ミラー、暗号化は外部コピーのみ age、署名は既存 OpenSSH
+  `ssh-keygen -Y sign`。RPO/RTO・媒体の接続形態・鍵保管先はユーザー確認待ち。
