@@ -215,9 +215,30 @@ fn status_label(status: axum::http::StatusCode) -> &'static str {
         403 => "403",
         404 => "404",
         409 => "409",
+        413 => "413",
+        415 => "415",
         500 => "500",
         503 => "503",
         _ => "other",
+    }
+}
+
+/// I66-B: `jarvis_http_requests_total{status=...}` must keep body-size (413)
+/// and content-type (415) rejections in their own fixed buckets. Before this
+/// fix both collapsed into `other`, hiding size-limit spikes in Grafana.
+#[cfg(test)]
+mod status_label_tests {
+    use axum::http::StatusCode;
+
+    #[test]
+    fn maps_413_and_415_to_distinct_fixed_labels() {
+        let too_large = StatusCode::from_u16(413).expect("valid status");
+        let wrong_media_type = StatusCode::from_u16(415).expect("valid status");
+        let unlisted = StatusCode::from_u16(418).expect("valid status");
+        assert_eq!(super::status_label(too_large), "413");
+        assert_eq!(super::status_label(wrong_media_type), "415");
+        // Bounded vocabulary: unrelated codes must still collapse to `other`.
+        assert_eq!(super::status_label(unlisted), "other");
     }
 }
 
