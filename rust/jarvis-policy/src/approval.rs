@@ -19,13 +19,18 @@
 //! backend cannot block `status`/`decide`/`list_pending`), then stamps and
 //! evicts in a second short section.
 //!
-//! R4-C: the `deciding` claim is owned by an RAII [`DecidingGuard`] backed by a
-//! shared atomic. Its `Drop` releases the claim synchronously, so a `decide`
-//! (or timeout) future cancelled mid-commit always leaves the entry `Pending`
-//! instead of stranding a flag that blocks both `prune` and later `decide`
-//! calls until restart. A time-based stale-claim heuristic was considered and
-//! rejected: a grace window that expires while a legitimate durable commit is
-//! still in flight could split brain (durable `Approved` vs memory `Expired`).
+//! R4-C / I46-B: the `deciding` claim is owned by an RAII [`DecidingGuard`]
+//! backed by a generation token in a shared atomic. Each guard releases only
+//! its own generation, so a second guard created while the first is still in
+//! flight cannot have its flag cleared by the first guard's `Drop`. Its `Drop`
+//! releases that generation synchronously, so a `decide` (or timeout) future
+//! cancelled mid-commit always leaves the entry `Pending` instead of stranding
+//! a flag that blocks both `prune` and later `decide` calls until restart. A
+//! time-based stale-claim heuristic was considered and rejected: a grace window
+//! that expires while a legitimate durable commit is still in flight could
+//! split brain (durable `Approved` vs memory `Expired`). `apply_prune` also
+//! preserves any decision stamped by a competing winner while its durable
+//! commit was in flight, instead of sending `Expired` over it and evicting it.
 //! User notification (HA/phone) will be layered on top later.
 //!
 //! Approval is intentionally HTTP-only: the gRPC surface is limited to
@@ -34,7 +39,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -254,41 +259,108 @@ impl ApprovalPersistence for NoopPersistence {
     }
 }
 
-/// Shared claim flag for one [`Entry`] (R4-C).
+/// Advance a claim token to the next odd value. Odd tokens mean "claimed";
+/// every advance yields a fresh odd value, so a token from an earlier owner is
+/// never reused even after an explicit invalidate (I46-B).
+fn next_claim_token(current: u64) -> u64 {
+    let next = current.wrapping_add(if current & 1 == 1 { 2 } else { 1 });
+    if next == 0 { 1 } else { next }
+}
+
+/// Generation-token claim for one [`Entry`] (R4-C, hardened by I46-B).
 ///
 /// The store's `RwLock` is deliberately released across a durable commit so
-/// `status()` keeps observing `Pending` until that commit succeeds. The flag
-/// therefore lives behind an `Arc`: a [`DecidingGuard`] can clear it in `Drop`
-/// without re-acquiring the async lock (which is impossible in `Drop`), so
-/// cancelling the owning future mid-commit always releases the claim.
+/// `status()` keeps observing `Pending` until that commit succeeds. The claim
+/// therefore lives behind an `Arc`: a [`DecidingGuard`] can release its own
+/// generation in `Drop` without re-acquiring the async lock (impossible in
+/// `Drop`), so cancelling the owning future mid-commit always releases it.
+///
+/// Once the three-phase prune split (R5-C) landed, a timeout could force-clear
+/// a prune claim and create a second guard on the same `Arc` while the prune
+/// commit was still in flight. With a plain `AtomicBool`, whichever guard was
+/// dropped first cleared the flag for both, letting a `decide` commit over a
+/// live owner and letting `apply_prune` publish `Expired` over the winner.
+/// Releasing only a matching generation keeps overlapping guards independent.
 #[derive(Debug, Default)]
 struct DecidingClaim {
-    claimed: AtomicBool,
+    /// Odd: the token of the current owner. Even: unclaimed. Monotonically
+    /// advanced so an old guard can never match a later generation.
+    generation: AtomicU64,
 }
 
 impl DecidingClaim {
     fn is_claimed(&self) -> bool {
-        self.claimed.load(Ordering::Acquire)
+        self.generation.load(Ordering::Acquire) & 1 == 1
     }
 
-    fn set(&self, value: bool) {
-        self.claimed.store(value, Ordering::Release);
+    /// Start a fresh generation and return its odd token.
+    fn new_generation(&self) -> u64 {
+        let previous = self
+            .generation
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                Some(next_claim_token(current))
+            })
+            .expect("claim generation update never fails");
+        next_claim_token(previous)
+    }
+
+    /// Release exactly `owner` (odd -> the following even token). A stale
+    /// guard's `Drop` is therefore a no-op when a later owner is active.
+    fn release_generation(&self, owner: u64) {
+        let _ = self.generation.compare_exchange(
+            owner,
+            owner.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+
+    /// Invalidate the active claim without a guard token. Only the bounded
+    /// timeout loop uses this to clear a stale claim it does not own before
+    /// claiming a fresh generation; it advances the token instead of reusing
+    /// one, so an older live guard still cannot clear the new owner's claim.
+    fn invalidate(&self) {
+        let _ = self
+            .generation
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                if current & 1 == 1 {
+                    Some(current.wrapping_add(1))
+                } else {
+                    None
+                }
+            });
+    }
+
+    /// Claim this shared token and return its RAII owner.
+    fn claim_guard(self: &Arc<Self>) -> DecidingGuard {
+        DecidingGuard {
+            claim: Arc::clone(self),
+            generation: self.new_generation(),
+        }
     }
 }
 
-/// RAII owner of an entry's `deciding` claim (R4-C).
+/// RAII owner of one generation of an entry's `deciding` claim (R4-C / I46-B).
 ///
 /// Created under the store's write guard by [`Entry::claim`] and held across
-/// `record_decision` / `mark_expired`. `Drop` clears the claim unconditionally
-/// — on success, on error, and on cancellation of the owning future. A
-/// cancelled `decide` therefore leaves the entry `Pending`, so `prune` (or
-/// startup reconciliation) can still settle it and a later operator retry is
-/// not answered with a spurious `AlreadyDecided` (HTTP 409).
-struct DecidingGuard(Arc<DecidingClaim>);
+/// `record_decision` / `mark_expired`. `Drop` releases only the generation
+/// recorded in this guard — on success, on error, and on cancellation of the
+/// owning future. A cancelled `decide` therefore leaves the entry `Pending`,
+/// and a guard dropped by one owner never clears another owner's claim.
+struct DecidingGuard {
+    claim: Arc<DecidingClaim>,
+    generation: u64,
+}
+
+impl DecidingGuard {
+    fn generation(&self) -> u64 {
+        self.generation
+    }
+}
 
 impl Drop for DecidingGuard {
     fn drop(&mut self) {
-        self.0.set(false);
+        self.claim.release_generation(self.generation);
     }
 }
 
@@ -324,16 +396,25 @@ impl Entry {
 
     /// Start a claim and return its RAII owner. Called under the store's
     /// write guard; the returned guard may outlive that lock and is released
-    /// on `Drop`, including when the owning future is cancelled (R4-C).
+    /// on `Drop`, including when the owning future is cancelled (R4-C). Each
+    /// call mints a fresh generation, so overlapping guards stay independent.
     fn claim(&self) -> DecidingGuard {
-        self.deciding.set(true);
-        DecidingGuard(Arc::clone(&self.deciding))
+        self.deciding.claim_guard()
     }
 
-    /// Clear a claim early. The guard's `Drop` clears it again on release;
-    /// keeping both makes the in-memory state explicit at each commit point.
-    fn release(&self) {
-        self.deciding.set(false);
+    /// Release the claim owned by `generation`. A later owner's generation is
+    /// left untouched, so a guard dropped by a competing commit cannot clear
+    /// the in-flight owner's flag (I46-B). The owning guard's `Drop` releases
+    /// the same generation again as a no-op, keeping both paths explicit.
+    fn release(&self, generation: u64) {
+        self.deciding.release_generation(generation);
+    }
+
+    /// Clear the current claim when no guard token is available. Only the
+    /// bounded timeout loop uses this to invalidate a stale claim it does not
+    /// own before minting a fresh generation with [`Self::claim`].
+    fn release_stale(&self) {
+        self.deciding.invalidate();
     }
 }
 
@@ -343,14 +424,22 @@ struct Inner {
     entries: RwLock<HashMap<Uuid, Entry>>,
     /// Additive seam handle. In slice 1 this is always [`NoopPersistence`].
     persistence: Arc<dyn ApprovalPersistence>,
-    /// Synchronous authoritative gate re-read at every decision commit
-    /// boundary (R5-D). `None` — used by every pre-existing constructor —
-    /// keeps the historical behavior unchanged. When present, `decide`
-    /// consults it immediately before invoking the backend and again before
-    /// publishing the in-memory decision, so an emergency stop that lands
-    /// after a caller's pre-check cannot commit a decision. The closure is
-    /// called with the store's write guard held: it must not await or
-    /// re-enter the store, only re-read the authority.
+    /// Synchronous authoritative gate re-read at the single pre-commit
+    /// boundary (R5-D, refined by I46-A). `None` — used by every pre-existing
+    /// constructor — keeps the historical behavior unchanged. When present,
+    /// `decide` consults it immediately before invoking the backend, so an
+    /// emergency stop that lands after a caller's pre-check cannot commit a
+    /// decision. The closure is called with the store's write guard held: it
+    /// must not await or re-enter the store, only re-read the authority.
+    ///
+    /// I46-A: the gate is deliberately NOT re-read after a successful durable
+    /// commit. A post-commit stop used to return `KillSwitchActivated` (HTTP
+    /// 409) while the DB row was already committed; lifting the stop then made
+    /// the retry fail the CAS with `AlreadyDecided` (409), leaving the operator
+    /// response, UI and DB inconsistent. Once the durable commit succeeds it
+    /// is the authority and is always published. Tool execution stays
+    /// fail-closed because `PolicyEngine::is_allowed` re-checks the kill
+    /// switch independently of this publish.
     commit_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
@@ -439,12 +528,15 @@ impl ApprovalStore {
 
     /// Additive constructor that also installs a synchronous commit gate.
     ///
-    /// `is_blocked` is re-read (never cached) at both commit boundaries of
-    /// [`Self::decide`]: before the durable write and before the in-memory
-    /// publish. `PolicyEngine` injects a gate backed by the authoritative
-    /// kill-switch flag; passing `None` reproduces
+    /// `is_blocked` is re-read (never cached) once, immediately before the
+    /// durable write in [`Self::decide`]. `PolicyEngine` injects a gate backed
+    /// by the authoritative kill-switch flag; passing `None` reproduces
     /// [`Self::with_persistence`] exactly. The closure runs with the store's
     /// write guard held, so it must not await or re-enter the store.
+    ///
+    /// I46-A: there is intentionally no second read after the commit. A stop
+    /// landing mid-commit no longer turns a successful durable write into a
+    /// 409 over an un-published decision (see `commit_gate` field docs).
     pub fn with_commit_gate(
         timeout: Duration,
         max_pending: usize,
@@ -668,7 +760,12 @@ impl ApprovalStore {
                                     TimeoutOutcome::YieldToDecide
                                 } else {
                                     if entry.is_deciding() {
-                                        entry.release();
+                                        // Invalidate the stale claim without a
+                                        // guard token, then mint a fresh
+                                        // generation below. The old owner's
+                                        // `Drop` can no longer clear the new
+                                        // claim (I46-B).
+                                        entry.release_stale();
                                         tracing::warn!(
                                             request_id = %id,
                                             "stale decide claim cleared after repeated yields"
@@ -699,9 +796,10 @@ impl ApprovalStore {
                             let _ = tokio::time::timeout(RECOVERY_GRACE, rx.changed()).await;
                             continue;
                         }
-                        TimeoutOutcome::Expire(_guard) => {
-                            // `_guard` is held until this arm ends (or the
-                            // future is dropped), then releases the claim.
+                        TimeoutOutcome::Expire(guard) => {
+                            // `guard` is held until this arm ends (or the
+                            // future is dropped), then releases only its own
+                            // generation (I46-B).
                             // `NoopPersistence` never errors, so the default
                             // path is unchanged. A failed `mark_expired` leaves
                             // the entry Pending (no decision/decided_at stamp),
@@ -905,7 +1003,7 @@ impl ApprovalStore {
                                         // publish one.
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id) {
-                                            entry.release();
+                                            entry.release(guard.generation());
                                             if entry.decision.is_none()
                                                 || matches!(
                                                     entry.decision.as_ref(),
@@ -927,7 +1025,7 @@ impl ApprovalStore {
                                     {
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id) {
-                                            entry.release();
+                                            entry.release(guard.generation());
                                         }
                                     }
                                     tracing::warn!(
@@ -944,7 +1042,7 @@ impl ApprovalStore {
                                     {
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id) {
-                                            entry.release();
+                                            entry.release(guard.generation());
                                         }
                                     }
                                     tracing::warn!(
@@ -959,7 +1057,7 @@ impl ApprovalStore {
                                     // in-memory entry decided (I43-B (a)).
                                     let mut entries = self.inner.entries.write().await;
                                     if let Some(entry) = entries.get_mut(&id) {
-                                        entry.release();
+                                        entry.release(guard.generation());
                                         if entry.decision.is_none() {
                                             entry.decision = Some(ApprovalDecision::Expired);
                                             entry.decided_at = Some(expired_at);
@@ -997,12 +1095,16 @@ impl ApprovalStore {
     /// [`NoopPersistence`] the commit is immediate, so memory-only behavior is
     /// unchanged.
     ///
-    /// R5-D: an optional synchronous commit gate ([`Self::with_commit_gate`])
-    /// is re-read at both commit boundaries — before invoking the backend and
-    /// before publishing the in-memory decision. A kill switch activation that
+    /// R5-D / I46-A: an optional synchronous commit gate
+    /// ([`Self::with_commit_gate`]) is re-read exactly once, immediately
+    /// before invoking the durable backend. A kill switch activation that
     /// lands after the transport's pre-check therefore cannot commit a
-    /// decision. This is additive: every pre-existing constructor installs no
-    /// gate, so the timeout, lost-ack, RAII-claim and prune paths are untouched.
+    /// decision. Once the commit succeeds it is the authority and is always
+    /// published: a stop landing during the commit no longer produces a 409
+    /// over an already-committed row (which made later retries fail with
+    /// `AlreadyDecided` and left UI/DB inconsistent). This is additive: every
+    /// pre-existing constructor installs no gate, so the timeout, lost-ack,
+    /// RAII-claim and prune paths are untouched.
     pub async fn decide(&self, id: Uuid, decision: ApprovalDecision) -> Result<(), ApprovalError> {
         let decided_at = Utc::now();
 
@@ -1010,7 +1112,7 @@ impl ApprovalStore {
         // while held, and a second `decide` fails closed without touching the
         // persistence backend. The guard outlives the lock and is released on
         // `Drop` even if this future is cancelled mid-commit (R4-C).
-        let _claim = {
+        let claim = {
             let mut entries = self.inner.entries.write().await;
             let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
             if decided_at > entry.deadline {
@@ -1048,22 +1150,19 @@ impl ApprovalStore {
         {
             let mut entries = self.inner.entries.write().await;
             let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
-            entry.release();
+            entry.release(claim.generation());
             // A failed commit must leave the entry pending so no waiter can
             // observe a rolled-back decision.
             commit?;
-            // R5-D: re-read the authority once more before finalizing. An
-            // activation that landed while the durable commit was in flight
-            // must not publish a decision to the waiter or the UI. The entry
-            // stays Pending (claim already released) so the operator can retry
-            // after deactivation; the error vocabulary is fixed and carries no
-            // id, path or backend detail.
-            if self.commit_blocked() {
-                tracing::warn!("decision publish blocked: kill switch activated during commit");
-                return Err(ApprovalError::KillSwitchActivated);
-            }
-            // The commit is the authority: overwrite any provisional state so
-            // a commit that won is never reported back as a 409.
+            // I46-A: no second gate read here. The durable commit succeeded,
+            // so it is the authority: publish it unconditionally. A post-commit
+            // stop used to return `KillSwitchActivated` (409) while the DB row
+            // was already `Approved`; lifting the stop then made the retry hit
+            // the CAS with zero rows and become `AlreadyDecided` (409), so the
+            // operator response, UI and DB disagreed. Tool execution stays
+            // fail-closed: `PolicyEngine::is_allowed` re-checks the kill switch
+            // independently of this publish. The error vocabulary is unchanged
+            // (no id, path, URL or decision body is added).
             entry.decision = Some(decision.clone());
             entry.decided_at = Some(decided_at);
             let _ = entry.tx.send(Some(decision));
@@ -1351,15 +1450,27 @@ impl ApprovalStore {
     /// (R5-C phase 3), held by the caller together with the registration of
     /// the new request. The RAII claim lives until after the eviction so a
     /// concurrent `decide` cannot publish over a committed expiry.
+    ///
+    /// I46-B: a competing `decide`/timeout may have stamped a decision while
+    /// this sweep's durable write was in flight (its guard can even overlap
+    /// this one). That stamp is the winner: preserve it without a watch send
+    /// or eviction, or DB=`Approved` / waiter=`Expired` splits brain.
     fn apply_prune(entries: &mut HashMap<Uuid, Entry>, sweep: PruneSweep, now: DateTime<Utc>) {
         for outcome in sweep.to_settle {
             if let Some(entry) = entries.get_mut(&outcome.id) {
+                // A winner already committed and stamped this entry. Neither
+                // announce `Expired` nor drop the winner's decision; the
+                // losing guard still drops after this iteration, releasing
+                // only its own generation.
+                if entry.decided_at.is_some() {
+                    continue;
+                }
                 match outcome.result {
                     ExpiryCommit::Committed => {
-                        if entry.decided_at.is_none() {
-                            entry.decision = Some(ApprovalDecision::Expired);
-                            entry.decided_at = Some(now);
-                        }
+                        // The top-level `decided_at` check above proves no
+                        // winner stamped this entry while the commit ran.
+                        entry.decision = Some(ApprovalDecision::Expired);
+                        entry.decided_at = Some(now);
                         // Wake a still-waiting receiver with the same decision
                         // the ordinary timeout path produces. Ignore send
                         // errors: no receiver means the waiter already left.
@@ -3566,21 +3677,44 @@ mod tests {
 
     // ---- R4-C: RAII deciding claim / cancelled-decide recovery -------------
 
-    /// The guard must release its claim on every exit path, including a plain
-    /// scope exit that models an aborted future. No timer or lock is involved.
+    /// Each guard releases only its own generation on every exit path,
+    /// including a plain scope exit that models an aborted future. A later
+    /// owner's claim survives an earlier guard's `Drop` (R4-C / I46-B).
     #[test]
-    fn deciding_guard_releases_claim_on_drop() {
+    fn deciding_guard_releases_only_its_own_generation() {
         let claim = new_deciding();
         assert!(!claim.is_claimed());
+
+        let first = claim.claim_guard();
+        assert!(claim.is_claimed());
         {
-            let _guard = DecidingGuard(Arc::clone(&claim));
-            claim.set(true);
-            assert!(claim.is_claimed());
+            let second = claim.claim_guard();
+            drop(first);
+            assert!(
+                claim.is_claimed(),
+                "an older guard's Drop must not clear the later owner's claim"
+            );
+            drop(second);
         }
         assert!(
             !claim.is_claimed(),
-            "Drop must release the claim unconditionally"
+            "the last guard's Drop must release the claim"
         );
+
+        // An explicit invalidate (the bounded-yield branch) must advance the
+        // token instead of reusing one an older live guard still holds.
+        let stale = claim.claim_guard();
+        claim.invalidate();
+        assert!(!claim.is_claimed());
+        let fresh = claim.claim_guard();
+        assert!(claim.is_claimed());
+        drop(stale);
+        assert!(
+            claim.is_claimed(),
+            "invalidate must not let a stale guard clear the fresh owner's claim"
+        );
+        drop(fresh);
+        assert!(!claim.is_claimed());
     }
 
     /// Mock that (a) replays one live recovered hold with no waiter, (b) gates
@@ -3866,5 +4000,197 @@ mod tests {
             store.status(hold_id).await,
             Err(ApprovalError::NotFound(_))
         ));
+    }
+
+    // ---- I46-B: overlapping prune/timeout guards keep the winner's decision -
+
+    /// Mock for the prune/timeout overlap: `mark_expired` blocks on a oneshot
+    /// so the test can create a second guard and stamp a competing winner
+    /// while the prune commit is still in flight. No database is contacted.
+    #[derive(Debug, Default)]
+    struct PruneOverlapPersistence {
+        entered: Arc<AtomicBool>,
+        gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        expired: tokio::sync::Mutex<Vec<Uuid>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for PruneOverlapPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.entered.store(true, Ordering::SeqCst);
+            if let Some(rx) = self.gate.lock().await.take() {
+                let _ = rx.await;
+            }
+            self.expired.lock().await.push(id);
+            Ok(())
+        }
+    }
+
+    /// I46-B regression: `classify_prune` claims the expired entry and blocks
+    /// in `commit_prunes`. While that commit is gated, the timeout side
+    /// force-clears the stale claim and mints a second guard on the same `Arc`;
+    /// a concurrent settlement then stamps `Approved` as the winner. When the
+    /// prune gate opens, `apply_prune` must neither send `Expired` on the watch
+    /// nor evict the winner, and the still-live second guard must survive the
+    /// prune guard's `Drop`. Ordering is mock-controlled; no real DB is used.
+    #[tokio::test]
+    async fn prune_commit_overlaps_second_guard_and_keeps_winner_decision() {
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered = Arc::new(AtomicBool::new(false));
+        let persistence = Arc::new(PruneOverlapPersistence {
+            entered: entered.clone(),
+            gate: tokio::sync::Mutex::new(Some(gate_rx)),
+            expired: tokio::sync::Mutex::new(Vec::new()),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+
+        // Victim: deadline already past, still pending, live watch receiver.
+        let victim = make_request();
+        let victim_id = victim.id;
+        let (tx, rx) = watch::channel(None);
+        {
+            let mut entries = store.inner.entries.write().await;
+            entries.insert(
+                victim_id,
+                Entry {
+                    request: victim,
+                    decision: None,
+                    decided_at: None,
+                    deadline: Utc::now() - chrono::Duration::seconds(1),
+                    deciding: new_deciding(),
+                    tx,
+                },
+            );
+        }
+
+        // A fresh request drives the lazy sweep; its `mark_expired` for the
+        // victim blocks on the gate, so the prune guard stays in flight.
+        let next = make_request();
+        let next_id = next.id;
+        let fresh_waiter = {
+            let store = store.clone();
+            tokio::spawn(async move { store.request(next).await })
+        };
+        for _ in 0..200 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "prune must be blocked in mark_expired for the victim"
+        );
+        assert!(
+            matches!(store.status(victim_id).await, Ok(ApprovalDecision::Pending)),
+            "the in-flight prune commit must stay invisible"
+        );
+
+        let winner = approved();
+        let second_guard = {
+            let mut entries = store.inner.entries.write().await;
+            let entry = entries
+                .get_mut(&victim_id)
+                .expect("victim is still pending while prune is gated");
+            assert!(
+                entry.is_deciding(),
+                "the prune guard must still own the claim"
+            );
+            // The timeout's bounded-yield branch invalidates the stale claim
+            // it does not own, then mints a fresh generation on the same Arc.
+            entry.release_stale();
+            let guard = entry.claim();
+            // A concurrent durable settlement (e.g. a lost-ack re-read that
+            // recovered a committed `Approved`) stamps the winner while this
+            // sweep's own commit is still blocked.
+            entry.decision = Some(winner.clone());
+            entry.decided_at = Some(Utc::now());
+            let _ = entry.tx.send(Some(winner.clone()));
+            guard
+        };
+        {
+            let entries = store.inner.entries.read().await;
+            let entry = entries.get(&victim_id).expect("winner entry is retained");
+            assert!(
+                entry.is_deciding(),
+                "the second guard owns the claim while prune is in flight"
+            );
+        }
+
+        // Release the prune commit. `apply_prune` must preserve the winner.
+        let _ = gate_tx.send(());
+        wait_for_registration(&store, next_id).await;
+
+        assert_eq!(
+            store.status(victim_id).await.expect("winner survives"),
+            winner,
+            "apply_prune must not evict or overwrite the committed winner"
+        );
+        assert_eq!(
+            rx.borrow().as_ref(),
+            Some(&winner),
+            "no Expired may be sent over the winner's decision"
+        );
+        {
+            let entries = store.inner.entries.read().await;
+            let entry = entries.get(&victim_id).expect("winner entry is retained");
+            assert!(
+                entry.is_deciding(),
+                "prune guard Drop must not clear the second guard's claim"
+            );
+        }
+        assert!(
+            persistence.expired.lock().await.contains(&victim_id),
+            "the prune expiry was still committed durably"
+        );
+
+        drop(second_guard);
+        {
+            let entries = store.inner.entries.read().await;
+            let entry = entries.get(&victim_id).expect("winner entry is retained");
+            assert!(
+                !entry.is_deciding(),
+                "the last guard's Drop releases the claim"
+            );
+        }
+
+        decide_after_registration(&store, next_id, approved()).await;
+        let _ = fresh_waiter.await.expect("fresh waiter task");
     }
 }

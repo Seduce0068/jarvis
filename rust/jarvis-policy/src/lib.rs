@@ -83,11 +83,13 @@ impl PolicyEngine {
         // so existing (and all test) deployments are behaviorally unchanged.
         // The URL itself is never logged: it may carry credentials.
         let approval_timeout = std::time::Duration::from_secs(config.approval_timeout_secs);
-        // R5-D: the commit side re-reads the authoritative kill-switch flag at
-        // both decision commit boundaries. The gate captures an Arc to the
-        // very same KillSwitch the transports arm/disarm, so no mirror can
-        // drift and no activation can slip between the transport pre-check
-        // and the durable commit unnoticed.
+        // R5-D / I46-A: the commit side re-reads the authoritative kill-switch
+        // flag once, immediately before the durable write. The gate captures
+        // an Arc to the very same KillSwitch the transports arm/disarm, so no
+        // mirror can drift and no activation can slip between the transport
+        // pre-check and the durable commit unnoticed. It is deliberately not
+        // read after the commit: a successful row is the authority and must be
+        // published, otherwise the retry-after-lift becomes AlreadyDecided.
         let kill_switch_for_gate = Arc::clone(&kill_switch);
         let commit_gate: Arc<dyn Fn() -> bool + Send + Sync> =
             Arc::new(move || kill_switch_for_gate.is_activated());
@@ -196,8 +198,8 @@ impl PolicyEngine {
         // tool execution. Otherwise an operator could approve work that is
         // immediately denied, while the UI reports a successful decision.
         // R5-D: this is only the fast-path check; `ApprovalStore::decide`
-        // re-reads the same authoritative flag at its commit boundaries so an
-        // activation landing after this check cannot commit the decision.
+        // re-reads the same authoritative flag once before the durable commit
+        // so an activation landing after this check cannot commit the decision.
         if self.kill_switch.is_activated() {
             return Err(approval::ApprovalError::KillSwitchActivated);
         }
@@ -215,8 +217,9 @@ impl PolicyEngine {
         id: uuid::Uuid,
         reason: &str,
     ) -> std::result::Result<policy::ApprovalDecision, approval::ApprovalError> {
-        // R5-D: fast-path check; the authoritative re-check lives in
-        // `ApprovalStore::decide` so a stop landing here still blocks the commit.
+        // R5-D: fast-path check; the authoritative pre-commit re-check lives
+        // in `ApprovalStore::decide` so a stop landing here still blocks the
+        // commit.
         if self.kill_switch.is_activated() {
             return Err(approval::ApprovalError::KillSwitchActivated);
         }
@@ -665,9 +668,14 @@ mod tests {
         std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
     }
 
-    /// Defense in depth: when the stop lands *while* the durable commit is in
-    /// flight, the authority is re-read once more before finalization so the
-    /// decision is never published to the waiter or the UI.
+    /// I46-A: this test keeps its historical name as a regression ID, but its
+    /// expectation was updated. The old post-commit gate re-read returned
+    /// `KillSwitchActivated` (409) after the row was already committed; lifting
+    /// the stop then made the retry fail the CAS with `AlreadyDecided` (409),
+    /// so the operator response, UI and DB disagreed. Adopted policy: a single
+    /// pre-commit read, and once the durable commit succeeds it is published
+    /// unconditionally. Tool execution stays fail-closed via
+    /// `PolicyEngine::is_allowed`, which re-checks the kill switch.
     #[tokio::test]
     async fn kill_switch_during_commit_is_not_published() {
         let label = "toctou-during-commit";
@@ -692,14 +700,10 @@ mod tests {
         let engine = PolicyEngine { approvals, ..base };
         let (id, waiter) = register_pending(&engine).await;
 
-        let error = engine
+        engine
             .approve(id, "koppe")
             .await
-            .expect_err("publication must be blocked after the stop lands");
-        assert!(
-            matches!(error, approval::ApprovalError::KillSwitchActivated),
-            "fixed-vocabulary error expected: {error:?}"
-        );
+            .expect("the committed row is the authority and is published");
         assert_eq!(
             recorder.decisions.lock().await.len(),
             1,
@@ -707,12 +711,12 @@ mod tests {
         );
         assert!(matches!(
             engine.approval_status(id).await,
-            Ok(policy::ApprovalDecision::Pending)
+            Ok(policy::ApprovalDecision::Approved { .. })
         ));
-        assert!(
-            !waiter.is_finished(),
-            "a blocked decision is never published"
-        );
+        assert!(matches!(
+            waiter.await.expect("waiter task"),
+            policy::ApprovalDecision::Approved { .. }
+        ));
 
         std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
     }
