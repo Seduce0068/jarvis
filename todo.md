@@ -1197,3 +1197,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   「未実装・判断待ち」のまま（実際は判断済み／実装済み）。
 
 - 親が対応: tokio::select! の構文（カンマ2箇所＋ガードの `, if`）、rustfmt。
+
+### Round 41 のレビュー／発掘結果（R4 で修正済み）
+
+- [x] index の実測件数ゲートが未実装（confirmed high）→ `INDEX_RESULT_MISMATCH`
+  を実装し、tamper 4ケース（index/型2/Scenario）を追加。
+- [x] assume-unchanged/skip-worktree が clean-tree と tracked-SQL 検査を迂回
+  （confirmed high）→ `git cat-file blob HEAD:<path>` の内容ハッシュ照合と
+  `ls-files -v` の index-bit 検査を追加。
+- [x] クラッシュ残存 mask が管理者 mask と誤認され tee が /dev/null へ
+  （likely high）→ 永続マーカー付与＋優先 unmask、tee 直前に symlink assert。
+- [x] deciding クレームが await を跨ぎキャンセルで永久スタック（likely high）
+  → `DecidingClaim(AtomicBool)` + `DecidingGuard(Drop)` の RAII 化。
+- [x] jarvis-event の TOML パスだけ CWD 相対（confirmed medium）→
+  `/etc/jarvis/event.toml` + `JARVIS_EVENT_CONFIG_PATH` へ統一。
+
+### Round 41 の残り指摘（未対応）
+
+- [ ] config 4テンプレートに実装済み変数が未反映（confirmed medium）—
+  event の CONTEXT_MODE/CONTEXT_GRPC_ADDR/CONTEXT_GRPC_TOKEN、context の
+  EMBEDDING_DIM、policy の REQUIRE_* ガード、mcp-gw の UPSTREAMS など。
+  R4-E で一部追記済みだが、設定キーの網羅性を再確認する。
+- [ ] check-evidence の tamper 期待値が増えたため、次回以降も
+      `make safety-test` で全ケースの維持を確認する。
