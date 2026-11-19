@@ -10,6 +10,14 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$HOME/jarvis}"
 JARVIS_USER="${JARVIS_USER:-$(id -un)}"
 
+# R4-D: persistent marker for a mask that THIS script applies to
+# jarvis-migrations.service. It must live on persistent storage: a power loss
+# clears /run and /tmp but leaves the /etc/systemd/system mask symlink behind.
+# A surviving marker therefore means "previous run crashed between mask and
+# unmask", never "administrator mask". Content carries PID/token for diagnosis.
+MASK_MARKER_DIR="/etc/jarvis"
+MASK_MARKER="${MASK_MARKER_DIR}/.selfhost-migrations-mask.marker"
+
 if [[ ! -d "${REPO_DIR}/rust" ]]; then
   echo "repository not found at ${REPO_DIR}" >&2
   exit 1
@@ -108,6 +116,64 @@ for sql_file in "${MIGRATION_SQL_FILES[@]}"; do
   fi
 done
 
+# R4-B: close the assume-unchanged / skip-worktree bypass. Every clean-tree
+# gate above is defined in terms of `git diff`, which deliberately ignores
+# index entries flagged assume-unchanged (CE_VALID) or skip-worktree. A tracked
+# migration SQL can therefore be rewritten on disk while `git diff --quiet`,
+# `git diff --cached --quiet`, `ls-files --error-unmatch` and `ls-files
+# --others` all stay green, then be globbed into the payload and published
+# under this HEAD's BUILD_COMMIT marker. Two independent layers:
+#   (a) reject those index bits themselves on the migration SQL set;
+#   (b) compare every globbed file's raw content hash with its HEAD blob,
+#       which never consults the index.
+# No refusal path prints a file name or any diff content.
+SQL_REL_PATHS=()
+for sql_file in "${MIGRATION_SQL_FILES[@]}"; do
+  SQL_REL_PATHS+=("${sql_file#"${REPO_DIR}/"}")
+done
+
+# (a) `git ls-files -v` tags: H = normal cached, h = assume-unchanged,
+# S = skip-worktree (some versions emit lowercase s). Only H is acceptable.
+sql_index_flags="$(git -C "${REPO_DIR}" ls-files -v -- "${SQL_REL_PATHS[@]}")" || {
+  echo "git ls-files -v failed at ${REPO_DIR}; refusing to deploy" >&2
+  exit 1
+}
+while IFS= read -r sql_flag_line; do
+  [[ -n "${sql_flag_line}" ]] || continue
+  case "${sql_flag_line:0:1}" in
+    h|s|S)
+      echo "migration SQL carries an assume-unchanged/skip-worktree index bit; refusing to deploy" >&2
+      exit 1
+      ;;
+  esac
+done <<< "${sql_index_flags}"
+
+# (b) Authoritative byte-for-byte check against HEAD. `git hash-object --stdin`
+# hashes the raw stream with no path attributes / CRLF filter, so no filter can
+# disguise tampered content. With pipefail, a failing cat-file (path absent
+# from HEAD) fails the whole assignment even though hash-object --stdin would
+# otherwise succeed by hashing empty input. Both streams are suppressed so no
+# file name or diff content is leaked on refusal.
+for sql_file in "${MIGRATION_SQL_FILES[@]}"; do
+  sql_rel="${sql_file#"${REPO_DIR}/"}"
+  if ! head_sql_hash="$(git -C "${REPO_DIR}" cat-file blob "HEAD:${sql_rel}" 2>/dev/null | git hash-object --stdin 2>/dev/null)"; then
+    echo "git cat-file could not read migration SQL from HEAD; refusing to deploy" >&2
+    exit 1
+  fi
+  if [[ -z "${head_sql_hash}" ]]; then
+    echo "git cat-file returned no migration SQL content from HEAD; refusing to deploy" >&2
+    exit 1
+  fi
+  if ! wt_sql_hash="$(git hash-object --stdin < "${sql_file}" 2>/dev/null)"; then
+    echo "could not hash migration SQL payload; refusing to deploy" >&2
+    exit 1
+  fi
+  if [[ "${wt_sql_hash}" != "${head_sql_hash}" ]]; then
+    echo "migration SQL payload differs from HEAD content; refusing to deploy an uncommitted SQL pair" >&2
+    exit 1
+  fi
+done
+
 cd "${REPO_DIR}/rust"
 cargo build --release --workspace
 
@@ -124,6 +190,9 @@ cleanup_selfhost() {
   rm -rf "${STAGE_DIR}"
   if [[ "${mig_unit_masked:-0}" -eq 1 ]]; then
     sudo systemctl unmask "${MIGRATIONS_UNIT:-jarvis-migrations.service}" >/dev/null 2>&1 || true
+    # R4-D: remove our marker together with the unmask so a clean exit is not
+    # misread as a crash residue on the next run. Best-effort like the unmask.
+    sudo rm -f "${MASK_MARKER}" 2>/dev/null || true
   fi
 }
 trap cleanup_selfhost EXIT
@@ -243,7 +312,26 @@ mig_unit_was_active=0
 if sudo systemctl is-active --quiet "${MIGRATIONS_UNIT}" 2>/dev/null; then
   mig_unit_was_active=1
 fi
+# R4-D: crash recovery BEFORE classifying the mask. A marker left by a prior
+# run means that run applied the mask and died (SIGKILL/power loss) before its
+# unmask, so the current mask is our residue -- not an admin decision. Unmask
+# it now and fall through to the normal flow below, which re-applies and
+# re-marks our own mask for this run. Fail closed if the unmask itself fails:
+# keep the marker for the next attempt and abort rather than misclassify a
+# still-present mask as an admin mask (which would silently corrupt unit
+# writes via tee -> /dev/null).
+sudo mkdir -p "${MASK_MARKER_DIR}"
+if [[ -e "${MASK_MARKER}" ]]; then
+  echo "stale selfhost mask marker found; unmasking residual ${MIGRATIONS_UNIT}" >&2
+  if sudo systemctl unmask "${MIGRATIONS_UNIT}" >/dev/null 2>&1; then
+    sudo rm -f "${MASK_MARKER}"
+  else
+    echo "failed to unmask residual ${MIGRATIONS_UNIT}; refusing to continue" >&2
+    exit 1
+  fi
+fi
 mig_unit_was_masked=0
+# An admin mask is trusted only when no selfhost marker is present.
 if [[ "$(sudo systemctl is-enabled "${MIGRATIONS_UNIT}" 2>/dev/null || true)" == "masked" ]]; then
   mig_unit_was_masked=1
 fi
@@ -257,10 +345,18 @@ if sudo systemctl cat "${MIGRATIONS_UNIT}" >/dev/null 2>&1; then
 fi
 # Mask right after the stop: without this, policy/context (Restart=on-failure)
 # pulling in jarvis-migrations.service via Wants= could restart a pre-flight
-# reader during the window. An admin-applied mask is never undone by us.
+# reader during the window. An admin-applied mask (no marker) is never undone.
 if (( mig_unit_was_masked == 0 )); then
-  sudo systemctl mask "${MIGRATIONS_UNIT}" >/dev/null
+  # R4-D: write the marker BEFORE applying the mask. If SIGKILL/power loss
+  # landed between `mask` and the marker write, a mask with no marker would be
+  # misread as an admin mask next run and persist forever. The reverse order
+  # is safe: a marker with no mask only makes the next run do a harmless,
+  # idempotent unmask. Set the flag first so the EXIT trap cleans up even if
+  # either operation fails.
   mig_unit_masked=1
+  printf 'pid=%s token=%s unit=%s\n' "$$" "$(date +%s)-${RANDOM}" "${MIGRATIONS_UNIT}" \
+    | sudo tee "${MASK_MARKER}" >/dev/null
+  sudo systemctl mask "${MIGRATIONS_UNIT}" >/dev/null
 fi
 
 for bin in "${BINARIES[@]}"; do
@@ -363,10 +459,14 @@ done
 
 # Unmask BEFORE the unit-generation loop rewrites the unit file below: a
 # lingering mask symlink at /etc/systemd/system/${name} would make `tee`
-# follow it to /dev/null and silently discard the generated unit.
+# follow it to /dev/null and silently discard the generated unit. R4-D: drop
+# our marker at the same point, since the write boundary is now closed. An
+# admin mask (no marker, mig_unit_masked == 0) is left untouched here; the
+# fail-closed assert in the unit loop below catches it instead.
 if (( mig_unit_masked )); then
   sudo systemctl unmask "${MIGRATIONS_UNIT}" >/dev/null
   mig_unit_masked=0
+  sudo rm -f "${MASK_MARKER}"
 fi
 # The write boundary is sealed, so restore the pre-flight unit to its prior
 # active state and let it apply the new SQL. On a fresh install the unit was
@@ -444,6 +544,21 @@ for unit in \
   "${REPO_DIR}"/infra/systemd/code-server.service \
   "${REPO_DIR}"/infra/systemd/otelcol.service; do
   name="$(basename "${unit}")"
+  # R4-D: fail-closed unit-write guard. `tee` follows a mask symlink
+  # (/etc/systemd/system/<name> -> /dev/null), silently discarding the
+  # generated unit while the old one stays masked/stale and the script still
+  # reports success. Never write through such a destination: abort loudly.
+  unit_dst="/etc/systemd/system/${name}"
+  if [[ -L "${unit_dst}" ]]; then
+    unit_link_target="$(sudo readlink -f -- "${unit_dst}" 2>/dev/null || true)"
+    if [[ -z "${unit_link_target}" ]]; then
+      unit_link_target="$(sudo readlink -- "${unit_dst}" 2>/dev/null || true)"
+    fi
+    if [[ "${unit_link_target}" == "/dev/null" ]]; then
+      echo "refusing to write ${unit_dst}: destination is a mask symlink to /dev/null; unmask the unit first" >&2
+      exit 1
+    fi
+  fi
   sed_args=()
   if [[ " ${JARVIS_SERVICE_UNITS[*]} " != *" ${name} "* ]]; then
     # 認可サービス・migration 以外のみ、従来どおり jarvis -> JARVIS_USER へ置換。
