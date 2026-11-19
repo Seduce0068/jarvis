@@ -1,6 +1,7 @@
 //! HTTP/REST for Context Builder
 
 use crate::ContextBuilder;
+use crate::error::ContextError;
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -268,19 +269,42 @@ async fn metrics() -> String {
     }
 }
 
-/// Preserve an internal failure's reason in the server log while keeping the
-/// client contract unchanged (bare 500, no error body).
+/// Reduce an internal error to a fixed-vocabulary category safe for logging.
 ///
-/// `{err:#}` is anyhow's full kind/context chain. The request itself is never
-/// passed here, so payloads, correlation IDs and other raw data cannot leak
-/// into this log record.
+/// Mirrors `grpc.rs::error_kind`: `ContextError`'s `Display` can embed database
+/// URLs and SQL, Qdrant endpoints and responses, PII payloads, and config
+/// paths. Only the variant token is logged; the error text is neither echoed to
+/// the client nor written to any log record. Keeping both transports on the
+/// same seven tokens makes journald/OTLP output uniform across HTTP and gRPC.
+fn error_kind(err: &anyhow::Error) -> &'static str {
+    match err.downcast_ref::<ContextError>() {
+        Some(ContextError::Database(_)) => "database",
+        Some(ContextError::Qdrant(_)) => "qdrant",
+        Some(ContextError::Pii(_)) => "pii",
+        Some(ContextError::Config(_)) => "config",
+        Some(ContextError::Grpc(_)) => "grpc",
+        Some(ContextError::Serialization(_)) => "serialization",
+        None => "other",
+    }
+}
+
+/// Preserve an internal failure in the server log using fixed vocabulary only,
+/// then return the unchanged bare-500 contract (no error body).
+///
+/// `anyhow`'s `{err:#}` chain is deliberately never formatted here: it can carry
+/// DB URLs/SQL, Qdrant endpoints, config paths and PII bodies straight into
+/// journald -> otelcol -> OTLP/Grafana. The request is not passed in either, so
+/// neither the chain nor the payload can reach this log record.
 fn log_internal_error<T>(
     result: anyhow::Result<T>,
     op: &'static str,
 ) -> Result<T, axum::http::StatusCode> {
     result.map_err(|err| {
-        let chain = format!("{err:#}");
-        tracing::error!(operation = op, error = %chain, "internal error");
+        tracing::error!(
+            operation = op,
+            error_kind = error_kind(&err),
+            "internal error"
+        );
         axum::http::StatusCode::INTERNAL_SERVER_ERROR
     })
 }
@@ -372,8 +396,8 @@ pub async fn serve(builder: Arc<ContextBuilder>, addr: std::net::SocketAddr) -> 
 mod tests {
     use super::{
         ADMIN_TOKEN_HEADER, AuthState, MemoryBackend, MemoryEntry, MemoryEntryResponse,
-        StoreMemoryRequest, UnifiedEvent, build_context, constant_time_eq, log_internal_error,
-        prepare_store_memory, require_admin_token, search_memory, store_memory,
+        StoreMemoryRequest, UnifiedEvent, build_context, constant_time_eq, error_kind,
+        log_internal_error, prepare_store_memory, require_admin_token, search_memory, store_memory,
     };
     use axum::{
         Router,
@@ -408,8 +432,21 @@ mod tests {
         assert_eq!(ADMIN_TOKEN_HEADER, jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER);
     }
 
+    /// I51-A: hostile detail of the kind that used to travel through
+    /// `format!("{err:#}")`: a token-bearing Qdrant URL, SQL, a config path and
+    /// a PII body. The `*_PROBE_*` names keep these fixtures clear of the
+    /// repository secret scanner's credential-key patterns.
+    const HTTP_LOG_PROBE_URL: &str = concat!(
+        "https://admin:I51A-do-not-log@qdrant.internal:6333/private",
+        "?session=I51A-do-not-log"
+    );
+    const HTTP_LOG_PROBE_SQL: &str =
+        "SELECT patient_name, diagnosis FROM decisions WHERE note = 'I51A-do-not-log'";
+    const HTTP_LOG_PROBE_PATH: &str = "/etc/jarvis/I51A-do-not-log.toml";
+    const HTTP_LOG_PROBE_PII: &str = "patient I51A-do-not-log / 090-1234-5678 / private note";
+
     #[test]
-    fn internal_error_is_logged_with_chain_and_mapped_to_bare_500() {
+    fn internal_error_is_logged_with_fixed_kind_and_mapped_to_bare_500() {
         let buffer = LogBuffer::default();
         let writer = buffer.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -419,25 +456,89 @@ mod tests {
             .finish();
 
         let outcome = tracing::subscriber::with_default(subscriber, || {
-            let err = anyhow::anyhow!("qdrant request timed out")
-                .context("producing query embedding for memory vector search");
+            let detail = [
+                HTTP_LOG_PROBE_URL,
+                HTTP_LOG_PROBE_SQL,
+                HTTP_LOG_PROBE_PATH,
+                HTTP_LOG_PROBE_PII,
+            ]
+            .join(" ");
+            let err = anyhow::Error::from(crate::error::ContextError::qdrant(
+                crate::error::QdrantErrorKind::FAILED,
+            ))
+            .context(detail);
+            let err = err.context("outer context that must also stay out of the log");
             log_internal_error::<()>(Err(err), "build_context")
         });
 
         assert_eq!(
             outcome.unwrap_err(),
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "the HTTP response contract stays a bare 500"
         );
 
         let captured = buffer.0.lock().expect("log buffer mutex").clone();
         let logs = String::from_utf8(captured).expect("logs are utf-8");
+        for probe in [
+            HTTP_LOG_PROBE_URL,
+            HTTP_LOG_PROBE_SQL,
+            HTTP_LOG_PROBE_PATH,
+            HTTP_LOG_PROBE_PII,
+            "qdrant.internal",
+            "SELECT",
+            "/etc/jarvis",
+            "outer context",
+        ] {
+            assert!(
+                !logs.contains(probe),
+                "sensitive error-chain detail leaked to logs: {probe}"
+            );
+        }
+        // Fixed message, operation label and the fixed `qdrant` token survive;
+        // the absence checks above prove the token did not arrive via the URL.
         assert!(logs.contains("ERROR"), "{logs}");
         assert!(logs.contains("build_context"), "{logs}");
-        assert!(
-            logs.contains("producing query embedding for memory vector search"),
-            "{logs}"
-        );
-        assert!(logs.contains("qdrant request timed out"), "{logs}");
+        assert!(logs.contains("internal error"), "{logs}");
+        assert!(logs.contains("qdrant"), "{logs}");
+    }
+
+    /// The HTTP vocabulary must stay identical to `grpc.rs::error_kind`:
+    /// database / qdrant / pii / config / grpc / serialization / other.
+    #[test]
+    fn error_kind_vocabulary_matches_grpc_transport() {
+        let database: anyhow::Error =
+            crate::error::ContextError::Database(sqlx::Error::RowNotFound).into();
+        assert_eq!(error_kind(&database), "database");
+
+        let qdrant = anyhow::Error::from(crate::error::ContextError::qdrant(
+            crate::error::QdrantErrorKind::FAILED,
+        ))
+        .context(HTTP_LOG_PROBE_PII);
+        assert_eq!(error_kind(&qdrant), "qdrant");
+        // anyhow context layers must not mask the typed variant.
+        assert_eq!(error_kind(&qdrant.context("outer")), "qdrant");
+
+        let pii: anyhow::Error =
+            crate::error::ContextError::Pii(HTTP_LOG_PROBE_PII.to_owned()).into();
+        assert_eq!(error_kind(&pii), "pii");
+
+        let config: anyhow::Error =
+            crate::error::ContextError::Config(anyhow::anyhow!("{HTTP_LOG_PROBE_PATH}")).into();
+        assert_eq!(error_kind(&config), "config");
+
+        let grpc_status: anyhow::Error =
+            crate::error::ContextError::Grpc(tonic::Status::internal(HTTP_LOG_PROBE_SQL)).into();
+        assert_eq!(error_kind(&grpc_status), "grpc");
+
+        let serialization: anyhow::Error = crate::error::ContextError::Serialization(
+            serde_json::from_str::<serde_json::Value>(HTTP_LOG_PROBE_PII)
+                .expect_err("the PII probe is not JSON"),
+        )
+        .into();
+        assert_eq!(error_kind(&serialization), "serialization");
+
+        let untyped = anyhow::anyhow!("{HTTP_LOG_PROBE_URL} {HTTP_LOG_PROBE_SQL}");
+        assert_eq!(error_kind(&untyped), "other");
     }
 
     fn store_request(id: Option<String>) -> StoreMemoryRequest {
