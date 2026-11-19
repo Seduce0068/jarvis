@@ -330,15 +330,28 @@ impl Connection {
     /// rebuilt, and retries are bounded, so a real outage still terminates in
     /// the `Persistence`/503 contract rather than looping forever.
     async fn reconnect(&mut self, pg_url: &str) -> Result<(), ApprovalError> {
-        // Abort the dead socket's driver before dropping the generation so no
-        // task lingers; dropping a `JoinHandle` alone merely detaches it.
-        self.driver.abort();
-        *self = Self::open(pg_url).await.map_err(|_| {
+        // I45-C (b): fully open the replacement generation BEFORE mutating this
+        // one. The TCP connect is the only await point in this method; if the
+        // caller cancels the future while it is in flight, `self` is still the
+        // original, intact generation (its driver NOT aborted) and no
+        // replacement driver has been spawned to be detached. The old order
+        // aborted first, so a cancelled connect left the mutex holding a client
+        // whose driver was already dead with no rescue path.
+        let fresh = Self::open(pg_url).await.map_err(|_| {
             // Never log the URL or the connect error text: both may carry
             // credentials.
             tracing::error!("failed to reconnect approval persistence after connection loss");
             ApprovalError::Persistence
         })?;
+
+        // Short, await-free critical section: swap the whole generation in a
+        // single `mem::replace`, then abort the outgoing driver so no task
+        // lingers (dropping a `JoinHandle` alone merely detaches it). There is
+        // no cancellation point between the open completing and this swap, so
+        // the old abort-then-detach window is closed.
+        let Connection { client, driver } = fresh;
+        let old = std::mem::replace(self, Connection { client, driver });
+        old.driver.abort();
         Ok(())
     }
 }

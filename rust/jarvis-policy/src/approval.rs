@@ -787,7 +787,17 @@ impl ApprovalStore {
                                             let remaining = deadline.saturating_duration_since(
                                                 tokio::time::Instant::now(),
                                             );
+                                            // I45-C (a): with `biased;` the watch
+                                            // branch is polled first, so a durable
+                                            // decision published in the same poll as
+                                            // the grace sleep wins instead of a random
+                                            // branch expiring the waiter (DB=Approved /
+                                            // waiter=Expired split brain). The Grace
+                                            // arm also re-checks the watch before every
+                                            // break, covering a send that lands after
+                                            // the poll already chose Grace.
                                             let winner = tokio::select! {
+                                                biased;
                                                 changed = rx.changed() => {
                                                     if changed.is_ok() { Race::Watch }
                                                     else { Race::Grace }
@@ -815,8 +825,32 @@ impl ApprovalStore {
                                                     other => durable_fallback = Some(other),
                                                 },
                                                 Race::Grace => {
+                                                    // I45-C (a): the grace sleep and a
+                                                    // concurrent commit's watch send can
+                                                    // become ready in the same instant.
+                                                    // `biased;` prefers Watch when both are
+                                                    // ready at poll time; this final read
+                                                    // also adopts a send that landed just
+                                                    // after the poll chose Grace, so a
+                                                    // published decision always beats
+                                                    // `Expired`. `borrow_and_update` takes
+                                                    // `&mut`, hence the mutable binding.
+                                                    // Fixed vocabulary only: no id, SQL
+                                                    // text or decision body is logged.
+                                                    let mut watch_now = || {
+                                                        let guard = rx.borrow_and_update();
+                                                        (*guard).clone()
+                                                    };
+                                                    if let Some(decision) = watch_now() {
+                                                        break Some((decision, None));
+                                                    }
                                                     if let Some(result) = durable_fallback.take() {
-                                                        break resolve_durable(id, result);
+                                                        break match watch_now() {
+                                                            Some(decision) => {
+                                                                Some((decision, None))
+                                                            }
+                                                            None => resolve_durable(id, result),
+                                                        };
                                                     }
                                                     // The re-read is still in
                                                     // flight at budget expiry. Give
@@ -834,9 +868,17 @@ impl ApprovalStore {
                                                     .await
                                                     {
                                                         Ok(result) => {
-                                                            break resolve_durable(id, result);
+                                                            break match watch_now() {
+                                                                Some(decision) => {
+                                                                    Some((decision, None))
+                                                                }
+                                                                None => resolve_durable(id, result),
+                                                            };
                                                         }
                                                         Err(_) => {
+                                                            if let Some(decision) = watch_now() {
+                                                                break Some((decision, None));
+                                                            }
                                                             tracing::warn!(
                                                                 request_id = %id,
                                                                 "durable decision re-read timed out after lost expiry CAS; waiter expires"
@@ -3128,6 +3170,129 @@ mod tests {
             "a late watch decision must beat the non-authoritative durable error"
         );
         assert_eq!(persistence.load_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// I45-C (a): when the grace sleep fires at the same instant a concurrent
+    /// durable commit publishes its decision on the watch, the waiter must adopt
+    /// that decision instead of expiring (DB=Approved / waiter=Expired split
+    /// brain). The re-read is gated so `durable_fallback` stays `None` and the
+    /// only rescue path is the final watch re-check inside the Grace arm, which
+    /// is reached after the sleep. No real DB and no `decide` preconditions:
+    /// the watch send is injected directly into the entry's sender, exactly as
+    /// in the I42-A (a) regression.
+    #[tokio::test]
+    async fn grace_deadline_late_watch_beats_expired() {
+        #[derive(Debug)]
+        struct GatedRereadPersistence {
+            started: Arc<AtomicBool>,
+            gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl ApprovalPersistence for GatedRereadPersistence {
+            async fn record_request(
+                &self,
+                _request: &ApprovalRequest,
+                _deadline: DateTime<Utc>,
+            ) -> Result<(), ApprovalError> {
+                Ok(())
+            }
+
+            async fn record_decision(
+                &self,
+                _id: Uuid,
+                _decision: &ApprovalDecision,
+                _decided_at: DateTime<Utc>,
+            ) -> Result<(), ApprovalError> {
+                Ok(())
+            }
+
+            async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+                Ok(Vec::new())
+            }
+
+            async fn load_decision_with_time(
+                &self,
+                _id: Uuid,
+            ) -> Result<Option<LoadedDecision>, ApprovalError> {
+                self.started.store(true, Ordering::SeqCst);
+                if let Some(rx) = self.gate.lock().await.take() {
+                    let _ = rx.await;
+                }
+                // Non-authoritative: the durable re-read itself carries no
+                // decision, so only the watch can rescue the waiter.
+                Ok(None)
+            }
+
+            async fn mark_expired(
+                &self,
+                id: Uuid,
+                _expired_at: DateTime<Utc>,
+            ) -> Result<(), ApprovalError> {
+                Err(ApprovalError::AlreadyDecided(id))
+            }
+        }
+
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let started = Arc::new(AtomicBool::new(false));
+        let persistence = Arc::new(GatedRereadPersistence {
+            started: started.clone(),
+            gate: tokio::sync::Mutex::new(Some(release_rx)),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(30),
+            DEFAULT_MAX_PENDING,
+            persistence,
+        );
+        let request = make_request();
+        let id = request.id;
+
+        let waiter = {
+            let store = store.clone();
+            tokio::spawn(async move { store.request(request).await })
+        };
+        wait_for_registration(&store, id).await;
+
+        // Wait until the lost-CAS recovery has started the gated re-read.
+        for _ in 0..200 {
+            if started.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(
+            started.load(Ordering::SeqCst),
+            "the durable re-read must have started"
+        );
+
+        // Let the grace deadline fire while the re-read is still blocked. The
+        // waiter is now inside the Grace arm's final bounded wait; publishing
+        // the decision here is the deadline-boundary race that used to resolve
+        // to `Expired` without ever looking at the watch again.
+        tokio::time::sleep(RECOVERY_GRACE + Duration::from_millis(70)).await;
+        assert!(
+            !waiter.is_finished(),
+            "the waiter must still be waiting on the gated re-read"
+        );
+
+        let decision = approved();
+        {
+            let mut entries = store.inner.entries.write().await;
+            let entry = entries
+                .get_mut(&id)
+                .expect("entry survives until recovery resolves");
+            let _ = entry.tx.send(Some(decision.clone()));
+        }
+        let _ = release_tx.send(());
+
+        let result = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter completes")
+            .expect("waiter task");
+        assert_eq!(
+            result, decision,
+            "a watch decision published at the grace boundary must beat Expired"
+        );
     }
 
     /// I42-A (b): a durable re-read that never resolves (stalled DB RTT) must
