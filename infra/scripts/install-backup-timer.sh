@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Install the local-only JARVIS backup service + timer (BK-2).
 # Dry-run by default; --apply performs the changes. Root required for --apply.
-# Idempotent and reversible: previous unit files are backed up before replace.
+# Idempotent and reversible: previous unit files are backed up before replace,
+# and pre-existing timer state (active/enabled, next elapse) is restored on
+# rollback instead of being stopped unconditionally.
 set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -82,15 +84,51 @@ fi
 
 [ "$(id -u)" -eq 0 ] || { echo "ERROR: --apply requires root" >&2; exit 1; }
 
+# Read-only service-manager state captured BEFORE the first write (I36-C (b)).
+# Rollback uses it to restore the exact active/enabled state instead of
+# unconditionally stopping a timer that was already enabled before this run.
+# Every query is best-effort: an absent unit is a valid pre-install state.
+pre_timer_known=0
+pre_timer_active=0
+pre_timer_enabled=0
+pre_timer_next=""
+if systemctl cat jarvis-backup.timer >/dev/null 2>&1; then
+  pre_timer_known=1
+fi
+if systemctl is-active --quiet jarvis-backup.timer 2>/dev/null; then
+  pre_timer_active=1
+fi
+if systemctl is-enabled --quiet jarvis-backup.timer 2>/dev/null; then
+  pre_timer_enabled=1
+fi
+pre_timer_next="$(systemctl list-timers jarvis-backup.timer --no-pager 2>/dev/null \
+  | awk 'NR==2 {print $1, $2, $3}' || true)"
+echo "  pre-install timer: known=$pre_timer_known active=$pre_timer_active enabled=$pre_timer_enabled${pre_timer_next:+ next=$pre_timer_next}"
+
 # ERR trap must be disarmed before rollback runs: otherwise a failure inside
 # rollback would re-enter it. Explicit `exit 1` paths call fail() instead.
 rollback() {
   trap - ERR
   echo "== ROLLBACK ==" >&2
-  # Stop and disable the timer before touching unit files: restoring the files
-  # alone leaves an already enabled/started timer running. Only act when
-  # systemd knows the unit; ignore any failure so restore + reload still run.
-  if systemctl cat jarvis-backup.timer >/dev/null 2>&1; then
+  # Restore the service-manager state observed before this run. A blanket
+  # stop+disable breaks the "Idempotent and reversible" contract when the
+  # timer was already active/enabled before the installer ran: only a timer
+  # this run newly activated is stopped and disabled. A pre-existing state is
+  # re-asserted per dimension (active and enabled are independent).
+  if [ "$pre_timer_known" -eq 1 ] || [ "$pre_timer_active" -eq 1 ] || [ "$pre_timer_enabled" -eq 1 ]; then
+    if [ "$pre_timer_enabled" -eq 1 ]; then
+      systemctl enable jarvis-backup.timer || true
+    else
+      systemctl disable jarvis-backup.timer || true
+    fi
+    if [ "$pre_timer_active" -eq 1 ]; then
+      systemctl start jarvis-backup.timer || true
+    else
+      systemctl stop jarvis-backup.timer || true
+    fi
+  else
+    # No unit/state before this run: this execution introduced it, so undo the
+    # enable --now before restore_configs removes the installed unit file.
     systemctl stop jarvis-backup.timer || true
     systemctl disable jarvis-backup.timer || true
   fi

@@ -57,6 +57,25 @@ pub enum ApprovalError {
     Persistence,
 }
 
+impl ApprovalError {
+    /// Fixed-vocabulary classification for logs and metrics.
+    ///
+    /// The returned literal is derived only from the variant, never from its
+    /// payload: no request id, database URL, filesystem path, SQL text or
+    /// upstream error string can reach a log record through this method. The
+    /// match is exhaustive so a future variant must be classified explicitly
+    /// instead of silently inheriting a generic category.
+    pub(crate) fn category(&self) -> &'static str {
+        match self {
+            ApprovalError::NotFound(_) => "NotFound",
+            ApprovalError::AlreadyDecided(_) => "AlreadyDecided",
+            ApprovalError::KillSwitchActivated => "KillSwitchActivated",
+            ApprovalError::QueueFull => "QueueFull",
+            ApprovalError::Persistence => "Persistence",
+        }
+    }
+}
+
 /// Reason attached to the legacy `Denied` decision returned by
 /// [`ApprovalStore::request`] when the queue is exhausted.
 ///
@@ -458,14 +477,59 @@ impl ApprovalStore {
                             // retried by the next `prune` (or startup
                             // reconciliation), so no decision/audit is lost.
                             let mark = self.inner.persistence.mark_expired(id, expired_at).await;
-                            if let Err(error) = mark {
-                                tracing::warn!(
-                                    error = %error,
-                                    request_id = %id,
-                                    "failed to persist approval expiration; audit row may be missing"
-                                );
+                            match mark {
+                                // A concurrent settlement won the durable CAS.
+                                // The row may already carry the real decision
+                                // even though this waiter never observed the
+                                // watch notification (lost-ack). Give the
+                                // winner one bounded chance to publish before
+                                // falling back to a memory-only `Expired`
+                                // (I36-C (3)). A full fix also has to re-read
+                                // the durable decision, which needs a new seam
+                                // on `ApprovalPersistence` (I36-B).
+                                Err(ApprovalError::AlreadyDecided(_)) => {
+                                    let grace = Duration::from_millis(100);
+                                    let changed =
+                                        tokio::time::timeout(grace, rx.changed()).await.is_ok();
+                                    let published = if changed {
+                                        let guard = rx.borrow_and_update();
+                                        (*guard).clone()
+                                    } else {
+                                        None
+                                    };
+                                    if let Some(decision) = published {
+                                        // Reconcile the provisional `Expired`
+                                        // written above with the decision the
+                                        // CAS winner committed, so memory, the
+                                        // waiter and the durable row agree.
+                                        let mut entries = self.inner.entries.write().await;
+                                        if let Some(entry) = entries.get_mut(&id)
+                                            && matches!(
+                                                entry.decision.as_ref(),
+                                                Some(&ApprovalDecision::Expired)
+                                            )
+                                        {
+                                            entry.decision = Some(decision.clone());
+                                            entry.decided_at = Some(expired_at);
+                                        }
+                                        return Ok(decision);
+                                    }
+                                    tracing::warn!(
+                                        request_id = %id,
+                                        "expiry CAS lost; waiter has no durable re-read (I36-B)"
+                                    );
+                                    return Ok(ApprovalDecision::Expired);
+                                }
+                                Err(error) => {
+                                    tracing::warn!(
+                                        error_category = error.category(),
+                                        request_id = %id,
+                                        "failed to persist approval expiration; audit row may be missing"
+                                    );
+                                    return Ok(ApprovalDecision::Expired);
+                                }
+                                Ok(()) => return Ok(ApprovalDecision::Expired),
                             }
-                            return Ok(ApprovalDecision::Expired);
                         }
                     }
                 }
@@ -658,22 +722,30 @@ impl ApprovalStore {
         // Per-row settlement (I34-E): one failed `mark_expired` must not strand
         // the remaining expired rows. `AlreadyDecided` means the row was already
         // settled by a concurrent decision/expiry and counts as success. Other
-        // errors are reported with only the request id and fixed vocabulary
-        // (no URL, SQL or upstream error text) and are collected so the loop
-        // always visits every row.
-        let settled_expired = expired.len();
+        // errors are reported with only the request id and a fixed-vocabulary
+        // error category (no URL, SQL or upstream error text) and are collected
+        // so the loop always visits every row. `settled_expired` counts actual
+        // successes, not attempts: `expired.len()` would over-report the INFO
+        // total whenever any single settlement failed (I36-C (a)).
+        let mut settled_expired = 0usize;
         let mut settlement_failed = 0usize;
         let mut first_error: Option<ApprovalError> = None;
         for id in expired {
             match self.inner.persistence.mark_expired(id, now).await {
-                Ok(()) | Err(ApprovalError::AlreadyDecided(_)) => {}
+                Ok(()) | Err(ApprovalError::AlreadyDecided(_)) => {
+                    settled_expired += 1;
+                }
                 Err(error) => {
                     settlement_failed += 1;
+                    // Fixed vocabulary only: the category is derived from the
+                    // variant, never from an error payload or upstream text.
+                    let category = error.category();
                     if first_error.is_none() {
                         first_error = Some(error);
                     }
                     tracing::warn!(
                         request_id = %id,
+                        error_category = category,
                         "failed to settle expired approval; continuing with remaining rows"
                     );
                 }
@@ -804,6 +876,33 @@ mod tests {
         ApprovalDecision::Approved {
             approved_by: "tester".into(),
             approved_at: Utc::now(),
+        }
+    }
+
+    /// I36-C (a): the warning/error classification is a fixed vocabulary
+    /// derived from the variant alone. Payload-bearing ids, DB URLs, SQL text
+    /// and upstream messages must never reach a log through `category()`.
+    #[test]
+    fn approval_error_category_is_fixed_vocabulary() {
+        let id = Uuid::new_v4();
+        let id_text = id.to_string();
+        let cases: Vec<(ApprovalError, &str)> = vec![
+            (ApprovalError::NotFound(id), "NotFound"),
+            (ApprovalError::AlreadyDecided(id), "AlreadyDecided"),
+            (ApprovalError::KillSwitchActivated, "KillSwitchActivated"),
+            (ApprovalError::QueueFull, "QueueFull"),
+            (ApprovalError::Persistence, "Persistence"),
+        ];
+        for (error, expected) in cases {
+            let category = error.category();
+            assert_eq!(category, expected);
+            assert!(
+                category.chars().all(|c| c.is_ascii_alphanumeric()),
+                "category must be a fixed identifier: {category}"
+            );
+            assert!(!category.contains(id_text.as_str()));
+            assert!(!category.to_ascii_lowercase().contains("postgres"));
+            assert!(!category.contains("SELECT"));
         }
     }
 
