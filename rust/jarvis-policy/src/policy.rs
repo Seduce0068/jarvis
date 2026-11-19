@@ -2,12 +2,68 @@
 
 use anyhow::{Context as AnyhowContext, Result};
 use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter, MgmtApi};
-use cedar_policy::{Authorizer, Context, Decision, Entities, PolicySet, Request as CedarRequest};
+use cedar_policy::{
+    Authorizer, Context, Decision, Entities, PolicySet, Request as CedarRequest, Schema,
+    ValidationMode, Validator,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 use tracing::instrument;
+
+/// Schema file shipped next to the Cedar policies. In the checkout this is
+/// `infra/config/policy/cedar_schema.cedarschema`; the deploy scripts install
+/// the same file as `/etc/jarvis/policy/cedar_schema.cedarschema`, i.e. next
+/// to the configured `cedar_policy_dir`.
+const CEDAR_SCHEMA_FILE: &str = "cedar_schema.cedarschema";
+
+/// Parse a Cedar schema, attaching the source to any error.
+fn parse_schema(text: &str, source: &Path) -> Result<Schema> {
+    text.parse::<Schema>()
+        .map_err(|err| anyhow::anyhow!("parsing Cedar schema from {}: {err}", source.display()))
+}
+
+/// Type-check `policies` against `schema` in strict mode.
+///
+/// This is the single validation gate used by both the production startup
+/// path ([`CedarEngine::new`]) and the shipped-config regression tests, so the
+/// enforced contract cannot drift from the tested one. A validation error is
+/// fatal: callers propagate the error with `?` and startup fails (fail-closed).
+fn validate_policies_against_schema(schema: Schema, policies: &PolicySet) -> Result<()> {
+    let validator = Validator::new(schema);
+    let result = validator.validate(policies, ValidationMode::Strict);
+    if result.validation_passed() {
+        return Ok(());
+    }
+    let errors: Vec<String> = result
+        .validation_errors()
+        .map(|err| err.to_string())
+        .collect();
+    anyhow::bail!(
+        "Cedar policy validation failed ({} error(s)): {}",
+        errors.len(),
+        errors.join("; ")
+    )
+}
+
+/// Locate the schema deployed alongside the configured Cedar policy source.
+///
+/// `None` means no schema is available, in which case startup keeps the
+/// legacy "empty PolicySet / deny by default" behavior. A missing policy path
+/// is tracked separately and is deliberately not turned into a schema
+/// validation failure here.
+fn schema_path_for(policy_path: &Path) -> Option<PathBuf> {
+    let dir = if policy_path.is_dir() {
+        Some(policy_path)
+    } else if policy_path.is_file() {
+        policy_path.parent()
+    } else {
+        None
+    }?;
+    let schema_path = dir.join(CEDAR_SCHEMA_FILE);
+    schema_path.is_file().then_some(schema_path)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApprovalRequest {
@@ -56,6 +112,28 @@ impl CedarEngine {
         };
 
         tracing::info!("Loaded {} Cedar policies", policies.policies().count());
+
+        // Type-check the policies that were actually loaded before the engine
+        // can authorize anything. The schema is deployed next to the policy
+        // source, so a missing schema means this installation has no schema
+        // contract yet: keep the legacy deny-by-default startup rather than
+        // failing (see the separate configuration-path finding).
+        if let Some(schema_path) = schema_path_for(path) {
+            tracing::info!(
+                "Validating Cedar policies against schema {}",
+                schema_path.display()
+            );
+            let schema_text = std::fs::read_to_string(&schema_path)
+                .with_context(|| format!("reading Cedar schema {}", schema_path.display()))?;
+            let schema = parse_schema(&schema_text, &schema_path)?;
+            validate_policies_against_schema(schema, &policies)?;
+        } else {
+            tracing::info!(
+                "Cedar schema {} not found next to {}; skipping schema validation",
+                CEDAR_SCHEMA_FILE,
+                path.display()
+            );
+        }
 
         Ok(Self {
             authorizer: Authorizer::new(),
@@ -233,7 +311,6 @@ fn casbin_rule(principal: &str, action: &str, resource: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cedar_policy::{Schema, ValidationMode, Validator};
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -324,6 +401,48 @@ mod tests {
         Ok(())
     }
 
+    /// A schema sitting next to the policies must be enforced on the
+    /// production startup path, not only in unit tests.
+    #[tokio::test]
+    async fn schema_violation_fails_startup() -> Result<()> {
+        let dir = temp_dir("schema-invalid");
+        fs::write(
+            dir.join("policies.cedar"),
+            r#"permit (principal == jarvis::Unknown::"ghost", action, resource);"#,
+        )?;
+        fs::write(
+            dir.join(CEDAR_SCHEMA_FILE),
+            include_str!("../../../infra/config/policy/cedar_schema.cedarschema"),
+        )?;
+
+        let result = CedarEngine::new(&config_for(&dir)).await;
+        assert!(
+            result.is_err(),
+            "a policy violating the schema must fail startup (fail-closed)"
+        );
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// The same startup path must still accept policies that satisfy the
+    /// schema (the shipped config is covered by the dedicated test below).
+    #[tokio::test]
+    async fn schema_conforming_policy_starts() -> Result<()> {
+        let dir = temp_dir("schema-valid");
+        fs::write(dir.join("policies.cedar"), ADMIN_POLICY)?;
+        fs::write(
+            dir.join(CEDAR_SCHEMA_FILE),
+            include_str!("../../../infra/config/policy/cedar_schema.cedarschema"),
+        )?;
+
+        let engine = CedarEngine::new(&config_for(&dir)).await?;
+        assert!(engine.is_authorized("jarvis_admin", "execute", "tool:git.commit", &json!({}))?);
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
     #[test]
     fn shipped_policies_parse() {
         let text = include_str!("../../../infra/config/policy/policies.cedar");
@@ -338,7 +457,7 @@ mod tests {
     #[test]
     fn shipped_cedar_schema_parses() {
         let text = include_str!("../../../infra/config/policy/cedar_schema.cedarschema");
-        let parsed = text.parse::<Schema>();
+        let parsed = parse_schema(text, Path::new("shipped cedar_schema.cedarschema"));
         assert!(
             parsed.is_ok(),
             "shipped cedar_schema.cedarschema must parse: {:?}",
@@ -347,27 +466,23 @@ mod tests {
     }
 
     /// The shipped policies must be well-typed against the shipped schema.
-    /// This is a prerequisite for ever enabling runtime schema validation
-    /// (the TODO in cedar_schema.cedarschema:7).
+    /// `CedarEngine::new` now runs this same check at startup, so this test
+    /// guards the shipped configuration against contract drift.
     #[test]
     fn shipped_policies_validate_against_shipped_schema() {
         let schema_text = include_str!("../../../infra/config/policy/cedar_schema.cedarschema");
-        let schema = schema_text
-            .parse::<Schema>()
+        let schema = parse_schema(schema_text, Path::new("shipped cedar_schema.cedarschema"))
             .expect("schema parses (covered by shipped_cedar_schema_parses)");
         let policies_text = include_str!("../../../infra/config/policy/policies.cedar");
         let policies = policies_text
             .parse::<PolicySet>()
             .expect("policies parse (covered by shipped_policies_parse)");
 
-        let result = Validator::new(schema).validate(&policies, ValidationMode::Strict);
+        let result = validate_policies_against_schema(schema, &policies);
         assert!(
-            result.validation_passed(),
+            result.is_ok(),
             "shipped policies must validate against the shipped schema: {:?}",
-            result
-                .validation_errors()
-                .map(|err| err.to_string())
-                .collect::<Vec<_>>()
+            result.err().map(|err| err.to_string())
         );
     }
 
