@@ -25,6 +25,40 @@ generated:
 | `config-*`（個別ファイル） | `/etc/jarvis` | 中（上書き） |
 | `manifest.txt` | — | なし（検証用） |
 
+## 現行推奨: restore-local（2026-11-19 追加）
+
+以下は現行推奨の復元経路である。[restore-local.sh](../../infra/scripts/restore-local.sh) は
+[backup-local.sh](../../infra/scripts/backup-local.sh) の成果物を直接入力とし、
+OCI / rclone / `op` に依存しない。設計と決定理由は
+[ローカル復元設計](local-restore-design.md) に記載（本 Runbook と相互リンク）。
+後述の手順 1〜3 はレガシー手順としてそのまま保持する。
+
+### 三段の安全レベル（dry-run → 隔離 → 本番）
+
+```bash
+# 1) dry-run: 検証と計画のみ。ファイル書き込み・サービス停止なし。
+bash infra/scripts/restore-local.sh --latest          # restore-local --latest
+
+# 2) --apply: 検証ゲート通過後に隔離先へ復元（本番データは触らない）。
+bash infra/scripts/restore-local.sh --latest --apply
+
+# 3) --apply --confirm: 本番上書き（破壊的）。実行前にユーザー承認が必要。
+bash infra/scripts/restore-local.sh --latest --apply --confirm
+```
+
+**本番実行の承認**: 手順 3（`--apply --confirm`）は本番データを上書きする破壊的操作である。
+実行には事前に**ユーザーの明示的な承認**が必要で、エージェントの単独判断では実行しない。
+承認後も後述「本番反映（要判断・破壊的）」のチェックリストをすべて満たすこと。
+
+### Qdrant 不変条件（旧 restore.rs のバグ回避）
+
+Qdrant は**停止せず HTTP API で復元**する。`restore-local.sh` は Qdrant を停止対象に
+含めず（`SERVICE_INVENTORY` に `qdrant` を登録しない）、「停止 → HTTP upload」という
+組み合わせを絶対に作らない。REST endpoint はプロセスが listening して初めて応答するため、
+停止後の HTTP 呼び出しは失敗し、旧 `restore.rs` 系のバグを再現する。
+ファイル直接配置方式を選ぶ場合のみ Qdrant を停止し、その場合は HTTP upload を呼ばない
+（推奨は API 方式で、この方式では Qdrant は起動したままにする）。
+
 ## 安全原則
 
 1. **まず検証**: 復元前に `make verify-backup` で SHA-256 と
@@ -36,6 +70,9 @@ generated:
 4. **秘密情報は別途**: バックアップに `bws.env` は含まれない。
    復元後に `bws.env` が無い場合はサービスが起動しないため、
    管理者が安全な経路で再配置する。
+
+**注**: 上記 3 の「サービス停止」に Qdrant は含まれない。HTTP API 復元では起動したままにする
+（「現行推奨: restore-local」の不変条件を参照）。
 
 ## バックアップsetの選択
 
@@ -111,6 +148,10 @@ curl -fsS -X DELETE "http://127.0.0.1:6333/collections/${COLLECTION}"
 **現状**: 隔離復元の自動スクリプトは未実装。手動検証が必要
 （BK-1 の残課題として追跡）。
 
+**注**: その後 [restore-local.sh](../../infra/scripts/restore-local.sh) が追加され、
+隔離復元を `--apply` で自動化可能になった（現行推奨節・
+[ローカル復元設計](local-restore-design.md) を参照）。
+
 ## 手順3: 設定ファイルを一時ディレクトリへ展開（非破壊）
 
 現行の [backup-local.sh](../../infra/scripts/backup-local.sh) は設定を
@@ -175,3 +216,7 @@ rm -rf "$TMP"
 - Qdrant 隔離復元の自動スクリプト
 - 本番反映の自動化（意図的に未実装: 破壊的操作は手動確認のまま）
 - restore 演習の定期実施（`backup-redesign-notes.md` の安全ゲート参照）
+
+**注**: Qdrant 隔離復元の自動スクリプトは
+[restore-local.sh](../../infra/scripts/restore-local.sh) として実装済み
+（本番反映は `--confirm` + ユーザー承認時のみ）。
