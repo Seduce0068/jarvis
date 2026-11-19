@@ -777,12 +777,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### 優先度 高
 
-- [ ] **jarvis-context の gRPC が `admin_token` を完全にバイパス** — `rust/jarvis-context/src/grpc.rs:112-119` / B3 / 高 / confirmed。親が grep で認証コード不存在を確認。HTTP 側のみゲートしておりポート 50054 経由でメモリ読書きが無認証。
-- [ ] **Webhook・memory API・upstream エラーが tracing へ生本文を流出** — `event/normalizer.rs:236-269`, `context/http.rs:41,136,267,280`, `event/opencode.rs:90-107` / B3 / 高 / confirmed。`#[instrument(skip(payload))]` 化と `safe_error_summary()` 相当の要約が必要。
+- [x] **jarvis-context の gRPC が `admin_token` を完全にバイパス** — 2026-11-19 対応済み: gRPC 3 RPC の `into_inner()` 前に `x-jarvis-context-token` metadata を定数時間検証。HTTP と同じ `admin_token` を共有、未設定時のみ loopback 互換。ContextConfig の Debug も redacted 化。回帰テスト7件追加 / `rust/jarvis-context/src/grpc.rs:112-119` / B3 / 高 / confirmed。
+- [x] **Webhook・memory API・upstream エラーが tracing へ生本文を流出** — 2026-11-19 対応済み: 4 Webhook と context store/search を `skip(payload/req)` 化、upstream エラーを `upstream_error_summary()`、HA ハンドシェイクを metadata-only へ。回帰テスト4件追加。子のテスト定数名 `SECRET` が secret_scan に誤検出されたため親が `PROBE` へリネーム / B3 / 高 / confirmed。
 - [x] **otelcol が journald を読めず JARVIS ログが空** — `infra/systemd/otelcol.service:9-10`, `otelcol-config.yaml:51-52` / B4 / 高 / confirmed。親が `id koppe` で systemd-journal 非所属を確認し、unit に `SupplementaryGroups=systemd-journal` を追加（systemd-analyze verify exit 0）。**実機への unit 再適用は root 必須・ユーザー実行が残る**。
-- [ ] **deploy ロールバックが退避ファイル欠落時に新規 unit/allowlist/バイナリを残す** — `infra/scripts/deploy-mcp-gw-safe.sh:28-46` / B4 / 高 / confirmed。退避コピー失敗時は die し、欠落時は install 先を削除する else 分支が必要。
-- [ ] **HTTP 型ベースエラー分類の取りこぼし（入力エラーが 500 に後退）** — `mcp-gw/src/sandbox.rs:166,178,183,227,545` / B1 / 高 / confirmed。残る bare `bail!` / `with_context` を `client_error` 系へ型化。
-- [ ] **egress allowlist が TOML 設定を黙って無視し空値で fail-open** — `mcp-gw/src/sandbox.rs:378-397,120` / B1 / 高 / confirmed。正式 config フィールドへ昇格し空値・解析不能値は fail-closed。
+- [x] **deploy ロールバックが退避ファイル欠落時に新規 unit/allowlist/バイナリを残す** — 2026-11-19 対応済み: 各復元 if に else 分支（install 先の明示削除）を追加、退避コピー失敗時は `die` で新規配置前に中止。ロールバック後に drift 検査を情報表示で実行。残る判断点: 退避失敗時の部分適用と repo allowlist は削除せず警告（意図的） / B4 / 高 / confirmed。
+- [x] **HTTP 型ベースエラー分類の取りこぼし（入力エラーが 500 に後退）** — 2026-11-19 対応済み: sandbox.rs の bare `bail!` を全除去し入力由来エラーを `ClientError` へ型化（内部エラーは 500 維持）。HTTP 400/500 境界の回帰テスト追加 / B1 / 高 / confirmed。
+- [x] **egress allowlist が TOML 設定を黙って無視し空値で fail-open** — 2026-11-19 対応済み: `McpGatewayConfig.egress_allowlist` を正式フィールド化し TOML/env 両対応、空値・不正値は DenyAll（fail-closed）。unit に `JARVIS_MCP_GW_EGRESS_ALLOWLIST`（既定 example.com、ホスト側で上書き）を追加。起動ログに実効ホストを出力 / B1 / 高 / confirmed。
 - [ ] **P1-1 ベクトル検索スコアの保持** — `context/src/builder.rs:15,228` / B5 / 高。`ScoredPoint.score` を捨てている。後方互換の `score` 付与＋テスト。
 - [ ] **P1-2 PG/Qdrant 二段書き込みの補償** — `context/src/builder.rs:198` / B5 / 高。outbox＋起動時再埋め込み。
 - [ ] **P1-3 マイグレーションのバージョン管理移行** — `context/src/builder.rs:396` / B5 / 高。sqlx migrate + baseline 記録。
@@ -794,9 +794,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [ ] gRPC ハンドラが `ErrorKind` を無視し全エラーを `Status::internal` に変換 — `mcp-gw/src/grpc.rs:64-85` / B1 / 中。
 - [ ] tools/list の inputSchema 優先順位が実際のルーティングと逆転 — `mcp_server.rs:51-59`, `gateway.rs:223-234` / B1 / 中。
-- [ ] 承認 gauge / 一覧が期限切れ放棄エントリを prune せず過大報告 — `policy/approval.rs:155,249-256` / B2 / 中。
-- [ ] kill switch status API が無認証で自由文字列 reason / actor を開示 — `policy/http.rs:241,647-651`, `grpc.rs:50-60` / B2 / 中。
-- [ ] kill switch admin token 比較が非定数時間 — `kill_switch.rs:135,217` / B2 / 中。
+- [x] 承認 gauge / 一覧が期限切れ放棄エントリを prune せず過大報告 — 2026-11-19 対応済み: `list_pending()` の読取側で `now > deadline` をフィルタし副作用なしで実態を反映。回帰テスト追加 / `policy/approval.rs:155,249-256` / B2 / 中。
+- [x] kill switch status API が無認証で自由文字列 reason / actor を開示 — 2026-11-19 対応済み: HTTP は `x-jarvis-kill-switch-token` ヘッダ / gRPC は同名 metadata で dedicated admin token を検証。`KillSwitchStatus::redacted()` で reason/actor を固定語彙へ丸め、内部監査用 `status()` は生文字列維持 / B2 / 中。
+- [x] kill switch admin token 比較が非定数時間 — 2026-11-19 対応済み: `constant_time_eq` を kill_switch モジュールの `pub(crate)` 共通ヘルパへ集約し、HTTP 承認トークンゲートと kill switch の全比較が同じ実装を共有 / `kill_switch.rs:135,217` / B2 / 中。
 - [ ] 失効フィルタが Qdrant top-K 選択後に適用され recall が低下 — `context/builder.rs:228-259` / B3 / 中。
 - [ ] PII キー redact がキー衝突で別フィールドを上書き — `context/pii.rs:124-164` / B3 / 中。
 - [ ] check-deploy-drift がサービス停止時の E2E SKIP を OK と報告 — `check-deploy-drift.sh:169-182` / B4 / 中。
