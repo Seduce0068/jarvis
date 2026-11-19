@@ -43,8 +43,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (service) (rate(jarvis_http_requests_total[5m]))",
-          "legendFormat": "{{service}}",
+          "expr": "sum by (job) (rate(jarvis_http_requests_total[5m]))",
+          "legendFormat": "{{job}}",
           "refId": "A"
         }
       ],
@@ -83,8 +83,8 @@
       },
       "targets": [
         {
-          "expr": "sum by (service) (jarvis_http_requests_total)",
-          "legendFormat": "{{service}}",
+          "expr": "sum by (job) (jarvis_http_requests_total)",
+          "legendFormat": "{{job}}",
           "refId": "A"
         }
       ],
@@ -150,7 +150,7 @@
       },
       "targets": [
         {
-          "expr": "up{job=~\"jarvis/jarvis-.*\"}",
+          "expr": "up{job=~\"jarvis-.*\"}",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
@@ -217,7 +217,7 @@
       },
       "targets": [
         {
-          "expr": "up{job=~\"jarvis/(qdrant|opencode|code-server|postgresql|node-exporter)\"}",
+          "expr": "up{job=~\"(qdrant|opencode|code-server|postgresql|node-exporter)\"}",
           "legendFormat": "{{job}}",
           "refId": "A"
         }
