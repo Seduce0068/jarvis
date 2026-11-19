@@ -66,15 +66,15 @@ fn error_kind(err: &anyhow::Error, fallback: ErrorKind) -> &'static str {
 /// Reduce any Qdrant client failure to the fixed `error_kind` vocabulary.
 ///
 /// The raw error `E` is consumed by `_` and never formatted: its `Display` can
-/// embed endpoint URLs and response fragments. Only
-/// [`crate::error::QdrantErrorKind::Failed`] is accepted by the `ContextError`
-/// constructor, so the returned error chain cannot carry client-supplied text
-/// into stderr/journal/OTLP. Every Qdrant call site in this module uses this
-/// single mapper.
+/// embed endpoint URLs and response fragments. Only the private-token newtype
+/// `crate::error::QdrantErrorKind` (here: its `FAILED` constant) is accepted by
+/// the `ContextError::qdrant` constructor, so the returned error chain cannot
+/// carry client-supplied text into stderr/journal/OTLP. Every Qdrant call site
+/// in this module uses this single mapper.
 fn discard_qdrant_error<T, E>(
     result: std::result::Result<T, E>,
 ) -> std::result::Result<T, crate::error::ContextError> {
-    result.map_err(|_| crate::error::ContextError::qdrant(crate::error::QdrantErrorKind::Failed))
+    result.map_err(|_| crate::error::ContextError::qdrant(crate::error::QdrantErrorKind::FAILED))
 }
 
 /// Reassemble PostgreSQL rows in the relevance order supplied by Qdrant.
@@ -984,11 +984,15 @@ pub mod memory {
     /// value. Qdrant cannot resize an existing collection, so a mismatch fails
     /// fast with an actionable message instead of surfacing later as an opaque
     /// upsert/search error. An unreadable dimension (`actual = None`) only
-    /// warns and keeps starting, for compatibility with multi-vector
-    /// collections. Callers must pass `None` only for a *fully parsed*
-    /// multi-vector response ([`inspected_dimension_from_info`], I49-C); a
-    /// *failed inspection* or an unparsed response is a different case and is
-    /// fail-closed in [`check_inspected_dimension`] (I47-C).
+    /// warns and keeps starting in this pure helper, so older single-vector
+    /// servers stay compatible (`unknown_existing_dimension_only_warns`).
+    /// A *confirmed* multi-vector collection is no longer a valid reason to
+    /// warn-and-continue: startup rejects it earlier in
+    /// [`reject_multi_vector_collection`] (I51-C). Callers must pass `None`
+    /// only for a *fully parsed* multi-vector response
+    /// ([`inspected_dimension_from_info`], I49-C); a *failed inspection* or an
+    /// unparsed response is a different case and is fail-closed in
+    /// [`check_inspected_dimension`] (I47-C).
     pub(super) fn check_existing_dimension(
         name: &str,
         expected: usize,
@@ -1028,10 +1032,13 @@ pub mod memory {
     /// outbox retrying forever. Startup must therefore fail with an actionable
     /// error instead.
     ///
-    /// The two successful-response outcomes keep their historical behavior:
-    /// a readable mismatch is a hard error, while a confirmed multi-vector
-    /// collection (`Ok(None)`) only warns and continues, so
-    /// `unknown_existing_dimension_only_warns` stays valid.
+    /// The two successful-response outcomes keep their historical behavior
+    /// *in this pure helper*: a readable mismatch is a hard error, while
+    /// `Ok(None)` still warns and continues so
+    /// `unknown_existing_dimension_only_warns` stays valid. At the startup
+    /// level a confirmed multi-vector collection is rejected earlier by
+    /// [`reject_multi_vector_collection`] (I51-C); this helper only classifies
+    /// the inspection outcome.
     ///
     /// The raw Qdrant error is deliberately discarded at the call site: its
     /// `Display` can embed endpoints and response fragments. Only the fixed
@@ -1091,7 +1098,7 @@ pub mod memory {
     /// The plain `Option` returned by [`configured_vector_size`] cannot tell a
     /// *confirmed* multi-vector collection from a *shape change* in the
     /// response: both produce `None` through its chain of `?`. `Ok(None)` must
-    /// only mean the former (the historical warn-only case), so this helper
+    /// only mean the former (a confirmed multi-vector collection), so this helper
     /// first verifies that every field on the path is present and that a named
     /// vector map is non-empty. Anything else is "unparsed" and is mapped to
     /// `Err(())`, the same fail-closed branch used for a failed
@@ -1100,7 +1107,10 @@ pub mod memory {
     /// - `Ok(Some(size))` — a single dense vector or a single named vector was
     ///   parsed; the exact dimension is known.
     /// - `Ok(None)` — the response was fully parsed and holds 2+ named vectors
-    ///   (no single dimension to compare); warn and keep starting.
+    ///   (no single dimension to compare); its own warn-and-continue behavior
+    ///   in [`check_existing_dimension`] is retained for the pure helpers, but
+    ///   startup now fails closed via [`reject_multi_vector_collection`]
+    ///   (I51-C) because the upsert/search paths use an unnamed vector.
     /// - `Err(())` — a field was missing, the named-vector map was empty, or
     ///   the response could not otherwise be interpreted; fail startup.
     pub(super) fn inspected_dimension_from_info(
@@ -1121,6 +1131,67 @@ pub mod memory {
             // when the map holds 2+ named vectors (confirmed multi-vector).
             Config::ParamsMap(_) => Ok(configured_vector_size(info)),
         }
+    }
+
+    /// Reject a collection configured with two or more named vectors (I51-C).
+    ///
+    /// Adopted policy: **fail startup (fail-closed)**. Both write and read paths
+    /// in this file address a single *unnamed* vector: [`upsert_vector`] builds
+    /// its point with `PointStruct::new`, and [`search_vectors`] builds its query
+    /// with `SearchPointsBuilder`. Qdrant rejects unnamed-vector points/queries
+    /// against a named-vector collection, so treating a confirmed multi-vector
+    /// collection as a healthy startup would make *every* memory save/search
+    /// fail afterwards while the `pending_embeddings` outbox retries forever —
+    /// a mismatch that is far cheaper to detect here than at runtime.
+    ///
+    /// The alternative policy — read a vector name from configuration and pass
+    /// named vectors to upsert/search — would require a new config field and
+    /// changes outside this file, so it is deliberately **not** adopted for this
+    /// file-only change. Single-vector collections (unnamed or a single named
+    /// vector) are unaffected, and the warn-and-continue path for an unreadable
+    /// single-vector dimension ([`check_existing_dimension`],
+    /// `unknown_existing_dimension_only_warns`) is left untouched: this guard
+    /// fires only for 2+ named vectors.
+    ///
+    /// As everywhere in this module, no raw response or error text is ever
+    /// formatted. Only the fixed `error_kind` vocabulary, the collection name
+    /// and the parsed (non-sensitive) vector count reach the log and the error.
+    pub(super) fn reject_multi_vector_collection(
+        name: &str,
+        info: &qdrant_client::qdrant::CollectionInfo,
+    ) -> Result<()> {
+        use qdrant_client::qdrant::vectors_config::Config;
+        let Some(config) = info.config.as_ref() else {
+            return Ok(());
+        };
+        let Some(params) = config.params.as_ref() else {
+            return Ok(());
+        };
+        let Some(vectors) = params.vectors_config.as_ref() else {
+            return Ok(());
+        };
+        let Some(inner) = vectors.config.as_ref() else {
+            return Ok(());
+        };
+        let Config::ParamsMap(params_map) = inner else {
+            return Ok(());
+        };
+        let named = params_map.map.len();
+        if named < 2 {
+            return Ok(());
+        }
+        let kind = ErrorKind::Qdrant.as_str();
+        error!(
+            collection = %name,
+            named_vectors = named,
+            error_kind = kind,
+            "Qdrant collection uses multiple named vectors; failing closed"
+        );
+        anyhow::bail!(
+            "Qdrant collection '{name}' has {named} named vectors (error_kind={kind}); \
+             this builder addresses a single unnamed vector and cannot upsert into or \
+             search a multi-vector collection; refusing to start"
+        )
     }
 
     pub async fn ensure_collection(
@@ -1153,7 +1224,15 @@ pub mod memory {
         // response all map to `Err(())` and fail closed (I47-C / I49-C).
         let inspected = match client.collection_info(name).await {
             Ok(response) => match response.result.as_ref() {
-                Some(info) => inspected_dimension_from_info(info),
+                Some(info) => {
+                    // I51-C: a confirmed multi-vector collection (2+ named
+                    // vectors) cannot be served by the unnamed-vector upsert
+                    // and search paths below. Fail startup here instead of
+                    // warning and continuing into a healthy-looking but fully
+                    // broken runtime with an endlessly retrying outbox.
+                    reject_multi_vector_collection(name, info)?;
+                    inspected_dimension_from_info(info)
+                }
                 None => Err(()),
             },
             // Drop the raw error: its Display can embed endpoints and response
@@ -1845,6 +1924,112 @@ mod tests {
         assert_eq!(memory::inspected_dimension_from_info(&named), Ok(Some(384)));
     }
 
+    // --- I51-C: confirmed multi-vector collections must fail startup ---
+
+    /// Build a `collection_info` response with `count` equally sized named
+    /// vectors. Pure data, no live Qdrant involved.
+    fn named_vector_info(names: &[&str]) -> qdrant_client::qdrant::CollectionInfo {
+        use qdrant_client::qdrant::vectors_config::Config;
+        use qdrant_client::qdrant::{
+            CollectionConfig, CollectionInfo, CollectionParams, VectorParams, VectorParamsMap,
+            VectorsConfig,
+        };
+        CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::ParamsMap(VectorParamsMap {
+                            map: names
+                                .iter()
+                                .map(|name| {
+                                    (
+                                        (*name).to_string(),
+                                        VectorParams {
+                                            size: 384,
+                                            ..Default::default()
+                                        },
+                                    )
+                                })
+                                .collect(),
+                        })),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn multi_vector_collection_fails_closed_at_startup() {
+        let multi = named_vector_info(&["text", "image"]);
+
+        // Still "confirmed multi-vector" at the inspection layer (I49-C)...
+        assert_eq!(memory::inspected_dimension_from_info(&multi), Ok(None));
+
+        // ... but startup must now reject it instead of warn+continue.
+        let err = memory::reject_multi_vector_collection("jarvis_memories", &multi)
+            .expect_err("a 2+ named-vector collection cannot be served by unnamed vectors");
+        let message = format!("{err:#}");
+        assert!(message.contains("jarvis_memories"), "{message}");
+        assert!(message.contains("error_kind=qdrant"), "{message}");
+        assert!(
+            message.contains('2'),
+            "the parsed vector count is reported: {message}"
+        );
+        assert!(
+            !message.contains("http") && !message.contains("response"),
+            "no endpoint or response fragment may leak: {message}"
+        );
+    }
+
+    #[test]
+    fn single_vector_collections_are_not_rejected_by_multi_vector_guard() {
+        use qdrant_client::qdrant::vectors_config::Config;
+        use qdrant_client::qdrant::{
+            CollectionConfig, CollectionInfo, CollectionParams, VectorParams, VectorsConfig,
+        };
+
+        // A single unnamed vector (the normal collection created here).
+        let dense = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::Params(VectorParams {
+                            size: 384,
+                            ..Default::default()
+                        })),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(memory::reject_multi_vector_collection("jarvis_memories", &dense).is_ok());
+
+        // A single named vector is still one vector: not a multi-vector map.
+        let single_named = named_vector_info(&["dense"]);
+        assert!(memory::reject_multi_vector_collection("jarvis_memories", &single_named).is_ok());
+
+        // An unparsed response must not be swallowed by this guard; it stays a
+        // fail-closed error through `check_inspected_dimension` (I47-C/I49-C).
+        assert!(
+            memory::reject_multi_vector_collection(
+                "jarvis_memories",
+                &qdrant_client::qdrant::CollectionInfo::default()
+            )
+            .is_ok()
+        );
+
+        // The single-vector unreadable-dimension warn path is unchanged.
+        assert!(
+            memory::check_existing_dimension("jarvis_memories", 384, None).is_ok(),
+            "single-vector unknown dimension keeps warn-and-continue"
+        );
+    }
+
     #[tokio::test]
     async fn unreachable_qdrant_fails_client_creation_fail_closed() {
         // No live Qdrant is needed: nothing listens on this loopback port, so
@@ -2526,8 +2711,12 @@ mod log_safety_tests {
 
     #[test]
     fn error_kind_maps_context_error_variants_without_reading_their_text() {
-        let err: anyhow::Error = crate::error::ContextError::Qdrant(PROBE.to_owned()).into();
+        // The Qdrant variant can only be built from the private-token newtype,
+        // so even the error's own rendering cannot carry the hostile probe.
+        let err: anyhow::Error =
+            crate::error::ContextError::qdrant(crate::error::QdrantErrorKind::FAILED).into();
         assert_eq!(error_kind(&err, ErrorKind::Persistence), "qdrant");
+        assert!(!format!("{err:#}").contains(PROBE));
 
         let err: anyhow::Error = crate::error::ContextError::Pii(PROBE.to_owned()).into();
         assert_eq!(error_kind(&err, ErrorKind::Persistence), "pii");
@@ -2537,11 +2726,14 @@ mod log_safety_tests {
         assert_eq!(error_kind(&err, ErrorKind::Embedding), "embedding");
     }
 
-    /// I49-B: all five Qdrant call sites (build, list, create, upsert, search)
-    /// share this mapper. Feed it a raw error whose `Display` carries the
-    /// credential probe and a response fragment: neither may survive into the
-    /// returned error, and the fixed `error_kind` token must. No live Qdrant is
-    /// needed, so this is a deterministic regression for all five paths.
+    /// I49-B / I51-D: all five Qdrant call sites (build, list, create, upsert,
+    /// search) share this mapper. Feed it a raw error whose `Display` carries
+    /// the credential probe and a response fragment: neither may survive into
+    /// the returned error, and the fixed `error_kind` token must. Non-leakage
+    /// is now enforced at the type boundary (`QdrantErrorKind`'s private token
+    /// and the crate-private constructor), so the mapper's `_` discard is a
+    /// single funnel rather than a convention. No live Qdrant is needed for
+    /// this deterministic regression.
     #[test]
     fn qdrant_error_mapper_discards_raw_client_text() {
         let raw: std::result::Result<(), String> =
@@ -2565,8 +2757,73 @@ mod log_safety_tests {
         assert_eq!(error_kind(&err, ErrorKind::Persistence), "qdrant");
     }
 
-    /// I49-B: pin every Qdrant call site to the fixed-kind mapper and forbid
-    /// reintroducing `e.to_string()` at any of them.
+    /// I51-C: the multi-vector startup rejection must use the fixed vocabulary
+    /// and never echo a raw response fragment or a named-vector identifier.
+    #[test]
+    fn multi_vector_rejection_never_logs_raw_text() {
+        use qdrant_client::qdrant::vectors_config::Config;
+        use qdrant_client::qdrant::{
+            CollectionConfig, CollectionInfo, CollectionParams, VectorParams, VectorParamsMap,
+            VectorsConfig,
+        };
+        use std::collections::HashMap;
+
+        // Put the leak probe in the vector names: the rejection must report
+        // only the count, never the identifiers.
+        let multi = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::ParamsMap(VectorParamsMap {
+                            map: HashMap::from([
+                                (
+                                    format!("dense-{PROBE}"),
+                                    VectorParams {
+                                        size: 384,
+                                        ..Default::default()
+                                    },
+                                ),
+                                (
+                                    "sparse".to_string(),
+                                    VectorParams {
+                                        size: 384,
+                                        ..Default::default()
+                                    },
+                                ),
+                            ]),
+                        })),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let logs = capture_warns(async {
+            let _ = memory::reject_multi_vector_collection("jarvis_memories", &multi);
+        });
+        assert!(!logs.contains(PROBE), "raw text leaked: {logs}");
+        assert!(
+            !logs.contains("response"),
+            "response fragment leaked: {logs}"
+        );
+        assert!(
+            !logs.contains("dense"),
+            "named-vector identifiers must not be logged: {logs}"
+        );
+    }
+
+    /// I49-B / I51-D: keep every Qdrant call site pinned to the shared mapper
+    /// and forbid reintroducing a raw `Display` read at any of them.
+    ///
+    /// This source scan is no longer the confidentiality boundary: since I51-D
+    /// a raw client string cannot be stored in `ContextError::Qdrant` at all,
+    /// because `QdrantErrorKind` has a private token and only the crate-private
+    /// `ContextError::qdrant` constructor can build the variant. The scan is a
+    /// belt-and-suspenders regression guard on the *call sites* only: it keeps
+    /// them on the single mapper so a future edit cannot leak client text into
+    /// a different error type (e.g. `anyhow`) that is not type-guarded here.
     #[test]
     fn all_qdrant_call_sites_use_fixed_kind_mapper() {
         const SOURCE: &str = include_str!("builder.rs");
