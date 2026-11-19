@@ -6,7 +6,6 @@ use cedar_policy::{
     Authorizer, Context, Decision, Entities, Policy, PolicyId, PolicySet, Request as CedarRequest,
     Schema, ValidationMode, Validator,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock as StdRwLock;
@@ -66,30 +65,13 @@ fn schema_path_for(policy_path: &Path) -> Option<PathBuf> {
     schema_path.is_file().then_some(schema_path)
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApprovalRequest {
-    pub id: uuid::Uuid,
-    pub principal: String,
-    pub action: String,
-    pub resource: String,
-    pub context: Value,
-    pub requested_at: chrono::DateTime<chrono::Utc>,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "decision")]
-pub enum ApprovalDecision {
-    Approved {
-        approved_by: String,
-        approved_at: chrono::DateTime<chrono::Utc>,
-    },
-    Denied {
-        reason: String,
-    },
-    Pending,
-    Expired,
-}
+// P1-7 (案A): `jarvis-core` is the single source of truth for the approval
+// domain. Re-exporting the canonical types keeps every existing
+// `crate::policy::ApprovalRequest` / `ApprovalDecision` path source-compatible
+// while removing the duplicated local definitions. The wire contract is
+// unchanged: `ApprovalDecision` is still an internally tagged enum and its
+// timestamps are still RFC 3339 strings.
+pub use jarvis_core::approval::{ApprovalDecision, ApprovalRequest};
 
 pub struct CedarEngine {
     authorizer: Authorizer,
@@ -553,6 +535,36 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
+
+    /// Golden test: the re-exported core type must keep producing the exact
+    /// tagged decision JSON that the HTTP handlers and UI consumers rely on.
+    #[test]
+    fn approval_decision_keeps_its_tagged_json_contract() {
+        let approved = ApprovalDecision::Approved {
+            approved_by: "tester".into(),
+            approved_at: chrono::DateTime::from_timestamp(0, 0).expect("valid timestamp"),
+        };
+        assert_eq!(
+            serde_json::to_string(&approved).expect("serializes"),
+            r#"{"decision":"Approved","approved_by":"tester","approved_at":"1970-01-01T00:00:00Z"}"#
+        );
+
+        let denied = ApprovalDecision::Denied {
+            reason: "not now".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&denied).expect("serializes"),
+            r#"{"decision":"Denied","reason":"not now"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalDecision::Pending).expect("serializes"),
+            r#"{"decision":"Pending"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalDecision::Expired).expect("serializes"),
+            r#"{"decision":"Expired"}"#
+        );
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

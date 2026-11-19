@@ -1,5 +1,10 @@
 //! JARVIS Core - Shared types and traits
 
+// Canonical approval domain types (P1-7, 案A). The legacy `ApprovalRequest` /
+// `ApprovalDecision` below are intentionally kept at the crate root for source
+// compatibility; `approval` is the new single source of truth.
+pub mod approval;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
