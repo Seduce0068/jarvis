@@ -80,7 +80,15 @@ enum ListenerOutcome {
     /// preserved unchanged so its one-error aggregation stays intact.
     Finished(Result<()>),
     /// A termination signal arrived first. `select!` dropped the listener
-    /// futures, which stops every accept loop before a clean exit.
+    /// futures, which stops both accept loops before the shutdown path below.
+    ///
+    /// I54-D — adopted policy: IMMEDIATE STOP, not a graceful drain. The
+    /// HTTP handler tasks spawned by the listeners are not owned by these
+    /// futures and are not collected in a `JoinSet`, so this branch neither
+    /// awaits nor explicitly cancels them. In-flight work is NOT guaranteed
+    /// to complete: it can be cut short by runtime teardown or by the unit's
+    /// `TimeoutStopSec` SIGKILL. The shutdown log is worded accordingly and
+    /// must not claim that in-flight requests finished.
     Shutdown,
 }
 
@@ -154,7 +162,15 @@ fn complete_shutdown(outcome: ListenerOutcome, tracer: &TracerGuard) -> Result<(
     match outcome {
         ListenerOutcome::Finished(result) => result,
         ListenerOutcome::Shutdown => {
-            info!("listeners stopped, exiting cleanly");
+            // I54-D: fixed vocabulary for the immediate-stop policy. Never log
+            // "exiting cleanly" here: spawned handlers are not drained and may
+            // still be running (or be SIGKILLed at `TimeoutStopSec`) after this
+            // line, so claiming a clean completion of in-flight work is false.
+            info!(
+                shutdown_policy = "immediate-stop",
+                in_flight_requests_drained = false,
+                "listeners stopped, exiting without draining in-flight requests"
+            );
             Ok(())
         }
     }
@@ -260,7 +276,8 @@ async fn main() -> Result<()> {
     // Race both listeners against a termination signal. `biased;` keeps the
     // listener branch first so a real failure is reported instead of being
     // masked by a coincident signal; when the signal wins, the listener futures
-    // are dropped and both accept loops stop before a clean exit.
+    // are dropped and both accept loops stop before the explicit shutdown
+    // below. No in-flight handler drain is performed (I54-D immediate stop).
     let outcome = race_listeners_with_shutdown(
         async {
             tokio::try_join!(builder.serve_grpc(grpc_addr), builder.serve_http(http_addr),)
