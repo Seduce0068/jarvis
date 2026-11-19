@@ -38,42 +38,93 @@ if (( ${#MIGRATION_SQL_FILES[@]} == 0 )); then
   echo "no *.sql migration files found in ${MIGRATIONS_SRC}" >&2
   exit 1
 fi
-BUILD_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || echo unknown)"
+# I37-A: resolve the commit that produced this build with fail-closed
+# semantics. The former `git ... || echo unknown` fallback made the
+# reconciliation guard pass trivially when git failed (both sides "unknown"),
+# so a binary/migration pair could be deployed with no real commit evidence.
+# An unusable commit is now fatal and is detected before any payload is staged
+# or installed.
+if ! BUILD_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null)"; then
+  echo "git rev-parse HEAD failed at ${REPO_DIR}; refusing to deploy" >&2
+  exit 1
+fi
+if [[ -z "${BUILD_COMMIT}" || "${BUILD_COMMIT}" == "unknown" ]]; then
+  echo "git rev-parse HEAD returned an unusable commit ('${BUILD_COMMIT}'); refusing to deploy" >&2
+  exit 1
+fi
 
 cd "${REPO_DIR}/rust"
 cargo build --release --workspace
 
-for bin in jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context; do
-  install -m 755 "target/release/${bin}" "/opt/jarvis/bin/${bin}"
-done
+# I37-A: stage every payload locally, record both markers, then run ALL
+# fallible checks before writing anything under /opt. The old code installed
+# the four binaries and the migration SQL first and only then ran the guard,
+# so a mismatch exited 1 while leaving new binaries paired with old migration
+# sources -- exactly the "half-updated pair" its comment claimed to prevent.
+STAGE_DIR="$(mktemp -d)"
+trap 'rm -rf "${STAGE_DIR}"' EXIT
+STAGE_BIN="${STAGE_DIR}/bin"
+STAGE_MIG="${STAGE_DIR}/migrations"
+mkdir -p "${STAGE_BIN}" "${STAGE_MIG}"
 
-# I35-A / I36-A: record the commit that produced the binaries, then distribute
-# the migration sources from this SAME checkout. Previously a missing marker
-# only produced a warning (fail-open), so a fresh install could end up with
-# jarvis-migrations.service --source pointing at a directory with no SQL.
-# Now the source directory, its *.sql files and the marker are installed here;
-# every missing input is fatal, so a fresh install always has usable SQL.
-bin_commit_file="/opt/jarvis/bin/.jarvis-build-commit"
-printf '%s\n' "${BUILD_COMMIT}" | sudo tee "${bin_commit_file}" >/dev/null
+BINARIES=(jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context)
+for bin in "${BINARIES[@]}"; do
+  if [[ ! -s "target/release/${bin}" ]]; then
+    echo "built binary missing or empty: target/release/${bin}" >&2
+    exit 1
+  fi
+  install -m 755 "target/release/${bin}" "${STAGE_BIN}/${bin}"
+done
+install -m 0644 "${MIGRATION_SQL_FILES[@]}" "${STAGE_MIG}/"
+
+# Record the build commit immediately after the build, before any binary
+# install. Both markers are derived from the single HEAD resolved above; that
+# single-checkout provenance, plus the fail-closed rev-parse, is what makes
+# the binary/migration pair a one-commit pair.
+bin_commit_file="${STAGE_BIN}/.jarvis-build-commit"
+mig_commit_file="${STAGE_MIG}/.jarvis-source-commit"
+printf '%s\n' "${BUILD_COMMIT}" > "${bin_commit_file}"
+printf '%s\n' "${BUILD_COMMIT}" > "${mig_commit_file}"
+
+# Reconciliation boundary: verify the staged payloads and both markers. A
+# mismatch, a missing/empty marker or an unusable commit exits here with zero
+# binaries and zero migration files installed under /opt.
+for marker in "${bin_commit_file}" "${mig_commit_file}"; do
+  if [[ ! -s "${marker}" ]]; then
+    echo "build marker missing or empty at ${marker}" >&2
+    exit 1
+  fi
+  staged_commit="$(<"${marker}")"
+  if [[ "${staged_commit}" != "${BUILD_COMMIT}" ]]; then
+    echo "staged commit ${staged_commit} in ${marker} != ${BUILD_COMMIT}; refusing to deploy a mixed pair" >&2
+    exit 1
+  fi
+done
+shopt -s nullglob
+STAGED_SQL_FILES=("${STAGE_MIG}"/*.sql)
+shopt -u nullglob
+if (( ${#STAGED_SQL_FILES[@]} != ${#MIGRATION_SQL_FILES[@]} )); then
+  echo "staged SQL count ${#STAGED_SQL_FILES[@]} != source SQL count ${#MIGRATION_SQL_FILES[@]} in ${MIGRATIONS_SRC}" >&2
+  exit 1
+fi
 
 MIGRATIONS_DST="/opt/jarvis/rust/migrations"
-sudo install -d -o root -g root -m 0755 "${MIGRATIONS_DST}"
-sudo install -o root -g root -m 0644 "${MIGRATION_SQL_FILES[@]}" "${MIGRATIONS_DST}/"
-mig_commit_file="${MIGRATIONS_DST}/.jarvis-source-commit"
-printf '%s\n' "${BUILD_COMMIT}" | sudo tee "${mig_commit_file}" >/dev/null
 
-# Fail-fast verification (replaces the former warn-only branch): the marker
-# must exist, be non-empty and match the binary commit before units are
-# installed, so a half-updated binary/source pair is never left behind.
-if [[ ! -s "${mig_commit_file}" ]]; then
-  echo "migration source marker missing or empty at ${mig_commit_file}" >&2
-  exit 1
-fi
-mig_commit="$(<"${mig_commit_file}")"
-if [[ "${mig_commit}" != "${BUILD_COMMIT}" ]]; then
-  echo "migration source commit ${mig_commit} != binary commit ${BUILD_COMMIT}; deploy both from the same commit" >&2
-  exit 1
-fi
+# All checks passed; deploy from the validated staging set. Payload files go
+# in first and the commit markers go in LAST, so the markers act as the seal
+# of a completed deploy: if an install aborts mid-way, set -e stops here, the
+# "start with:" instructions below are never printed and the previous markers
+# no longer describe the mixed on-disk payload. The next successful run
+# re-installs the whole set and is idempotent. (A true atomic swap of the bin
+# and migrations trees is not attempted here because their install paths are
+# referenced directly by the systemd units.)
+for bin in "${BINARIES[@]}"; do
+  install -m 755 "${STAGE_BIN}/${bin}" "/opt/jarvis/bin/${bin}"
+done
+sudo install -d -o root -g root -m 0755 "${MIGRATIONS_DST}"
+sudo install -o root -g root -m 0644 "${STAGED_SQL_FILES[@]}" "${MIGRATIONS_DST}/"
+sudo install -o root -g root -m 0644 "${bin_commit_file}" /opt/jarvis/bin/.jarvis-build-commit
+sudo install -o root -g root -m 0644 "${mig_commit_file}" "${MIGRATIONS_DST}/.jarvis-source-commit"
 
 sudo mkdir -p /etc/jarvis
 # Copy the *contents* of infra/config/policy/ directly into /etc/jarvis/policy/.
