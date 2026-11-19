@@ -4,11 +4,13 @@ use crate::normalizer::Normalizer;
 use axum::{
     Json, Router,
     extract::State,
+    http::StatusCode,
     routing::{get, post},
 };
 use jarvis_core::{EventSource, UnifiedEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
+use tokio::sync::mpsc;
 use tracing::instrument;
 
 /// Handle for the process-wide Prometheus recorder.
@@ -77,6 +79,39 @@ fn emit_response(event: &UnifiedEvent) -> EmitEventResponse {
     }
 }
 
+/// Non-blocking submission for `/v1/events`.
+///
+/// `Normalizer::emit` intentionally logs and drops on a full bounded channel;
+/// an API caller would see `success: true` and never learn that its event was
+/// lost. Submitting through the cloned sender from `event_sender()` lets this
+/// handler surface rejection as a retryable 503 instead, while leaving the
+/// webhook/bridge `emit` path unchanged. Only event metadata is logged — never
+/// the payload.
+fn submit_event(
+    sender: &mpsc::Sender<UnifiedEvent>,
+    event: UnifiedEvent,
+) -> Result<(), StatusCode> {
+    match sender.try_send(event) {
+        Ok(()) => Ok(()),
+        Err(mpsc::error::TrySendError::Full(event)) => {
+            tracing::warn!(
+                event_type = %event.event_type,
+                source = %event.source,
+                "/v1/events: event channel full; rejecting with 503"
+            );
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        Err(mpsc::error::TrySendError::Closed(event)) => {
+            tracing::warn!(
+                event_type = %event.event_type,
+                source = %event.source,
+                "/v1/events: event channel closed; rejecting with 503"
+            );
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
+
 pub fn router(normalizer: Arc<Normalizer>) -> Router {
     Router::new()
         .route("/health", get(health))
@@ -112,6 +147,7 @@ fn status_label(status: axum::http::StatusCode) -> &'static str {
         404 => "404",
         409 => "409",
         500 => "500",
+        503 => "503",
         _ => "other",
     }
 }
@@ -127,16 +163,16 @@ async fn metrics() -> String {
     }
 }
 
-#[instrument(skip(normalizer))]
+#[instrument(skip(normalizer, req))]
 async fn emit_event(
     State(normalizer): State<Arc<Normalizer>>,
     Json(req): Json<EmitEventRequest>,
-) -> Json<EmitEventResponse> {
+) -> Result<Json<EmitEventResponse>, StatusCode> {
     let event = emit_event_from_request(req, uuid::Uuid::new_v4(), chrono::Utc::now(), || {
         uuid::Uuid::new_v4().to_string()
     });
-    normalizer.emit(event.clone());
-    Json(emit_response(&event))
+    submit_event(&normalizer.event_sender(), event.clone())?;
+    Ok(Json(emit_response(&event)))
 }
 
 pub async fn serve(normalizer: Arc<Normalizer>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
@@ -219,6 +255,41 @@ mod tests {
         );
         assert_eq!(event.source, EventSource::Android);
         assert_eq!(event.correlation_id, "corr-supplied");
+    }
+
+    fn test_event(seq: u128, event_type: &str) -> UnifiedEvent {
+        UnifiedEvent {
+            id: uuid::Uuid::from_u128(seq),
+            source: EventSource::Manual,
+            event_type: event_type.into(),
+            payload: json!({"seq": seq}),
+            timestamp: chrono::DateTime::from_timestamp(1_700_000_000, 0).expect("valid timestamp"),
+            correlation_id: format!("corr-{seq}"),
+        }
+    }
+
+    #[test]
+    fn tc_e2_submit_event_rejects_when_channel_full() {
+        // Capacity 1 + one queued event => the next try_send is genuinely Full
+        // (the receiver is kept alive until after the assertion).
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(test_event(1, "probe"))
+            .expect("first event accepted");
+
+        let result = submit_event(&tx, test_event(2, "overflow"));
+        assert_eq!(result, Err(StatusCode::SERVICE_UNAVAILABLE));
+        drop(rx);
+    }
+
+    #[test]
+    fn tc_e2_submit_event_accepts_when_channel_has_capacity() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let event = test_event(3, "accepted");
+        assert!(submit_event(&tx, event.clone()).is_ok());
+
+        let queued = rx.try_recv().expect("event accepted");
+        assert_eq!(queued.id, event.id);
+        assert_eq!(queued.event_type, "accepted");
     }
 
     #[tokio::test]
