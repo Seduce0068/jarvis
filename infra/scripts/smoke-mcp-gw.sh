@@ -96,9 +96,13 @@ else
 fi
 
 # MCPエンドポイント: initialize → tools/list
+# protocolVersion はドリフト検査 infra/scripts/check-deploy-drift.sh の
+# runtime_check 内 initialize と同じ値へ同期する（R4-DP3）。
+# 生成コード/設定に単一の参照元が未定義のため定数で同期しているため、
+# どちらかを更新するときは必ず両方を同じ値に揃えること。
 curl -q -s -D "$tmp/mcp.h" -o "$tmp/mcp.b" -X POST "http://127.0.0.1:$port/mcp" \
   -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
 check mcp-initialize 200 "$(head -n1 "$tmp/mcp.h" | grep -q '200' && echo 200 || echo fail)"
 sid=$(grep -i '^mcp-session-id:' "$tmp/mcp.h" | tr -d '\r' | cut -d' ' -f2)
 if [ -n "$sid" ]; then echo "  PASS: mcp-session-id issued"; ok=$((ok+1)); else echo "  FAIL: no session id"; fail=$((fail+1)); fi
