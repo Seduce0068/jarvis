@@ -275,7 +275,7 @@ printf '== I24-E: restore-local fixture regression ==\n'
 printf '   workspace: %s\n' "$tmp"
 
 # --- 0. フィクスチャ自身が verify-backup.sh を通ること ---------------------
-printf '-- fixture / verify-backup.sh --\n'
+printf '%s\n' '-- fixture / verify-backup.sh --'
 check_exit "verify-backup.sh accepts good fixture" 0 bash "$verifier" "$set_dir"
 for name in "${all_payloads[@]}"; do
   if manifest_matches "$set_dir" "$name"; then
@@ -286,7 +286,7 @@ for name in "${all_payloads[@]}"; do
 done
 
 # --- 1. dry-run（既定。オプション無し）------------------------------------
-printf '-- restore-local.sh dry-run (default, zero writes) --\n'
+printf '%s\n' '-- restore-local.sh dry-run (default, zero writes) --'
 dry_code=0
 dry_out="$(run_driver --backup-set "$set_dir" 2>&1)" || dry_code=$?
 if [ "$dry_code" -eq 0 ]; then
@@ -310,7 +310,7 @@ assert_no_log "dry-run: no service stop/start" "$tmp/logs/systemctl.log"
 check_exit "dry-run: backup set still verifies" 0 bash "$verifier" "$set_dir"
 
 # --- 2. fail-closed 検証ゲート --------------------------------------------
-printf '-- fail-closed verification gates --\n'
+printf '%s\n' '-- fail-closed verification gates --'
 corrupt="$tmp/corrupt"
 cp -R -- "$set_dir" "$corrupt"
 printf 'tampered config\n' > "$corrupt/config-mcp_allowlist.toml"
@@ -358,7 +358,7 @@ fi
 
 # --- 3. --apply（明示指定時のみ。隔離先は一時ディレクトリ）----------------
 if [ "$apply" -eq 1 ]; then
-  printf '-- restore-local.sh --apply (isolated temp target) --\n'
+  printf '%s\n' '-- restore-local.sh --apply (isolated temp target) --'
   rm -f -- "$tmp/logs"/*.log
   apply_code=0
   apply_out="$(run_driver --backup-set "$set_dir" --apply 2>&1)" || apply_code=$?
@@ -427,7 +427,7 @@ if [ "$apply" -eq 1 ]; then
     fi
   done
 else
-  printf '-- --apply not requested: isolated apply path skipped (default contract) --\n'
+  printf '%s\n' '-- --apply not requested: isolated apply path skipped (default contract) --'
 fi
 
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"

@@ -69,5 +69,8 @@ jobs:
         make check-evidence
         make secret-scan
         make safety-test
+        # I24-E: restore-local.sh の合成フィクスチャ回帰（既定 dry-run・本番非接触）。
+        # safety-test 経由でも走るが CI ゲートとして明示的に列挙する。
+        make test-restore-local
         bash ci/scripts/test-review-run.sh
         make ui-test

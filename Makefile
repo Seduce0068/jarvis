@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-termux doctor test lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args timer-status check-shell check-toml check-evidence
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args timer-status check-shell check-toml check-evidence init-config
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -51,6 +51,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@bash ci/scripts/test-review-run.sh
 	@bash ci/scripts/test-verify-backup.sh
 	@bash ci/scripts/test-backup-args.sh
+	@bash infra/scripts/test-restore-local.sh
 	@echo "ci-local: all gates passed"
 
 secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は出力しない）
@@ -60,6 +61,7 @@ safety-test: ## レガシー fail-closed とバックアップ検証ロジック
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-verify-backup.sh
 	@bash ci/scripts/test-backup-args.sh
+	@bash infra/scripts/test-restore-local.sh
 
 timer-status: ## バックアップ timer の状態を表示（読み取り専用）
 	@echo "== backup timer status =="
@@ -84,6 +86,9 @@ test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
 test-backup-args: ## backup-local.sh の --retain-days 引数検証を検証（dry-run・失敗時はコードのみ）
 	@bash ci/scripts/test-backup-args.sh
 
+test-restore-local: ## restore-local.sh の合成フィクスチャ回帰テスト（既定 dry-run・本番非接触・承認不要）
+	@bash infra/scripts/test-restore-local.sh
+
 install-backup-timer: ## ローカルバックアップ timer を導入（既定は dry-run）
 	@bash infra/scripts/install-backup-timer.sh
 
@@ -99,7 +104,7 @@ backup-preflight: ## バックアップ前提の読み取り専用チェック�
 deploy-mcp-gw: ## jarvis-mcp-gw をローカルへ安全デプロイ（乾燥実行が既定）
 	@bash infra/scripts/deploy-mcp-gw-safe.sh
 
-ui-build: ## GPUI 承認コンソールをビルド（独立クレート、CI 対象外）
+ui-build: ## GPUI 承認コンソールをビルド（独立クレート、UI 検証は make ui-test・CI 対象）
 	@cd ui && cargo build --release
 
 ui-run: ## GPUI 承認コンソールを起動

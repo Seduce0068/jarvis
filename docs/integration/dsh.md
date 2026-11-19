@@ -152,12 +152,21 @@ DSH 側の設定箇所（2026-11-15 確認）:
   [ui/README.md](../../ui/README.md)）。
   上記の `curl` による承認手順も、ローカルホストからの代替手段として
   引き続き有効。
-- **通知（ntfy 橋渡し）**: 未実装・判断待ち（P3-9）。
-- **監査永続化（PostgreSQL 等への保存）**: 未実装・判断待ち。
-  A-M16 / MCP-1 で要件分離待ち（[remaining-tasks.md](remaining-tasks.md)）。
+- **通知（ntfy 橋渡し）**: **実装見送り（2026-11-18 判断・P3-9）**。
+  公開 ntfy トピックへ機微な `context` を送信するリスクが理由。非公開
+  トピック／`id`・`resource` のみの通知契約が確定次第、再検討
+  （[CFG-2](unknown-tasks-survey.md)）。
+- **監査永続化（PostgreSQL）**: **実装済み（2026-11-19、
+  `PgApprovalPersistence`）**。`pg_url` 設定時に opt-in で注入され、
+  CAS と audit INSERT を同一トランザクションでコミット、コミット後のみ
+  watch へ通知。起動時リコンサイル・再接続・専用
+  `ApprovalError::Persistence` も対応済み。残るスライスは opt-in
+  ロールアウトのみ（[todo.md](../../todo.md)、
+  [persistence.rs](../../rust/jarvis-policy/src/persistence.rs)）。
 
-つまり「承認UI・通知・監査永続化は今後の拡張」のうち、**承認 UI のみが
-実装済み**で、通知と監査永続化は未実装のままである。
+つまり「承認UI・通知・監査永続化は今後の拡張」のうち、**承認 UI と監査
+永続化（`PgApprovalPersistence`）は実装済み**、通知（ntfy 橋渡し）は
+2026-11-18 に実装見送りと判断済みである。
 
 ## 関連
 
