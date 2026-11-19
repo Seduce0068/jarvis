@@ -9,6 +9,8 @@
 //! The [`ApprovalStore`](crate::approval::ApprovalStore) publishes the decision
 //! to its `watch` channel only after [`ApprovalPersistence::record_decision`]
 //! returns `Ok`, which for this backend means after `Transaction::commit`.
+//! At startup the same transaction is reused by `mark_expired` to settle holds
+//! that expired while the service was down.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
@@ -146,7 +148,12 @@ impl ApprovalPersistence for PgApprovalPersistence {
     /// Persist the pending request with a single auto-committed INSERT.
     ///
     /// This runs before the store starts waiting (and therefore before any
-    /// `decide` CAS), so the row always exists when the decision arrives.
+    /// `decide` CAS), so on the success path the row exists when the decision
+    /// arrives. On a failed INSERT, [`db_failure`] logs the error and returns
+    /// [`ApprovalError::QueueFull`]; the store then rolls back the in-memory
+    /// registration and answers HTTP 503 (retry). This fail-closed choice
+    /// (R4-PERSIST) prevents an orphan hold whose later `decide` would hit a
+    /// zero-row CAS and surface as `AlreadyDecided` (409) with no audit row.
     async fn record_request(
         &self,
         request: &ApprovalRequest,
@@ -185,6 +192,11 @@ impl ApprovalPersistence for PgApprovalPersistence {
         self.commit_decision(id, decision, decided_at).await
     }
 
+    /// Return every undecided row, including holds whose `expires_at` has
+    /// passed. `ApprovalStore::reconcile_pending` keeps those with
+    /// `expires_at > now` as "no waiter" entries and settles the rest through
+    /// `mark_expired`; narrowing this query to live rows would leave expired
+    /// holds undecided and unaudited after a restart.
     async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
         let rows = self
             .client

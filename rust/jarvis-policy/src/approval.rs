@@ -5,6 +5,9 @@
 //! Decisions are held in memory; an opt-in PostgreSQL backend
 //! ([`crate::persistence::PgApprovalPersistence`]) can durably CAS the decision
 //! and write the audit row in one transaction when `pg_url` is configured.
+//! On startup, [`ApprovalStore::reconcile_pending`] loads undecided durable
+//! rows: live holds are re-registered without a waiter and expired holds are
+//! settled with an audit record, so stale approvals never linger in the UI.
 //! User notification (HA/phone) will be layered on top later.
 //!
 //! Approval is intentionally HTTP-only: the gRPC surface is limited to
@@ -54,10 +57,14 @@ pub const QUEUE_FULL_REASON: &str = "approval queue full";
 /// commits a CAS plus an audit row in one transaction).
 ///
 /// Implementations must be `Send + Sync` because [`ApprovalStore`] is cloned
-/// across Tokio tasks. [`ApprovalStore::try_request`] treats `record_request`
-/// errors as best-effort so the memory-only default is unchanged. For
-/// `record_decision`, however, an error now withholds the in-memory decision:
-/// the watch channel must not announce a decision that failed to commit.
+/// across Tokio tasks. `record_request` and `mark_expired` errors are logged by
+/// [`ApprovalStore`]; a `record_request` failure additionally rolls back the
+/// in-memory registration and is surfaced as [`ApprovalError::QueueFull`] so an
+/// orphan hold can never later produce a zero-row CAS. With
+/// [`NoopPersistence`] none of these paths can fail, so the memory-only default
+/// is unchanged. For `record_decision`, an error withholds the in-memory
+/// decision: the watch channel must not announce a decision that failed to
+/// commit.
 #[async_trait::async_trait]
 pub trait ApprovalPersistence: Send + Sync {
     /// Persist a newly registered pending request with its authoritative
@@ -81,13 +88,21 @@ pub trait ApprovalPersistence: Send + Sync {
         decided_at: DateTime<Utc>,
     ) -> Result<(), ApprovalError>;
 
-    /// Load requests that are still awaiting a decision.
+    /// Load durable rows that are still awaiting a decision.
     ///
-    /// Reserved for slice 2: `list_pending` keeps using in-memory state so
-    /// existing behavior is unchanged.
+    /// Both live holds (`expires_at > now`) and already-expired holds are
+    /// returned: [`ApprovalStore::reconcile_pending`] re-registers the former in
+    /// memory and settles the latter through [`Self::mark_expired`]. Filtering
+    /// expired rows out here would make them invisible to that settlement path.
+    /// `list_pending` still reads in-memory state, so its return type and
+    /// behavior remain unchanged.
     async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError>;
 
-    /// Mark a pending request as expired at `expired_at` (timeout path).
+    /// Mark a pending request as expired at `expired_at`.
+    ///
+    /// Used by both the runtime timeout path and startup reconciliation. The
+    /// transactional backend commits the `Expired` decision and its audit row
+    /// in one transaction.
     async fn mark_expired(&self, id: Uuid, expired_at: DateTime<Utc>) -> Result<(), ApprovalError>;
 }
 
@@ -288,15 +303,37 @@ impl ApprovalStore {
             );
         }
 
-        // Best-effort seam: `NoopPersistence` is a no-op, so the default store
-        // stays memory-only and its observable behavior is unchanged. For the
-        // Pg backend this auto-commits the pending INSERT here, before the wait
-        // below begins and therefore before any `decide` CAS can run.
-        let _ = self
+        // Fail-closed on a durable INSERT failure. `NoopPersistence` always
+        // returns Ok, so the memory-only default keeps its exact behavior.
+        //
+        // Choice (documented per R4-PERSIST): on `record_request` error we do
+        // BOTH undo the in-memory registration AND return
+        // `ApprovalError::QueueFull` (HTTP 503, retry). Leaving a pending entry
+        // with no durable row would make a later operator `decide` hit a
+        // zero-row CAS and be reported as `AlreadyDecided` (HTTP 409) with an
+        // empty audit trail. Rolling back plus a retryable error closes that
+        // gap: no orphan hold survives and the requester is asked to retry.
+        // This runs before the wait, so no `decide` CAS can race a committed
+        // row that does not exist.
+        if let Err(error) = self
             .inner
             .persistence
             .record_request(&request, deadline)
-            .await;
+            .await
+        {
+            tracing::warn!(
+                error = %error,
+                request_id = %id,
+                "failed to persist approval request; dropping in-memory entry (fail-closed)"
+            );
+            // Undo the registration so no orphan hold survives. A concurrent
+            // `decide` cannot have published a decision here: for the Pg backend
+            // the CAS needs the very row whose INSERT just failed, so `decide`
+            // would itself have failed with `AlreadyDecided` without publishing.
+            let mut entries = self.inner.entries.write().await;
+            entries.remove(&id);
+            return Err(ApprovalError::QueueFull);
+        }
 
         let remaining = (deadline - Utc::now()).to_std().unwrap_or(Duration::ZERO);
         let wait = async {
@@ -339,7 +376,23 @@ impl ApprovalStore {
                     }
                 }
                 if marked {
-                    let _ = self.inner.persistence.mark_expired(id, expired_at).await;
+                    // `NoopPersistence` never errors, so the default path is
+                    // unchanged. For the Pg backend a failed CAS/audit INSERT
+                    // leaves the durable row undecided and the audit row
+                    // missing; surface that for operators instead of silently
+                    // discarding it (R4-PERSIST). The `ApprovalError` carries no
+                    // URL/token, so it is safe to log. Keep the in-memory
+                    // `Expired` marking: the waiter already resolves as
+                    // Expired, and the still-undecided durable row is retried by
+                    // `reconcile_pending` on the next startup, so no decision
+                    // or audit record is permanently lost.
+                    if let Err(error) = self.inner.persistence.mark_expired(id, expired_at).await {
+                        tracing::warn!(
+                            error = %error,
+                            request_id = %id,
+                            "failed to persist approval expiration; audit row may be missing"
+                        );
+                    }
                 }
                 ApprovalDecision::Expired
             }
@@ -416,6 +469,65 @@ impl ApprovalStore {
             .filter(|entry| entry.decision.is_none() && now <= entry.deadline)
             .map(|entry| entry.request.clone())
             .collect()
+    }
+
+    /// Restore durable, still-live pending holds at startup (I31-A).
+    ///
+    /// [`ApprovalPersistence::load_pending`] returns every row whose
+    /// `decided_at` is NULL, including holds whose deadline has already passed
+    /// (they must be reachable by the settlement path below). A row with
+    /// `expires_at > now` is re-inserted as an [`Entry`] with a watch sender but
+    /// **no receiver**: an operator can still decide it, but there is no
+    /// original waiter to wake. The durable `expires_at` is reused verbatim as
+    /// the deadline so recovery never extends a hold.
+    ///
+    /// A row whose deadline has passed is settled through
+    /// [`ApprovalPersistence::mark_expired`] instead of being re-registered.
+    /// For the PostgreSQL backend that commits an `Expired` decision plus its
+    /// audit row atomically, so a stale hold cannot resurface in the UI (or the
+    /// `/metrics` pending gauge) after a restart.
+    ///
+    /// With [`NoopPersistence`] this is a true no-op: `load_pending` yields an
+    /// empty vector, so nothing is registered and nothing is audited. No
+    /// existing API's return type or behavior changes.
+    pub async fn reconcile_pending(&self) -> Result<(), ApprovalError> {
+        let pending = self.inner.persistence.load_pending().await?;
+        let now = Utc::now();
+        let mut expired = Vec::new();
+        {
+            let mut entries = self.inner.entries.write().await;
+            for request in pending {
+                let deadline = request.expires_at;
+                if deadline > now {
+                    // A request that raced startup must not overwrite an
+                    // existing waiter's channel.
+                    if entries.contains_key(&request.id) {
+                        continue;
+                    }
+                    // The receiver is intentionally dropped: recovered holds
+                    // have no original caller to notify. `decide` ignores the
+                    // resulting `send` error while still recording the decision
+                    // in memory and durably.
+                    let (tx, _rx) = watch::channel(None);
+                    entries.insert(
+                        request.id,
+                        Entry {
+                            request,
+                            decision: None,
+                            decided_at: None,
+                            deadline,
+                            tx,
+                        },
+                    );
+                } else {
+                    expired.push(request.id);
+                }
+            }
+        }
+        for id in expired {
+            self.inner.persistence.mark_expired(id, now).await?;
+        }
+        Ok(())
     }
 
     /// Drop entries that can no longer produce a real decision.
@@ -1226,5 +1338,275 @@ mod tests {
 
         let decision = waiter.await.expect("waiter task");
         assert!(matches!(decision, ApprovalDecision::Approved { .. }));
+    }
+
+    // ---- I31-A startup reconciliation tests (mock, no real DB) -------------
+
+    /// Mock durable backend that replays a fixed set of undecided rows and
+    /// mirrors the Pg backend's audit write inside `mark_expired` (one audit row
+    /// per settled hold). No database is contacted.
+    #[derive(Debug, Default)]
+    struct ReconcilePersistence {
+        rows: tokio::sync::Mutex<Vec<ApprovalRequest>>,
+        expired: tokio::sync::Mutex<Vec<Uuid>>,
+        audit: tokio::sync::Mutex<Vec<Uuid>>,
+        decisions: tokio::sync::Mutex<Vec<Uuid>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for ReconcilePersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.decisions.lock().await.push(id);
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(self.rows.lock().await.clone())
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.expired.lock().await.push(id);
+            // `PgApprovalPersistence::mark_expired` commits an Expired decision
+            // plus one audit row; the mock mirrors that observable effect.
+            self.audit.lock().await.push(id);
+            Ok(())
+        }
+    }
+
+    /// (a) A live durable row is re-registered as a pending entry with no
+    /// waiter, so `list_pending()` (and `PolicyEngine::pending_approvals()` and
+    /// the `/metrics` gauge) exposes it to the operator UI.
+    #[tokio::test]
+    async fn reconcile_reregisters_live_row_without_waiter() {
+        let mock = Arc::new(ReconcilePersistence::default());
+        let live = make_request();
+        mock.rows.lock().await.push(live.clone());
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            mock.clone(),
+        );
+        store.reconcile_pending().await.expect("reconcile");
+
+        let pending = store.list_pending().await;
+        assert_eq!(pending.len(), 1, "the recovered hold is visible");
+        assert_eq!(pending[0].id, live.id);
+        assert!(matches!(
+            store.status(live.id).await,
+            Ok(ApprovalDecision::Pending)
+        ));
+        assert!(mock.expired.lock().await.is_empty());
+        assert!(mock.audit.lock().await.is_empty());
+    }
+
+    /// A recovered entry has no receiver; deciding it must still record the
+    /// decision durably and expose it through `status()`.
+    #[tokio::test]
+    async fn recovered_entry_can_be_decided_without_a_receiver() {
+        let mock = Arc::new(ReconcilePersistence::default());
+        let live = make_request();
+        mock.rows.lock().await.push(live.clone());
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            mock.clone(),
+        );
+        store.reconcile_pending().await.expect("reconcile");
+        store
+            .decide(live.id, approved())
+            .await
+            .expect("decide recovered hold");
+
+        assert!(matches!(
+            store.status(live.id).await,
+            Ok(ApprovalDecision::Approved { .. })
+        ));
+        assert!(store.list_pending().await.is_empty());
+        assert_eq!(*mock.decisions.lock().await, vec![live.id]);
+    }
+
+    /// (b) An already-expired durable row is settled via `mark_expired`, which
+    /// writes one audit row, and is never re-registered in memory.
+    #[tokio::test]
+    async fn reconcile_expires_stale_row_and_writes_one_audit_row() {
+        let mock = Arc::new(ReconcilePersistence::default());
+        let mut stale = make_request();
+        stale.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        mock.rows.lock().await.push(stale.clone());
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            mock.clone(),
+        );
+        store.reconcile_pending().await.expect("reconcile");
+
+        assert_eq!(*mock.expired.lock().await, vec![stale.id]);
+        assert_eq!(
+            mock.audit.lock().await.len(),
+            1,
+            "mark_expired commits the Expired decision and its audit row"
+        );
+        assert!(
+            store.list_pending().await.is_empty(),
+            "a stale hold must not reappear in the UI after restart"
+        );
+        assert!(
+            store.status(stale.id).await.is_err(),
+            "no in-memory entry is created for an expired hold"
+        );
+    }
+
+    /// (c) Without `pg_url` the store uses `NoopPersistence`; reconciliation
+    /// must register nothing and audit nothing.
+    #[tokio::test]
+    async fn reconcile_is_a_noop_without_persistence() {
+        let store = ApprovalStore::new(Duration::from_secs(5));
+        store.reconcile_pending().await.expect("noop reconcile");
+        assert!(store.list_pending().await.is_empty());
+
+        let explicit_noop = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            Arc::new(NoopPersistence),
+        );
+        explicit_noop
+            .reconcile_pending()
+            .await
+            .expect("explicit noop reconcile");
+        assert!(explicit_noop.list_pending().await.is_empty());
+    }
+
+    // ---- R4-PERSIST durable-write failure injection (mock, no real DB) -----
+
+    /// Failure-injecting persistence double. No database is contacted: the
+    /// injected `ApprovalError::QueueFull` is exactly what the Pg backend's
+    /// `db_failure` returns on a failed INSERT / audit write.
+    #[derive(Debug, Default)]
+    struct FailingPersistence {
+        fail_record_request: AtomicBool,
+        fail_mark_expired: AtomicBool,
+        record_calls: AtomicUsize,
+        expired: tokio::sync::Mutex<Vec<Uuid>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for FailingPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.record_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_record_request.load(Ordering::SeqCst) {
+                Err(ApprovalError::QueueFull)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.expired.lock().await.push(id);
+            if self.fail_mark_expired.load(Ordering::SeqCst) {
+                Err(ApprovalError::QueueFull)
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A failed durable INSERT must not leave an in-memory pending hold that a
+    /// later operator `decide` cannot settle (zero-row CAS -> `AlreadyDecided`
+    /// / HTTP 409 with an empty audit trail). The store must roll back the
+    /// entry and answer with the retryable `QueueFull` (HTTP 503).
+    #[tokio::test]
+    async fn record_request_failure_fails_closed() {
+        let persistence = Arc::new(FailingPersistence {
+            fail_record_request: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let request = make_request();
+        let id = request.id;
+
+        let result = store.try_request(request).await;
+        assert!(
+            matches!(result, Err(ApprovalError::QueueFull)),
+            "INSERT failure must surface as QueueFull (503, retry): {result:?}"
+        );
+        assert_eq!(persistence.record_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(store.status(id).await, Err(ApprovalError::NotFound(_))),
+            "no orphan in-memory entry may survive a failed durable INSERT"
+        );
+        assert!(
+            store.list_pending().await.is_empty(),
+            "the rolled-back hold must not be visible to operators"
+        );
+    }
+
+    /// An injected `mark_expired` failure must be non-fatal for the timing-out
+    /// waiter, must still reach the persistence seam (where the warning is
+    /// emitted), and must leave the durable row undecided so startup
+    /// reconciliation can retry the audit write.
+    #[tokio::test]
+    async fn mark_expired_failure_is_non_fatal() {
+        let persistence = Arc::new(FailingPersistence {
+            fail_mark_expired: AtomicBool::new(true),
+            ..Default::default()
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(50),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let request = make_request();
+        let id = request.id;
+
+        assert!(
+            matches!(store.request(request).await, ApprovalDecision::Expired),
+            "the waiter still times out normally when the audit write fails"
+        );
+        assert_eq!(*persistence.expired.lock().await, vec![id]);
     }
 }

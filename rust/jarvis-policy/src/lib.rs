@@ -103,6 +103,16 @@ impl PolicyEngine {
             ),
         };
 
+        // I31-A: restore durable pending holds before the engine is published.
+        // Every undecided row is loaded; live ones become "no waiter" entries
+        // visible to `pending_approvals()` / `/metrics`, while already-expired
+        // ones are settled through `mark_expired` (Expired + audit) so they do
+        // not survive a restart as stale UI holds. Without `pg_url` the store
+        // uses `NoopPersistence`, making this a genuine no-op.
+        approvals.reconcile_pending().await.map_err(|error| {
+            anyhow::anyhow!("failed to reconcile persisted approvals at startup: {error}")
+        })?;
+
         Ok(Self {
             config,
             cedar_engine,
