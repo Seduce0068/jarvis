@@ -123,19 +123,30 @@ impl Sandbox {
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .user_agent("jarvis-mcp-gw/web-fetch")
+            // A proxy would re-resolve the host itself and bypass the IP
+            // pinning below, so `web.fetch` always connects directly.
+            .no_proxy()
             .build()
             .context("build http client")?;
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms);
         let mut redirects = 0usize;
         loop {
-            ensure_public_host(&url).await?;
+            let dest = ensure_public_host(&url).await?;
             // Applied on every hop, so a redirect cannot escape the allowlist.
             ensure_host_allowed(&url, &allowlist)?;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 bail!("web.fetch timed out");
             }
-            let resp = tokio::time::timeout(remaining, client.get(url.clone()).send())
+            // Pin the TCP connection to the addresses validated above. Without
+            // this, reqwest resolves the DNS name a second time and a rebinding
+            // attacker can swap in a private IP after the check (TOCTOU).
+            // `resolve_to_addrs` keeps the hostname in the URI, so the Host
+            // header and HTTPS SNI / certificate verification stay bound to the
+            // real host; rewriting the URL host to an IP would break TLS.
+            // IP literals need no pinning (reqwest never re-resolves them).
+            let hop_client = fetch_client_for_dest(&dest, &client)?;
+            let resp = tokio::time::timeout(remaining, hop_client.get(url.clone()).send())
                 .await
                 .context("web.fetch request timed out")?
                 .with_context(|| format!("GET {url}"))?;
@@ -496,26 +507,47 @@ fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-async fn ensure_public_host(url: &reqwest::Url) -> Result<()> {
+/// Validated destination of one `web.fetch` hop. Resolver results are carried
+/// forward so the real connection can be pinned to exactly the addresses that
+/// passed the public-IP check, closing the DNS-rebinding / TOCTOU window
+/// between validation and reqwest's own name resolution.
+#[derive(Clone, Debug)]
+enum ValidatedDest {
+    /// The URL host is an IP literal: reqwest connects to it directly and
+    /// never re-resolves it, so the checked literal is already the destination.
+    Literal,
+    /// A DNS name. `host` is the authority reqwest will resolve (kept in the
+    /// URI for a correct Host header and HTTPS SNI / certificate validation);
+    /// `addrs` are the validated public addresses the connection is limited to.
+    Resolved {
+        host: String,
+        addrs: Vec<std::net::SocketAddr>,
+    },
+}
+
+async fn ensure_public_host(url: &reqwest::Url) -> Result<ValidatedDest> {
     let host = url
         .host_str()
         .ok_or_else(|| client_error("url has no host"))?;
     let port = url.port_or_known_default().unwrap_or(80);
-    // Literal IPs (including bracketed IPv6) are checked directly without DNS.
+    // Literal IPs (including bracketed IPv6) are checked directly without DNS
+    // and need no pinning: reqwest never re-resolves an IP literal.
     let bare = host.trim_start_matches('[').trim_end_matches(']');
     if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
         if !is_public_ip(&ip) {
             let message = format!("refusing to fetch non-public address {ip} for host {host}");
             return Err(client_error(message));
         }
-        return Ok(());
+        return Ok(ValidatedDest::Literal);
     }
-    let addrs = tokio::net::lookup_host((bare, port))
+    let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((bare, port))
         .await
-        .with_context(|| format!("dns lookup failed: {host}"))?;
-    let mut any = false;
-    for addr in addrs {
-        any = true;
+        .with_context(|| format!("dns lookup failed: {host}"))?
+        .collect();
+    if addrs.is_empty() {
+        bail!("dns lookup returned no addresses for {host}");
+    }
+    for addr in &addrs {
         if !is_public_ip(&addr.ip()) {
             let message = format!(
                 "refusing to fetch non-public address {} for host {host}",
@@ -524,10 +556,30 @@ async fn ensure_public_host(url: &reqwest::Url) -> Result<()> {
             return Err(client_error(message));
         }
     }
-    if !any {
-        bail!("dns lookup returned no addresses for {host}");
+    Ok(ValidatedDest::Resolved {
+        host: host.to_string(),
+        addrs,
+    })
+}
+
+/// Build the per-hop HTTP client. DNS-named hosts are pinned to the exact
+/// addresses returned by `ensure_public_host` through reqwest's DNS override,
+/// so no second resolution can redirect the connection to a different IP. The
+/// hostname stays in the URI (only its resolution is overridden), which keeps
+/// the Host header and HTTPS SNI / certificate validation bound to the real
+/// host. Proxies are disabled for the same reason a proxy would re-resolve the
+/// host and bypass the pin. IP literals reuse the base client unchanged.
+fn fetch_client_for_dest(dest: &ValidatedDest, base: &reqwest::Client) -> Result<reqwest::Client> {
+    match dest {
+        ValidatedDest::Literal => Ok(base.clone()),
+        ValidatedDest::Resolved { host, addrs } => reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("jarvis-mcp-gw/web-fetch")
+            .no_proxy()
+            .resolve_to_addrs(host, addrs)
+            .build()
+            .context("build pinned http client"),
     }
-    Ok(())
 }
 
 fn is_textual_content_type(content_type: &str) -> bool {
@@ -604,6 +656,43 @@ mod tests {
         assert!(validate_http_url("ftp://example.com").is_err());
         assert!(validate_http_url("https://user:pass@example.com").is_err());
         assert!(validate_http_url("not a url").is_err());
+    }
+
+    #[tokio::test]
+    async fn validated_dest_for_ip_literals_skips_dns() {
+        // IP literals are validated locally (no DNS) and classified as
+        // `Literal`, so no pinning / second resolution is involved.
+        for public in ["https://8.8.8.8/", "https://[2001:4860:4860::8888]/"] {
+            let url = validate_http_url(public).unwrap();
+            assert!(
+                matches!(
+                    ensure_public_host(&url).await.unwrap(),
+                    ValidatedDest::Literal
+                ),
+                "{public} should be a literal destination"
+            );
+        }
+        for private in ["https://127.0.0.1/", "https://[::1]/", "https://10.0.0.1/"] {
+            let url = validate_http_url(private).unwrap();
+            let err = ensure_public_host(&url).await.unwrap_err();
+            assert!(err.to_string().contains("non-public"), "{err}");
+        }
+    }
+
+    #[test]
+    fn pinned_client_builds_for_resolved_dest() {
+        let base = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resolved = ValidatedDest::Resolved {
+            host: "example.com".to_string(),
+            addrs: vec!["93.184.216.34:443".parse().unwrap()],
+        };
+        // Building the pinned client must succeed without a network call; the
+        // DNS override leaves the URI hostname intact for SNI/cert checks.
+        assert!(fetch_client_for_dest(&resolved, &base).is_ok());
+        assert!(fetch_client_for_dest(&ValidatedDest::Literal, &base).is_ok());
     }
 
     #[test]
