@@ -117,6 +117,7 @@ impl Sandbox {
             .and_then(Value::as_str)
             .ok_or_else(|| client_error("missing 'url' argument"))?;
         let mut url = validate_http_url(raw)?;
+        let allowlist = EgressAllowlist::from_env();
         let max_bytes = web_max_bytes(args);
         let timeout_ms = tool_config.timeout_ms.clamp(1_000, 15_000);
         let client = reqwest::Client::builder()
@@ -128,6 +129,8 @@ impl Sandbox {
         let mut redirects = 0usize;
         loop {
             ensure_public_host(&url).await?;
+            // Applied on every hop, so a redirect cannot escape the allowlist.
+            ensure_host_allowed(&url, &allowlist)?;
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 bail!("web.fetch timed out");
@@ -346,6 +349,80 @@ fn web_max_bytes(args: &Value) -> usize {
     usize::try_from(clamped).unwrap_or(WEB_FETCH_HARD_MAX_BYTES)
 }
 
+/// Destination host allowlist for `web.fetch`, sourced from
+/// `JARVIS_MCP_GW_EGRESS_ALLOWLIST` (comma-separated hostnames, e.g.
+/// `example.com,*.trusted.org`). Unset or blank keeps the historical
+/// unrestricted behaviour, so existing deployments are unaffected.
+#[derive(Clone, Debug)]
+enum EgressAllowlist {
+    Unrestricted,
+    Hosts(Vec<String>),
+}
+
+impl EgressAllowlist {
+    fn from_env() -> Self {
+        match std::env::var("JARVIS_MCP_GW_EGRESS_ALLOWLIST") {
+            Ok(raw) => Self::parse(&raw),
+            Err(_) => Self::Unrestricted,
+        }
+    }
+
+    fn parse(raw: &str) -> Self {
+        let hosts: Vec<String> = raw
+            .split(',')
+            .map(str::trim)
+            .filter(|entry| !entry.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect();
+        if hosts.is_empty() {
+            Self::Unrestricted
+        } else {
+            Self::Hosts(hosts)
+        }
+    }
+
+    fn allows(&self, host: &str) -> bool {
+        match self {
+            Self::Unrestricted => true,
+            Self::Hosts(entries) => {
+                let host = host.trim().to_ascii_lowercase();
+                entries.iter().any(|entry| match entry.strip_prefix("*.") {
+                    // `*.example.com` covers `a.example.com` and deeper
+                    // subdomains, but not the apex or `notexample.com`.
+                    Some(base) => host
+                        .strip_suffix(base)
+                        .is_some_and(|prefix| prefix.ends_with('.')),
+                    None => host == *entry,
+                })
+            }
+        }
+    }
+}
+
+/// Enforce the egress allowlist on the URL host, in addition to the existing
+/// public-IP/SSRF checks. With no allowlist configured this is a no-op.
+fn ensure_host_allowed(url: &reqwest::Url, allowlist: &EgressAllowlist) -> Result<()> {
+    if matches!(allowlist, EgressAllowlist::Unrestricted) {
+        return Ok(());
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| client_error("url has no host"))?;
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    // DNS names only: an IP literal cannot be named in the allowlist, so
+    // reject it outright rather than trying to match it as a hostname.
+    if bare.parse::<std::net::IpAddr>().is_ok() {
+        let message =
+            format!("host '{host}' is an IP literal and is not allowed by the egress allowlist");
+        return Err(client_error(message));
+    }
+    if !allowlist.allows(bare) {
+        let message = format!("host '{host}' is not in the egress allowlist");
+        return Err(client_error(message));
+    }
+    Ok(())
+}
+
 fn validate_http_url(raw: &str) -> Result<reqwest::Url> {
     let url = client_context(reqwest::Url::parse(raw), format!("invalid url: {raw}"))?;
     match url.scheme() {
@@ -515,6 +592,65 @@ mod tests {
         assert_eq!(next.as_str(), "https://example.com/c");
         let abs = resolve_redirect(&base, "https://other.example/d").unwrap();
         assert_eq!(abs.as_str(), "https://other.example/d");
+    }
+
+    #[test]
+    fn egress_allowlist_parse_and_match() {
+        // Unset/blank (also whitespace or empty entries) means unrestricted.
+        for raw in ["", "   ", ","] {
+            assert!(EgressAllowlist::parse(raw).allows("anything.example"));
+        }
+
+        let list = EgressAllowlist::parse(" example.com , *.trusted.org ");
+        // Exact match, case-insensitive on both sides, without suffix confusion.
+        assert!(list.allows("example.com"));
+        assert!(list.allows("EXAMPLE.COM"));
+        assert!(!list.allows("notexample.com"));
+        // `*.` covers subdomains (including nested) but not the apex.
+        assert!(list.allows("api.trusted.org"));
+        assert!(list.allows("a.b.trusted.org"));
+        assert!(!list.allows("trusted.org"));
+        assert!(!list.allows("nottrusted.org"));
+        // Anything outside the list is refused.
+        assert!(!list.allows("attacker.example"));
+    }
+
+    #[test]
+    fn egress_allowlist_allows_and_rejects_urls() {
+        let list = EgressAllowlist::parse("example.com,*.trusted.org");
+        let sub = validate_http_url("https://api.trusted.org/resource").unwrap();
+        assert!(ensure_host_allowed(&sub, &list).is_ok());
+        let exact = validate_http_url("https://example.com/").unwrap();
+        assert!(ensure_host_allowed(&exact, &list).is_ok());
+
+        let denied = validate_http_url("https://attacker.example/").unwrap();
+        let err = ensure_host_allowed(&denied, &list).unwrap_err();
+        assert!(err.to_string().contains("egress allowlist"), "{err}");
+
+        // IP literals are refused even when the address itself is public.
+        let v4 = validate_http_url("https://8.8.8.8/").unwrap();
+        let err = ensure_host_allowed(&v4, &list).unwrap_err();
+        assert!(err.to_string().contains("IP literal"), "{err}");
+        let v6 = validate_http_url("https://[2001:4860:4860::8888]/").unwrap();
+        assert!(ensure_host_allowed(&v6, &list).is_err());
+
+        // With no allowlist the same destinations stay unrestricted.
+        let unrestricted = EgressAllowlist::parse("");
+        assert!(ensure_host_allowed(&denied, &unrestricted).is_ok());
+        assert!(ensure_host_allowed(&v4, &unrestricted).is_ok());
+    }
+
+    #[test]
+    fn redirect_target_is_checked_against_allowlist() {
+        let list = EgressAllowlist::parse("example.com");
+        let base = validate_http_url("https://example.com/a").unwrap();
+        // A relative redirect stays on the allowed host.
+        let inside = resolve_redirect(&base, "../b").unwrap();
+        assert!(ensure_host_allowed(&inside, &list).is_ok());
+        // An absolute redirect to another host is caught by the same check
+        // that the fetch loop applies on every hop.
+        let outside = resolve_redirect(&base, "https://attacker.example/x").unwrap();
+        assert!(ensure_host_allowed(&outside, &list).is_err());
     }
 
     /// 実ネットワーク検証（CIでは実行しない）: cargo test -p jarvis-mcp-gw --lib -- --ignored
