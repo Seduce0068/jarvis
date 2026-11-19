@@ -6,7 +6,9 @@
 //!    `web.fetch`) implemented in the gateway itself (ADR-0002/0003).
 //! 2. **Registered MCP servers** - upstream MCP servers spawned as child
 //!    processes and driven by the official `rmcp` client over stdio. Tools
-//!    are discovered at registration time via `tools/list`.
+//!    are discovered at registration time via `tools/list`; both their names
+//!    and their declared input schemas are retained so the MCP `tools/list`
+//!    surface can advertise the upstream contract instead of a generic one.
 //!
 //! There is no agent-runtime CLI fallback (ADR-0002): tools with neither a
 //! native handler nor an upstream server return a clear error. [`Gateway`]
@@ -145,6 +147,11 @@ struct RegisteredServer {
     client: RunningService<RoleClient, ()>,
     /// Tool names advertised by the server at registration time.
     tools: HashSet<String>,
+    /// Input schemas declared by the upstream server in its `tools/list`
+    /// response, keyed by tool name. Kept alongside `tools` so the MCP
+    /// `tools/list` surface can advertise the upstream contract verbatim
+    /// instead of a permissive `additionalProperties: true` catch-all.
+    input_schemas: HashMap<String, serde_json::Map<String, Value>>,
     /// Liveness probe for the backing process (if the server was spawned as
     /// a child). Consulted before every tool call.
     liveness: ProcessLiveness,
@@ -225,6 +232,23 @@ impl Gateway {
 
         // Fall back to the native Rust handler (runtime-agnostic, ADR-0002).
         self.sandbox.execute(tool, args, &tool_config).await
+    }
+
+    /// Input schema declared by an upstream MCP server for `tool`, captured
+    /// from that server's `tools/list` response at registration time.
+    ///
+    /// Only tools advertised by a registered server have an entry here.
+    /// Native tools are served by the hardcoded branch on the MCP surface
+    /// and therefore return `None` from this lookup.
+    pub(crate) async fn upstream_input_schema(
+        &self,
+        tool: &str,
+    ) -> Option<serde_json::Map<String, Value>> {
+        self.servers
+            .read()
+            .await
+            .values()
+            .find_map(|server| server.input_schemas.get(tool).cloned())
     }
 
     /// Spawn an upstream MCP server and register it with the gateway.
@@ -323,7 +347,16 @@ impl Gateway {
             .await
             .with_context(|| format!("Failed to list tools from MCP server '{name}'"))?;
 
+        // Retain both views of the discovery result: names drive routing,
+        // duplicate detection and liveness-based cleanup, while the declared
+        // input schemas are what clients need to validate calls against the
+        // upstream contract. Discarding the schemas here was the root cause
+        // of upstream tools being advertised with a generic catch-all schema.
         let tool_names: HashSet<String> = tools.iter().map(|tool| tool.name.to_string()).collect();
+        let input_schemas: HashMap<String, serde_json::Map<String, Value>> = tools
+            .iter()
+            .map(|tool| (tool.name.to_string(), tool.input_schema.as_ref().clone()))
+            .collect();
         let tool_count = tool_names.len();
 
         // Hold the write lock across both the conflict check and the insert
@@ -361,6 +394,7 @@ impl Gateway {
             Arc::new(RegisteredServer {
                 client,
                 tools: tool_names,
+                input_schemas,
                 liveness,
             }),
         );
@@ -438,6 +472,67 @@ async fn call_registered_tool(
         anyhow::bail!("MCP tool '{tool}' returned an error ({summary})");
     }
     Ok(value)
+}
+
+/// Minimal MCP server advertising one tool with a caller-supplied input
+/// schema. The shared `crate::testing::run_mock_mcp_server` hardcodes
+/// `{ "type": "object" }`, so tests that need to verify schema propagation
+/// use this fixture instead.
+#[cfg(test)]
+pub(crate) async fn run_mock_mcp_server_with_schema(
+    stream: tokio::io::DuplexStream,
+    tool_name: &str,
+    schema: serde_json::Value,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read_half).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let message: Value = serde_json::from_str(&line).expect("valid JSON-RPC line");
+        let method = message["method"].as_str().unwrap_or_default();
+        let id = message.get("id").cloned();
+        let response = match method {
+            "initialize" => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "serverInfo": { "name": "schema-mock", "version": "0.1.0" }
+                }
+            })),
+            "notifications/initialized" => None,
+            "tools/list" => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "tools": [{
+                        "name": tool_name,
+                        "description": "Declared-schema tool",
+                        "inputSchema": schema.clone()
+                    }]
+                }
+            })),
+            "tools/call" => Some(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "content": [{ "type": "text", "text": "pong" }],
+                    "isError": false
+                }
+            })),
+            _ => None,
+        };
+        if let Some(response) = response {
+            let mut line = serde_json::to_string(&response).expect("serializable response");
+            line.push('\n');
+            write_half
+                .write_all(line.as_bytes())
+                .await
+                .expect("write response");
+            write_half.flush().await.expect("flush response");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -518,6 +613,46 @@ requires_approval = false
             .expect("tool call succeeds");
         assert_eq!(result["content"][0]["text"], "pong");
         assert_eq!(result["isError"], false);
+    }
+
+    /// Regression: registration must retain the upstream-declared input
+    /// schema alongside the tool name instead of discarding it. This is the
+    /// data the MCP `tools/list` surface reuses when advertising upstream
+    /// tools.
+    #[tokio::test]
+    async fn registration_retains_upstream_input_schemas() {
+        let gateway = test_gateway("schema-retention").await;
+
+        let declared = json!({
+            "type": "object",
+            "properties": { "query": { "type": "string", "description": "search text" } },
+            "required": ["query"],
+            "additionalProperties": false
+        });
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server_with_schema(
+            server_side,
+            "search.query",
+            declared.clone(),
+        ));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("registration succeeds");
+
+        let retained = gateway
+            .upstream_input_schema("search.query")
+            .await
+            .expect("upstream schema retained");
+        assert_eq!(Value::Object(retained), declared);
+
+        assert!(
+            gateway
+                .upstream_input_schema("not.advertised")
+                .await
+                .is_none(),
+            "an unadvertised tool has no retained schema"
+        );
     }
 
     #[tokio::test]
