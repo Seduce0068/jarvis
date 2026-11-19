@@ -23,7 +23,18 @@ for bin in jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context; do
 done
 
 sudo mkdir -p /etc/jarvis
-sudo cp -r "${REPO_DIR}/infra/config/policy" /etc/jarvis/
+# Copy the *contents* of infra/config/policy/ directly into /etc/jarvis/policy/.
+# A plain `cp -r <src> /etc/jarvis/` nests <src>/policy inside an existing
+# /etc/jarvis/policy, leaving the stale config effective (todo.md 2026-11-19).
+POLICY_SRC="${REPO_DIR}/infra/config/policy"
+POLICY_DST="/etc/jarvis/policy"
+if [[ -e "${POLICY_DST}" || -L "${POLICY_DST}" ]]; then
+  policy_backup="${POLICY_DST}.bak-$(date +%Y%m%d%H%M%S)"
+  sudo mv "${POLICY_DST}" "${policy_backup}"
+  echo "backed up existing policy dir to ${policy_backup}"
+fi
+sudo mkdir -p "${POLICY_DST}"
+sudo cp -r "${POLICY_SRC}/." "${POLICY_DST}/"
 sudo cp "${REPO_DIR}/infra/config/pii_patterns.toml" /etc/jarvis/
 sudo cp "${REPO_DIR}/infra/config/mcp_allowlist.toml" /etc/jarvis/
 
