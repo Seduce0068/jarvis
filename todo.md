@@ -431,7 +431,7 @@ generated:
 - [x] **jarvis-context の memory/context API に認証・認可が無い**（2026-11-19 対応済み: `admin_token`（`JARVIS_CONTEXT_ADMIN_TOKEN`）を追加し全 `/v1/*` と `/metrics` を `x-jarvis-context-token` でゲート。**R4 判断で `/metrics` は Prometheus スクレイプ互換のため認証除外に変更**。未設定時は従来どおり。context 35 tests pass） — 根拠
   `rust/jarvis-context/src/http.rs:55-64` / R3-AU2 / 重大度 high / confirmed。
   `/v1/context/build`, `/v1/memory`, `/v1/memory/search` が認証レイヤーなし。
-- [ ] **jarvis-event の emit API が無認証で主体が `jarvis` にハードコード** — 根拠
+- [x] **jarvis-event の emit API が無認証で主体が `jarvis` にハードコード**（2026-11-19 対応済み: `admin_token`（`JARVIS_EVENT_ADMIN_TOKEN`）を追加し HTTP は `x-jarvis-event-token` / gRPC は metadata で検証。定数時間比較、health/metrics は除外、Debug redaction。未設定時は loopback 互換。event 40 tests pass。固定 principal "jarvis" は runtime 非依存契約として維持） — 根拠
   `rust/jarvis-event/src/http.rs:130-139` / R3-AU2 / 重大度 high / confirmed。
 - [x] **`build-selfhost.sh` が OpenCode ポートを 49374→49375 に書き換え unit と乖離**（2026-11-19 対応済み: 当該 sed 置換1行を削除。スクリプトに 49375 残存なし、`opencode.service` と AGENTS.md の port 表が 49374 で統一、`bash -n` OK） — 根拠
   `infra/scripts/build-selfhost.sh:43` / R2-FG3 / 重大度 high / confirmed。
@@ -453,7 +453,7 @@ generated:
 
 - [x] `sandbox_type` / `sandbox_config` が `let _ =` で読み捨てられ no-op — 2026-11-19 対応済み: legacy パース互換を維持したまま doc に ADR-0002 と未使用を明記し、明示設定時に load で warn を発行。既定 none/{} ではノイズなし / `src/sandbox.rs:29-37` / R1-ST1,R1-CF01 / confirmed
 - [x] 承認ウィンドウが gateway 側 300 秒固定で policy 設定と drift — 2026-11-19 対応済み: `JARVIS_MCP_GW_APPROVAL_WINDOW_SECS` を追加し `expires_at` と HTTP timeout を単一値から算出。policy 側は共有定数 `DEFAULT_APPROVAL_TIMEOUT_SECS=300` と compile-time assert で同期。回帰テスト7件 / `src/approval.rs:21-31`, `policy/src/config.rs:25` / R2-FG1,R1-CF01,R1-ST01 / confirmed
-- [ ] HTTP と gRPC で context 正規化・エラー契約が不一致（内部エラーが空 context / 200 deny に潰れる）— `policy/src/grpc.rs:27`, `policy/src/http.rs:203-207`, `client.rs:80-86` / R2-ER1,R1-AP01 / confirmed
+- [x] HTTP と gRPC で context 正規化・エラー契約が不一致（内部エラーが空 context / 200 deny に潰れる）— 2026-11-19 対応済み: `without_nulls` を `pub(crate)` の単一実装とし両ハンドラの `is_allowed` 直前に適用、client 側の重複変換を削除。HTTP/gRPC 間の同一判定回帰テスト3件追加、policy 83 tests pass / `policy/src/grpc.rs:27`, `policy/src/http.rs:203-207`, `client.rs:80-86` / R2-ER1,R1-AP01 / confirmed
 - [x] 設定ファイルが CWD 相対の `config/*.toml` — 2026-11-19 対応済み: 既定を `/etc/jarvis/{policy,mcp_gateway}.toml` へ変更し `JARVIS_{POLICY,MCP_GW}_CONFIG_PATH` で上書き可能。smoke スクリプトも env 追随。実機は Env provider で設定供给のため既定ファイル不在でも起動可 / `policy/src/config.rs:51-58`, `mcp-gw/src/config.rs:38-46` / R1-CF01 / confirmed
 - [x] 同名ツールの upstream 選択が HashMap 反復順依存 — 2026-11-19 対応済み: 登録時に他サーバのツール名衝突を検出して拒否（最初の登録が優先）。check と insert を単一 write ガード内で実施し競合も防止。回帰テスト3件 / `mcp-gw/src/gateway.rs:79-89,143-156` / R1-AR01 / confirmed
 - [x] PII フィルタが JSON キー名を対象外のまま — 2026-11-19 対応済み: PII パターンに一致する object キーも `[REDACTED]` に置換（通常キーは保持、部分一致対応、深度 128 ガード）。回帰テスト5件追加、既存 fixture を非 PII キーへ更新 / `context/src/pii.rs:204` / R1-ST2 / likely（既存 P2-1 と別観点）
@@ -490,7 +490,7 @@ generated:
 - [ ] バックアップ/リストア CLI が OCI/1Password 前提の説明のまま — `rust/scripts/backup.rs:31,35,79` / R5-DC2 / confirmed（ADR-0004 準拠の文言へ）
 - [ ] トークン予算ドキュメントが文字数とバイト数を混同 — `context/src/builder.rs:195-196` / R5-DC2 / confirmed
 - [ ] OpenCode クライアントのモジュール doc フロー図が実装の認可順序と不一致 — `event/src/opencode.rs:7-8` / R5-DC2 / likely
-- [ ] Grafana README のクエリがダッシュボード JSON の実式と不一致 — `infra/grafana/README.md:14-17` / R5-DC3 / confirmed
+- [x] Grafana README のクエリがダッシュボード JSON の実式と不一致 — 2026-11-19 対応済み: 4パネルのクエリを実式へ同期し、長行はコードブロックへ移動して markdownlint MD013 を解消。注意書きも「per scrape job」へ修正、lint 0 issues / `infra/grafana/README.md:14-17` / R5-DC3 / confirmed
 - [ ] OTel `SdkTracerProvider` が shutdown されずバッチスパンが失われる — `policy/src/main.rs:27-30` / R4-DP1 / confirmed
 
 ### メモ（要判断・却下）
@@ -598,7 +598,7 @@ generated:
 - [ ] kill switch の永続化失敗が unauthenticated として返される — `kill_switch.rs:147-150` / R2-ER1 / confirmed
 - [ ] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
 - [ ] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — `policy/src/policy.rs:101-107` / R2-ER1 / likely
-- [ ] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — `kill_switch.rs:133` / R2-FG1 / confirmed
+- [x] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — 2026-11-19 対応済み: `activate_with_actor()` / `arm_with_actor()` を追加し既存 `activate()` は "system" の互換ラッパーに。永続化失敗時の fail-closed re-arm は従来どおり。回帰テスト3件追加 / `kill_switch.rs:133` / R2-FG1 / confirmed
 - [ ] Casbin `add_policy` / `remove_policy` が公開 API を持たず設定ファイル手編集に依存 — `policy.rs:190,205` / R2-FG1 / confirmed
 - [x] `Gateway::execute` が public なのに policy/approval を適用せず doc と不一致 — 2026-11-19 対応済み: module doc と execute doc を実態（低レベル実行 primitive、policy/allowlist/approval は `McpGateway::execute_tool` が担当）へ修正。コード・シグネチャ・テストは無変更 / `gateway.rs:11-16` / R2-FG1 / confirmed
 - [ ] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — `backup.rs:331` / R2-ER2 / confirmed
@@ -740,3 +740,11 @@ generated:
   を無条件に使っていた問題を修正。POST 応答の `.result.name`
   （旧形式の文字列も可）のみを根拠とし、名前が無ければ明示エラーで中止。
   dry-run の書き込みゼロを確認、bash -n OK。
+
+## 完了記録（2026-11-19 Round 10）
+
+- [x] **event / context の設定パスも絶対パス化** — 457 の policy/mcp-gw に
+  続き `/etc/jarvis/{event,context}.toml` 既定と
+  `JARVIS_{EVENT,CONTEXT}_CONFIG_PATH` 上書きに対応。Env provider から
+  `config_path` を除外し、実機は Env 供给でファイル不在でも起動可。
+  新規パス解決テスト6件追加。
