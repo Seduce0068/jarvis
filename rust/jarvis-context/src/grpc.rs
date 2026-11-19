@@ -3,7 +3,7 @@
 use crate::ContextBuilder;
 use crate::config::{CONTEXT_TOKEN_HEADER, token_matches};
 use chrono::{DateTime, Utc};
-use jarvis_core::{EventSource, MemoryEntry, UnifiedEvent};
+use jarvis_core::{EventSource, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
 use tonic::{Request, Response, Status};
 
 pub mod proto {
@@ -29,6 +29,14 @@ impl GrpcContextService {
         // module of the crate root where that field is declared (same access
         // the HTTP router uses). Reading the config value keeps both transports
         // on one secret instead of duplicating the credential.
+        //
+        // The legacy config-side header name is retained in `config.rs` (outside
+        // this change's scope). Keep it in lockstep with the canonical constant
+        // so the ingress key cannot drift from the HTTP gate and the client.
+        debug_assert_eq!(
+            CONTEXT_TOKEN_HEADER,
+            jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER
+        );
         let admin_token = builder.config.admin_token().map(str::to_owned);
         Self {
             builder,
@@ -39,13 +47,14 @@ impl GrpcContextService {
 
 /// Authorize a gRPC call before any handler work runs.
 ///
-/// A configured token must be supplied in the `x-jarvis-context-token`
-/// metadata; when none is configured the legacy loopback path stays open.
-/// Neither the expected nor the presented value is ever logged.
+/// A configured token must be supplied in the
+/// [`JARVIS_CONTEXT_TOKEN_HEADER`] metadata; when none is configured the legacy
+/// loopback path stays open. Neither the expected nor the presented value is
+/// ever logged.
 fn authorize<T>(request: &Request<T>, expected: Option<&str>) -> Result<(), Status> {
     let provided = request
         .metadata()
-        .get(CONTEXT_TOKEN_HEADER)
+        .get(JARVIS_CONTEXT_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok());
     if token_matches(expected, provided) {
         Ok(())
@@ -232,16 +241,21 @@ mod tests {
         let mut request = Request::new(());
         if let Some(token) = token {
             request.metadata_mut().insert(
-                CONTEXT_TOKEN_HEADER,
+                jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER,
                 token.parse().expect("valid metadata token"),
             );
         }
         request
     }
 
+    /// Cross-contract: the legacy config-side name must not drift from the
+    /// canonical header the ingress now reads (and the HTTP gate / client use).
     #[test]
-    fn token_metadata_key_matches_http_header_literal() {
-        assert_eq!(CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    fn token_metadata_key_agrees_with_the_shared_context_header() {
+        assert_eq!(
+            CONTEXT_TOKEN_HEADER,
+            jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER
+        );
     }
 
     #[test]

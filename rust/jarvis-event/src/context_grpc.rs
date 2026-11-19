@@ -8,14 +8,15 @@
 use async_trait::async_trait;
 use jarvis_context::grpc::proto::BuildContextRequest;
 use jarvis_context::grpc::proto::context_service_client::ContextServiceClient;
-use jarvis_core::UnifiedEvent;
+use jarvis_core::{JARVIS_CONTEXT_TOKEN_HEADER, UnifiedEvent};
 use tonic::metadata::{Ascii, MetadataValue};
 use tonic::transport::{Channel, Endpoint};
 
 use crate::ports::ContextProvider;
 
-/// Same secret header the context service's gRPC ingress gate reads.
-const CONTEXT_TOKEN_HEADER: &str = "x-jarvis-context-token";
+/// Same canonical header the context service's gRPC ingress and HTTP gate read.
+/// Aliased from `jarvis-core` so the client cannot drift from the server.
+const CONTEXT_TOKEN_HEADER: &str = JARVIS_CONTEXT_TOKEN_HEADER;
 
 /// Encode an event for the context sidecar, including the additive correlation
 /// fields (I31-B).
@@ -181,7 +182,10 @@ mod tests {
     }
 
     #[test]
-    fn token_header_literal_matches_the_context_service_gate() {
-        assert_eq!(CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    fn token_header_matches_the_shared_context_header() {
+        assert_eq!(
+            CONTEXT_TOKEN_HEADER,
+            jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER
+        );
     }
 }

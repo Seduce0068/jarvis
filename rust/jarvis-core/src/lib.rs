@@ -9,6 +9,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Canonical HTTP header / gRPC metadata key carrying the context admin token.
+///
+/// The context service's gRPC ingress, its HTTP gate and the event-side gRPC
+/// provider must all read this one definition. Duplicating the literal in a
+/// transport lets a client send a key the server never reads, which turns
+/// every `BuildContext` in `context_mode = grpc` into a 401/UNAUTHENTICATED.
+/// The wire name itself is stable and must not change.
+pub const JARVIS_CONTEXT_TOKEN_HEADER: &str = "x-jarvis-context-token";
+
 /// Unified event type used across JARVIS services
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedEvent {
@@ -134,6 +143,13 @@ impl std::str::FromStr for EventSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Single canonical pin of the wire name. Transport crates assert against
+    /// [`JARVIS_CONTEXT_TOKEN_HEADER`] instead of repeating this literal.
+    #[test]
+    fn context_token_header_pins_the_wire_contract() {
+        assert_eq!(JARVIS_CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    }
 
     fn all_sources() -> [EventSource; 7] {
         [

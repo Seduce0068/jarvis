@@ -8,7 +8,7 @@ use axum::{
     response::Response,
     routing::{get, post},
 };
-use jarvis_core::{MemoryEntry, UnifiedEvent};
+use jarvis_core::{JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tracing::instrument;
@@ -91,7 +91,10 @@ impl From<MemoryEntry> for MemoryEntryResponse {
 }
 
 /// Header carrying the shared admin token on the context HTTP API.
-const ADMIN_TOKEN_HEADER: &str = "x-jarvis-context-token";
+///
+/// Aliased from `jarvis-core` so the HTTP gate reads the same canonical name as
+/// the gRPC ingress and the event-side client; no transport-local literal.
+const ADMIN_TOKEN_HEADER: &str = JARVIS_CONTEXT_TOKEN_HEADER;
 
 /// The only route that stays public even when a token is configured.
 const HEALTH_PATH: &str = "/health";
@@ -398,6 +401,11 @@ mod tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn http_header_uses_the_shared_context_token_header() {
+        assert_eq!(ADMIN_TOKEN_HEADER, jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER);
     }
 
     #[test]
