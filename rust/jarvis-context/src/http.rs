@@ -1,6 +1,7 @@
 //! HTTP/REST for Context Builder
 
 use crate::ContextBuilder;
+use crate::config::validation::{self, InvalidInput};
 use crate::error::ContextError;
 use axum::{
     Json, Router,
@@ -176,7 +177,10 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 #[derive(Debug, Deserialize)]
 struct SearchMemoryRequest {
     query: String,
-    limit: usize,
+    /// Signed on the wire so a negative value reaches the shared validator and
+    /// is rejected with the same bare 400 as gRPC's `InvalidArgument`, instead
+    /// of being rejected by serde with a different response body.
+    limit: i64,
 }
 
 /// Minimal backend surface used by the HTTP handlers.
@@ -188,6 +192,10 @@ trait MemoryBackend: Send + Sync {
     async fn build(&self, event: &UnifiedEvent) -> anyhow::Result<serde_json::Value>;
     async fn store(&self, memory: MemoryEntry) -> anyhow::Result<()>;
     async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<MemoryEntry>>;
+    /// Configured vector size used to validate an incoming embedding before it
+    /// reaches Qdrant (I55-A). Kept on the backend so instrumented handlers can
+    /// stay backend-agnostic and testable with a small in-memory stub.
+    fn embedding_dim(&self) -> usize;
 }
 
 #[async_trait::async_trait]
@@ -202,6 +210,10 @@ impl MemoryBackend for ContextBuilder {
 
     async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
         ContextBuilder::search_memory(self, query, limit).await
+    }
+
+    fn embedding_dim(&self) -> usize {
+        self.config.embedding_dim
     }
 }
 
@@ -300,6 +312,12 @@ fn log_internal_error<T>(
     op: &'static str,
 ) -> Result<T, axum::http::StatusCode> {
     result.map_err(|err| {
+        // Defense-in-depth: the core store re-checks required fields and may
+        // surface an `InvalidInput`. It is a client error, not an internal
+        // failure, so keep the same bare-400 contract as ingress validation.
+        if let Some(invalid) = err.downcast_ref::<InvalidInput>() {
+            return reject_invalid_input(invalid.field);
+        }
         tracing::error!(
             operation = op,
             error_kind = error_kind(&err),
@@ -321,11 +339,9 @@ fn log_internal_error<T>(
 /// journald/OTLP, and no error body is returned to the caller (bare 400). This
 /// mirrors the Round-49 no-leak policy used by [`log_internal_error`].
 fn reject_invalid_input(field: &'static str) -> axum::http::StatusCode {
-    tracing::warn!(
-        error_kind = "invalid_input",
-        field = field,
-        "invalid client input"
-    );
+    // The log record itself is shared with the gRPC ingress so both transports
+    // emit the identical fixed vocabulary for the same rejected input.
+    validation::log_invalid_input(field);
     axum::http::StatusCode::BAD_REQUEST
 }
 
@@ -359,30 +375,27 @@ async fn build_context(
 /// field keeps its previous handling.
 fn prepare_store_memory(
     req: StoreMemoryRequest,
+    embedding_dim: usize,
 ) -> Result<(MemoryEntry, StoreMemoryResponse), axum::http::StatusCode> {
     // I7-E: consumed and discarded so the ignore is explicit in code, not just
     // in the docs above.
     let _ignored_client_id = req.id;
-    let id = uuid::Uuid::new_v4();
-    let response = StoreMemoryResponse { id: id.to_string() };
-    // I53-C: a malformed metadata string used to become `{}` via
-    // `unwrap_or_default()`, silently discarding the caller's data. Reject it
-    // instead. Note this is the metadata field itself, not an additive field:
-    // additive fields (e.g. response `score`) still degrade when absent.
-    let metadata =
-        serde_json::from_str(&req.metadata).map_err(|_| reject_invalid_input("metadata"))?;
-    let memory = MemoryEntry {
-        id,
-        content: req.content,
-        embedding: req.embedding,
-        metadata,
-        source: req.source,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        expires_at: req
-            .expires_at
-            .and_then(|t| chrono::DateTime::from_timestamp(t, 0)),
-        score: None,
+    // I53-C / I55-A: all required-field checks (metadata must be an object,
+    // embedding length must match the configured dimension, and a positive
+    // out-of-range expires_at must be rejected) live in the shared validator.
+    // Boundary note: this is *not* the additive-field path — event
+    // `source`/`timestamp` and ranked `score` still degrade when absent.
+    let memory = validation::prepare_memory(
+        req.content,
+        req.embedding,
+        &req.metadata,
+        req.source,
+        req.expires_at.unwrap_or(0),
+        embedding_dim,
+    )
+    .map_err(|invalid| reject_invalid_input(invalid.field))?;
+    let response = StoreMemoryResponse {
+        id: memory.id.to_string(),
     };
     Ok((memory, response))
 }
@@ -392,7 +405,7 @@ async fn store_memory(
     State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<StoreMemoryRequest>,
 ) -> Result<Json<StoreMemoryResponse>, axum::http::StatusCode> {
-    let (memory, response) = prepare_store_memory(req)?;
+    let (memory, response) = prepare_store_memory(req, builder.embedding_dim())?;
     log_internal_error(builder.store(memory).await, "store_memory")?;
     Ok(Json(response))
 }
@@ -402,8 +415,12 @@ async fn search_memory(
     State(builder): State<Arc<dyn MemoryBackend>>,
     Json(req): Json<SearchMemoryRequest>,
 ) -> Result<Json<Vec<MemoryEntryResponse>>, axum::http::StatusCode> {
-    let memories =
-        log_internal_error(builder.search(&req.query, req.limit).await, "search_memory")?;
+    // I55-A: the signed wire value is widened/try_from-checked by the shared
+    // validator, so a negative or oversized limit yields the same bare 400 as
+    // gRPC's InvalidArgument and never reaches the over-fetch/Qdrant path.
+    let limit = validation::validate_search_limit(req.limit)
+        .map_err(|invalid| reject_invalid_input(invalid.field))?;
+    let memories = log_internal_error(builder.search(&req.query, limit).await, "search_memory")?;
     Ok(Json(
         memories
             .into_iter()
@@ -425,7 +442,7 @@ mod tests {
         ADMIN_TOKEN_HEADER, AuthState, MemoryBackend, MemoryEntry, MemoryEntryResponse,
         StoreMemoryRequest, UnifiedEvent, build_context, constant_time_eq, error_kind,
         log_internal_error, prepare_store_memory, reject_invalid_input, require_admin_token,
-        search_memory, store_memory,
+        search_memory, store_memory, validation,
     };
     use axum::{
         Router,
@@ -471,6 +488,7 @@ mod tests {
         Router::new()
             .route("/v1/context/build", post(build_context))
             .route("/v1/memory", post(store_memory))
+            .route("/v1/memory/search", post(search_memory))
             .with_state(Arc::new(StubBackend) as Arc<dyn MemoryBackend>)
     }
 
@@ -511,7 +529,7 @@ mod tests {
                 "/v1/memory",
                 serde_json::json!({
                     "content": "probe",
-                    "embedding": [0.1, 0.2],
+                    "embedding": [0.1, 0.2, 0.3],
                     "metadata": HTTP_INVALID_METADATA_PROBE,
                     "source": "regression-test",
                 }),
@@ -542,7 +560,7 @@ mod tests {
                 "/v1/memory",
                 serde_json::json!({
                     "content": "probe",
-                    "embedding": [0.1, 0.2],
+                    "embedding": [0.1, 0.2, 0.3],
                     "metadata": r#"{"kind":"test"}"#,
                     "source": "regression-test",
                 }),
@@ -555,6 +573,110 @@ mod tests {
                 .expect("service responds")
                 .status();
             assert_eq!(status, StatusCode::OK, "{uri} must accept valid input");
+        }
+    }
+
+    /// Post a JSON body and return the status together with the response body,
+    /// so the regression tests can assert that rejections stay bare (no leak).
+    async fn post_and_read(
+        app: Router,
+        uri: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, Vec<u8>) {
+        let response = app
+            .oneshot(i53_c_post(uri, body))
+            .await
+            .expect("service responds");
+        let status = response.status();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body reads")
+            .to_vec();
+        (status, body)
+    }
+
+    /// I55-A: the signed wire limit is checked by the shared validator, so a
+    /// negative value and an oversized positive one get the same bare 400 that
+    /// gRPC reports as `InvalidArgument`.
+    #[tokio::test]
+    async fn i55_a_search_limit_rejects_negative_and_oversized_values() {
+        let rejected = [-1_i64, validation::MAX_SEARCH_LIMIT as i64 + 1];
+        for limit in rejected {
+            let (status, body) = post_and_read(
+                i53_c_test_app(),
+                "/v1/memory/search",
+                serde_json::json!({"query": "probe", "limit": limit}),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "limit {limit}");
+            assert!(body.is_empty(), "no error body may cross the boundary");
+        }
+
+        let (status, _) = post_and_read(
+            i53_c_test_app(),
+            "/v1/memory/search",
+            serde_json::json!({"query": "probe", "limit": 5}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "an in-range limit stays accepted");
+    }
+
+    /// I55-A: required store fields are rejected with a bare 400. Additive
+    /// fields keep their degrade contract; these cases are all required ones.
+    #[tokio::test]
+    async fn i55_a_store_memory_rejects_invalid_required_fields() {
+        let cases: [(&str, serde_json::Value); 5] = [
+            (
+                "non-object metadata string",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": r#""text""#,
+                    "source": "probe",
+                }),
+            ),
+            (
+                "numeric metadata",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": "123",
+                    "source": "probe",
+                }),
+            ),
+            (
+                "wrong embedding length",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2],
+                    "metadata": "{\"kind\":\"test\"}",
+                    "source": "probe",
+                }),
+            ),
+            (
+                "empty embedding",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [],
+                    "metadata": "{\"kind\":\"test\"}",
+                    "source": "probe",
+                }),
+            ),
+            (
+                "out-of-range expiry",
+                serde_json::json!({
+                    "content": "probe",
+                    "embedding": [0.1, 0.2, 0.3],
+                    "metadata": "{\"kind\":\"test\"}",
+                    "source": "probe",
+                    "expires_at": i64::MAX,
+                }),
+            ),
+        ];
+        for (label, body) in cases {
+            let (status, response_body) = post_and_read(i53_c_test_app(), "/v1/memory", body).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{label}");
+            assert!(response_body.is_empty(), "{label}: no error body may leak");
         }
     }
 
@@ -651,106 +773,38 @@ mod tests {
         assert!(logs.contains("qdrant"), "{logs}");
     }
 
-    /// Collect the plain `"..."` string literals inside a source slice.
-    ///
-    /// `error_kind`'s returned category tokens are the only string literals in
-    /// its body, so this yields the vocabulary actually written in that file
-    /// rather than a copy kept inside this test.
-    fn quoted_literals(src: &str) -> Vec<&str> {
-        let bytes = src.as_bytes();
-        let mut literals = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'"' {
-                let start = i + 1;
-                let mut end = start;
-                while end < bytes.len() && bytes[end] != b'"' {
-                    end += 1;
-                }
-                if end < bytes.len() {
-                    literals.push(&src[start..end]);
-                    i = end + 1;
-                    continue;
-                }
-            }
-            i += 1;
-        }
-        literals
-    }
-
     /// The HTTP vocabulary must stay identical to `grpc.rs::error_kind`:
     /// database / qdrant / pii / config / grpc / serialization / other.
     ///
-    /// `grpc::error_kind` is private, so this test cannot call it directly. It
-    /// reads the real gRPC source with `include_str!` and compares the returned
-    /// literal sets instead of comparing HTTP literals to their own copies. A
-    /// vocabulary change on the gRPC side (in `grpc.rs`) changes that set and
-    /// fails this test.
+    /// I55-C: compare the *return values* of both real functions on the same
+    /// seven errors instead of extracting string literals with `include_str!`.
+    /// Removing a match arm or changing a returned token can no longer pass
+    /// while an old literal stays somewhere in the source file.
     #[test]
     fn error_kind_vocabulary_matches_grpc_transport() {
-        let database: anyhow::Error =
-            crate::error::ContextError::Database(sqlx::Error::RowNotFound).into();
-        let qdrant = anyhow::Error::from(crate::error::ContextError::qdrant(
-            crate::error::QdrantErrorKind::FAILED,
-        ))
-        .context(HTTP_LOG_PROBE_PII);
-        let pii: anyhow::Error =
-            crate::error::ContextError::Pii(HTTP_LOG_PROBE_PII.to_owned()).into();
-        let config: anyhow::Error =
-            crate::error::ContextError::Config(anyhow::anyhow!("{HTTP_LOG_PROBE_PATH}")).into();
-        let grpc_status: anyhow::Error =
-            crate::error::ContextError::Grpc(tonic::Status::internal(HTTP_LOG_PROBE_SQL)).into();
-        let serialization: anyhow::Error = crate::error::ContextError::Serialization(
-            serde_json::from_str::<serde_json::Value>(HTTP_LOG_PROBE_PII)
-                .expect_err("the PII probe is not JSON"),
-        )
-        .into();
-        let untyped = anyhow::anyhow!("{HTTP_LOG_PROBE_URL} {HTTP_LOG_PROBE_SQL}");
+        use crate::error::test_support::{ERROR_KIND_TOKENS, ErrorCase};
 
-        // Keep the original per-variant assertions so any HTTP regression is
-        // still reported at the exact variant that broke.
-        assert_eq!(error_kind(&database), "database");
-        assert_eq!(error_kind(&qdrant), "qdrant");
-        assert_eq!(error_kind(&pii), "pii");
-        assert_eq!(error_kind(&config), "config");
-        assert_eq!(error_kind(&grpc_status), "grpc");
-        assert_eq!(error_kind(&serialization), "serialization");
-        assert_eq!(error_kind(&untyped), "other");
-        // Observe the HTTP vocabulary through the real function, then compare
-        // it to the literals compiled into grpc.rs.
-        let http_vocab: std::collections::BTreeSet<&str> = [
-            error_kind(&database),
-            error_kind(&qdrant),
-            error_kind(&pii),
-            error_kind(&config),
-            error_kind(&grpc_status),
-            error_kind(&serialization),
-            error_kind(&untyped),
-        ]
-        .into_iter()
-        .collect();
+        let mut http_seen = std::collections::BTreeSet::new();
+        let mut grpc_seen = std::collections::BTreeSet::new();
 
-        // anyhow context layers must not mask the typed variant. This consumes
-        // `qdrant`, so it runs after every other use of that value.
-        let qdrant_with_context = qdrant.context("outer");
-        assert_eq!(error_kind(&qdrant_with_context), "qdrant");
+        for case in ErrorCase::ALL {
+            let http = error_kind(&case.into_error());
+            let grpc = crate::grpc::error_kind(&case.into_error());
+            assert_eq!(http, case.token(), "HTTP mapping drifted for {case:?}");
+            assert_eq!(grpc, case.token(), "gRPC mapping drifted for {case:?}");
+            assert_eq!(http, grpc, "transports disagree for {case:?}");
+            http_seen.insert(http);
+            grpc_seen.insert(grpc);
+        }
 
-        const GRPC_ERROR_KIND_SOURCE: &str = include_str!("grpc.rs");
-        let grpc_body = GRPC_ERROR_KIND_SOURCE
-            .split_once("fn error_kind")
-            .map(|(_, rest)| rest)
-            .expect("grpc.rs must define error_kind");
-        let grpc_body = grpc_body
-            .split_once("\n}")
-            .map(|(body, _)| body)
-            .expect("grpc.rs::error_kind must have a closing brace");
-        let grpc_vocab: std::collections::BTreeSet<&str> =
-            quoted_literals(grpc_body).into_iter().collect();
+        let expected: std::collections::BTreeSet<&str> = ERROR_KIND_TOKENS.into_iter().collect();
+        assert_eq!(http_seen, expected);
+        assert_eq!(grpc_seen, expected);
 
-        assert_eq!(
-            http_vocab, grpc_vocab,
-            "HTTP and gRPC error_kind vocabularies drifted"
-        );
+        // anyhow context layers must not mask the typed variant on either side.
+        let wrapped = ErrorCase::Qdrant.into_error().context("outer");
+        assert_eq!(error_kind(&wrapped), "qdrant");
+        assert_eq!(crate::grpc::error_kind(&wrapped), "qdrant");
     }
 
     fn store_request(id: Option<String>) -> StoreMemoryRequest {
@@ -767,7 +821,7 @@ mod tests {
     #[test]
     fn store_memory_ignores_caller_id_and_returns_generated_id() {
         let supplied = uuid::Uuid::new_v4().to_string();
-        let (memory, response) = prepare_store_memory(store_request(Some(supplied.clone())))
+        let (memory, response) = prepare_store_memory(store_request(Some(supplied.clone())), 3)
             .expect("valid metadata is accepted");
 
         assert_ne!(
@@ -793,7 +847,7 @@ mod tests {
             "the JSON body exposes the generated id to the caller"
         );
 
-        let (second, _) = prepare_store_memory(store_request(Some(supplied)))
+        let (second, _) = prepare_store_memory(store_request(Some(supplied)), 3)
             .expect("valid metadata is accepted");
         assert_ne!(
             memory.id, second.id,
@@ -804,7 +858,7 @@ mod tests {
     #[test]
     fn store_memory_preserves_all_other_fields() {
         let (memory, _) =
-            prepare_store_memory(store_request(None)).expect("valid metadata is accepted");
+            prepare_store_memory(store_request(None), 3).expect("valid metadata is accepted");
         assert_eq!(memory.content, "sensitive content");
         assert_eq!(memory.embedding, vec![0.1_f32, 0.2, 0.3]);
         assert_eq!(memory.metadata, serde_json::json!({ "kind": "test" }));
@@ -821,7 +875,7 @@ mod tests {
     #[test]
     fn search_response_exposes_score_additively() {
         let (mut memory, _) =
-            prepare_store_memory(store_request(None)).expect("valid metadata is accepted");
+            prepare_store_memory(store_request(None), 3).expect("valid metadata is accepted");
         memory.score = Some(0.75);
 
         let ranked = serde_json::to_value(MemoryEntryResponse::from(memory.clone()))
@@ -1007,6 +1061,10 @@ mod tests {
         async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
             Ok(Vec::new())
         }
+
+        fn embedding_dim(&self) -> usize {
+            3
+        }
     }
 
     #[test]
@@ -1048,7 +1106,7 @@ mod tests {
                         "/v1/memory",
                         serde_json::json!({
                             "content": PROBE,
-                            "embedding": [0.1, 0.2],
+                            "embedding": [0.1, 0.2, 0.3],
                             "metadata": "{\"kind\":\"test\"}",
                             "source": "regression-test",
                         })
@@ -1124,6 +1182,10 @@ mod tests {
         async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
             Err(probe_error())
         }
+
+        fn embedding_dim(&self) -> usize {
+            3
+        }
     }
 
     /// Return the braced body that follows `marker` in `source`.
@@ -1172,12 +1234,12 @@ mod tests {
     }
 
     /// I53-B: all six RPCs (3 HTTP + 3 gRPC) must funnel internal failures
-    /// through the fixed-vocabulary helper. HTTP is checked behaviourally:
-    /// every handler is driven to failure and must emit the same `error_kind`
-    /// log `build_context` already emitted — a bare `map_err(|_| 500)` would
-    /// still return 500 but log nothing, so it fails this test. The gRPC
-    /// handlers need a live store to invoke, so their bodies are scanned from
-    /// the HTTP side via `include_str!`, again scoped to one function body.
+    /// through the fixed-vocabulary helper. This test keeps the original HTTP
+    /// behavioural check plus source-scoped checks as a *secondary* guard; the
+    /// primary, actual-call proof for both transports and all seven categories
+    /// lives in `all_six_rpcs_return_the_same_seven_vocabularies_by_real_calls`
+    /// and `grpc_handlers_log_fixed_kind_for_all_seven_error_vocabularies`.
+    /// Static checks alone are not treated as evidence of routing.
     #[test]
     fn all_six_rpcs_route_internal_failures_through_fixed_vocabulary() {
         const OPS: [(&str, &str); 3] = [
@@ -1222,7 +1284,7 @@ mod tests {
                         "/v1/memory",
                         serde_json::json!({
                             "content": "probe",
-                            "embedding": [0.1, 0.2],
+                            "embedding": [0.1, 0.2, 0.3],
                             "metadata": "{\"kind\":\"test\"}",
                             "source": "regression-test",
                         })
@@ -1333,5 +1395,233 @@ mod tests {
         .collect();
         assert_eq!(http_tokens, expected);
         assert_eq!(grpc_tokens, expected);
+    }
+
+    /// HTTP backend that always fails with a chosen fixed-vocabulary category.
+    struct ErrorCaseBackend(crate::error::test_support::ErrorCase);
+
+    #[async_trait::async_trait]
+    impl MemoryBackend for ErrorCaseBackend {
+        async fn build(&self, _event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+            Err(self.0.into_error())
+        }
+
+        async fn store(&self, _memory: MemoryEntry) -> anyhow::Result<()> {
+            Err(self.0.into_error())
+        }
+
+        async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+            Err(self.0.into_error())
+        }
+
+        fn embedding_dim(&self) -> usize {
+            3
+        }
+    }
+
+    /// gRPC backend with the same contract, defined here so one test can drive
+    /// all six RPCs through their real handlers.
+    struct GrpcErrorCaseBackend(crate::error::test_support::ErrorCase);
+
+    #[async_trait::async_trait]
+    impl crate::grpc::GrpcBackend for GrpcErrorCaseBackend {
+        async fn build(&self, _event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+            Err(self.0.into_error())
+        }
+
+        async fn store(&self, _memory: MemoryEntry) -> anyhow::Result<()> {
+            Err(self.0.into_error())
+        }
+
+        async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+            Err(self.0.into_error())
+        }
+    }
+
+    /// I55-C: cross-transport proof based on real calls. For each of the seven
+    /// categories, all six RPCs (3 HTTP + 3 gRPC) are invoked with an injected
+    /// error and must emit the same fixed `error_kind` in their logs, return a
+    /// bare failure to the caller, and never leak the probe text. The static
+    /// source checks above remain only as a secondary guard.
+    #[test]
+    fn all_six_rpcs_return_the_same_seven_vocabularies_by_real_calls() {
+        use crate::error::test_support::{ERROR_KIND_TOKENS, ErrorCase, SENSITIVE_PROBE};
+
+        let mut http_seen = std::collections::BTreeSet::new();
+        let mut grpc_seen = std::collections::BTreeSet::new();
+
+        for case in ErrorCase::ALL {
+            // ---------- HTTP: three real handler calls. ----------
+            let http_buffer = LogBuffer::default();
+            let http_writer = http_buffer.clone();
+            let http_subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_target(false)
+                .with_writer(move || http_writer.clone())
+                .finish();
+
+            tracing::subscriber::with_default(http_subscriber, || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime builds");
+                runtime.block_on(async {
+                    let app = Router::new()
+                        .route("/v1/context/build", post(build_context))
+                        .route("/v1/memory", post(store_memory))
+                        .route("/v1/memory/search", post(search_memory))
+                        .with_state(Arc::new(ErrorCaseBackend(case)) as Arc<dyn MemoryBackend>);
+
+                    let requests = [
+                        (
+                            "/v1/context/build",
+                            serde_json::json!({
+                                "event_id": "00000000-0000-0000-0000-000000000001",
+                                "event_type": "state_changed",
+                                "payload": {"body": "probe"},
+                                "correlation_id": "corr-1",
+                            })
+                            .to_string(),
+                        ),
+                        (
+                            "/v1/memory",
+                            serde_json::json!({
+                                "content": "probe",
+                                "embedding": [0.1, 0.2, 0.3],
+                                "metadata": "{\"kind\":\"test\"}",
+                                "source": "regression-test",
+                            })
+                            .to_string(),
+                        ),
+                        (
+                            "/v1/memory/search",
+                            serde_json::json!({"query": "probe", "limit": 5}).to_string(),
+                        ),
+                    ];
+
+                    for (uri, body) in requests {
+                        let response = app
+                            .clone()
+                            .oneshot(
+                                Request::builder()
+                                    .method("POST")
+                                    .uri(uri)
+                                    .header("content-type", "application/json")
+                                    .body(Body::from(body))
+                                    .expect("request builds"),
+                            )
+                            .await
+                            .expect("service responds");
+                        assert_eq!(
+                            response.status(),
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "{uri}"
+                        );
+                        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                            .await
+                            .expect("body reads");
+                        assert!(bytes.is_empty(), "no error body may cross the boundary");
+                    }
+                });
+            });
+
+            let captured = http_buffer.0.lock().expect("log buffer mutex").clone();
+            let http_logs = String::from_utf8(captured).expect("logs are utf-8");
+            assert_eq!(
+                http_logs.matches(case.token()).count(),
+                3,
+                "each HTTP RPC must log the injected category {case:?}: {http_logs}"
+            );
+            assert!(
+                !http_logs.contains(SENSITIVE_PROBE),
+                "HTTP leak: {http_logs}"
+            );
+            http_seen.insert(case.token());
+
+            // ---------- gRPC: three real handler calls. ----------
+            let grpc_buffer = LogBuffer::default();
+            let grpc_writer = grpc_buffer.clone();
+            let grpc_subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_target(false)
+                .with_writer(move || grpc_writer.clone())
+                .finish();
+
+            tracing::subscriber::with_default(grpc_subscriber, || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime builds");
+                runtime.block_on(async {
+                    use crate::grpc::proto::context_service_server::ContextService;
+
+                    let service = crate::grpc::GrpcContextService::with_backend(
+                        Arc::new(GrpcErrorCaseBackend(case)),
+                        None,
+                    );
+
+                    let build = service
+                        .build_context(tonic::Request::new(
+                            crate::grpc::proto::BuildContextRequest {
+                                event_id: "00000000-0000-0000-0000-000000000001".into(),
+                                event_type: "state_changed".into(),
+                                payload: r#"{"body":"probe"}"#.into(),
+                                correlation_id: "corr-1".into(),
+                                source: "manual".into(),
+                                timestamp: 0,
+                            },
+                        ))
+                        .await
+                        .expect_err("injected error must fail the RPC");
+                    assert_eq!(build.code(), tonic::Code::Internal);
+                    assert_eq!(build.message(), crate::grpc::INTERNAL_ERROR_MESSAGE);
+
+                    let store = service
+                        .store_memory(tonic::Request::new(
+                            crate::grpc::proto::StoreMemoryRequest {
+                                id: "ignored".into(),
+                                content: "probe".into(),
+                                embedding: vec![0.1, 0.2, 0.3],
+                                metadata: r#"{"kind":"test"}"#.into(),
+                                source: "regression-test".into(),
+                                expires_at: 0,
+                            },
+                        ))
+                        .await
+                        .expect_err("injected error must fail the RPC");
+                    assert_eq!(store.code(), tonic::Code::Internal);
+                    assert_eq!(store.message(), crate::grpc::INTERNAL_ERROR_MESSAGE);
+
+                    let search = service
+                        .search_memory(tonic::Request::new(
+                            crate::grpc::proto::SearchMemoryRequest {
+                                query: "probe".into(),
+                                limit: 5,
+                            },
+                        ))
+                        .await
+                        .expect_err("injected error must fail the RPC");
+                    assert_eq!(search.code(), tonic::Code::Internal);
+                    assert_eq!(search.message(), crate::grpc::INTERNAL_ERROR_MESSAGE);
+                });
+            });
+
+            let captured = grpc_buffer.0.lock().expect("log buffer mutex").clone();
+            let grpc_logs = String::from_utf8(captured).expect("logs are utf-8");
+            assert_eq!(
+                grpc_logs.matches(case.token()).count(),
+                3,
+                "each gRPC RPC must log the injected category {case:?}: {grpc_logs}"
+            );
+            assert!(
+                !grpc_logs.contains(SENSITIVE_PROBE),
+                "gRPC leak: {grpc_logs}"
+            );
+            grpc_seen.insert(case.token());
+        }
+
+        let expected: std::collections::BTreeSet<&str> = ERROR_KIND_TOKENS.into_iter().collect();
+        assert_eq!(http_seen, expected);
+        assert_eq!(grpc_seen, expected);
     }
 }

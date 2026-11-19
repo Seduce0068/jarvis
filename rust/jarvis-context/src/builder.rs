@@ -648,6 +648,13 @@ impl Builder {
     }
 
     pub async fn store_memory(&self, memory: MemoryEntry) -> Result<()> {
+        // I55-A: fail closed at the core write boundary as well. Both
+        // transports already reject these inputs at ingress with a bare 400 /
+        // `InvalidArgument` through the shared validator; rechecking here also
+        // covers direct callers that bypass an ingress. The returned
+        // `InvalidInput` is mapped back to the transport's input error by
+        // `internal_status` / `log_internal_error`, never to a 500.
+        crate::config::validation::validate_memory_for_store(&memory, self.config.embedding_dim)?;
         // Store in PostgreSQL
         let client = self.pg_pool.get().await?;
         client.execute(
@@ -1650,6 +1657,33 @@ mod tests {
     #[test]
     fn configured_embedding_dim_defaults_to_384() {
         assert_eq!(crate::config::ContextConfig::default().embedding_dim, 384);
+    }
+
+    /// I55-A: the core store re-checks the same required fields as the shared
+    /// ingress validator, so a direct caller cannot push a wrong-sized vector
+    /// or a non-object payload into Qdrant.
+    #[test]
+    fn store_boundary_rejects_invalid_required_fields() {
+        let mut memory = entry_with_expiry(None);
+        memory.embedding = vec![0.1_f32; 3];
+        assert!(crate::config::validation::validate_memory_for_store(&memory, 3).is_ok());
+
+        memory.embedding.clear();
+        assert_eq!(
+            crate::config::validation::validate_memory_for_store(&memory, 3)
+                .expect_err("an empty vector is never a valid embedding")
+                .field,
+            "embedding"
+        );
+
+        memory.embedding = vec![0.1_f32; 3];
+        memory.metadata = json!("text");
+        assert_eq!(
+            crate::config::validation::validate_memory_for_store(&memory, 3)
+                .expect_err("a non-object metadata produces an empty Qdrant payload")
+                .field,
+            "metadata"
+        );
     }
 
     #[test]

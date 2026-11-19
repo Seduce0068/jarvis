@@ -1,10 +1,12 @@
 //! gRPC service for Context Builder
 
 use crate::ContextBuilder;
+use crate::config::validation::{self, InvalidInput};
 use crate::config::{CONTEXT_TOKEN_HEADER, token_matches};
 use crate::error::ContextError;
 use chrono::{DateTime, Utc};
 use jarvis_core::{EventSource, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
+use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 pub mod proto {
@@ -17,11 +19,41 @@ use proto::{
     SearchMemoryRequest, SearchMemoryResponse, StoreMemoryRequest, StoreMemoryResponse,
 };
 
+/// Minimal backend surface used by the gRPC handlers.
+///
+/// Mirrors the HTTP side's `MemoryBackend`: the handlers can be driven to a
+/// real failure with an injected error instead of only being scanned from
+/// source. Production wiring uses the real [`ContextBuilder`].
+#[async_trait::async_trait]
+pub(crate) trait GrpcBackend: Send + Sync {
+    async fn build(&self, event: &UnifiedEvent) -> anyhow::Result<serde_json::Value>;
+    async fn store(&self, memory: MemoryEntry) -> anyhow::Result<()>;
+    async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<MemoryEntry>>;
+}
+
+#[async_trait::async_trait]
+impl GrpcBackend for ContextBuilder {
+    async fn build(&self, event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+        ContextBuilder::build_context(self, event).await
+    }
+
+    async fn store(&self, memory: MemoryEntry) -> anyhow::Result<()> {
+        ContextBuilder::store_memory(self, memory).await
+    }
+
+    async fn search(&self, query: &str, limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+        ContextBuilder::search_memory(self, query, limit).await
+    }
+}
+
 pub struct GrpcContextService {
-    builder: ContextBuilder,
+    backend: Arc<dyn GrpcBackend>,
     /// Effective value of `ContextConfig::admin_token`, shared with the HTTP
     /// gate. `None` keeps the legacy loopback path. Never logged.
     admin_token: Option<String>,
+    /// Configured Qdrant vector size, used by the shared ingress validator to
+    /// reject a wrong-sized or empty embedding before it reaches the store.
+    embedding_dim: usize,
 }
 
 impl GrpcContextService {
@@ -39,9 +71,24 @@ impl GrpcContextService {
             jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER
         );
         let admin_token = builder.config.admin_token().map(str::to_owned);
+        let embedding_dim = builder.config.embedding_dim;
         Self {
-            builder,
+            backend: Arc::new(builder),
             admin_token,
+            embedding_dim,
+        }
+    }
+
+    /// Inject a backend so the three handlers can be invoked directly in
+    /// tests without opening a PostgreSQL/Qdrant-backed `ContextBuilder`.
+    #[cfg(test)]
+    pub(crate) fn with_backend(backend: Arc<dyn GrpcBackend>, admin_token: Option<String>) -> Self {
+        Self {
+            backend,
+            admin_token,
+            // Test fixtures use a three-element vector; production `new()`
+            // reads the real configured dimension from `ContextConfig`.
+            embedding_dim: 3,
         }
     }
 }
@@ -73,7 +120,7 @@ fn authorize<T>(request: &Request<T>, expected: Option<&str>) -> Result<(), Stat
 ///
 /// Mirrors the HTTP transport's bare-500 contract (`http::log_internal_error`):
 /// the caller learns that the operation failed, never why.
-const INTERNAL_ERROR_MESSAGE: &str = "internal context error";
+pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "internal context error";
 
 /// Reduce an internal error to a fixed-vocabulary category safe for logging.
 ///
@@ -81,7 +128,7 @@ const INTERNAL_ERROR_MESSAGE: &str = "internal context error";
 /// and responses, PII payloads, and config paths. Only the variant token is
 /// logged; the error text is neither echoed to the client nor written to any
 /// log record.
-fn error_kind(err: &anyhow::Error) -> &'static str {
+pub(crate) fn error_kind(err: &anyhow::Error) -> &'static str {
     match err.downcast_ref::<ContextError>() {
         Some(ContextError::Database(_)) => "database",
         Some(ContextError::Qdrant(_)) => "qdrant",
@@ -101,6 +148,13 @@ fn error_kind(err: &anyhow::Error) -> &'static str {
 /// originating inside the store or context assembly.
 fn internal_status<T>(result: anyhow::Result<T>, op: &'static str) -> Result<T, Status> {
     result.map_err(|err| {
+        // Defense-in-depth: the core store re-checks required fields and may
+        // surface an `InvalidInput`. It is a client error, so keep the same
+        // `InvalidArgument` contract as ingress validation instead of hiding it
+        // behind the bare internal failure.
+        if let Some(invalid) = err.downcast_ref::<InvalidInput>() {
+            return reject_invalid_input(invalid.field);
+        }
         tracing::error!(
             operation = op,
             error_kind = error_kind(&err),
@@ -127,11 +181,9 @@ const INVALID_ARGUMENT_MESSAGE: &str = "invalid client input";
 /// with the fixed `invalid_input` category — so the offending value cannot reach
 /// either the status message or any log record (Round-49 no-leak policy).
 fn reject_invalid_input(field: &'static str) -> Status {
-    tracing::warn!(
-        error_kind = "invalid_input",
-        field = field,
-        "invalid client input"
-    );
+    // Shared with the HTTP ingress so both transports emit the identical fixed
+    // vocabulary for the same rejected input; no offending value is ever read.
+    validation::log_invalid_input(field);
     Status::invalid_argument(INVALID_ARGUMENT_MESSAGE)
 }
 
@@ -153,31 +205,26 @@ fn parse_payload(value: &str) -> Result<serde_json::Value, Status> {
 /// let any client overwrite an existing memory by choosing its id (I8-A).
 fn prepare_store_memory(
     req: StoreMemoryRequest,
+    embedding_dim: usize,
 ) -> Result<(MemoryEntry, StoreMemoryResponse), Status> {
     let _ignored = &req.id;
-    let id = uuid::Uuid::new_v4();
-    // I53-C: a malformed metadata string used to become `{}` via
-    // `unwrap_or_default()`, silently discarding the caller's data. Reject it.
-    // This is the metadata field itself, not an additive field: additive fields
-    // (source/timestamp, score) still degrade when absent or out of range.
-    let metadata =
-        serde_json::from_str(&req.metadata).map_err(|_| reject_invalid_input("metadata"))?;
-    let memory = MemoryEntry {
-        id,
-        content: req.content,
-        embedding: req.embedding,
-        metadata,
-        source: req.source,
-        created_at: chrono::Utc::now(),
-        updated_at: chrono::Utc::now(),
-        expires_at: if req.expires_at > 0 {
-            chrono::DateTime::from_timestamp(req.expires_at, 0)
-        } else {
-            None
-        },
-        score: None,
+    // I53-C / I55-A: every required-field check lives in the shared validator
+    // (metadata must be an object, embedding length must match the configured
+    // dimension, and a positive out-of-range expires_at must be rejected).
+    // Boundary note: this is *not* the additive-field path — the event
+    // `source`/`timestamp` and ranked `score` still degrade when absent.
+    let memory = validation::prepare_memory(
+        req.content,
+        req.embedding,
+        &req.metadata,
+        req.source,
+        req.expires_at,
+        embedding_dim,
+    )
+    .map_err(|invalid| reject_invalid_input(invalid.field))?;
+    let response = StoreMemoryResponse {
+        id: memory.id.to_string(),
     };
-    let response = StoreMemoryResponse { id: id.to_string() };
     Ok((memory, response))
 }
 
@@ -252,7 +299,7 @@ impl ContextService for GrpcContextService {
             timestamp,
             correlation_id: req.correlation_id,
         };
-        let context = internal_status(self.builder.build_context(&event).await, "build_context")?;
+        let context = internal_status(self.backend.build(&event).await, "build_context")?;
         Ok(Response::new(BuildContextResponse {
             context: context.to_string(),
         }))
@@ -264,8 +311,8 @@ impl ContextService for GrpcContextService {
     ) -> Result<Response<StoreMemoryResponse>, Status> {
         // Auth stays first so unauthenticated callers cannot reach the store.
         authorize(&request, self.admin_token.as_deref())?;
-        let (memory, response) = prepare_store_memory(request.into_inner())?;
-        internal_status(self.builder.store_memory(memory).await, "store_memory")?;
+        let (memory, response) = prepare_store_memory(request.into_inner(), self.embedding_dim)?;
+        internal_status(self.backend.store(memory).await, "store_memory")?;
         Ok(Response::new(response))
     }
 
@@ -275,10 +322,13 @@ impl ContextService for GrpcContextService {
     ) -> Result<Response<SearchMemoryResponse>, Status> {
         authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
+        // I55-A: `as usize` used to turn limit=-1 into usize::MAX and reach
+        // Qdrant through the over-fetch path. The shared validator performs the
+        // `try_from` sign check and the common upper bound before any store call.
+        let limit = validation::validate_search_limit(req.limit as i64)
+            .map_err(|invalid| reject_invalid_input(invalid.field))?;
         let memories = internal_status(
-            self.builder
-                .search_memory(&req.query, req.limit as usize)
-                .await,
+            self.backend.search(&req.query, limit).await,
             "search_memory",
         )?;
         Ok(Response::new(SearchMemoryResponse {
@@ -299,10 +349,12 @@ pub async fn serve(builder: ContextBuilder, addr: std::net::SocketAddr) -> anyho
 #[cfg(test)]
 mod tests {
     use super::{
-        BuildContextRequest, CONTEXT_TOKEN_HEADER, ContextError, DateTime, EventSource,
-        INTERNAL_ERROR_MESSAGE, INVALID_ARGUMENT_MESSAGE, Request, StoreMemoryRequest, Utc,
-        authorize, event_metadata_from_request, internal_status, parse_event_id, parse_payload,
-        prepare_store_memory, to_proto_memory_entry,
+        BuildContextRequest, CONTEXT_TOKEN_HEADER, ContextError, ContextService, DateTime,
+        EventSource, GrpcBackend, GrpcContextService, INTERNAL_ERROR_MESSAGE,
+        INVALID_ARGUMENT_MESSAGE, MemoryEntry, Request, SearchMemoryRequest, StoreMemoryRequest,
+        UnifiedEvent, Utc, authorize, event_metadata_from_request, internal_status, parse_event_id,
+        parse_payload, prepare_store_memory, reject_invalid_input, to_proto_memory_entry,
+        validation,
     };
     use crate::error::QdrantErrorKind;
     use std::io::Write;
@@ -385,7 +437,7 @@ mod tests {
     fn i53_c_invalid_metadata_is_invalid_argument() {
         let mut req = store_request("ignored");
         req.metadata = GRPC_INVALID_JSON_PROBE.into();
-        let status = prepare_store_memory(req).expect_err("malformed metadata must be rejected");
+        let status = prepare_store_memory(req, 3).expect_err("malformed metadata must be rejected");
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
         assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
     }
@@ -393,9 +445,92 @@ mod tests {
     #[test]
     fn i53_c_valid_inputs_are_accepted() {
         let (memory, response) =
-            prepare_store_memory(store_request("ignored")).expect("valid metadata is accepted");
+            prepare_store_memory(store_request("ignored"), 3).expect("valid metadata is accepted");
         assert_eq!(memory.metadata, serde_json::json!({"kind": "test"}));
         assert_eq!(response.id, memory.id.to_string());
+    }
+
+    /// I55-A: a negative gRPC `int32` limit used to become `usize::MAX` via
+    /// `as`, over-fetch an unbounded candidate pool and reach Qdrant. Both it
+    /// and an oversized positive value must now fail with the fixed message.
+    #[test]
+    fn i55_a_negative_and_oversized_limit_are_invalid_argument() {
+        for raw in [-1_i32, validation::MAX_SEARCH_LIMIT as i32 + 1] {
+            let status = validation::validate_search_limit(raw as i64)
+                .map_err(|invalid| reject_invalid_input(invalid.field))
+                .expect_err("limit must be rejected");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+        }
+    }
+
+    /// I55-A: prove the real handler rejects the bad limit before the backend
+    /// is reached — an injected backend error would otherwise surface as
+    /// `Internal`, so the status code distinguishes the two paths.
+    #[tokio::test]
+    async fn i55_a_search_handler_rejects_bad_limit_before_backend_call() {
+        use crate::error::test_support::ErrorCase;
+        let service =
+            GrpcContextService::with_backend(Arc::new(ErrorBackend(ErrorCase::Database)), None);
+        for raw in [-1_i32, validation::MAX_SEARCH_LIMIT as i32 + 1] {
+            let status = service
+                .search_memory(Request::new(SearchMemoryRequest {
+                    query: "probe".into(),
+                    limit: raw,
+                }))
+                .await
+                .expect_err("bad limit is rejected before the backend runs");
+            assert_eq!(status.code(), tonic::Code::InvalidArgument);
+            assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
+        }
+    }
+
+    /// I55-A: the required store fields are validated at the boundary. Additive
+    /// fields keep their degrade contract; these are all required ones.
+    #[test]
+    fn i55_a_store_memory_rejects_invalid_required_fields() {
+        let mut req = store_request("ignored");
+        req.metadata = r#""text""#.into();
+        assert_eq!(
+            prepare_store_memory(req, 3)
+                .expect_err("a non-object metadata must be rejected")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let mut req = store_request("ignored");
+        req.metadata = "123".into();
+        assert_eq!(
+            prepare_store_memory(req, 3)
+                .expect_err("a numeric metadata must be rejected")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let mut req = store_request("ignored");
+        req.embedding = vec![0.1_f32, 0.2];
+        assert_eq!(
+            prepare_store_memory(req, 3)
+                .expect_err("a wrong-sized embedding must be rejected")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let mut req = store_request("ignored");
+        req.embedding.clear();
+        assert_eq!(
+            prepare_store_memory(req, 3)
+                .expect_err("an empty embedding must be rejected")
+                .code(),
+            tonic::Code::InvalidArgument
+        );
+
+        let mut req = store_request("ignored");
+        req.expires_at = i64::MAX;
+        let status = prepare_store_memory(req, 3)
+            .expect_err("an out-of-range expiry must not degrade to no expiry");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_ARGUMENT_MESSAGE);
     }
 
     #[test]
@@ -484,7 +619,7 @@ mod tests {
     fn store_memory_ignores_caller_id_and_returns_generated_id() {
         let supplied = uuid::Uuid::new_v4().to_string();
         let (memory, response) =
-            prepare_store_memory(store_request(&supplied)).expect("valid metadata is accepted");
+            prepare_store_memory(store_request(&supplied), 3).expect("valid metadata is accepted");
 
         assert_ne!(
             memory.id.to_string(),
@@ -503,7 +638,7 @@ mod tests {
         );
 
         let (second, _) =
-            prepare_store_memory(store_request(&supplied)).expect("valid metadata is accepted");
+            prepare_store_memory(store_request(&supplied), 3).expect("valid metadata is accepted");
         assert_ne!(
             memory.id, second.id,
             "repeated requests with the same id get distinct records"
@@ -513,7 +648,7 @@ mod tests {
     #[test]
     fn store_memory_preserves_all_other_fields() {
         let (memory, _) =
-            prepare_store_memory(store_request("ignored")).expect("valid metadata is accepted");
+            prepare_store_memory(store_request("ignored"), 3).expect("valid metadata is accepted");
         assert_eq!(memory.content, "sensitive content");
         assert_eq!(memory.embedding, vec![0.1_f32, 0.2, 0.3]);
         assert_eq!(memory.metadata, serde_json::json!({ "kind": "test" }));
@@ -530,7 +665,7 @@ mod tests {
     #[test]
     fn proto_mapping_preserves_additive_score() {
         let (mut memory, _) =
-            prepare_store_memory(store_request("ignored")).expect("valid metadata is accepted");
+            prepare_store_memory(store_request("ignored"), 3).expect("valid metadata is accepted");
 
         memory.score = Some(0.625);
         let ranked = to_proto_memory_entry(memory.clone());
@@ -647,5 +782,92 @@ mod tests {
         // form depends on the tracing-subscriber formatter version. The contract
         // here is that the raw error text never reaches either the status or
         // the logs; the fixed category fields are set at the call site.
+    }
+
+    /// Backend that fails every operation with a chosen fixed-vocabulary
+    /// category. This is the gRPC counterpart of the HTTP side's failing
+    /// backend: it lets all three handlers be invoked for real.
+    struct ErrorBackend(crate::error::test_support::ErrorCase);
+
+    #[async_trait::async_trait]
+    impl GrpcBackend for ErrorBackend {
+        async fn build(&self, _event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+            Err(self.0.into_error())
+        }
+
+        async fn store(&self, _memory: MemoryEntry) -> anyhow::Result<()> {
+            Err(self.0.into_error())
+        }
+
+        async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+            Err(self.0.into_error())
+        }
+    }
+
+    /// I55-C: behavioural proof for the gRPC side. Each of the three RPCs is
+    /// really invoked with an injected error; it must return the fixed status
+    /// message and emit a log record carrying the category of that error. A
+    /// discarded result or a stale source literal cannot satisfy this.
+    #[test]
+    fn grpc_handlers_log_fixed_kind_for_all_seven_error_vocabularies() {
+        use crate::error::test_support::{ErrorCase, SENSITIVE_PROBE};
+
+        for case in ErrorCase::ALL {
+            let buffer = LogBuffer::default();
+            let writer = buffer.clone();
+            let subscriber = tracing_subscriber::fmt()
+                .without_time()
+                .with_target(false)
+                .with_writer(move || writer.clone())
+                .finish();
+
+            tracing::subscriber::with_default(subscriber, || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("runtime builds");
+                runtime.block_on(async {
+                    let service =
+                        GrpcContextService::with_backend(Arc::new(ErrorBackend(case)), None);
+
+                    let build = service
+                        .build_context(Request::new(build_context_request(
+                            "home_assistant",
+                            1_700_000_000,
+                        )))
+                        .await
+                        .expect_err("injected error must fail the RPC");
+                    assert_eq!(build.code(), tonic::Code::Internal);
+                    assert_eq!(build.message(), INTERNAL_ERROR_MESSAGE);
+
+                    let store = service
+                        .store_memory(Request::new(store_request("ignored")))
+                        .await
+                        .expect_err("injected error must fail the RPC");
+                    assert_eq!(store.code(), tonic::Code::Internal);
+                    assert_eq!(store.message(), INTERNAL_ERROR_MESSAGE);
+
+                    let search = service
+                        .search_memory(Request::new(SearchMemoryRequest {
+                            query: "probe".into(),
+                            limit: 5,
+                        }))
+                        .await
+                        .expect_err("injected error must fail the RPC");
+                    assert_eq!(search.code(), tonic::Code::Internal);
+                    assert_eq!(search.message(), INTERNAL_ERROR_MESSAGE);
+                });
+            });
+
+            let captured = buffer.0.lock().expect("log buffer mutex").clone();
+            let logs = String::from_utf8(captured).expect("logs are utf-8");
+            assert_eq!(
+                logs.matches(case.token()).count(),
+                3,
+                "each gRPC RPC must log the injected category {case:?}: {logs}"
+            );
+            assert!(logs.contains("internal context error"), "{case:?}: {logs}");
+            assert!(!logs.contains(SENSITIVE_PROBE), "gRPC leak: {logs}");
+        }
     }
 }

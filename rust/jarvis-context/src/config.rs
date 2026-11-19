@@ -82,6 +82,267 @@ pub(crate) fn token_matches(expected: Option<&str>, presented: Option<&str>) -> 
     constant_time_eq(expected, presented)
 }
 
+/// Shared ingress validation for the HTTP and gRPC boundaries (I55-A).
+///
+/// Every rule below lives in exactly one place so the two transports cannot
+/// drift: HTTP maps [`InvalidInput`] to a bare 400 and gRPC maps it to
+/// `InvalidArgument`, both through their own `reject_invalid_input` wrapper.
+/// The helper returns only a static `field` label — never the offending bytes,
+/// vector contents or timestamp — so the fixed-vocabulary `invalid_input` log
+/// record is identical on both ingresses and leaks no caller data.
+pub(crate) mod validation {
+    use chrono::{DateTime, Utc};
+    use jarvis_core::MemoryEntry;
+
+    /// Upper bound on a caller-supplied `search_memory` limit, shared by both
+    /// transports.
+    ///
+    /// Without a common ceiling a negative gRPC `int32` was widened with `as`
+    /// into `usize::MAX` and reached Qdrant through the over-fetch path, while
+    /// HTTP rejected the same value during deserialization. One explicit
+    /// bounded constant keeps both ingresses fail-closed; `try_from` handles
+    /// the sign and this constant handles the magnitude.
+    pub(crate) const MAX_SEARCH_LIMIT: usize = 1_000;
+
+    /// The only information a boundary validation failure carries outward.
+    ///
+    /// `field` is always a static label chosen here (never derived from input),
+    /// so it is safe to log and to echo as a fixed client-facing message.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) struct InvalidInput {
+        pub(crate) field: &'static str,
+    }
+
+    // Fixed message only: an `InvalidInput` must never render caller data even
+    // if a `Builder`-layer caller wraps it in an `anyhow::Error` chain.
+    impl std::fmt::Display for InvalidInput {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("invalid client input")
+        }
+    }
+    impl std::error::Error for InvalidInput {}
+
+    /// Emit the single fixed-vocabulary log record for a rejected input.
+    ///
+    /// Both transports call this before mapping to their own status code, so
+    /// journald/OTLP output is uniform and the offending value is never read.
+    pub(crate) fn log_invalid_input(field: &'static str) {
+        tracing::warn!(
+            error_kind = "invalid_input",
+            field = field,
+            "invalid client input"
+        );
+    }
+
+    /// Validate a caller-supplied search limit, returning the safe `usize`.
+    ///
+    /// `i64` is the transport-neutral input: gRPC widens its `int32` (a
+    /// negative value fails `try_from`) and HTTP now deserializes its limit as
+    /// `i64` too, so both ingresses take the identical path. Zero is kept as a
+    /// valid "return nothing" request for backwards compatibility.
+    pub(crate) fn validate_search_limit(limit: i64) -> Result<usize, InvalidInput> {
+        let limit = usize::try_from(limit).map_err(|_| InvalidInput { field: "limit" })?;
+        if limit > MAX_SEARCH_LIMIT {
+            return Err(InvalidInput { field: "limit" });
+        }
+        Ok(limit)
+    }
+
+    /// `true` only for a JSON object. Qdrant's payload map is built from object
+    /// entries; a scalar/array value would silently produce an empty payload.
+    fn is_object(value: &serde_json::Value) -> bool {
+        matches!(value, serde_json::Value::Object(_))
+    }
+
+    /// Parse the `metadata` string and require a JSON object.
+    ///
+    /// A scalar such as `"text"` or `123` used to satisfy `from_str` and pass
+    /// the boundary, but `memory::upsert_vector` only copies `Value::Object`
+    /// entries into the Qdrant payload — the caller's data was silently lost.
+    pub(crate) fn parse_metadata(raw: &str) -> Result<serde_json::Value, InvalidInput> {
+        let value: serde_json::Value =
+            serde_json::from_str(raw).map_err(|_| InvalidInput { field: "metadata" })?;
+        if is_object(&value) {
+            Ok(value)
+        } else {
+            Err(InvalidInput { field: "metadata" })
+        }
+    }
+
+    /// Validate an embedding vector against the configured dimension.
+    ///
+    /// `embedding_dim` is fail-closed at startup; without this check the write
+    /// path stayed fail-open and forwarded a wrong-sized (or empty) vector to
+    /// Qdrant, contradicting that startup guarantee. An empty vector is a
+    /// special case of the same mismatch and is rejected explicitly.
+    pub(crate) fn validate_embedding(
+        embedding: &[f32],
+        embedding_dim: usize,
+    ) -> Result<(), InvalidInput> {
+        if embedding.is_empty() || embedding.len() != embedding_dim {
+            return Err(InvalidInput { field: "embedding" });
+        }
+        Ok(())
+    }
+
+    /// Resolve a caller-supplied expiry timestamp.
+    ///
+    /// Non-positive values are the documented "no expiry" sentinel (HTTP
+    /// absent/`0`, gRPC proto3 `<= 0`). A *positive* value outside chrono's
+    /// range used to degrade silently to `None` and store the memory with no
+    /// expiry; it is now rejected at the boundary.
+    ///
+    /// Boundary note: this is a **required** memory field, unlike the additive
+    /// event `source`/`timestamp` and the ranked `score`, which keep their
+    /// degrade-on-invalid contract elsewhere.
+    pub(crate) fn parse_expires_at(raw: i64) -> Result<Option<DateTime<Utc>>, InvalidInput> {
+        if raw <= 0 {
+            return Ok(None);
+        }
+        DateTime::from_timestamp(raw, 0)
+            .map(Some)
+            .ok_or(InvalidInput {
+                field: "expires_at",
+            })
+    }
+
+    /// Build a complete `MemoryEntry` from raw ingress fields, enforcing every
+    /// I55-A rule in one place.
+    ///
+    /// The caller-supplied id is deliberately *not* accepted: both transports
+    /// mint a fresh UUID so a client cannot overwrite an existing record
+    /// (I7-E / I8-A). Only required memory fields are validated here; the
+    /// additive fields (`event` `source`/`timestamp` on the build path and the
+    /// ranked `score` on responses) intentionally keep their degrade contract
+    /// outside this boundary. `score` starts as `None` for a stored entry.
+    pub(crate) fn prepare_memory(
+        content: String,
+        embedding: Vec<f32>,
+        metadata_raw: &str,
+        source: String,
+        expires_at_raw: i64,
+        embedding_dim: usize,
+    ) -> Result<MemoryEntry, InvalidInput> {
+        validate_embedding(&embedding, embedding_dim)?;
+        let metadata = parse_metadata(metadata_raw)?;
+        let expires_at = parse_expires_at(expires_at_raw)?;
+        Ok(MemoryEntry {
+            id: uuid::Uuid::new_v4(),
+            content,
+            embedding,
+            metadata,
+            source,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at,
+            score: None,
+        })
+    }
+
+    /// Defense-in-depth recheck at the core store boundary.
+    ///
+    /// Normal ingress already passed [`prepare_memory`]; this guards direct
+    /// callers of `ContextBuilder::store_memory` too. A failure is returned as
+    /// an `InvalidInput` error that the transports map back to a bare 400 /
+    /// `InvalidArgument` rather than an internal error.
+    pub(crate) fn validate_memory_for_store(
+        memory: &MemoryEntry,
+        embedding_dim: usize,
+    ) -> Result<(), InvalidInput> {
+        validate_embedding(&memory.embedding, embedding_dim)?;
+        if is_object(&memory.metadata) {
+            Ok(())
+        } else {
+            Err(InvalidInput { field: "metadata" })
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use serde_json::json;
+
+        #[test]
+        fn limit_rejects_negative_and_oversized_values() {
+            assert_eq!(
+                validate_search_limit(-1),
+                Err(InvalidInput { field: "limit" })
+            );
+            assert_eq!(
+                validate_search_limit(MAX_SEARCH_LIMIT as i64 + 1),
+                Err(InvalidInput { field: "limit" })
+            );
+            assert_eq!(validate_search_limit(0).expect("zero is allowed"), 0);
+            assert_eq!(validate_search_limit(5).expect("valid limit"), 5);
+            assert_eq!(
+                validate_search_limit(MAX_SEARCH_LIMIT as i64).expect("boundary value"),
+                MAX_SEARCH_LIMIT
+            );
+        }
+
+        #[test]
+        fn metadata_requires_a_json_object() {
+            assert_eq!(
+                parse_metadata(r#"{"kind":"test"}"#).expect("object is accepted"),
+                json!({"kind": "test"})
+            );
+            for scalar in [r#""text""#, "123", "[1, 2]", "null"] {
+                assert_eq!(
+                    parse_metadata(scalar),
+                    Err(InvalidInput { field: "metadata" }),
+                    "non-object metadata must be rejected: {scalar}"
+                );
+            }
+            assert_eq!(
+                parse_metadata("{not-json").err().map(|e| e.field),
+                Some("metadata")
+            );
+        }
+
+        #[test]
+        fn embedding_must_match_the_configured_dimension_and_be_non_empty() {
+            assert!(validate_embedding(&[0.1, 0.2, 0.3], 3).is_ok());
+            assert_eq!(
+                validate_embedding(&[], 3),
+                Err(InvalidInput { field: "embedding" })
+            );
+            assert_eq!(
+                validate_embedding(&[0.1, 0.2], 3),
+                Err(InvalidInput { field: "embedding" })
+            );
+            assert_eq!(
+                validate_embedding(&[0.1; 4], 3),
+                Err(InvalidInput { field: "embedding" })
+            );
+        }
+
+        #[test]
+        fn positive_out_of_range_expiry_is_rejected() {
+            assert_eq!(parse_expires_at(0).expect("unset"), None);
+            assert_eq!(parse_expires_at(-5).expect("sentinel"), None);
+            assert_eq!(
+                parse_expires_at(1_800_000_000)
+                    .expect("valid")
+                    .map(|t| t.timestamp()),
+                Some(1_800_000_000)
+            );
+            assert_eq!(
+                parse_expires_at(i64::MAX),
+                Err(InvalidInput {
+                    field: "expires_at"
+                })
+            );
+        }
+
+        #[test]
+        fn invalid_input_error_never_renders_caller_data() {
+            let err = InvalidInput { field: "limit" };
+            assert_eq!(err.to_string(), "invalid client input");
+            assert!(!err.to_string().contains("limit"));
+        }
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     pub grpc_addr: String,
