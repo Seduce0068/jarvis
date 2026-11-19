@@ -44,6 +44,27 @@ pub(crate) mod status_vocabulary {
     pub const ACTOR_OPERATOR: &str = "operator";
 }
 
+/// Collapse a free-form reason into the fixed vocabulary shared by the status
+/// projection ([`KillSwitchStatus::redacted`]) and the activation warning.
+///
+/// Keeping a single classifier is what makes the tracing surface obey the same
+/// contract as the wire surface: a value that is safe to return over gRPC/HTTP
+/// must also be safe to forward to OTLP/Grafana. Only the literals above can be
+/// returned; no fragment of the input string is ever propagated.
+fn reason_kind(reason: &str) -> &'static str {
+    if reason == POISONED_LOCK_REASON {
+        status_vocabulary::REASON_LOCK_POISONED
+    } else if reason == PERSIST_FAILURE_REASON {
+        status_vocabulary::REASON_PERSISTENCE_FAILURE
+    } else if reason.starts_with(CLOCK_FAILURE_REASON) {
+        status_vocabulary::REASON_CLOCK_FAILURE
+    } else if reason.starts_with("unreadable kill switch state") {
+        status_vocabulary::REASON_STATE_UNREADABLE
+    } else {
+        status_vocabulary::REASON_OPERATOR_DEFINED
+    }
+}
+
 /// Compute the fixed-size SHA-256 digest used as the comparison target by
 /// every token gate. Reducing both operands to `[u8; 32]` absorbs their
 /// lengths into the digest, so the comparison itself always covers exactly 32
@@ -131,19 +152,7 @@ impl KillSwitchStatus {
     /// Collapse them to a fixed vocabulary; the raw values remain available to
     /// internal audit code via [`KillSwitch::status`].
     pub fn redacted(&self) -> Self {
-        let reason = self.reason.as_deref().map(|reason| {
-            if reason == POISONED_LOCK_REASON {
-                status_vocabulary::REASON_LOCK_POISONED
-            } else if reason == PERSIST_FAILURE_REASON {
-                status_vocabulary::REASON_PERSISTENCE_FAILURE
-            } else if reason.starts_with(CLOCK_FAILURE_REASON) {
-                status_vocabulary::REASON_CLOCK_FAILURE
-            } else if reason.starts_with("unreadable kill switch state") {
-                status_vocabulary::REASON_STATE_UNREADABLE
-            } else {
-                status_vocabulary::REASON_OPERATOR_DEFINED
-            }
-        });
+        let reason = self.reason.as_deref().map(reason_kind).map(str::to_owned);
         let activated_by = self.activated_by.as_deref().map(|actor| {
             if actor == status_vocabulary::ACTOR_SYSTEM {
                 status_vocabulary::ACTOR_SYSTEM
@@ -154,7 +163,7 @@ impl KillSwitchStatus {
         Self {
             activated: self.activated,
             activated_at: self.activated_at,
-            reason: reason.map(str::to_owned),
+            reason,
             activated_by: activated_by.map(str::to_owned),
         }
     }
@@ -238,18 +247,28 @@ impl KillSwitch {
     /// `"system"`.
     pub fn activate_with_actor(&self, reason: String, actor: String) {
         self.arm_with_actor(reason.clone(), actor);
-        if let Err(error) = self.persist() {
+        if self.persist().is_err() {
             // `persist()` re-arms the switch fail-closed, so the in-memory
             // state stays activated. The state file was NOT written though:
             // never log a durable "KILL SWITCH ACTIVATED" that contradicts
             // the post-restart reality (the switch would be disarmed again).
+            //
+            // I48-B: the caller's free-form `reason`, the persist error's
+            // anyhow chain and the state-file path all flow to OTLP/Grafana
+            // via tracing. Log only the fixed `status_vocabulary` kind, a
+            // fixed message and the fail-closed `activated` flag — exactly
+            // the vocabulary `redacted()` exposes on the wire.
             warn!(
-                "KILL SWITCH ACTIVATED IN MEMORY ONLY (NOT PERSISTED): requested reason '{}'; \
-                 state will not survive restart: {error}",
-                reason
+                error_kind = status_vocabulary::REASON_PERSISTENCE_FAILURE,
+                activated = true,
+                "KILL SWITCH ACTIVATED IN MEMORY ONLY (NOT PERSISTED)"
             );
         } else {
-            warn!("KILL SWITCH ACTIVATED: {}", reason);
+            warn!(
+                error_kind = reason_kind(&reason),
+                activated = true,
+                "KILL SWITCH ACTIVATED"
+            );
         }
     }
 
@@ -914,5 +933,129 @@ mod tests {
             .deactivate("admin-token")
             .expect("valid token deactivates");
         assert!(!switch.is_activated());
+    }
+
+    // ---- I48-B activation log redaction / PROBE non-leak regression --------
+
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// In-memory sink for the JSON formatter, mirroring the OTLP-bound output.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer mutex poisoned")
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Render the real JSON log lines emitted during `f` into a buffer.
+    fn capture_activation_logs<F: FnOnce()>(f: F) -> String {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, f);
+        }
+        String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8")
+    }
+
+    /// The caller's free-form reason must never reach the activation warning,
+    /// including on the real token-gated persist-failure path. `PROBE` is a
+    /// canary placed in that reason; a control event first proves the JSON
+    /// capture observes it, then the production log must carry only the fixed
+    /// `error_kind`/message and none of the canary. Status redaction is covered
+    /// separately by `redacted_status_uses_a_fixed_vocabulary`.
+    #[test]
+    fn activation_log_never_leaks_caller_reason_on_persist_failure() {
+        const ACTIVATION_LOG_PROBE_REASON: &str = "I48B_PERSIST_LOG_PROBE_DO_NOT_LEAK";
+
+        let control = capture_activation_logs(|| {
+            tracing::info!(probe = ACTIVATION_LOG_PROBE_REASON, "capture control event");
+        });
+        assert!(
+            control.contains(ACTIVATION_LOG_PROBE_REASON),
+            "control event must be observable, otherwise this test proves nothing: {control}"
+        );
+
+        let path = temp_path("activation-log-probe");
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+        assert!(!switch.is_activated());
+
+        // Make the configured parent unwritable so persist() fails on the real
+        // token-gated path: activate_with_token -> activate ->
+        // activate_with_actor -> persist.
+        let parent = path.parent().expect("state path has a parent");
+        std::fs::remove_dir_all(parent).expect("remove temp dir");
+        std::fs::write(parent, b"blocker").expect("create blocker file");
+
+        let log = capture_activation_logs(|| {
+            switch
+                .activate_with_token(ACTIVATION_LOG_PROBE_REASON.to_owned(), "admin-token")
+                .expect("valid admin token activates");
+        });
+
+        assert!(
+            log.contains("\"error_kind\":\"persistence_failure\""),
+            "the fixed activation error_kind must be present: {log}"
+        );
+        assert!(
+            log.contains("KILL SWITCH ACTIVATED IN MEMORY ONLY (NOT PERSISTED)"),
+            "the fixed activation message must be present: {log}"
+        );
+        assert!(
+            !log.contains(ACTIVATION_LOG_PROBE_REASON),
+            "caller reason leaked into the activation log: {log}"
+        );
+
+        std::fs::remove_file(parent).expect("clean blocker file");
+    }
+
+    /// A successful activation must collapse the caller's reason to the fixed
+    /// vocabulary too — the `redacted()` contract applies to both warnings.
+    #[test]
+    fn activation_log_never_leaks_caller_reason_on_success() {
+        const ACTIVATION_LOG_PROBE_REASON: &str = "I48B_SUCCESS_LOG_PROBE_DO_NOT_LEAK";
+
+        // No state path: persist() is a no-op and the success warning is emitted.
+        let switch = KillSwitch::new("admin-token", None);
+        let log = capture_activation_logs(|| {
+            switch
+                .activate_with_token(ACTIVATION_LOG_PROBE_REASON.to_owned(), "admin-token")
+                .expect("valid admin token activates");
+        });
+
+        assert!(
+            log.contains("\"error_kind\":\"operator_defined\""),
+            "the reason must be collapsed to fixed vocabulary: {log}"
+        );
+        assert!(log.contains("KILL SWITCH ACTIVATED"), "{log}");
+        assert!(
+            !log.contains(ACTIVATION_LOG_PROBE_REASON),
+            "caller reason leaked into the activation log: {log}"
+        );
     }
 }
