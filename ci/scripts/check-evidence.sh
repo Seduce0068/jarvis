@@ -28,8 +28,13 @@
 # reference-style definitions and inline links, must state at least passed and
 # failed, and must agree with the referenced JSON results. Every count match and
 # every reference link in an entry is checked, so a second contradictory count
-# or a second link to a different JSON cannot hide a failure. Values are withheld
-# from error output; no secret values are read.
+# or a second link to a different JSON cannot hide a failure. Contract steps
+# added to an EXISTING Scenario (e.g. the Round 61 BareJson 415/413/400/no-leak
+# steps) do not change the Scenario count, so an unchanged executed total could
+# still be reported as sufficient. Pinned contract keywords are therefore
+# counted per spec; any keyword beyond the grandfathered Round 61 baseline must
+# appear in the matching evidence notes, otherwise SCENARIO_STEP_UNCOVERED fails
+# closed. No keyword value is emitted; no secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -44,6 +49,7 @@ fi
 
 result=$(python3 - "${evidence[@]}" <<'PY'
 import glob, hashlib, json, os, re, sys
+from collections import Counter
 from datetime import datetime
 from urllib.parse import unquote
 
@@ -60,6 +66,88 @@ ok = 0
 RFC3339 = re.compile(
     r'^\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})$')
 DOCUMENT_TYPES = ("test-execution-log", "test-result", "test-summary-report")
+
+# I65-C contract-step coverage. Round 61 appended the BareJson 415/413/400/
+# no-leak contract group to four EXISTING Scenarios, so the executed >=
+# scenario_count gate could not notice a spec-only edit. A "contract step" is a
+# gherkin step line (or the I61-A marker comment inside a gherkin block) that
+# carries one of these pinned keywords. Those four specs' evidence notes were
+# NOT synced with the keywords (reported separately), so their exact keyword
+# occurrences are grandfathered via BASELINE_CONTRACT_STEPS. Any additional or
+# duplicated occurrence must be present in the evidence notes, otherwise the
+# gate fails closed with SCENARIO_STEP_UNCOVERED. Remove the baseline once the
+# four notes have been synchronised with a real test run.
+CONTRACT_KEYWORDS = {
+    "BareJson": r'\bBareJson\b',
+    "415": r'\b415\b',
+    "413": r'\b413\b',
+    "400": r'\b400\b',
+    "no-leak": r'rejection\s*文と入力本文バイトを[^\n]*出さない|no-?leak|非漏洩',
+    "invalid_input": r'error_kind\s*=\s*invalid_input',
+    "field=body": r'field\s*=\s*body',
+}
+# Notes are prose: accept the same keyword or a close human spelling. This only
+# decides whether a step is covered; the value itself is never emitted.
+CONTRACT_NOTE_PATTERNS = {
+    "BareJson": r'\bBareJson\b',
+    "415": r'\b415\b',
+    "413": r'\b413\b',
+    "400": r'\b400\b',
+    "no-leak": r'no-?leak|非漏洩|漏洩しな|rejection\s*文',
+    "invalid_input": r'invalid[_-]?input',
+    "field=body": r'field\s*[=:]\s*body',
+}
+BASELINE_CONTRACT_STEPS = {
+    "test-context.md": ("BareJson", "415", "413", "400", "no-leak",
+                        "invalid_input", "field=body"),
+    "test-event.md": ("BareJson", "415", "413", "400", "no-leak",
+                      "invalid_input", "field=body"),
+    "test-policy-approval.md": ("BareJson", "415", "413", "400", "no-leak",
+                                "invalid_input", "field=body"),
+    # mcp-gateway has one extra 400 step (ArgsTooLarge と別経路).
+    "test-mcp-gateway.md": ("BareJson", "415", "413", "400", "400",
+                            "no-leak", "invalid_input", "field=body"),
+}
+
+def contract_keywords(spec_text):
+    """Count pinned contract keywords in steps after a contract marker.
+
+    Scoping to the marker and to its following steps keeps ordinary gherkin
+    steps that merely mention a status code (e.g. "Then 400 ...") from being
+    mistaken for contract steps. A new contract group in a new gherkin block
+    is still detected because the block carries its own marker.
+    """
+    found = []
+    marker = re.compile(
+        r'I61-A|BareJson|error_kind\s*=\s*invalid_input|'
+        r'field\s*=\s*body|rejection\s*文と入力本文バイト', re.IGNORECASE)
+    step = re.compile(r'^[ \t]*(?:Given|When|Then|And|But)\b')
+    blocks = []
+    current = None
+    for line in spec_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('```'):
+            if stripped.lower().startswith('```gherkin'):
+                current = []
+            elif current is not None:
+                blocks.append(current)
+                current = None
+            continue
+        if current is not None:
+            current.append(line)
+    if current is not None:
+        blocks.append(current)
+    for block in blocks:
+        start = next((i for i, line in enumerate(block)
+                      if marker.search(line)), None)
+        if start is None:
+            continue
+        for line in block[start:]:
+            if not (step.match(line) or marker.search(line)):
+                continue
+            for name, pattern in CONTRACT_KEYWORDS.items():
+                found.extend([name] * len(re.findall(pattern, line, re.IGNORECASE)))
+    return Counter(found)
 
 def digest(path):
     return "sha256:" + hashlib.sha256(open(path, "rb").read()).hexdigest()
@@ -179,6 +267,30 @@ for f in evidence_files:
                              ref.get("requirements")))
     if not os.path.isfile(spec_path):
         errors.append(f"{f}: SPEC_PATH_NOT_FOUND:{spec_path}"); continue
+    # Read the spec before the hash gate: appending a contract step to a spec
+    # drifts its sha256, and SPEC_HASH_MISMATCH would otherwise mask the
+    # SCENARIO_STEP_UNCOVERED regression the tamper test isolates.
+    try:
+        with open(spec_path, encoding="utf-8") as sf:
+            spec_text = sf.read()
+    except OSError:
+        errors.append(f"{f}: SPEC_UNREADABLE"); continue
+    # I65-C: a contract step appended to an existing Scenario keeps the
+    # Scenario count unchanged, so the executed total alone cannot detect a
+    # spec-only edit. Only keyword occurrences beyond the grandfathered Round
+    # 61 baseline require a matching note. A Counter (not a set) is used so a
+    # duplicated step also counts as newly uncovered. No keyword is emitted.
+    detected_steps = contract_keywords(spec_text)
+    baseline_steps = Counter(BASELINE_CONTRACT_STEPS.get(
+        os.path.basename(spec_path), ()))
+    uncovered_steps = detected_steps - baseline_steps
+    if uncovered_steps:
+        missing_steps = [name for name in uncovered_steps
+                         if not re.search(CONTRACT_NOTE_PATTERNS[name], notes,
+                                          re.IGNORECASE)]
+        if missing_steps:
+            errors.append(f"{f}: SCENARIO_STEP_UNCOVERED")
+            continue
     actual = digest(spec_path)
     if actual != top:
         errors.append(f"{f}: SPEC_HASH_MISMATCH:{spec_path}"); continue
@@ -194,11 +306,6 @@ for f in evidence_files:
     # unverifiable and fails as well. bool values are excluded from the sum
     # so True cannot be counted as 1. Only the error code is emitted; the
     # counts themselves are never printed.
-    try:
-        with open(spec_path, encoding="utf-8") as sf:
-            spec_text = sf.read()
-    except OSError:
-        errors.append(f"{f}: SPEC_UNREADABLE"); continue
     scenario_count = len(re.findall(r'^[ \t]*Scenario[ \t]*:', spec_text, re.MULTILINE))
     executed = sum(value for value in (r.get(k, 0) for k in ("passed", "failed"))
                    if type(value) is int)

@@ -804,6 +804,48 @@ PY
   fi
 done
 
+# I65-C: a contract step appended to an existing Scenario must not be treated
+# as covered when the evidence notes still lack its keyword. Use COPIED specs
+# so the real specification is untouched; the gate evaluates contract coverage
+# before the hash gate, so the drifted sha256 cannot mask the targeted code.
+step_tmp="$tmp/scenario_step_negative"
+mkdir -p "$step_tmp/ci/scripts" "$step_tmp/evidence" "$step_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$step_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/specs/index.md" "$step_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$step_tmp/evidence/index.md"
+cp "$repo/todo.md" "$step_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$step_tmp/evidence/"
+cp "$repo"/specs/test-*.md "$step_tmp/specs/"
+# Duplicate the existing 415 contract step in TC-C. The Scenario count is
+# unchanged and the notes are untouched, so only the new contract-coverage
+# gate can reject this copy.
+if python3 - "$step_tmp/specs/test-context.md" <<'PY'
+import sys
+
+path = sys.argv[1]
+with open(path, encoding='utf-8') as fh:
+    text = fh.read()
+needle = '  Then 空本文の 415 を返す（ヘッダ付与を促す）\n'
+if text.count(needle) != 1:
+    raise SystemExit('415 contract step anchor not unique')
+with open(path, 'w', encoding='utf-8') as fh:
+    fh.write(text.replace(needle, needle + needle, 1))
+PY
+then
+  out=$(bash "$step_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+  if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'SCENARIO_STEP_UNCOVERED'; then
+    echo "  PASS: check-evidence.sh rejects an uncovered contract step"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: check-evidence.sh accepted an uncovered contract step (exit $code)"
+    printf '%s\n' "$out" | head -3 >&2
+    fail=$((fail+1))
+  fi
+else
+  echo "  FAIL: could not prepare contract-step tamper"
+  fail=$((fail+1))
+fi
+
 # secret_scan.py must fail closed on a value-like credential and must never
 # echo the value itself. Build a throwaway git repo with a synthetic token
 # (no real secret); the tree is removed by the existing EXIT trap on $tmp.
@@ -1028,6 +1070,36 @@ if [ -n "$drift_gate" ] && [ "$danger_rc" -eq 3 ] && [ "$unknown_rc" -eq 3 ]; th
   ok=$((ok+1))
 else
   echo "  FAIL: rollback drift gate regressed (DANGER must exit 3)"
+  fail=$((fail+1))
+fi
+
+# I65-A (Round 61 / migration 005): a terminal dead-letter decision must retain
+# the row for audit. Guard the production UPDATE directly: reverting to remove()
+# or a DELETE would destroy the audit trail while the behavioural mock tests
+# would still pass. A second guard keeps the SELECT gate and its use in `list`.
+builder="$repo/rust/jarvis-context/src/builder.rs"
+dl_body="$(sed -n '/^    async fn dead_letter(&self, id: Uuid, dead_lettered_at: DateTime<Utc>)/,/^    }/p' "$builder")"
+# The SQL placeholder is matched literally.
+# shellcheck disable=SC2016
+if printf '%s\n' "$dl_body" | grep -Fq 'UPDATE pending_embeddings' \
+   && printf '%s\n' "$dl_body" | grep -Fq 'dead_lettered_at = $2' \
+   && printf '%s\n' "$dl_body" | grep -Fq "vector_state = 'dead_lettered'" \
+   && ! printf '%s\n' "$dl_body" | grep -Fq 'DELETE FROM'; then
+  echo "  PASS: PgPendingStore::dead_letter retains rows with an UPDATE"
+  ok=$((ok+1))
+else
+  echo "  FAIL: PgPendingStore::dead_letter lost its retention UPDATE"
+  fail=$((fail+1))
+fi
+
+list_sql="$(sed -n '/^const LIST_PENDING_SQL: &str = /,/ORDER BY created_at ASC LIMIT/p' "$builder")"
+pg_list_body="$(sed -n '/^    async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>>/,/^    }/p' "$builder")"
+if printf '%s\n' "$list_sql" | grep -Fq 'dead_lettered_at IS NULL' \
+   && printf '%s\n' "$pg_list_body" | grep -Fq 'LIST_PENDING_SQL'; then
+  echo "  PASS: pending selection keeps the dead-letter exclusion gate"
+  ok=$((ok+1))
+else
+  echo "  FAIL: pending selection lost the dead-letter exclusion gate"
   fail=$((fail+1))
 fi
 

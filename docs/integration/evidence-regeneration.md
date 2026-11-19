@@ -69,6 +69,11 @@ Traceability の Req 列集合の両方と一致させる。要件の追加・�
   一致させる。スキップがある場合は `N ignored` のように数値付きで明記し、
   `N` を `results.skipped` と一致させる。`no tests were ignored` のような
   文字列だけでは `SKIPPED_TESTS` で拒否される。
+- 仕様へ契約 step（`BareJson` / `415` / `413` / `400` / no-leak /
+  `error_kind=invalid_input` / `field=body`）を追加・変更した場合は、
+  対応テストの実測に基づき同じキーワードを `notes` にも明記する。
+  仕様だけを更新してキーワードが無い場合は `SCENARIO_STEP_UNCOVERED` で
+  拒否される（詳細は「契約 step のカバレッジ」を参照）。
 - `results.skipped`: 正の値にする場合は `notes` へ数値付きの `N ignored` が必要。
   ただしスキップは実行済みに数えず、Scenario カバレッジの分子には入らない
   （mcp-gw の `skipped=1` は `notes` の `1 ignored` と `passed=124` で
@@ -116,6 +121,7 @@ make check-evidence
 | notes | `BAD_NOTES_TYPE`, `SKIPPED_TESTS`, `NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH` |
 | 要件 | `REQ_SET_MISMATCH` |
 | シナリオ | `SCENARIO_COUNT_MISMATCH` |
+| 契約 step | `SCENARIO_STEP_UNCOVERED` |
 | 仕様構造 | `MISSING_EVIDENCE`, `MISSING_SECTION`, `MISSING_TRACEABILITY`, `MISSING_INFO_ITEM`, `MISSING_CONFORMANCE` |
 | 索引 | `INDEX_NOT_FOUND`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK` |
 | 索引の件数 | `INDEX_RESULT_MISSING`, `INDEX_RESULT_MISMATCH` |
@@ -133,12 +139,53 @@ make check-evidence
 | `results.skipped` | 正の値は `notes` に数値付き `N ignored`（`N` = `results.skipped`）が必要（`SKIPPED_TESTS`） |
 | `notes` | 文字列型（`BAD_NOTES_TYPE`）。`passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致（`NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH`） |
 | `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed のみ、skipped は除外）がその数以上（`SCENARIO_COUNT_MISMATCH`）。`ignored` 明記済みのスキップでもカバレッジは満たせない |
+| 契約 step | 契約マーカー以降の step に現れるキーワードが証跡 `notes` にもあること。baseline 超過分が未同期なら `SCENARIO_STEP_UNCOVERED` |
 | index | 両 index が全成果物をリンクし、リンク切れなし |
 | index のエントリ | 参照定義・インラインリンクを等価に解決し、`N passed` / `N failed` が必須（欠落は `INDEX_RESULT_MISSING`） |
 | index の件数 | 見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
 | `timestamp` / `signature` | RFC 3339 の実在日時（`BAD_TIMESTAMP`）/ `self-attested`（`BAD_SIGNATURE`） |
 | `document_type` | 設定時は `test-execution-log` / `test-result` / `test-summary-report` のいずれか（`BAD_DOCUMENT_TYPE`） |
 | 仕様構造 | 必須4セクション、7列 Traceability、Document map、6情報項目、`tailored`（`MISSING_SECTION` 等） |
+
+## 契約 step のカバレッジ（I65-C）
+
+### 採用方針
+
+既存シナリオへ契約 step を追記しても `Scenario:` 行数は増えないため、
+`executed >= scenario_count` の下限ゲートだけでは「仕様のみの改変」を
+検出できない。本リポジトリでは、**仕様内の契約 step キーワードを検出し、
+対応証跡の `notes` に当該キーワードが無ければ
+`SCENARIO_STEP_UNCOVERED` で fail-closed にする**方針を採用する。
+「新規 step 追加時に Scenario を新設して件数ゲートを上げる運用」は採らない。
+
+検出対象は gherkin ブロック内の契約マーカー（`# I61-A: BareJson ...`）以降の
+step に現れる `BareJson` / `415` / `413` / `400` / no-leak /
+`error_kind=invalid_input` / `field=body`。契約グループ外で status に言及する
+通常 step（例: `Then 400 と ... が返る`）は誤検知を避けるため対象外とする。
+`Counter` で出現回数を数えるため、既存 step の重複追記も新規 step と
+みなされ、notes 未同期なら拒否される。
+
+### Round 61 の legacy baseline（解消待ち）
+
+Round 61 で 4 仕様へ追記された契約 step は、対応する 4 証跡の `notes` に
+キーワードが同期されていない（2026-11-20 時点で確認）。既存 6 証跡を通す
+ため、これら既知の出現回数だけを `check-evidence.sh` の
+`BASELINE_CONTRACT_STEPS` で grandfather している。
+
+| 仕様 | 対応証跡の `notes` の状態 |
+| --- | --- |
+| `test-context.md` | `BareJson` / `415` / `413` / `400` / no-leak / 固定語彙のいずれも未記載 |
+| `test-event.md` | 同上（「非漏洩検証」はあるが no-leak 契約キーワードとしては未同期） |
+| `test-policy-approval.md` | 同上 |
+| `test-mcp-gateway.md` | 同上 |
+
+baseline を超える新規・重複 step は notes 同期が必須となり、未同期なら
+`SCENARIO_STEP_UNCOVERED` で拒否される。`ci/scripts/test-legacy-guards.sh`
+に、契約 step を重複追記したコピーが拒否される tamper 回帰を追加済み。
+
+**残作業（本担当の担当外）**: 上記 4 証跡の `notes` へ実測済みキーワードを
+追記したうえで `BASELINE_CONTRACT_STEPS` を削除し、strict モードへ移行する。
+証跡 JSON と仕様ファイルは本担当の編集範囲外のため未変更である。
 
 ## JSON リジェクションの status 回帰（I61-A）
 
