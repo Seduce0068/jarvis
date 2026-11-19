@@ -20,15 +20,34 @@ const INVALID_ADMIN_TOKEN_MESSAGE: &str = "Invalid admin token";
 
 /// Fixed status text for every non-authentication kill-switch failure.
 /// `KillSwitchError::Persistence::detail` embeds the state-file path and OS
-/// error text; it belongs in the internal tracing log only (R5-B).
+/// error text; the error is reduced to a fixed `error_kind` before any tracing
+/// record is written, so that detail is never logged (R5-B / I46-D).
 const KILL_SWITCH_INTERNAL_ERROR_MESSAGE: &str = "internal error";
+
+/// Fixed-vocabulary categories for kill-switch failures (I46-D).
+///
+/// `KillSwitchError::Persistence` embeds a state-file path and an OS error in
+/// its `detail`, and untyped `anyhow` chains can carry URLs or token fragments.
+/// Only the variant token below is ever logged: no part of the error's
+/// `Display`/`Debug` text is read here. This mirrors `jarvis_context::grpc`'s
+/// `error_kind` so both transports expose the same log vocabulary.
+fn error_kind(error: &anyhow::Error) -> &'static str {
+    use crate::kill_switch::KillSwitchError;
+
+    match error.downcast_ref::<KillSwitchError>() {
+        Some(KillSwitchError::InvalidAdminToken) => "invalid_admin_token",
+        Some(KillSwitchError::Persistence { .. }) => "persistence",
+        None => "other",
+    }
+}
 
 /// Map a kill-switch failure to a gRPC status without disclosing its detail.
 ///
 /// The status-code contract is unchanged: `InvalidAdminToken` is the sole
 /// authentication failure (`Unauthenticated`), everything else — including a
-/// persistence failure after a valid token — is `Internal`. Only the message
-/// is fixed: the full error chain is isolated in the server-side log.
+/// persistence failure after a valid token — is `Internal`. Both the message
+/// and the log record use fixed vocabulary only; the raw error chain never
+/// reaches the client, OTLP or Grafana (I46-D).
 fn kill_switch_status(error: anyhow::Error) -> Status {
     use crate::kill_switch::KillSwitchError;
 
@@ -38,8 +57,11 @@ fn kill_switch_status(error: anyhow::Error) -> Status {
     ) {
         return Status::unauthenticated(INVALID_ADMIN_TOKEN_MESSAGE);
     }
-    let detail = format!("{error:#}");
-    tracing::error!(error = %detail, "kill switch RPC failed with internal error");
+    tracing::error!(
+        operation = "kill_switch_rpc",
+        error_kind = error_kind(&error),
+        "kill switch RPC failed with internal error"
+    );
     Status::internal(KILL_SWITCH_INTERNAL_ERROR_MESSAGE)
 }
 
@@ -164,7 +186,26 @@ mod tests {
     use super::*;
     use crate::PolicyEngine;
     use crate::config::PolicyConfig;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    /// In-memory `MakeWriter` target: no new dependency and no global
+    /// subscriber, so other tests can still install their own (I46-D).
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self.0.lock().expect("log buffer mutex");
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("jarvis-policy-grpc-{label}"));
@@ -474,14 +515,14 @@ mod tests {
     fn kill_switch_status_messages_do_not_leak_detail() {
         use crate::kill_switch::KillSwitchError;
 
-        const PATH: &str = "/home/koppe/.secret/kill-switch-state.json";
-        const OS_ERROR: &str = "permission denied (os error 13)";
+        const PROBE_STATE_PATH: &str = "/var/lib/jarvis/PROBE-kill-switch-state.json";
+        const PROBE_OS_ERROR: &str = "permission denied (os error 13)";
 
         let auth = kill_switch_status(KillSwitchError::InvalidAdminToken.into());
         assert_eq!(auth.code(), tonic::Code::Unauthenticated);
         assert_eq!(auth.message(), INVALID_ADMIN_TOKEN_MESSAGE);
 
-        let detail = format!("write {PATH}: {OS_ERROR}");
+        let detail = format!("write {PROBE_STATE_PATH}: {PROBE_OS_ERROR}");
         let err: anyhow::Error = KillSwitchError::Persistence { detail }.into();
         let persistence = kill_switch_status(err);
         assert_eq!(persistence.code(), tonic::Code::Internal);
@@ -489,18 +530,84 @@ mod tests {
 
         // An untyped anyhow failure (e.g. an upstream context chain) falls
         // back to the same fixed internal phrase.
-        let untyped = kill_switch_status(anyhow::anyhow!("secret at {PATH}"));
+        let untyped = kill_switch_status(anyhow::anyhow!(
+            "PROBE upstream detail at {PROBE_STATE_PATH}"
+        ));
         assert_eq!(untyped.code(), tonic::Code::Internal);
         assert_eq!(untyped.message(), KILL_SWITCH_INTERNAL_ERROR_MESSAGE);
 
         for status in [&auth, &persistence, &untyped] {
-            for sentinel in [PATH, OS_ERROR] {
+            for probe in [PROBE_STATE_PATH, PROBE_OS_ERROR] {
                 assert!(
-                    !status.message().contains(sentinel),
-                    "status leaked {sentinel}: {}",
+                    !status.message().contains(probe),
+                    "status leaked {probe}: {}",
                     status.message()
                 );
             }
         }
+    }
+
+    /// I46-D: the fixed log vocabulary must come from the error *variant*,
+    /// never from its text; untyped failures collapse to `other`, matching the
+    /// context gRPC mapping.
+    #[test]
+    fn kill_switch_error_kind_uses_variants_only() {
+        use crate::kill_switch::KillSwitchError;
+
+        let detail = "write /var/lib/jarvis/PROBE-state.json: PROBE os error".to_owned();
+        let persistence: anyhow::Error = KillSwitchError::Persistence { detail }.into();
+        assert_eq!(error_kind(&persistence), "persistence");
+
+        let auth: anyhow::Error = KillSwitchError::InvalidAdminToken.into();
+        assert_eq!(error_kind(&auth), "invalid_admin_token");
+
+        let untyped = anyhow::anyhow!("PROBE upstream detail");
+        assert_eq!(error_kind(&untyped), "other");
+    }
+
+    /// I46-D regression: `Persistence::detail` (state-file path + OS error) and
+    /// untyped anyhow chains (URLs / token fragments) must not reach the log
+    /// stream either. Only the fixed `error_kind` and `operation` fields are
+    /// emitted, so nothing sensitive is forwarded to OTLP/Grafana.
+    #[test]
+    fn kill_switch_status_never_logs_raw_error_detail() {
+        use crate::kill_switch::KillSwitchError;
+
+        const PROBE_STATE_PATH: &str = "/var/lib/jarvis/PROBE-kill-switch-state.json";
+        const PROBE_OS_ERROR: &str = "Permission denied (os error 13)";
+        const PROBE_URL: &str = "https://PROBE.internal/token/fragment";
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let statuses = tracing::subscriber::with_default(subscriber, || {
+            let detail = format!("write {PROBE_STATE_PATH}: {PROBE_OS_ERROR}");
+            let persistence = kill_switch_status(KillSwitchError::Persistence { detail }.into());
+            let untyped = kill_switch_status(anyhow::anyhow!("upstream {PROBE_URL}"));
+            [persistence, untyped]
+        });
+
+        for status in &statuses {
+            assert_eq!(status.code(), tonic::Code::Internal);
+            assert_eq!(status.message(), KILL_SWITCH_INTERNAL_ERROR_MESSAGE);
+        }
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        for probe in [PROBE_STATE_PATH, PROBE_OS_ERROR, PROBE_URL] {
+            assert!(
+                !logs.contains(probe),
+                "raw error detail leaked to logs: {probe}"
+            );
+        }
+        assert!(logs.contains("kill switch RPC failed with internal error"));
+        // Do not pin the textual rendering of structured fields: it depends on
+        // the tracing-subscriber formatter version. The mapping itself is
+        // asserted in `kill_switch_error_kind_uses_variants_only`.
     }
 }
