@@ -11,6 +11,36 @@ use serde::{Deserialize, Serialize};
 /// The opt-in strict guard rejects this value at startup.
 pub const PLACEHOLDER_KILL_SWITCH_TOKEN: &str = "changeme";
 
+/// Absolute default location of the policy TOML. The former CWD-relative
+/// `config/policy.toml` was not found when the service was started outside
+/// the repository root.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/jarvis/policy.toml";
+
+/// Environment variable that overrides [`DEFAULT_CONFIG_PATH`].
+pub const CONFIG_PATH_ENV: &str = "JARVIS_POLICY_CONFIG_PATH";
+
+const ENV_PREFIX: &str = "JARVIS_POLICY_";
+
+/// Select the TOML path from an optional environment override. Kept pure so
+/// both branches are testable without mutating the process environment
+/// (edition 2024 makes `set_var` unsafe and parallel tests racy).
+fn resolve_config_path(override_path: Option<String>) -> String {
+    override_path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string())
+}
+
+/// Default human approval deadline, in seconds.
+///
+/// Keep this value identical to the gateway's
+/// `JARVIS_MCP_GW_APPROVAL_WINDOW_SECS` default (300 in
+/// `jarvis-mcp-gw/src/approval.rs`). The gateway derives `expires_at` from its
+/// window while this service expires the request using
+/// `approval_timeout_secs`; if the two values differ, the effective deadline
+/// silently drifts. **Both sides must be set to the same value** — when
+/// changing one, change the other.
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyConfig {
     pub grpc_addr: String,
@@ -22,6 +52,10 @@ pub struct PolicyConfig {
     /// Optional JSON file used to persist kill-switch state across restarts.
     /// Unset keeps the switch in memory (tests, ephemeral runs).
     pub kill_switch_state_path: Option<String>,
+    /// Human approval deadline in seconds. Configure this to the same value
+    /// as the gateway's `JARVIS_MCP_GW_APPROVAL_WINDOW_SECS`
+    /// (see [`DEFAULT_APPROVAL_TIMEOUT_SECS`]); both sides describe one
+    /// deadline and must be changed together.
     pub approval_timeout_secs: u64,
     /// Upper bound on simultaneously pending approval requests.
     #[serde(default = "default_approval_max_pending")]
@@ -62,12 +96,24 @@ fn default_approval_max_pending() -> usize {
 }
 
 impl PolicyConfig {
+    /// Load from the absolute [`DEFAULT_CONFIG_PATH`], or from the path in
+    /// [`CONFIG_PATH_ENV`] when it is set and non-blank, with `JARVIS_POLICY_*`
+    /// environment overrides applied on top.
     pub fn load() -> Result<Self> {
+        let path = resolve_config_path(std::env::var(CONFIG_PATH_ENV).ok());
+        Self::load_from_path(&path)
+    }
+
+    /// Parse a config from an explicit TOML path. Split out from [`Self::load`]
+    /// so path selection is testable without touching the process environment.
+    fn load_from_path(path: &str) -> Result<Self> {
         let config: PolicyConfig = Figment::new()
-            .merge(Toml::file("config/policy.toml"))
+            .merge(Toml::file(path))
             // Flat snake_case fields: do NOT use figment's Env split, which
             // would turn JARVIS_POLICY_GRPC_ADDR into the nested key `grpc.addr`.
-            .merge(Env::prefixed("JARVIS_POLICY_"))
+            // The config-path variable only selects the file, so keep it out
+            // of the field provider as well.
+            .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
             .extract()?;
         // I8-E fail-closed guard: enforce at load time so the real binary
         // aborts before any service starts when a durable state path is
@@ -97,7 +143,8 @@ impl Default for PolicyConfig {
             casbin_policy_path: "/etc/jarvis/policy/casbin_policy.csv".into(),
             kill_switch_admin_token: PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
             kill_switch_state_path: None,
-            approval_timeout_secs: 300,
+            // Mirrored by jarvis-mcp-gw's APPROVAL_WINDOW_ENV default (300).
+            approval_timeout_secs: DEFAULT_APPROVAL_TIMEOUT_SECS,
             approval_max_pending: default_approval_max_pending(),
             approval_api_token: None,
             approval_admin_token: None,
@@ -144,6 +191,15 @@ impl PolicyConfig {
 mod tests {
     use super::*;
     use figment::providers::{Format, Serialized};
+    use std::path::Path;
+
+    /// The approval timeout default is the shared value that
+    /// `jarvis-mcp-gw` must mirror via `JARVIS_MCP_GW_APPROVAL_WINDOW_SECS`.
+    #[test]
+    fn approval_timeout_default_is_shared_300() {
+        assert_eq!(DEFAULT_APPROVAL_TIMEOUT_SECS, 300);
+        assert_eq!(PolicyConfig::default().approval_timeout_secs, 300);
+    }
 
     /// Config files written before the pending-approval cap was introduced
     /// must still load (the MCP-1 approval flow depends on this).
@@ -590,5 +646,32 @@ default_deny = true
             config.kill_switch_state_path.as_deref(),
             Some("/var/lib/jarvis/kill-switch.json")
         );
+    }
+
+    /// The service must find its config regardless of the launch directory;
+    /// the former `config/policy.toml` was CWD-relative.
+    #[test]
+    fn default_config_path_is_absolute() {
+        assert!(Path::new(DEFAULT_CONFIG_PATH).is_absolute());
+        assert_eq!(DEFAULT_CONFIG_PATH, "/etc/jarvis/policy.toml");
+    }
+
+    #[test]
+    fn config_path_override_is_honoured() {
+        const OVERRIDE: &str = "/tmp/jarvis-policy-custom.toml";
+        assert_eq!(resolve_config_path(Some(OVERRIDE.into())), OVERRIDE);
+        assert_eq!(resolve_config_path(None), DEFAULT_CONFIG_PATH);
+        assert_eq!(resolve_config_path(Some("   ".into())), DEFAULT_CONFIG_PATH);
+    }
+
+    /// The override variable shares the config prefix, so verify it maps to
+    /// the `config_path` key that `load_from_path` filters out of the provider.
+    #[test]
+    fn config_path_env_name_matches_prefix() {
+        let field = CONFIG_PATH_ENV
+            .strip_prefix(ENV_PREFIX)
+            .expect("override variable uses the policy env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "config_path");
     }
 }

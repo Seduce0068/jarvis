@@ -7,6 +7,24 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Absolute default location of the gateway TOML. The former CWD-relative
+/// `config/mcp_gateway.toml` was not found when started outside the repo root.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/jarvis/mcp_gateway.toml";
+
+/// Environment variable that overrides [`DEFAULT_CONFIG_PATH`].
+pub const CONFIG_PATH_ENV: &str = "JARVIS_MCP_GW_CONFIG_PATH";
+
+const ENV_PREFIX: &str = "JARVIS_MCP_GW_";
+
+/// Select the TOML path from an optional environment override. Kept pure so
+/// both branches are testable without mutating the process environment
+/// (edition 2024 makes `set_var` unsafe and parallel tests racy).
+fn resolve_config_path(override_path: Option<String>) -> String {
+    override_path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string())
+}
+
 /// An upstream MCP server to spawn and register when the gateway starts.
 ///
 /// Only the registration `name` and the child-process `command` are needed:
@@ -26,7 +44,14 @@ pub struct McpGatewayConfig {
     pub grpc_addr: String,
     pub http_addr: String,
     pub allowlist_path: String,
+    /// Legacy sandbox selector, parsed for backward compatibility only.
+    ///
+    /// It is not consulted by the execution path (ADR-0002): native handlers
+    /// and registered upstream MCP servers run without a sandbox wrapper.
+    /// [`McpGatewayConfig::load`] warns when a non-default value is set.
     pub sandbox_type: SandboxType,
+    /// Legacy sandbox options, likewise parsed but never applied at runtime.
+    /// See the `sandbox_type` field above and ADR-0002.
     pub sandbox_config: serde_json::Value,
     pub policy_grpc_addr: String,
     /// HTTP base URL of `jarvis-policy`, used for the human approval flow
@@ -63,19 +88,55 @@ pub struct McpGatewayConfig {
 }
 
 impl McpGatewayConfig {
-    /// Load from `config/mcp_gateway.toml` and `JARVIS_MCP_GW_*` variables.
+    /// Load from the absolute [`DEFAULT_CONFIG_PATH`], or from the path in
+    /// [`CONFIG_PATH_ENV`] when it is set and non-blank, with `JARVIS_MCP_GW_*`
+    /// environment overrides applied on top.
     ///
     /// Figment parses environment values as TOML-style data, so structured
     /// fields such as `upstreams` are readable from both sources without any
     /// split of the flat snake_case keys used by the existing variables.
     pub fn load() -> Result<Self> {
+        let path = resolve_config_path(std::env::var(CONFIG_PATH_ENV).ok());
+        Self::load_from_path(&path)
+    }
+
+    /// Parse a config from an explicit TOML path. Split out from [`Self::load`]
+    /// so path selection is testable without touching the process environment.
+    fn load_from_path(path: &str) -> Result<Self> {
         let config: McpGatewayConfig = Figment::new()
-            .merge(Toml::file("config/mcp_gateway.toml"))
+            .merge(Toml::file(path))
             // Flat snake_case fields: do NOT use figment's Env split, which
             // would turn JARVIS_MCP_GW_GRPC_ADDR into the nested key `grpc.addr`.
-            .merge(Env::prefixed("JARVIS_MCP_GW_"))
+            // The config-path variable only selects the file, so keep it out
+            // of the field provider as well.
+            .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
             .extract()?;
+        config.warn_if_legacy_sandbox_settings_are_ignored();
         Ok(config)
+    }
+
+    /// True when legacy sandbox keys carry non-default values that an
+    /// operator might mistake for an enforced sandbox boundary.
+    fn has_effective_legacy_sandbox_settings(&self) -> bool {
+        let type_is_set = !matches!(self.sandbox_type, SandboxType::None);
+        let options_are_set = !self
+            .sandbox_config
+            .as_object()
+            .is_some_and(|v| v.is_empty());
+        type_is_set || options_are_set
+    }
+
+    /// Emit an operator-facing warning at load time: these keys are kept only
+    /// for config compatibility and are not used by the execution path.
+    fn warn_if_legacy_sandbox_settings_are_ignored(&self) {
+        if self.has_effective_legacy_sandbox_settings() {
+            tracing::warn!(
+                sandbox_type = ?self.sandbox_type,
+                "sandbox_type and sandbox_config are legacy keys: parsed for \
+                 compatibility but not used by the execution path (ADR-0002). \
+                 No sandbox boundary is enforced by these settings."
+            );
+        }
     }
 }
 
@@ -108,6 +169,7 @@ impl Default for McpGatewayConfig {
 /// `sandbox_type` in `mcp_gateway.toml` keep parsing). Execution is
 /// runtime-agnostic (ADR-0002): native handlers and upstream MCP servers
 /// serve all tools, and this value no longer selects an execution backend.
+/// [`McpGatewayConfig::load`] warns when a non-default value is configured.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SandboxType {
@@ -122,6 +184,7 @@ pub enum SandboxType {
 mod tests {
     use super::*;
     use figment::providers::Serialized;
+    use std::path::Path;
 
     /// Config files written before the MCP-1 approval flow existed do not
     /// contain `policy_http_addr`; loading them must still work (fail-open
@@ -344,5 +407,82 @@ command = ["/usr/bin/mcp-git"]
         );
         assert_eq!(config.upstreams[1].name, "git");
         assert_eq!(config.upstreams[1].command, vec!["/usr/bin/mcp-git"]);
+    }
+
+    /// Minimal config with configurable legacy sandbox keys, used by the
+    /// compatibility tests below.
+    fn config_toml(sandbox_type: &str, sandbox_config: &str) -> String {
+        format!(
+            r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "{sandbox_type}"
+sandbox_config = {sandbox_config}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+mcp_principal = "opencode"
+"#
+        )
+    }
+
+    /// The service must find its config regardless of the launch directory;
+    /// the former `config/mcp_gateway.toml` was CWD-relative.
+    #[test]
+    fn default_config_path_is_absolute() {
+        assert!(Path::new(DEFAULT_CONFIG_PATH).is_absolute());
+        assert_eq!(DEFAULT_CONFIG_PATH, "/etc/jarvis/mcp_gateway.toml");
+    }
+
+    #[test]
+    fn config_path_override_is_honoured() {
+        const OVERRIDE: &str = "/tmp/jarvis-mcp-gw-custom.toml";
+        assert_eq!(resolve_config_path(Some(OVERRIDE.into())), OVERRIDE);
+        assert_eq!(resolve_config_path(None), DEFAULT_CONFIG_PATH);
+        assert_eq!(
+            resolve_config_path(Some(String::new())),
+            DEFAULT_CONFIG_PATH
+        );
+    }
+
+    #[test]
+    fn config_path_env_name_matches_prefix() {
+        let field = CONFIG_PATH_ENV
+            .strip_prefix(ENV_PREFIX)
+            .expect("override variable uses the gateway env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "config_path");
+    }
+
+    /// Legacy sandbox keys must keep parsing for every previously supported
+    /// value: they are inert at runtime but never rejected at config load.
+    #[test]
+    fn legacy_sandbox_types_still_parse() {
+        for (value, is_default) in [
+            ("none", true),
+            ("firejail", false),
+            ("bwrap", false),
+            ("docker", false),
+            ("gvisor", false),
+        ] {
+            let toml = config_toml(value, "{}");
+            let config: McpGatewayConfig = toml::from_str(&toml)
+                .unwrap_or_else(|err| panic!("sandbox_type '{value}' must parse: {err}"));
+            assert_eq!(
+                config.has_effective_legacy_sandbox_settings(),
+                !is_default,
+                "sandbox_type '{value}'"
+            );
+        }
+    }
+
+    /// Non-default legacy settings are detected so `load()` can warn that the
+    /// execution path ignores them.
+    #[test]
+    fn explicit_sandbox_settings_are_detected_as_ignored() {
+        let toml = config_toml("firejail", "{ seccomp = true }");
+        let config: McpGatewayConfig = toml::from_str(&toml).expect("legacy config parses");
+        assert!(matches!(config.sandbox_type, SandboxType::Firejail));
+        assert!(config.has_effective_legacy_sandbox_settings());
     }
 }
