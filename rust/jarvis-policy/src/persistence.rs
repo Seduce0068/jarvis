@@ -45,11 +45,17 @@
 //! `OurCommit` / `CompetingDecision` classification is unchanged. The new
 //! [`ApprovalPersistence::load_decision`] seam also lets the approval store
 //! re-read the authoritative decision after a lost expiry CAS.
+//!
+//! I40-A (a): the final transaction attempt gets one dedicated extra read-back
+//! probe on another fresh generation when its regular probe hits a transport
+//! error. This restores the I36-B "lost ack is success" contract even when
+//! every per-attempt probe lost its socket, without raising the
+//! [`MAX_DB_ATTEMPTS`] transaction cap.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::approval::{ApprovalError, ApprovalPersistence};
+use crate::approval::{ApprovalError, ApprovalPersistence, LoadedDecision};
 use crate::policy::{ApprovalDecision, ApprovalRequest};
 
 /// Upper bound on consecutive attempts for a single persistence operation:
@@ -150,6 +156,25 @@ fn probe_iteration_resolution(
         )),
         Err(()) => None,
     }
+}
+
+/// Pure resolution of the final-attempt read-back with its one-shot retry
+/// budget (I40-A (a)). `retry` is consulted only when the first probe was
+/// inconclusive because of a transport error; a definitive first read — even
+/// an `Undecided` one — is returned as-is because another generation cannot
+/// reveal a row a working read did not see. Pure so it is testable without a
+/// database.
+fn probe_with_final_retry_resolution(
+    first: &Result<Option<RecordedDecision>, ()>,
+    retry: Option<&Result<Option<RecordedDecision>, ()>>,
+    decision_label: &str,
+    decided_by: Option<&str>,
+    reason: Option<&str>,
+) -> Option<DurableResolution> {
+    probe_iteration_resolution(first, decision_label, decided_by, reason).or_else(|| {
+        retry
+            .and_then(|probe| probe_iteration_resolution(probe, decision_label, decided_by, reason))
+    })
 }
 
 /// `decided_at IS NOT NULL` is exactly the state left by a successful CAS +
@@ -302,8 +327,8 @@ impl PgApprovalPersistence {
         })
     }
 
-    /// Resolve one ambiguous transaction outcome with ONE durable read on a
-    /// freshly reconnected generation (I38-A).
+    /// Resolve one ambiguous transaction outcome with durable reads on freshly
+    /// reconnected generations (I38-A, tightened by I40-A (a)).
     ///
     /// `commit_decision` calls this at most once per transaction attempt, so
     /// the reconnect budget is the *same* [`MAX_DB_ATTEMPTS`] as the
@@ -315,6 +340,12 @@ impl PgApprovalPersistence {
     /// `Undecided`, which lets the caller retry the transaction (whose zero-row
     /// CAS then detects our own lost commit) or fail closed on the last try.
     ///
+    /// On the final attempt only, `retry_on_transport_error` spends one
+    /// dedicated extra probe on another fresh generation when the first probe
+    /// hit a transport error. That keeps the I36-B contract — a lost commit
+    /// acknowledgement is reported as success — even when every per-attempt
+    /// probe lost its socket, without raising [`MAX_DB_ATTEMPTS`].
+    ///
     /// No URL, SQL, decision label or payload is logged: a probe error is
     /// discarded and a reconnect failure is logged generically inside
     /// [`Connection::reconnect`].
@@ -325,16 +356,39 @@ impl PgApprovalPersistence {
         decision_label: &str,
         decided_by: Option<&str>,
         reason: Option<&str>,
+        retry_on_transport_error: bool,
     ) -> DurableResolution {
         // One fresh generation for this probe. Never propagate the reconnect
         // error here: probing must still run on the current generation (I36-B).
         let _ = guard.reconnect(&self.pg_url).await;
 
-        let probe = read_decision_on_client(&guard.client, id)
+        let first = read_decision_on_client(&guard.client, id)
             .await
             .map_err(|_| ());
-        probe_iteration_resolution(&probe, decision_label, decided_by, reason)
-            .unwrap_or(DurableResolution::Undecided)
+        // Spend the extra probe budget only for a transport error. A definitive
+        // `Ok(None)` already proved there is no committed row; another read
+        // could not reveal one.
+        let retry = if retry_on_transport_error
+            && probe_iteration_resolution(&first, decision_label, decided_by, reason).is_none()
+        {
+            let _ = guard.reconnect(&self.pg_url).await;
+            Some(
+                read_decision_on_client(&guard.client, id)
+                    .await
+                    .map_err(|_| ()),
+            )
+        } else {
+            None
+        };
+
+        probe_with_final_retry_resolution(
+            &first,
+            retry.as_ref(),
+            decision_label,
+            decided_by,
+            reason,
+        )
+        .unwrap_or(DurableResolution::Undecided)
     }
 
     /// Run the CAS + audit INSERT in a single transaction.
@@ -352,9 +406,11 @@ impl PgApprovalPersistence {
     /// retried on a freshly opened generation up to [`MAX_DB_ATTEMPTS`] times;
     /// the whole transaction is redone because the failed one was rolled back.
     /// Each attempt performs at most one read-back probe on that same fresh
-    /// generation, so a commit whose acknowledgement was lost is reported as
-    /// success instead of degrading into `AlreadyDecided` / `Expired` split
-    /// brain without multiplying the connection budget (I38-A).
+    /// generation, plus one dedicated retry on the final attempt when that
+    /// probe hit a transport error (I40-A (a)). A commit whose acknowledgement
+    /// was lost is therefore reported as success instead of degrading into
+    /// `AlreadyDecided` / `Expired` split brain or a spurious `Persistence`,
+    /// without multiplying the connection budget (I38-A).
     async fn commit_decision(
         &self,
         id: Uuid,
@@ -464,15 +520,24 @@ impl PgApprovalPersistence {
                         "approval decision transaction attempt failed"
                     );
                     // The error is ambiguous: the server may have committed and
-                    // only the acknowledgement was lost. Resolve it with ONE
-                    // read-back probe on a fresh generation (I38-A). Probe and
-                    // transaction share the same MAX_DB_ATTEMPTS budget: one
-                    // reconnect + one probe per attempt, never a nested probe
-                    // loop, so a real outage ends in Persistence after at most
-                    // MAX_DB_ATTEMPTS connection generations instead of nine.
-                    // A failed reconnect does not skip the probe (I36-B).
+                    // only the acknowledgement was lost. Resolve it with one
+                    // read-back probe on a fresh generation (I38-A), plus one
+                    // dedicated extra probe on the final attempt if that probe
+                    // lost its socket (I40-A (a)). Probe and transaction share
+                    // the MAX_DB_ATTEMPTS budget: one reconnect + one probe per
+                    // attempt, never a nested probe loop, so a real outage ends
+                    // in Persistence after at most MAX_DB_ATTEMPTS connection
+                    // generations instead of nine. A failed reconnect does not
+                    // skip the probe (I36-B).
                     let resolution = self
-                        .read_back_once(&mut guard, id, decision_label, decided_by, reason)
+                        .read_back_once(
+                            &mut guard,
+                            id,
+                            decision_label,
+                            decided_by,
+                            reason,
+                            attempt_no == MAX_DB_ATTEMPTS,
+                        )
                         .await;
                     match resolution {
                         DurableResolution::OurCommit => return Ok(()),
@@ -616,11 +681,29 @@ impl ApprovalPersistence for PgApprovalPersistence {
     ///
     /// This is the durable authority consulted by the approval store after a
     /// lost expiry CAS. Only rows with `decided_at IS NOT NULL` can match, so a
-    /// pending hold is never mistaken for a decision. Retry/reconnect behavior
-    /// mirrors `load_pending` and stays inside the single `MAX_DB_ATTEMPTS`
-    /// budget; a genuine outage surfaces as `ApprovalError::Persistence`.
-    /// Operation errors are logged without the URL, SQL text or decision body.
+    /// pending hold is never mistaken for a decision. It now delegates to
+    /// [`ApprovalPersistence::load_decision_with_time`] so the caller can also
+    /// obtain the authoritative `decided_at` (I40-A (c)). Retry/reconnect
+    /// behavior mirrors `load_pending` and stays inside the single
+    /// `MAX_DB_ATTEMPTS` budget; a genuine outage surfaces as
+    /// `ApprovalError::Persistence`. Operation errors are logged without the
+    /// URL, SQL text or decision body.
     async fn load_decision(&self, id: Uuid) -> Result<Option<ApprovalDecision>, ApprovalError> {
+        Ok(self
+            .load_decision_with_time(id)
+            .await?
+            .map(|loaded| loaded.decision))
+    }
+
+    /// Authoritative re-read that also carries the durable `decided_at`
+    /// (I40-A (c)). Rows with `decided_at IS NOT NULL` only; the commit time is
+    /// returned verbatim so the in-memory entry is never stamped with the local
+    /// timeout instant. Retry/reconnect stays inside `MAX_DB_ATTEMPTS`. No URL,
+    /// SQL or decision body is logged.
+    async fn load_decision_with_time(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<LoadedDecision>, ApprovalError> {
         for attempt_no in 1..=MAX_DB_ATTEMPTS {
             let mut guard = self.connection.lock().await;
             let result = guard.client.query_opt(LOAD_DECISION_SQL, &[&id]).await;
@@ -631,12 +714,16 @@ impl ApprovalPersistence for PgApprovalPersistence {
                     let decided_by: Option<String> = row.get("decided_by");
                     let reason: Option<String> = row.get("reason");
                     let decided_at: DateTime<Utc> = row.get("decided_at");
-                    return Ok(decision_from_columns(
+                    let rebuilt = decision_from_columns(
                         &decision,
                         decided_by.as_deref(),
                         reason.as_deref(),
                         decided_at,
-                    ));
+                    );
+                    return Ok(rebuilt.map(|decision| LoadedDecision {
+                        decision,
+                        decided_at,
+                    }));
                 }
                 Ok(None) => return Ok(None),
                 Err(error) => {
@@ -1001,6 +1088,57 @@ mod tests {
             decision_from_columns("unknown", None, None, decided_at),
             None,
             "an unexpected label must not fabricate a decision"
+        );
+    }
+
+    // ---- I40-A (a) final-attempt probe retry (pure, no real DB) -----------
+
+    /// A probe transport error on the final attempt must not degrade a lost
+    /// commit acknowledgement into `Persistence`. The dedicated one-shot retry
+    /// on a fresh generation finds our committed row and reports success.
+    #[test]
+    fn final_attempt_probe_transport_error_retry_detects_our_commit() {
+        let committed = Some(RecordedDecision {
+            decision: "approved".into(),
+            decided_by: Some("operator".into()),
+            reason: None,
+        });
+
+        // First probe lost its socket; the fresh-generation retry reads the
+        // committed row -> OurCommit (reported as success, not Persistence).
+        let first = Err(());
+        let retry = Ok(committed);
+        assert_eq!(
+            probe_with_final_retry_resolution(
+                &first,
+                Some(&retry),
+                "approved",
+                Some("operator"),
+                None
+            ),
+            Some(DurableResolution::OurCommit),
+            "a lost ack must still be reported as success on the final attempt"
+        );
+
+        // Earlier attempts have no retry budget: the transport error stays
+        // inconclusive so the caller retries the transaction within the cap.
+        assert_eq!(
+            probe_with_final_retry_resolution(&first, None, "approved", Some("operator"), None),
+            None
+        );
+
+        // A definitive first read is never retried, even when a retry is
+        // offered: a working read that saw no row cannot be contradicted.
+        let definitive_none = Ok(None);
+        assert_eq!(
+            probe_with_final_retry_resolution(
+                &definitive_none,
+                Some(&retry),
+                "approved",
+                Some("operator"),
+                None
+            ),
+            Some(DurableResolution::Undecided)
         );
     }
 }

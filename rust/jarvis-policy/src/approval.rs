@@ -83,6 +83,18 @@ impl ApprovalError {
 /// [`ApprovalStore::try_request`] instead of comparing this string.
 pub const QUEUE_FULL_REASON: &str = "approval queue full";
 
+/// A committed decision together with its authoritative durable commit time.
+///
+/// Returned by [`ApprovalPersistence::load_decision_with_time`] so the timeout
+/// path can stamp the in-memory entry with the database's `decided_at` instead
+/// of overwriting it with the local timeout instant (I40-A (c)). `ApprovalDecision`
+/// has no `Eq` impl, so this mirrors its `PartialEq` derive only.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LoadedDecision {
+    pub decision: ApprovalDecision,
+    pub decided_at: DateTime<Utc>,
+}
+
 /// Persistence seam for approval requests and decisions (I29-A / I30-A, 案A).
 ///
 /// The in-memory store remains the source of truth for pending state. Two
@@ -150,6 +162,29 @@ pub trait ApprovalPersistence: Send + Sync {
     /// backend overrides it with the authoritative committed row.
     async fn load_decision(&self, _id: Uuid) -> Result<Option<ApprovalDecision>, ApprovalError> {
         Ok(None)
+    }
+
+    /// Like [`Self::load_decision`], but also returns the authoritative commit
+    /// time (I40-A (c)).
+    ///
+    /// The default adapts the legacy [`Self::load_decision`] seam so every
+    /// existing backend (and the memory-only default) stays source-compatible:
+    /// when a backend has no explicit commit time, the observation time is
+    /// used. A transactional backend overrides this with the durable
+    /// `decided_at`, which the store copies into the entry so retention and
+    /// prune use the real decision time instead of the timeout instant. As
+    /// with `load_decision`, no id, SQL or decision body is logged.
+    async fn load_decision_with_time(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<LoadedDecision>, ApprovalError> {
+        Ok(self
+            .load_decision(id)
+            .await?
+            .map(|decision| LoadedDecision {
+                decision,
+                decided_at: Utc::now(),
+            }))
     }
 
     /// Mark a pending request as expired at `expired_at`.
@@ -241,6 +276,18 @@ pub struct ApprovalStore {
 /// The HTTP approval endpoint is loopback-only but unauthenticated; without
 /// a cap, repeated requests could grow the in-memory queue without bound.
 pub const DEFAULT_MAX_PENDING: usize = 100;
+
+/// Single grace window for the timeout recovery path (I40-A (b)): the time
+/// allowed for an in-flight decision notification or the parallel durable
+/// re-read to resolve after the deadline elapsed. Retains the legacy 100 ms
+/// value so existing timing assumptions stay unchanged; exposed as a constant
+/// so the budget is visible and assertable.
+const RECOVERY_GRACE: Duration = Duration::from_millis(100);
+
+/// Upper bound on yields to an in-flight `decide` commit before the timeout
+/// path takes over. Retains the legacy value of 100; exposed so the re-check
+/// budget is visible without changing behavior (I40-A (b)).
+const MAX_DECIDE_YIELDS: usize = 100;
 
 impl ApprovalStore {
     pub fn new(timeout: Duration) -> Self {
@@ -465,7 +512,7 @@ impl ApprovalStore {
                             Some(entry) => {
                                 if let Some(decision) = &entry.decision {
                                     TimeoutOutcome::Decided(decision.clone())
-                                } else if entry.deciding && yields < 100 {
+                                } else if entry.deciding && yields < MAX_DECIDE_YIELDS {
                                     TimeoutOutcome::YieldToDecide
                                 } else {
                                     if entry.deciding {
@@ -489,8 +536,7 @@ impl ApprovalStore {
                             // commit finishes; the notification wakes this loop
                             // so it returns the committed decision, not Expired.
                             yields += 1;
-                            let grace = Duration::from_millis(100);
-                            let _ = tokio::time::timeout(grace, rx.changed()).await;
+                            let _ = tokio::time::timeout(RECOVERY_GRACE, rx.changed()).await;
                             continue;
                         }
                         TimeoutOutcome::Expire => {
@@ -503,36 +549,55 @@ impl ApprovalStore {
                                 // A concurrent settlement won the durable CAS.
                                 // The row may already carry the real decision
                                 // even though this waiter never observed the
-                                // watch notification (lost-ack). The 100ms grace
-                                // is only a fast path for a notification that is
-                                // already in flight (I36-C (3)); the authoritative
-                                // answer is the durable row read through
-                                // `load_decision` when that grace elapses
-                                // (I38-A), so DB=decided / waiter=Expired cannot
-                                // split brain.
+                                // watch notification (lost-ack). Start the
+                                // authoritative re-read NOW, in parallel with
+                                // the single grace window, and adopt whichever
+                                // produces a decision first. The old sequential
+                                // path added grace + DB-RTT×3 after the deadline
+                                // (I40-A (b)); DB=decided / waiter=Expired can no
+                                // longer split brain.
                                 Err(ApprovalError::AlreadyDecided(_)) => {
-                                    let grace = Duration::from_millis(100);
-                                    let changed =
-                                        tokio::time::timeout(grace, rx.changed()).await.is_ok();
-                                    let published = if changed {
+                                    let mut reread =
+                                        self.inner.persistence.load_decision_with_time(id);
+                                    // A decision already on the watch channel is
+                                    // an immediate fast path (I36-C (3)).
+                                    let published = {
                                         let guard = rx.borrow_and_update();
                                         (*guard).clone()
-                                    } else {
-                                        None
                                     };
-                                    let decision = match published {
-                                        Some(decision) => Some(decision),
-                                        None => {
-                                            // Grace expired with no notification:
-                                            // re-read the committed value. A DB
-                                            // error or a still-undecided row is
-                                            // non-fatal and keeps the legacy
-                                            // `Expired` fallback. Only fixed
-                                            // log categories are emitted: never
-                                            // the id, SQL or decision body.
-                                            match self.inner.persistence.load_decision(id).await {
-                                                Ok(decision) => decision,
+
+                                    enum Race {
+                                        Watch,
+                                        Durable(Result<Option<LoadedDecision>, ApprovalError>),
+                                        Grace,
+                                    }
+
+                                    // `(decision, authoritative decided_at)`; a
+                                    // `None` timestamp means the backend has no
+                                    // time seam and the observation time is used.
+                                    let recovered = if let Some(decision) = published {
+                                        Some((decision, None))
+                                    } else {
+                                        let winner = tokio::select! {
+                                            changed = rx.changed() => {
+                                                if changed.is_ok() { Race::Watch } else { Race::Grace }
+                                            }
+                                            result = &mut reread => Race::Durable(result),
+                                            _ = tokio::time::sleep(RECOVERY_GRACE) => Race::Grace,
+                                        };
+                                        match winner {
+                                            Race::Watch => {
+                                                let guard = rx.borrow_and_update();
+                                                (*guard).clone().map(|d| (d, None))
+                                            }
+                                            Race::Durable(result) => match result {
+                                                Ok(Some(loaded)) => {
+                                                    Some((loaded.decision, Some(loaded.decided_at)))
+                                                }
+                                                Ok(None) => None,
                                                 Err(error) => {
+                                                    // Fixed vocabulary only: no id,
+                                                    // SQL or decision body in logs.
                                                     tracing::warn!(
                                                         error_category = error.category(),
                                                         request_id = %id,
@@ -540,14 +605,39 @@ impl ApprovalStore {
                                                     );
                                                     None
                                                 }
+                                            },
+                                            Race::Grace => {
+                                                // Grace elapsed without a watch
+                                                // notification. The re-read was
+                                                // started in parallel and is still
+                                                // the authority, so await its
+                                                // already-running result instead of
+                                                // falling back to Expired early.
+                                                match reread.await {
+                                                    Ok(Some(loaded)) => Some((
+                                                        loaded.decision,
+                                                        Some(loaded.decided_at),
+                                                    )),
+                                                    Ok(None) => None,
+                                                    Err(error) => {
+                                                        tracing::warn!(
+                                                            error_category = error.category(),
+                                                            request_id = %id,
+                                                            "durable decision re-read failed after lost expiry CAS"
+                                                        );
+                                                        None
+                                                    }
+                                                }
                                             }
                                         }
                                     };
-                                    if let Some(decision) = decision {
+
+                                    if let Some((decision, authoritative_at)) = recovered {
                                         // Reconcile the provisional `Expired`
-                                        // written above with the authoritative
-                                        // decision, so memory, the watch channel,
-                                        // the waiter and the durable row agree.
+                                        // with the authoritative decision so
+                                        // memory, watch, waiter and the durable
+                                        // row agree. The DB commit time wins over
+                                        // the local timeout instant (I40-A (c)).
                                         let mut entries = self.inner.entries.write().await;
                                         if let Some(entry) = entries.get_mut(&id)
                                             && matches!(
@@ -556,7 +646,8 @@ impl ApprovalStore {
                                             )
                                         {
                                             entry.decision = Some(decision.clone());
-                                            entry.decided_at = Some(expired_at);
+                                            entry.decided_at =
+                                                Some(authoritative_at.unwrap_or_else(Utc::now));
                                             let _ = entry.tx.send(Some(decision.clone()));
                                         }
                                         return Ok(decision);
@@ -2419,5 +2510,148 @@ mod tests {
             );
             assert_eq!(persistence.load_calls.load(Ordering::SeqCst), 1);
         }
+    }
+
+    // ---- I40-A (b)/(c) parallel re-read + authoritative decision time ------
+
+    /// Lost-expiry-CAS mock: `mark_expired` always reports `AlreadyDecided`,
+    /// `load_decision_with_time` records when it was called and can block on a
+    /// oneshot to simulate DB latency. No database and no watch notification.
+    #[derive(Debug)]
+    struct RereadDecisionPersistence {
+        committed: LoadedDecision,
+        started: Arc<AtomicBool>,
+        gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for RereadDecisionPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(Some(self.committed.decision.clone()))
+        }
+
+        async fn load_decision_with_time(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<LoadedDecision>, ApprovalError> {
+            self.started.store(true, Ordering::SeqCst);
+            if let Some(rx) = self.gate.lock().await.take() {
+                let _ = rx.await;
+            }
+            Ok(Some(self.committed.clone()))
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Err(ApprovalError::AlreadyDecided(id))
+        }
+    }
+
+    /// I40-A (b): the durable re-read must start in parallel with the grace
+    /// window, not after it, so the post-deadline wait is
+    /// `max(grace, DB RTT)` instead of `grace + DB RTT × 3`.
+    #[tokio::test]
+    async fn lost_expiry_cas_reread_starts_in_parallel_with_grace() {
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        let committed = LoadedDecision {
+            decision: approved(),
+            decided_at: Utc::now(),
+        };
+        let started = Arc::new(AtomicBool::new(false));
+        let persistence = Arc::new(RereadDecisionPersistence {
+            committed: committed.clone(),
+            started: started.clone(),
+            gate: tokio::sync::Mutex::new(Some(release_rx)),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(40),
+            DEFAULT_MAX_PENDING,
+            persistence,
+        );
+        let request = make_request();
+        let id = request.id;
+        let waiter = {
+            let store = store.clone();
+            tokio::spawn(async move { store.request(request).await })
+        };
+        wait_for_registration(&store, id).await;
+
+        // Well inside the 100ms grace the re-read must already be running.
+        tokio::time::sleep(Duration::from_millis(70)).await;
+        assert!(
+            started.load(Ordering::SeqCst),
+            "durable re-read must start in parallel with the grace, not after it"
+        );
+        assert!(
+            !waiter.is_finished(),
+            "the waiter must await the authoritative re-read, not expire early"
+        );
+
+        release_tx.send(()).expect("release re-read");
+        let decision = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter completes")
+            .expect("waiter task");
+        assert_eq!(decision, committed.decision);
+    }
+
+    /// I40-A (c): the authoritative `decided_at` from the durable row must be
+    /// copied into the in-memory entry; the local timeout instant must not
+    /// overwrite it (prune retention depends on the real decision time).
+    #[tokio::test]
+    async fn lost_expiry_cas_uses_authoritative_decided_at() {
+        let authoritative_at = Utc::now() - chrono::Duration::seconds(30);
+        let committed = LoadedDecision {
+            decision: approved(),
+            decided_at: authoritative_at,
+        };
+        let persistence = Arc::new(RereadDecisionPersistence {
+            committed: committed.clone(),
+            started: Arc::new(AtomicBool::new(false)),
+            gate: tokio::sync::Mutex::new(None),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(40),
+            DEFAULT_MAX_PENDING,
+            persistence,
+        );
+        let request = make_request();
+        let id = request.id;
+
+        assert_eq!(store.request(request).await, committed.decision);
+        let entries = store.inner.entries.read().await;
+        let entry = entries.get(&id).expect("entry survives reconciliation");
+        assert_eq!(
+            entry.decided_at,
+            Some(authoritative_at),
+            "DB commit time must win over the local timeout instant"
+        );
     }
 }
