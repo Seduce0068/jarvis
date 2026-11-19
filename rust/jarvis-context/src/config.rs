@@ -17,6 +17,13 @@ pub const CONFIG_PATH_ENV: &str = "JARVIS_CONTEXT_CONFIG_PATH";
 
 const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
 
+/// HTTP header and gRPC metadata key carrying the shared admin token.
+///
+/// The HTTP middleware in `http.rs` uses the same literal. Keeping it here lets
+/// the gRPC ingress gate reference one canonical name without reaching into a
+/// sibling module's private constant.
+pub(crate) const CONTEXT_TOKEN_HEADER: &str = "x-jarvis-context-token";
+
 /// Select the TOML path from an optional environment override. Kept pure so
 /// both branches are testable without mutating the process environment
 /// (edition 2024 makes `set_var` unsafe and parallel tests racy).
@@ -37,7 +44,45 @@ fn default_embedding_dim() -> usize {
     384
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Compare two token byte strings without an early exit on the first mismatch.
+///
+/// The loop covers the longer input and pads the shorter one, so neither a
+/// content mismatch nor a length mismatch short-circuits. Shared by the HTTP
+/// middleware and the gRPC ingress gate; no extra crate and no `unsafe` is
+/// needed.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let max = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for (x, y) in a
+        .iter()
+        .map(Some)
+        .chain(std::iter::repeat(None))
+        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
+        .take(max)
+    {
+        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
+    }
+    diff == 0
+}
+
+/// Authorize a presented token against the configured value.
+///
+/// A missing/blank configured token keeps the legacy unauthenticated loopback
+/// path. A missing or non-UTF-8 presented value is never valid when a token is
+/// configured. Neither value is logged.
+pub(crate) fn token_matches(expected: Option<&str>, presented: Option<&str>) -> bool {
+    let Some(expected) = expected.map(str::trim).filter(|t| !t.is_empty()) else {
+        return true;
+    };
+    let Some(presented) = presented else {
+        return false;
+    };
+    constant_time_eq(expected, presented)
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     pub grpc_addr: String,
     pub http_addr: String,
@@ -112,6 +157,27 @@ impl ContextConfig {
             .as_deref()
             .map(str::trim)
             .filter(|token| !token.is_empty())
+    }
+}
+
+/// Redacted `Debug`: a derived implementation would print `admin_token` into
+/// any config dump. Both transports must never emit the token value to logs.
+impl std::fmt::Debug for ContextConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ContextConfig")
+            .field("grpc_addr", &self.grpc_addr)
+            .field("http_addr", &self.http_addr)
+            .field("pg_url", &self.pg_url)
+            .field("qdrant_url", &self.qdrant_url)
+            .field("qdrant_api_key", &"<redacted>")
+            .field("collection_name", &self.collection_name)
+            .field("embedding_model", &self.embedding_model)
+            .field("embedding_dim", &self.embedding_dim)
+            .field("embedding_url", &self.embedding_url)
+            .field("pii_patterns_path", &self.pii_patterns_path)
+            .field("max_context_tokens", &self.max_context_tokens)
+            .field("admin_token", &"<redacted>")
+            .finish()
     }
 }
 
@@ -202,6 +268,45 @@ max_context_tokens = 8000
             .extract()
             .expect("env-style key merges into the admin token field");
         assert_eq!(config.admin_token(), Some("env-secret"));
+    }
+
+    /// The gRPC metadata key must match the HTTP header literal exactly;
+    /// otherwise the two transports would enforce different secrets.
+    #[test]
+    fn context_token_header_is_the_shared_header_name() {
+        assert_eq!(CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    }
+
+    #[test]
+    fn token_matches_enforces_exact_value_and_keeps_legacy_open_path() {
+        assert!(token_matches(None, None), "no configured token stays open");
+        assert!(token_matches(None, Some("anything")));
+        assert!(token_matches(Some("  "), None), "blank config stays open");
+        assert!(!token_matches(Some("context-secret"), None));
+        assert!(token_matches(
+            Some("context-secret"),
+            Some("context-secret")
+        ));
+        assert!(!token_matches(
+            Some("context-secret"),
+            Some("Context-secret")
+        ));
+        assert!(!token_matches(
+            Some("context-secret"),
+            Some("context-secret-extra")
+        ));
+        assert!(!token_matches(Some("context-secret"), Some("")));
+    }
+
+    #[test]
+    fn debug_output_never_contains_the_admin_token() {
+        let config = ContextConfig {
+            admin_token: Some("super-secret".into()),
+            ..Default::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(!rendered.contains("super-secret"));
+        assert!(rendered.contains("admin_token: \"<redacted>\""));
     }
 
     /// The compiled-in default must never embed a password. Auth is delegated

@@ -1,6 +1,7 @@
 //! gRPC service for Context Builder
 
 use crate::ContextBuilder;
+use crate::config::{CONTEXT_TOKEN_HEADER, token_matches};
 use jarvis_core::{MemoryEntry, UnifiedEvent};
 use tonic::{Request, Response, Status};
 
@@ -16,6 +17,45 @@ use proto::{
 
 pub struct GrpcContextService {
     builder: ContextBuilder,
+    /// Effective value of `ContextConfig::admin_token`, shared with the HTTP
+    /// gate. `None` keeps the legacy loopback path. Never logged.
+    admin_token: Option<String>,
+}
+
+impl GrpcContextService {
+    fn new(builder: ContextBuilder) -> Self {
+        // `ContextBuilder.config` is visible here because `grpc` is a child
+        // module of the crate root where that field is declared (same access
+        // the HTTP router uses). Reading the config value keeps both transports
+        // on one secret instead of duplicating the credential.
+        let admin_token = builder.config.admin_token().map(str::to_owned);
+        Self {
+            builder,
+            admin_token,
+        }
+    }
+}
+
+/// Authorize a gRPC call before any handler work runs.
+///
+/// A configured token must be supplied in the `x-jarvis-context-token`
+/// metadata; when none is configured the legacy loopback path stays open.
+/// Neither the expected nor the presented value is ever logged.
+fn authorize<T>(request: &Request<T>, expected: Option<&str>) -> Result<(), Status> {
+    let provided = request
+        .metadata()
+        .get(CONTEXT_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if token_matches(expected, provided) {
+        Ok(())
+    } else {
+        tracing::warn!(
+            "gRPC context: missing or invalid admin token; rejecting with UNAUTHENTICATED"
+        );
+        Err(Status::unauthenticated(
+            "missing or invalid context admin token",
+        ))
+    }
 }
 
 /// Build the memory entry and its response without touching the store.
@@ -49,6 +89,7 @@ impl ContextService for GrpcContextService {
         &self,
         request: Request<BuildContextRequest>,
     ) -> Result<Response<BuildContextResponse>, Status> {
+        authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
         // Convert proto event to UnifiedEvent (simplified)
         let event = UnifiedEvent {
@@ -73,6 +114,8 @@ impl ContextService for GrpcContextService {
         &self,
         request: Request<StoreMemoryRequest>,
     ) -> Result<Response<StoreMemoryResponse>, Status> {
+        // Auth stays first so unauthenticated callers cannot reach the store.
+        authorize(&request, self.admin_token.as_deref())?;
         let (memory, response) = prepare_store_memory(request.into_inner());
         self.builder
             .store_memory(memory)
@@ -85,6 +128,7 @@ impl ContextService for GrpcContextService {
         &self,
         request: Request<SearchMemoryRequest>,
     ) -> Result<Response<SearchMemoryResponse>, Status> {
+        authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
         let memories = self
             .builder
@@ -110,7 +154,7 @@ impl ContextService for GrpcContextService {
 }
 
 pub async fn serve(builder: ContextBuilder, addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    let service = GrpcContextService { builder };
+    let service = GrpcContextService::new(builder);
     tonic::transport::Server::builder()
         .add_service(ContextServiceServer::new(service))
         .serve(addr)
@@ -120,7 +164,90 @@ pub async fn serve(builder: ContextBuilder, addr: std::net::SocketAddr) -> anyho
 
 #[cfg(test)]
 mod tests {
-    use super::{StoreMemoryRequest, prepare_store_memory};
+    use super::{
+        CONTEXT_TOKEN_HEADER, Request, StoreMemoryRequest, authorize, prepare_store_memory,
+    };
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory `MakeWriter` target: no new dependency and no global
+    /// subscriber, so other tests can still install their own.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self.0.lock().expect("log buffer mutex");
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn request_with_token(token: Option<&str>) -> Request<()> {
+        let mut request = Request::new(());
+        if let Some(token) = token {
+            request.metadata_mut().insert(
+                CONTEXT_TOKEN_HEADER,
+                token.parse().expect("valid metadata token"),
+            );
+        }
+        request
+    }
+
+    #[test]
+    fn token_metadata_key_matches_http_header_literal() {
+        assert_eq!(CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    }
+
+    #[test]
+    fn authorize_enforces_configured_token() {
+        let request = request_with_token(Some("context-secret"));
+        assert!(authorize(&request, Some("context-secret")).is_ok());
+
+        for provided in [None, Some("wrong-secret")] {
+            let request = request_with_token(provided);
+            let status = authorize(&request, Some("context-secret"))
+                .expect_err("missing or invalid token must be rejected");
+            assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        }
+    }
+
+    #[test]
+    fn authorize_keeps_legacy_loopback_open_without_token() {
+        let request = request_with_token(None);
+        assert!(authorize(&request, None).is_ok());
+        let with_token = request_with_token(Some("anything"));
+        assert!(authorize(&with_token, None).is_ok());
+    }
+
+    #[test]
+    fn rejected_grpc_call_never_logs_the_token() {
+        const TOKEN: &str = "grpc-top-secret-42";
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let status = tracing::subscriber::with_default(subscriber, || {
+            let request = request_with_token(Some("wrong-token"));
+            authorize(&request, Some(TOKEN)).expect_err("wrong token is rejected")
+        });
+        assert_eq!(status.code(), tonic::Code::Unauthenticated);
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(
+            !logs.contains(TOKEN),
+            "the token must never be logged: {logs}"
+        );
+    }
 
     fn store_request(supplied_id: &str) -> StoreMemoryRequest {
         StoreMemoryRequest {
