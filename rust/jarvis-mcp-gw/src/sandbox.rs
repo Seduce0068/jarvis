@@ -244,24 +244,44 @@ impl Sandbox {
     }
 
     /// Reject paths that are known to carry credentials even though they may
-    /// live beneath the configured base directory. This is defense in depth:
-    /// `secret_scan` keeps such files out of the repo today, but a future
-    /// accidental `.env` must not become readable through the MCP tool.
+    /// live beneath the configured base directory. Every component of the
+    /// canonicalized path is inspected, not just `file_name()`, so secrets
+    /// reached through credential directories (`.ssh/id_rsa`,
+    /// `.aws/credentials`, `.config/gcloud/...`, ...) are refused too. This is
+    /// defense in depth: `secret_scan` keeps such files out of the repo today,
+    /// but a future accidental `.env` must not become readable via the MCP tool.
     fn reject_sensitive_path(path: &Path) -> Result<()> {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let sensitive = name == ".env"
-            || name.starts_with(".env.")
-            || name.contains("bws.env")
-            || name.contains("token")
-            || name.contains("secret")
-            || name.ends_with(".pem")
-            || name.ends_with(".key");
-        if sensitive {
-            bail!("refusing to read sensitive file: {}", path.display());
+        /// Directory component names whose entire subtree holds credentials.
+        const SENSITIVE_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube"];
+
+        let components: Vec<String> = path
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .map(str::to_ascii_lowercase)
+            .collect();
+
+        for (idx, component) in components.iter().enumerate() {
+            // `.config/gcloud` is sensitive only as an adjacent pair; a bare
+            // `gcloud` segment elsewhere is not treated as a credential dir.
+            let is_gcloud_config = component == ".config"
+                && components.get(idx + 1).map(String::as_str) == Some("gcloud");
+            let is_sensitive_dir = SENSITIVE_DIRS.contains(&component.as_str());
+            let is_sensitive_name = component == ".env"
+                || component.starts_with(".env.")
+                || component.contains("bws.env")
+                || component.contains("token")
+                || component.contains("secret")
+                || component.starts_with("id_rsa")
+                || component.starts_with("id_ed25519")
+                || component.starts_with("id_ecdsa")
+                || component.starts_with("id_dsa")
+                || component.contains("known_hosts")
+                || component.contains("credentials")
+                || component.ends_with(".pem")
+                || component.ends_with(".key");
+            if is_gcloud_config || is_sensitive_dir || is_sensitive_name {
+                bail!("refusing to read sensitive file: {}", path.display());
+            }
         }
         Ok(())
     }
@@ -586,5 +606,50 @@ mod tests {
         std::fs::write(&normal, b"x").unwrap();
         assert!(Sandbox::reject_sensitive_path(&normal).is_ok());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn sensitive_path_components_are_refused() {
+        let base = Path::new("/home/user/workspace");
+        for relative in [
+            ".ssh/id_rsa",
+            ".ssh/id_rsa.pub",
+            ".ssh/known_hosts",
+            ".aws/credentials",
+            ".aws/credentials.json",
+            ".gnupg/private-keys-v1.d/ABCDEF.key",
+            ".config/gcloud/settings.db",
+            ".kube/config",
+        ] {
+            let path = base.join(relative);
+            assert!(
+                Sandbox::reject_sensitive_path(&path).is_err(),
+                "{relative} must be refused"
+            );
+        }
+        // No sensitive component: benign names and a bare `.config` segment.
+        for relative in [
+            "notes.txt",
+            ".config/user-settings.toml",
+            "docs/ssh-notes.md",
+        ] {
+            assert!(
+                Sandbox::reject_sensitive_path(&base.join(relative)).is_ok(),
+                "{relative} must be allowed"
+            );
+        }
+    }
+
+    #[test]
+    fn refuses_read_under_sensitive_directory() {
+        let (base, sandbox) = fixture();
+        let ssh = base.join(".ssh");
+        std::fs::create_dir_all(&ssh).unwrap();
+        std::fs::write(ssh.join("id_rsa"), b"PRIVATE KEY").unwrap();
+        let err = sandbox
+            .native_read(&json!({"path": ".ssh/id_rsa"}))
+            .expect_err(".ssh/id_rsa must be refused end to end");
+        assert!(err.to_string().contains("sensitive"), "{err}");
+        let _ = std::fs::remove_dir_all(base);
     }
 }
