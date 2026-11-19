@@ -1702,3 +1702,28 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、Cargo.lock 更新（offline）、tracing field 形式依存
   アサーション削除、shellcheck SC2181（heredoc の $? 判定）。
+
+### Round 58（R4 で修正済み）
+
+- [x] kill switch probe の fail-open（confirmed medium 2件）→ probe agent に
+  `max_redirects(0)`、200/503 以外を Err 化（502/504/3xx は停止側）、想定外
+  200 本文も Err。UI 73 tests。
+- [x] 期限切れ AlreadyDecided の誤表示（confirmed medium）→ `ApprovalError::Expired`
+  を新設し HTTP 410 固定本文へ分離、kill switch 事前チェックを deadline より
+  前に移動、UI は winner が Pending/Expired なら実状態を表示。
+- [x] 証跡ゲートの部分文字列一致（low 2件）→ `N ignored` の数値照合、
+  inline link 対応と passed/failed 必須化（INDEX_RESULT_MISSING）、tamper3件。
+
+### Round 58 の残り指摘（未対応）
+
+- [ ] BareJson が axum の 413/415/422 を一律400へ丸め（medium）—
+  種別ごとの空本文 status、または bare-400 統一を仕様と契約テストで明記。
+- [ ] 非有限ベクトルの poison row が上限なしで永続 defer（medium）—
+  dead-letter／削除分岐と attempts 上限の導入、reconcile バッチ保護。
+- [ ] jarvis-core の BareJson が context に未適用（medium）— context も
+  共有型へ切り替え、cross-crate 契約テストで実 warn レコードを比較。
+- [ ] BareJson の rejection warn が不正 JSON 高レートでログ増幅（low）。
+- [ ] jarvis-core への axum/tracing 必須依存が GPUI UI に不要な推移依存
+  （low）— feature gate または薄い crate への分離、ui/Cargo.toml コメント更新。
+
+- 親が対応: fmt 差分のみ。
