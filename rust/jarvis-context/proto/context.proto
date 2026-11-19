@@ -4,7 +4,7 @@ package jarvis.context.v1;
 
 service ContextService {
   rpc BuildContext(BuildContextRequest) returns (BuildContextResponse);
-  rpc StoreMemory(StoreMemoryRequest) returns (Empty);
+  rpc StoreMemory(StoreMemoryRequest) returns (StoreMemoryResponse);
   rpc SearchMemory(SearchMemoryRequest) returns (SearchMemoryResponse);
 }
 
@@ -26,6 +26,10 @@ message StoreMemoryRequest {
   string metadata = 4;
   string source = 5;
   int64 expires_at = 6;
+}
+
+message StoreMemoryResponse {
+  string id = 1;
 }
 
 message SearchMemoryRequest {
