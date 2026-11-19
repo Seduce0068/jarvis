@@ -9,6 +9,10 @@
 # `github.event.pull_request.number` / workflow_dispatch `pr_number`, instead
 # of the default branch, so gate-check reviews the PR itself. Still unwired;
 # auto-merge, credentials and permissions stay undecided (P2-2).
+# 2026-11-19 (I21-A): cross-review signal parsing is now fail-closed. A missing,
+# empty, or erroring signal yields verdict=UNKNOWN instead of falling back to
+# APPROVE; UNKNOWN is blocked from Stage 3 and auto-merge. No new permissions,
+# credentials, or wiring changes (P2-2 unchanged).
 # See docs/integration/remaining-tasks.md for current status and decisions.
 name: JARVIS Review Flow
 
@@ -149,18 +153,53 @@ jobs:
       - name: Parse review results
         id: review
         run: |
-          # Count findings by severity
-          CRITICAL=$(grep -c "Critical" cross-review-result.md || true)
-          HIGH=$(grep -c "High" cross-review-result.md || true)
-          MEDIUM=$(grep -c "Medium" cross-review-result.md || true)
-          LOW=$(grep -c "Low" cross-review-result.md || true)
+          set +e  # handle every failure path explicitly (no implicit fail-open)
 
-          echo "critical=$CRITICAL" >> $GITHUB_OUTPUT
-          echo "high=$HIGH" >> $GITHUB_OUTPUT
-          echo "medium=$MEDIUM" >> $GITHUB_OUTPUT
-          echo "low=$LOW" >> $GITHUB_OUTPUT
+          SIGNAL_FILE="cross-review-result.md"
 
-          # Determine verdict
+          # Fail-closed: any problem reading the signal yields UNKNOWN and fails
+          # the job; it must never fall back to APPROVE.
+          fail_closed() {
+            echo "::error::$1"
+            echo "verdict=UNKNOWN" >> "$GITHUB_OUTPUT"
+            echo "critical=0" >> "$GITHUB_OUTPUT"
+            echo "high=0" >> "$GITHUB_OUTPUT"
+            echo "medium=0" >> "$GITHUB_OUTPUT"
+            echo "low=0" >> "$GITHUB_OUTPUT"
+            exit 1
+          }
+
+          # A missing or empty signal is not a passing signal.
+          [ -f "$SIGNAL_FILE" ] || fail_closed "Cross-review signal file is missing."
+          [ -s "$SIGNAL_FILE" ] || fail_closed "Cross-review signal file is empty."
+
+          # Count findings by severity. grep exit codes: 0 = matches,
+          # 1 = no match (prints "0"), 2 = real error. Never mask exit 2 with
+          # `|| true`: a real error must fail closed.
+          count_findings() {
+            local pattern="$1" out rc
+            out=$(grep -c -- "$pattern" "$SIGNAL_FILE" 2>/dev/null)
+            rc=$?
+            if [ "$rc" -gt 1 ]; then
+              return 2
+            fi
+            case "$out" in
+              ''|*[!0-9]*) return 2 ;;  # non-numeric count = unreadable signal
+            esac
+            printf '%s\n' "$out"
+          }
+
+          CRITICAL=$(count_findings "Critical") || fail_closed "Failed to count Critical findings."
+          HIGH=$(count_findings "High") || fail_closed "Failed to count High findings."
+          MEDIUM=$(count_findings "Medium") || fail_closed "Failed to count Medium findings."
+          LOW=$(count_findings "Low") || fail_closed "Failed to count Low findings."
+
+          echo "critical=$CRITICAL" >> "$GITHUB_OUTPUT"
+          echo "high=$HIGH" >> "$GITHUB_OUTPUT"
+          echo "medium=$MEDIUM" >> "$GITHUB_OUTPUT"
+          echo "low=$LOW" >> "$GITHUB_OUTPUT"
+
+          # Determine verdict (UNKNOWN is only reachable via fail_closed above).
           if [ "$CRITICAL" -gt 0 ] || [ "$HIGH" -gt 0 ]; then
             echo "verdict=REJECT" >> $GITHUB_OUTPUT
           elif [ "$MEDIUM" -gt 0 ]; then
@@ -184,17 +223,17 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Fail on Critical/High
-        if: steps.review.outputs.verdict == 'REJECT'
+      - name: Fail on REJECT or UNKNOWN verdict
+        if: steps.review.outputs.verdict == 'REJECT' || steps.review.outputs.verdict == 'UNKNOWN'
         run: |
-          echo "::error::Cross-review found Critical/High severity issues. Review rejected."
+          echo "::error::Cross-review verdict is ${{ steps.review.outputs.verdict }}; blocking merge."
           exit 1
 
   # Stage 3: Merge Gate (re-run gates before merge)
   merge-gate:
     name: Stage 3 - Merge Gate
     needs: [gate-check, cross-review]
-    if: needs.cross-review.outputs.verdict != 'REJECT'
+    if: needs.cross-review.outputs.verdict == 'APPROVE' || needs.cross-review.outputs.verdict == 'CONDITIONAL'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -234,7 +273,7 @@ jobs:
     needs: [gate-check, cross-review, merge-gate]
     if: |
       needs.gate-check.outputs.passed == 'true' &&
-      needs.cross-review.outputs.verdict != 'REJECT' &&
+      (needs.cross-review.outputs.verdict == 'APPROVE' || needs.cross-review.outputs.verdict == 'CONDITIONAL') &&
       needs.merge-gate.result == 'success'
     runs-on: ubuntu-latest
     steps:
