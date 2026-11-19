@@ -276,13 +276,18 @@ impl Runner {
 fn build(runner: &Runner, rust_dir: &str) -> Result<()> {
     info!("Building Rust services for aarch64...");
 
-    // Ensure target is installed
+    // Ensure target is installed. A non-zero exit is a hard error (the build
+    // stage's `set -e` equivalent): `rustup target add` already succeeds when
+    // the target is present, so failing here is not a benign "already there"
+    // case. Continuing would only fail later at `cargo build`, losing the
+    // original cause. In `--dry-run` `Runner::local` returns Ok without
+    // executing anything, so this stays a no-op there.
     if let Err(err) = runner.local(
         "rustup",
         &["target", "add", "aarch64-unknown-linux-gnu"],
         None,
     ) {
-        warn!("rustup target add returned non-zero (may already be installed): {err}");
+        bail!("failed to add aarch64 target via rustup: {err}");
     }
 
     // Build all services
@@ -415,8 +420,14 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
         let script_path = scripts_dir.join(script);
         info!("Deploying {}...", script_path.display());
         if !script_path.exists() && !runner.dry_run {
-            warn!("Script not found: {}", script_path.display());
-            continue;
+            // Fail closed like the binary check: shipping a deploy without
+            // backup.rs/restore.rs would break the backup/restore path while
+            // still printing "Deployment completed". Dry-run still prints the
+            // would-be scp command and must not fail.
+            bail!(
+                "required script missing: {}; cannot deploy",
+                script_path.display()
+            );
         }
         runner.scp(
             &script_path,
@@ -600,7 +611,10 @@ mod tests {
             .expect_err("all-unhealthy ports must fail deploy")
             .to_string();
         for port in HEALTH_PORTS {
-            assert!(msg.contains(&port.to_string()), "missing port {port} in: {msg}");
+            assert!(
+                msg.contains(&port.to_string()),
+                "missing port {port} in: {msg}"
+            );
         }
     }
 }
