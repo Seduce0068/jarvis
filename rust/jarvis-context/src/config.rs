@@ -7,6 +7,25 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Absolute default location of the context TOML. The former CWD-relative
+/// `config/context.toml` was not found when the service was started outside
+/// the repository root.
+pub const DEFAULT_CONFIG_PATH: &str = "/etc/jarvis/context.toml";
+
+/// Environment variable that overrides [`DEFAULT_CONFIG_PATH`].
+pub const CONFIG_PATH_ENV: &str = "JARVIS_CONTEXT_CONFIG_PATH";
+
+const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
+
+/// Select the TOML path from an optional environment override. Kept pure so
+/// both branches are testable without mutating the process environment
+/// (edition 2024 makes `set_var` unsafe and parallel tests racy).
+fn resolve_config_path(override_path: Option<String>) -> String {
+    override_path
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or_else(|| DEFAULT_CONFIG_PATH.to_string())
+}
+
 /// Compiled default for [`ContextConfig::embedding_dim`].
 ///
 /// A bare `#[serde(default)]` would resolve to `usize::default() == 0` for
@@ -44,12 +63,30 @@ pub struct ContextConfig {
 }
 
 impl ContextConfig {
+    /// Load from the absolute [`DEFAULT_CONFIG_PATH`], or from the path in
+    /// [`CONFIG_PATH_ENV`] when it is set and non-blank, with `JARVIS_CONTEXT_*`
+    /// environment overrides applied on top.
+    ///
+    /// The default file may be absent on real hosts: configuration is supplied
+    /// by the `JARVIS_CONTEXT_*` Env provider (`bws run` / systemd), so the
+    /// service starts with no TOML on disk. `Toml::file` simply contributes no
+    /// data for a missing file; every required field then comes from the
+    /// environment.
     pub fn load() -> Result<Self> {
+        let path = resolve_config_path(std::env::var(CONFIG_PATH_ENV).ok());
+        Self::load_from_path(&path)
+    }
+
+    /// Parse a config from an explicit TOML path. Split out from [`Self::load`]
+    /// so path selection is testable without touching the process environment.
+    fn load_from_path(path: &str) -> Result<Self> {
         let config: ContextConfig = Figment::new()
-            .merge(Toml::file("config/context.toml"))
+            .merge(Toml::file(path))
             // Flat snake_case fields: do NOT use figment's Env split, which
             // would turn JARVIS_CONTEXT_GRPC_ADDR into the nested key `grpc.addr`.
-            .merge(Env::prefixed("JARVIS_CONTEXT_"))
+            // The config-path variable only selects the file, so keep it out
+            // of the field provider as well.
+            .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
             .extract()?;
         Ok(config)
     }
@@ -85,7 +122,7 @@ impl Default for ContextConfig {
             http_addr: "127.0.0.1:8084".into(),
             // No compiled-in credentials: authentication is delegated to libpq
             // (PGUSER / PGPASSWORD / .pgpass / IAM ...). Deployments supply the
-            // full URL via JARVIS_CONTEXT_PG_URL or config/context.toml.
+            // full URL via JARVIS_CONTEXT_PG_URL or /etc/jarvis/context.toml.
             pg_url: "postgres://localhost:5432/jarvis".into(),
             qdrant_url: "http://127.0.0.1:6334".into(),
             qdrant_api_key: None,
@@ -102,11 +139,9 @@ impl Default for ContextConfig {
 
 #[cfg(test)]
 mod tests {
-    use super::ContextConfig;
-    use figment::{
-        Figment,
-        providers::{Format, Serialized, Toml},
-    };
+    use super::*;
+    use figment::providers::Serialized;
+    use std::path::Path;
 
     /// A config identical to a legacy deployment: no `admin_token` key at all.
     const LEGACY_TOML: &str = r#"
@@ -262,5 +297,36 @@ max_context_tokens = 8000
             .extract()
             .expect("env-style key merges into embedding_dim");
         assert_eq!(config.embedding_dim, 768);
+    }
+
+    /// The service must find its config regardless of the launch directory;
+    /// the former `config/context.toml` was CWD-relative.
+    #[test]
+    fn default_config_path_is_absolute() {
+        assert!(Path::new(DEFAULT_CONFIG_PATH).is_absolute());
+        assert_eq!(DEFAULT_CONFIG_PATH, "/etc/jarvis/context.toml");
+    }
+
+    #[test]
+    fn config_path_override_is_honoured() {
+        const OVERRIDE: &str = "/tmp/jarvis-context-custom.toml";
+        assert_eq!(resolve_config_path(Some(OVERRIDE.into())), OVERRIDE);
+        assert_eq!(resolve_config_path(None), DEFAULT_CONFIG_PATH);
+        assert_eq!(resolve_config_path(Some("   ".into())), DEFAULT_CONFIG_PATH);
+        assert_eq!(
+            resolve_config_path(Some(String::new())),
+            DEFAULT_CONFIG_PATH
+        );
+    }
+
+    /// The override variable shares the config prefix, so verify it maps to
+    /// the `config_path` key that `load_from_path` filters out of the provider.
+    #[test]
+    fn config_path_env_name_matches_prefix() {
+        let field = CONFIG_PATH_ENV
+            .strip_prefix(ENV_PREFIX)
+            .expect("override variable uses the context env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "config_path");
     }
 }
