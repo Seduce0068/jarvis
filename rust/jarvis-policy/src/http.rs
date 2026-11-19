@@ -39,15 +39,46 @@ struct CheckResponse {
     allowed: bool,
 }
 
+/// Wire DTO for `POST /v1/approval`.
+///
+/// `id` and `requested_at` are kept as optional legacy fields so existing
+/// clients (e.g. the MCP gateway) keep working, but the server never trusts
+/// them: fresh values are generated and echoed in the response. A present but
+/// malformed value is rejected with 400 instead of being silently swapped for
+/// a new UUID or epoch 0. `expires_at` is only a hint, clamped to the
+/// configured approval timeout so no caller can extend the decision window.
 #[derive(Deserialize, Debug)]
 struct ApprovalRequestHttp {
-    id: String,
+    id: Option<String>,
     principal: String,
     action: String,
     resource: String,
     context: serde_json::Value,
-    requested_at: i64,
-    expires_at: i64,
+    requested_at: Option<i64>,
+    expires_at: Option<i64>,
+}
+
+/// Server-authoritative request metadata echoed on every response so a client
+/// can track a request whose id/timestamps it no longer supplies.
+#[derive(Serialize, Debug)]
+struct ApprovalRequestMeta {
+    id: uuid::Uuid,
+    requested_at: chrono::DateTime<chrono::Utc>,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Merge the generated metadata into the decision object at the top level.
+///
+/// Existing consumers read `decision["decision"]` / `approved_by` / `reason`,
+/// so the tagged-enum shape is preserved and only new keys are added.
+fn approval_response(decision: ApprovalDecision, meta: &ApprovalRequestMeta) -> serde_json::Value {
+    let mut response = serde_json::to_value(decision).unwrap_or_default();
+    if let Some(object) = response.as_object_mut() {
+        object.insert("id".into(), serde_json::json!(meta.id));
+        object.insert("requested_at".into(), serde_json::json!(meta.requested_at));
+        object.insert("expires_at".into(), serde_json::json!(meta.expires_at));
+    }
+    response
 }
 
 #[derive(Deserialize, Debug)]
@@ -279,25 +310,55 @@ impl PolicyEngine {
     }
 }
 
+/// Accept an approval request without trusting client-supplied identity or
+/// timestamps (I9-A).
+///
+/// Invalid values are rejected with 400; valid legacy values are ignored in
+/// favour of server-generated ones, which are returned in the response so the
+/// caller can track the request. `expires_at` is clamped to the store's
+/// configured timeout, the same cap `ApprovalStore::try_request` enforces.
 #[instrument(skip(engine, req))]
 async fn request_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Json(req): Json<ApprovalRequestHttp>,
 ) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
+    let bad_request = axum::http::StatusCode::BAD_REQUEST;
+
+    if let Some(id) = req.id.as_deref() {
+        uuid::Uuid::parse_str(id).map_err(|_| bad_request)?;
+    }
+    let now = chrono::Utc::now();
+    if let Some(requested_at) = req.requested_at {
+        chrono::DateTime::from_timestamp(requested_at, 0).ok_or(bad_request)?;
+    }
+    let mut expires_at = engine.approvals.max_deadline(now);
+    if let Some(hint) = req.expires_at {
+        let hint = chrono::DateTime::from_timestamp(hint, 0).ok_or(bad_request)?;
+        if hint <= now {
+            return Err(bad_request);
+        }
+        expires_at = std::cmp::min(hint, expires_at);
+    }
+
+    let meta = ApprovalRequestMeta {
+        id: uuid::Uuid::new_v4(),
+        requested_at: now,
+        expires_at,
+    };
     let approval_req = ApprovalRequest {
-        id: uuid::Uuid::parse_str(&req.id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
+        id: meta.id,
         principal: req.principal,
         action: req.action,
         resource: req.resource,
         context: req.context,
-        requested_at: chrono::DateTime::from_timestamp(req.requested_at, 0).unwrap_or_default(),
-        expires_at: chrono::DateTime::from_timestamp(req.expires_at, 0).unwrap_or_default(),
+        requested_at: meta.requested_at,
+        expires_at: meta.expires_at,
     };
     let decision = engine
         .request_approval_http(approval_req)
         .await
         .map_err(approval_error_status)?;
-    Ok(Json(serde_json::to_value(decision).unwrap_or_default()))
+    Ok(Json(approval_response(decision, &meta)))
 }
 
 #[instrument(skip(engine, req))]
@@ -528,6 +589,52 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("approval request never appeared");
+    }
+
+    async fn post_approval(
+        client: &reqwest::Client,
+        base: &str,
+        body: &Value,
+    ) -> reqwest::StatusCode {
+        client
+            .post(format!("{base}/v1/approval"))
+            .json(body)
+            .send()
+            .await
+            .expect("approval request runs")
+            .status()
+    }
+
+    /// Submit a body, approve it once it is pending, and return the requester's
+    /// response body together with the temp dir to clean up.
+    async fn submit_and_approve(body: Value, label: &str) -> (Value, PathBuf) {
+        let (engine, dir) = test_engine(label).await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{base}/v1/approval");
+            async move {
+                client
+                    .post(url)
+                    .json(&body)
+                    .send()
+                    .await
+                    .expect("approval request runs")
+            }
+        });
+        let id = wait_for_pending(&client, &base).await;
+        let approved = client
+            .post(format!("{base}/v1/approval/{id}/approve"))
+            .json(&json!({ "approved_by": "tester" }))
+            .send()
+            .await
+            .expect("approve request runs");
+        assert_eq!(approved.status(), reqwest::StatusCode::OK);
+        let response = request.await.expect("request task joins");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: Value = response.json().await.expect("approval response is JSON");
+        (body, dir)
     }
 
     /// POST /v1/approval blocks until a decision arrives, so the request runs
@@ -1145,5 +1252,175 @@ mod tests {
             .expect("deny request")
             .status();
         assert_eq!(deny_without_token, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    /// I9-A: a caller-supplied id / requested_at are never adopted. The server
+    /// generates both and echoes them in the response; the legacy decision
+    /// fields stay at the top level so existing consumers keep working.
+    #[tokio::test]
+    async fn approval_request_uses_server_generated_id_and_requested_at() {
+        let caller_id = uuid::Uuid::new_v4().to_string();
+        let mut body = pending_request(chrono::Utc::now().timestamp() + 60);
+        body["id"] = json!(caller_id.clone());
+        body["requested_at"] = json!(0i64); // caller claims epoch 0
+        let before = chrono::Utc::now();
+
+        let (response, dir) = submit_and_approve(body, "http-server-generated").await;
+
+        let id = response["id"].as_str().expect("response carries id");
+        assert_ne!(id, caller_id, "caller id must not be adopted");
+        uuid::Uuid::parse_str(id).expect("response id is a UUID");
+
+        let requested_at = chrono::DateTime::parse_from_rfc3339(
+            response["requested_at"]
+                .as_str()
+                .expect("response carries requested_at"),
+        )
+        .expect("requested_at is RFC 3339");
+        assert_ne!(requested_at.timestamp(), 0, "epoch 0 must not leak through");
+        assert!(requested_at.timestamp() >= before.timestamp() - 1);
+        assert!(requested_at.timestamp() <= chrono::Utc::now().timestamp() + 1);
+
+        assert_eq!(response["decision"], "Approved");
+        assert_eq!(response["approved_by"], "tester");
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I9-A: malformed identity/timestamps are rejected with 400 instead of
+    /// being silently replaced with a new UUID or epoch 0.
+    #[tokio::test]
+    async fn approval_request_rejects_malformed_caller_fields() {
+        let (engine, dir) = test_engine("http-malformed-input").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let now = chrono::Utc::now().timestamp();
+
+        let mut bad_id = pending_request(now + 60);
+        bad_id["id"] = json!("not-a-uuid");
+        assert_eq!(
+            post_approval(&client, &base, &bad_id).await,
+            reqwest::StatusCode::BAD_REQUEST
+        );
+
+        let mut bad_requested_at = pending_request(now + 60);
+        bad_requested_at["requested_at"] = json!(i64::MAX);
+        assert_eq!(
+            post_approval(&client, &base, &bad_requested_at).await,
+            reqwest::StatusCode::BAD_REQUEST
+        );
+
+        let mut bad_expires_at = pending_request(now + 60);
+        bad_expires_at["expires_at"] = json!(i64::MIN);
+        assert_eq!(
+            post_approval(&client, &base, &bad_expires_at).await,
+            reqwest::StatusCode::BAD_REQUEST
+        );
+
+        let past_expires_at = pending_request(now - 60);
+        assert_eq!(
+            post_approval(&client, &base, &past_expires_at).await,
+            reqwest::StatusCode::BAD_REQUEST
+        );
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I9-A: `expires_at` can never exceed the configured timeout (5s here),
+    /// even for a far-future hint, and the effective deadline is returned.
+    #[tokio::test]
+    async fn approval_request_caps_expires_at_to_server_timeout() {
+        let before = chrono::Utc::now();
+        let far_future = before + chrono::Duration::seconds(86_400);
+        let mut body = pending_request(far_future.timestamp());
+        body["expires_at"] = json!(far_future.timestamp());
+
+        let (response, dir) = submit_and_approve(body, "http-expires-cap").await;
+
+        let expires_at = chrono::DateTime::parse_from_rfc3339(
+            response["expires_at"]
+                .as_str()
+                .expect("response carries expires_at"),
+        )
+        .expect("expires_at is RFC 3339");
+        let cap = before
+            + chrono::Duration::from_std(std::time::Duration::from_secs(5))
+                .expect("chrono duration");
+        assert!(
+            expires_at.timestamp() <= cap.timestamp() + 1,
+            "deadline must be capped at the server timeout"
+        );
+        assert!(expires_at.timestamp() > before.timestamp());
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I9-A: a shorter caller hint is still honoured (min with the server cap),
+    /// and the stored pending request carries the same effective deadline.
+    #[tokio::test]
+    async fn approval_request_honours_shorter_expires_at_hint() {
+        let before = chrono::Utc::now();
+        let short = before + chrono::Duration::seconds(2);
+        let mut body = pending_request(short.timestamp());
+        body["expires_at"] = json!(short.timestamp());
+
+        let (engine, dir) = test_engine("http-expires-short").await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let request = tokio::spawn({
+            let client = client.clone();
+            let url = format!("{base}/v1/approval");
+            async move {
+                client
+                    .post(url)
+                    .json(&body)
+                    .send()
+                    .await
+                    .expect("approval request runs")
+                    .json::<Value>()
+                    .await
+                    .expect("approval response is JSON")
+            }
+        });
+        let id = wait_for_pending(&client, &base).await;
+
+        let pending: Value = client
+            .get(format!("{base}/v1/approvals"))
+            .send()
+            .await
+            .expect("list request")
+            .json()
+            .await
+            .expect("list JSON");
+        let stored = pending["pending"]
+            .as_array()
+            .expect("pending list")
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(id.as_str()))
+            .expect("submitted request is pending");
+        let stored_expires_at = chrono::DateTime::parse_from_rfc3339(
+            stored["expires_at"]
+                .as_str()
+                .expect("pending carries expires_at"),
+        )
+        .expect("pending expires_at is RFC 3339");
+        assert!(stored_expires_at.timestamp() <= short.timestamp() + 1);
+
+        client
+            .post(format!("{base}/v1/approval/{id}/approve"))
+            .json(&json!({ "approved_by": "tester" }))
+            .send()
+            .await
+            .expect("approve request");
+        let response = request.await.expect("request task joins");
+        let expires_at = chrono::DateTime::parse_from_rfc3339(
+            response["expires_at"]
+                .as_str()
+                .expect("response carries expires_at"),
+        )
+        .expect("expires_at is RFC 3339");
+        assert_eq!(expires_at.timestamp(), stored_expires_at.timestamp());
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
     }
 }

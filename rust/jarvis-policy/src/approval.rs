@@ -85,6 +85,23 @@ impl ApprovalStore {
         }
     }
 
+    /// Configured decision window for pending approvals.
+    pub fn timeout(&self) -> Duration {
+        self.inner.timeout
+    }
+
+    /// Latest deadline this store honours for a request registered at `now`.
+    ///
+    /// This is the authoritative cap used by [`Self::try_request`] and exposed
+    /// to transports so the HTTP endpoint can clamp a caller-supplied
+    /// `expires_at` to exactly the value the store enforces. Purely additive:
+    /// no existing `ApprovalRequest` caller or gRPC contract changes.
+    pub fn max_deadline(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        let timeout = chrono::Duration::from_std(self.inner.timeout)
+            .unwrap_or_else(|_| chrono::Duration::seconds(300));
+        now + timeout
+    }
+
     /// Register `request` and wait for a decision.
     ///
     /// Returns the recorded decision, or [`ApprovalDecision::Expired`] when no
@@ -121,12 +138,10 @@ impl ApprovalStore {
     ) -> Result<ApprovalDecision, ApprovalError> {
         let id = request.id;
         let now = Utc::now();
-        let timeout = chrono::Duration::from_std(self.inner.timeout)
-            .unwrap_or_else(|_| chrono::Duration::seconds(300));
         let deadline = if request.expires_at > now {
-            std::cmp::min(now + timeout, request.expires_at)
+            std::cmp::min(self.max_deadline(now), request.expires_at)
         } else {
-            now + timeout
+            self.max_deadline(now)
         };
 
         let (tx, mut rx) = watch::channel(None);
@@ -472,5 +487,48 @@ mod tests {
         ));
         store.decide(id, approved()).await.expect("decide");
         let _ = waiter.await.expect("waiter task");
+    }
+
+    #[test]
+    fn timeout_accessor_and_max_deadline_use_the_configured_window() {
+        let store = ApprovalStore::new(Duration::from_secs(7));
+        assert_eq!(store.timeout(), Duration::from_secs(7));
+
+        let now = Utc::now();
+        assert_eq!(store.max_deadline(now), now + chrono::Duration::seconds(7));
+    }
+
+    /// A caller-supplied `expires_at` far in the future must never extend the
+    /// wait past the configured timeout. The HTTP layer now clamps the value
+    /// before storing it; this guards the store-level cap that still applies
+    /// to every other transport (in-process callers included).
+    #[tokio::test]
+    async fn caller_expires_at_cannot_extend_the_configured_timeout() {
+        let store = ApprovalStore::new(Duration::from_millis(100));
+        let now = Utc::now();
+        let mut request = make_request();
+        request.expires_at = now + chrono::Duration::seconds(3600);
+        let id = request.id;
+
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(request).await });
+
+        loop {
+            if store.status(id).await.is_ok() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(store.max_deadline(now) < now + chrono::Duration::seconds(3600));
+
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            waiter.await.expect("waiter task"),
+            ApprovalDecision::Expired
+        ));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "deadline must follow the configured timeout, not the caller hint"
+        );
     }
 }
