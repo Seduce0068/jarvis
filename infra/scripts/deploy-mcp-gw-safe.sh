@@ -25,23 +25,44 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # 適用後の任意の失敗（再起動失敗・事後E2E失敗）で変更を戻す
 rollback() {
   echo "== ロールバック: 変更を戻します ==" >&2
+  # install-backup-timer.sh:46-48 と同じ枠組み:
+  # 退避ファイルがあれば復元し、無ければ今回配置した先を明示削除する。
   if [ -f "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" ]; then
     install -o root -g root -m 0755 "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" /opt/jarvis/bin/jarvis-mcp-gw
+  else
+    rm -f /opt/jarvis/bin/jarvis-mcp-gw || true
   fi
   # /etc allowlist は step2(承認必須化パッチ) -> step3(repo版 install) の順に更新する。
   # よって復元は逆順(step3 -> step2)が必須。step2 のバックアップが元の内容を保持する。
-  if [ "${allowlist_changed:-0}" -eq 1 ] && [ -f "$allowlist.bak-step3-$ts" ]; then
-    install -o root -g root -m 0644 "$allowlist.bak-step3-$ts" "$allowlist"
+  if [ "${allowlist_changed:-0}" -eq 1 ]; then
+    if [ -f "$allowlist.bak-step3-$ts" ]; then
+      install -o root -g root -m 0644 "$allowlist.bak-step3-$ts" "$allowlist"
+    else
+      rm -f "$allowlist" || true
+    fi
   fi
-  if [ "${allowlist_step2_changed:-0}" -eq 1 ] && [ -f "$allowlist.bak-step2-$ts" ]; then
-    install -o root -g root -m 0644 "$allowlist.bak-step2-$ts" "$allowlist"
+  if [ "${allowlist_step2_changed:-0}" -eq 1 ]; then
+    if [ -f "$allowlist.bak-step2-$ts" ]; then
+      install -o root -g root -m 0644 "$allowlist.bak-step2-$ts" "$allowlist"
+    else
+      rm -f "$allowlist" || true
+    fi
   fi
   # web.fetch 承認必須化で書き換えた repo 側 allowlist も元へ戻す（配備版だけの復元は不整合が残る）
-  if [ "${repo_allowlist_changed:-0}" -eq 1 ] && [ -f "$repo_allowlist.bak-step2-$ts" ]; then
-    cp -a "$repo_allowlist.bak-step2-$ts" "$repo_allowlist"
+  # repo 側は install 先ではないため、退避欠落時は削除せず手動確認を促す。
+  if [ "${repo_allowlist_changed:-0}" -eq 1 ]; then
+    if [ -f "$repo_allowlist.bak-step2-$ts" ]; then
+      cp -a "$repo_allowlist.bak-step2-$ts" "$repo_allowlist"
+    else
+      echo "  警告: $repo_allowlist.bak-step2-$ts が無く repo allowlist を復元できません（手動確認が必要）" >&2
+    fi
   fi
-  if [ "${unit_changed:-0}" -eq 1 ] && [ -f "$unit.bak-step3-$ts" ]; then
-    install -o root -g root -m 0644 "$unit.bak-step3-$ts" "$unit"
+  if [ "${unit_changed:-0}" -eq 1 ]; then
+    if [ -f "$unit.bak-step3-$ts" ]; then
+      install -o root -g root -m 0644 "$unit.bak-step3-$ts" "$unit"
+    else
+      rm -f "$unit" || true
+    fi
     systemctl daemon-reload || true
   fi
   systemctl restart jarvis-mcp-gw || true
@@ -51,6 +72,8 @@ rollback() {
     sleep 0.5
   done
   echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || echo 000)" >&2
+  # ロールバック後の整合確認（情報表示のみ。ロールバックの成否には影響させない）
+  bash "$repo/infra/scripts/check-deploy-drift.sh" || true
   exit 1
 }
 
@@ -72,9 +95,10 @@ if grep -A8 'name = "web.fetch"' "$allowlist" 2>/dev/null | grep -q 'requires_ap
   if [ "$allow" -eq 1 ]; then
     echo "== 2. web.fetch承認必須化（repo + /etc） =="
     if [ "$apply" -eq 1 ]; then
-      cp -a "$allowlist" "$allowlist.bak-step2-$ts"
+      cp -a "$allowlist" "$allowlist.bak-step2-$ts" || die "退避コピー失敗: $allowlist.bak-step2-$ts"
       # repo 側 allowlist もここで .bak-step2-$ts へ退避（ロールバック時に復元するため）
-      cp -a "$repo_allowlist" "$repo_allowlist.bak-step2-$ts" 2>/dev/null || true
+      # 退避に失敗したら新規配置へ進まない（|| true を外して中止）
+      cp -a "$repo_allowlist" "$repo_allowlist.bak-step2-$ts" || die "退避コピー失敗: $repo_allowlist.bak-step2-$ts"
       python3 - "$allowlist" "$repo_allowlist" <<'PY'
 import sys
 for path in sys.argv[1:]:
@@ -114,14 +138,18 @@ if [ -f "$unit" ] && cmp -s "$unit" "$repo_unit"; then
 else
   unit_changed=1
   echo "  unit: 差分あり -> $unit を $repo_unit で更新"
-  [ "$apply" -eq 1 ] && cp -a "$unit" "$unit.bak-step3-$ts" 2>/dev/null || true
+  if [ "$apply" -eq 1 ] && [ -f "$unit" ]; then
+    cp -a "$unit" "$unit.bak-step3-$ts" || die "退避コピー失敗: $unit.bak-step3-$ts"
+  fi
 fi
 if [ -f "$allowlist" ] && cmp -s "$allowlist" "$repo_allowlist"; then
   echo "  allowlist: 既に一致（スキップ）"
 else
   allowlist_changed=1
   echo "  allowlist: 差分あり -> $allowlist を repo 版で更新"
-  [ "$apply" -eq 1 ] && cp -a "$allowlist" "$allowlist.bak-step3-$ts" 2>/dev/null || true
+  if [ "$apply" -eq 1 ] && [ -f "$allowlist" ]; then
+    cp -a "$allowlist" "$allowlist.bak-step3-$ts" || die "退避コピー失敗: $allowlist.bak-step3-$ts"
+  fi
 fi
 if [ "$apply" -eq 1 ]; then
   if [ "$unit_changed" -eq 1 ]; then
@@ -141,7 +169,10 @@ bash "$repo/infra/scripts/smoke-mcp-gw.sh" "$bin" approval || die "スモーク�
 
 echo "== 5. 配置・再起動 =="
 if [ "$apply" -eq 1 ]; then
-  [ -f /opt/jarvis/bin/jarvis-mcp-gw ] && cp -a /opt/jarvis/bin/jarvis-mcp-gw "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts"
+  if [ -f /opt/jarvis/bin/jarvis-mcp-gw ]; then
+    cp -a /opt/jarvis/bin/jarvis-mcp-gw "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" \
+      || die "退避コピー失敗: /opt/jarvis/bin/jarvis-mcp-gw.prev-$ts"
+  fi
   install -o root -g root -m 0755 "$bin" /opt/jarvis/bin/jarvis-mcp-gw
   systemctl restart jarvis-mcp-gw || { echo "再起動に失敗しました" >&2; rollback; }
   for _ in $(seq 1 20); do
