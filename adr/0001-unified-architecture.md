@@ -11,7 +11,7 @@ tags:
 status: accepted
 deciders:
   - "Sovereign AI Agent"
-date: "2026-10-09"
+date: "2026-10-09T00:00:00+09:00"
 generated:
   by: "DeepSeek Harness (lead agent)"
   at: "2026-11-18T06:34:00+09:00"

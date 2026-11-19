@@ -43,7 +43,7 @@ sha256sum specs/test-<name>.md
 - `test-context.md`: `cd rust && cargo test -p jarvis-context --lib`
 - `test-event.md`: `cd rust && cargo test -p jarvis-event --lib`
 - `test-ui.md`: `cd ui && cargo test`
-- `test-backup.md`: `make test-verify-backup` と `make safety-test`
+- `test-backup.md`: `make test-verify-backup` と `make test-backup-args`（`make safety-test` は集計対象外）
 
 ### 3. evidence JSON の spec_hash を更新する
 
@@ -59,7 +59,11 @@ sha256sum specs/test-<name>.md
   `failed` が 0 でない場合はゲートが拒否する。
 - `timestamp`: RFC 3339（タイムゾーン付き、例 `2026-11-18T06:20:42+09:00`）。
 - `notes`: 検証した内容と未測定項目（カバレッジ等）を簡潔に記載する。
-  秘密情報や実機固有の値は書かない。
+  秘密情報や実機固有の値は書かない。件数表記（`N passed` 等）は `results` と
+  一致させ、スキップがある場合は `ignored` と明記する。
+- `results.skipped`: 正の値にする場合は `notes` へ `ignored` の明記が必要。
+- `document_type`: 設定する場合は `test-execution-log` / `test-result` /
+  `test-summary-report` のいずれか。
 - `environment.runtime`: 実行コマンドが変わった場合のみ更新する。
 
 ### 5. ファイル名の接頭詞を変更する
@@ -68,8 +72,8 @@ sha256sum specs/test-<name>.md
 接頭詞を新しい `sha256:` 値の先頭12文字へ変更する（旧ファイルは
 リネームして残さない）。
 
-注: `check-evidence.sh` は現状ファイル名接頭詞を直接検証しないが、
-成果物の追跡可能性を保つためこの規約に従う。
+注: `check-evidence.sh` はファイル名末尾のハッシュ接頭詞（12文字）を
+`spec_hash` と照合し、不一致なら `HASH_FILENAME_MISMATCH` で拒否する。
 
 ### 6. 両 index を更新する
 
@@ -87,18 +91,24 @@ make check-evidence
 
 `ok=<n> errors=0` なら成功。失敗時はエラーコードのみが出力され、
 問題の値は表示されない（例: `SPEC_HASH_MISMATCH`,
-`NESTED_HASH_MISMATCH`, `FAILED_TESTS`, `*_NOT_IN_INDEX`,
-`INDEX_BROKEN_LINK`）。
+`HASH_FILENAME_MISMATCH`, `NESTED_HASH_MISMATCH`, `FAILED_TESTS`,
+`SCENARIO_COUNT_MISMATCH`, `SKIPPED_TESTS`, `NOTES_*_MISMATCH`,
+`BAD_DOCUMENT_TYPE`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK`）。
 
 ## ゲートが検証する項目
 
 | 検証対象 | 内容 |
 | --- | --- |
 | `spec_hash` | トップレベルが仕様ファイルの sha256 と一致 |
+| ファイル名末尾 | ハッシュ接頭詞（12文字）が `spec_hash` と一致（不一致は `HASH_FILENAME_MISMATCH`） |
 | `test_basis_ref.spec_hash` | トップレベルと一致（nested hash） |
 | `results` | `failed=0` / `passed>0` / 厳密な整数型 |
+| `results.skipped` | 正の値は `notes` に `ignored` の明記が必要（`SKIPPED_TESTS`） |
+| `notes` | `passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致 |
+| `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed + skipped）がその数以上 |
 | index | 両 index が全成果物をリンクし、リンク切れなし |
 | `timestamp` / `signature` | RFC 3339 の実在日時 / `self-attested` |
+| `document_type` | 設定時は `test-execution-log` / `test-result` / `test-summary-report` のいずれか |
 | 仕様構造 | 必須4セクション、7列 Traceability、Document map、`tailored` |
 
 ## 関連

@@ -11,7 +11,7 @@ Group=jarvis
 WorkingDirectory=/opt/jarvis/rust
 EnvironmentFile=-/etc/jarvis/bws.env
 
-# 1Password references in event.env are resolved at service start
+# Secrets are resolved by bws run (Bitwarden Secrets Manager) at service start
 ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /opt/jarvis/bin/jarvis-event
 Restart=on-failure
 RestartSec=5

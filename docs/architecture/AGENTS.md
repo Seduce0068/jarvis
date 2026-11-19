@@ -2,7 +2,9 @@
 
 ## Project: JARVIS Architecture Calculations
 
-This directory (`docs/architecture/`) follows the **Markdown + MPE + Rust + LaTeX** workflow defined in `markdown_mpe_rust_latex_architecture_report_2026-10-09.md`.
+This directory (`docs/architecture/`) follows the **Markdown + MPE + Rust +
+LaTeX** workflow defined in
+[mpe-rust-latex-architecture-report.md](mpe-rust-latex-architecture-report.md).
 
 ---
 

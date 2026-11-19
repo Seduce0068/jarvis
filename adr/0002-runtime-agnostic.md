@@ -4,8 +4,8 @@ title: "ADR-0002: Runtime-agnostic JARVIS (ACP/MCP contracts)"
 description: OpenCode固定をやめ、エージェントランタイムとIDEをACP/MCPの契約で交換可能にする
 tags: [adr, jarvis, architecture, acp, mcp, dsh]
 status: accepted
-date: "2026-11-09"
-accepted_at: "2026-11-17"
+date: "2026-11-09T00:00:00+09:00"
+accepted_at: "2026-11-17T00:00:00+09:00"
 generated:
   by: "DeepSeek Harness (lead agent)"
   at: "2026-11-18T06:34:00+09:00"

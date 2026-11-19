@@ -1,6 +1,6 @@
 ---
 title: "ADR-XXX: <決定の短いタイトル>"
-date: YYYY-MM-DD
+date: "YYYY-MM-DDT00:00:00+09:00"
 status: proposed | accepted | deprecated | superseded
 deciders: [<決定者>]
 tags: [adr, <関連タグ>]
