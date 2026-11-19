@@ -1,7 +1,7 @@
 ---
 type: Test Specification
 title: "承認コンソール UI テスト仕様"
-description: "エラー保持 / 期限切れ強調 / scope 別トークン保護 / a11y / full args / timeout"
+description: "エラー保持 / 期限切れ強調 / scope 別トークン / a11y / kill switch pin / 409 winner / probe fail-closed"
 tags:
   - test-spec
   - gpuui
@@ -9,7 +9,7 @@ tags:
   - security
 generated:
   by: spec-writer
-  at: "2026-11-18T02:32:38+09:00"
+  at: "2026-11-20T05:18:30+09:00"
 status: draft
 ---
 
@@ -55,6 +55,14 @@ status: draft
 | REQ-18 | decide の非2xx (401/500/3xx) はエラーとし成功と誤らない |
 | REQ-19 | トークン未設定の scope ではヘッダを送らない。3xx では再送しない |
 | REQ-20 | admin scope 未設定時は API scope へフォールバックする。レガシー ENV は警告付きで API scope にフォールバックし、空文字は未設定として扱う |
+| REQ-21 | kill switch 発動中は承認済みの「実行停止」表示を独立 pin で保持し、poll で件数に上書きしない |
+| REQ-22 | kill switch が解除されたときのみ停止 pin を外し通常表示へ戻す |
+| REQ-23 | already-decided 409 は status 端点の winner を読み AlreadyDecided として表示する |
+| REQ-24 | winner が読めない 409 はエラーとし、winner の理由本文は表示しない |
+| REQ-25 | kill switch 409 は共有本文一致または空/読取不能本文で停止を pin し、winner 取得をしない |
+| REQ-26 | probe は fail-closed。timeout・接続失敗・読み取り不能本文は active=true とする |
+| REQ-27 | 明示的な healthy 応答のみ active=false とし、latch と pin を解除する |
+| REQ-28 | 409 の停止 latch は racing した healthy probe より優先する |
 
 トークン関連の REQ-11 / REQ-19 / REQ-20 は
 [policy_client.rs](../ui/src/policy_client.rs) の scope 定数に対応する。
@@ -62,6 +70,10 @@ API scope は `JARVIS_POLICY_APPROVAL_API_TOKEN`、レガシー
 `JARVIS_POLICY_APPROVAL_TOKEN` は警告付きフォールバック、admin scope は
 `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN` を読み、未設定時は API scope へ
 フォールバックする。両 scope ともヘッダ名は `X-Jarvis-Approval-Token`。
+
+409 の分類は `jarvis-core` が公開する共有固定本文 `KILL_SWITCH_409_BODY` の
+trim 後完全一致で行う。空または読み取り不能な本文も停止側へ fail-closed に分類する。
+winner の取得は status 端点で API scope を優先し、未設定なら admin scope を使う。
 
 ## Risk & tier
 
@@ -77,6 +89,10 @@ API scope は `JARVIS_POLICY_APPROVAL_API_TOKEN`、レガシー
 | R-8 | JSON 形状違いでキューが読めない | T3 | unit >= 0.60 |
 | R-9 | 非2xx が空キュー/成功と誤認される | T1 | unit >= 0.90 |
 | R-10 | scope 誤りでトークンが別 API へ送られる / 未設定 scope で誤送信される | T1 | unit >= 0.90 |
+| R-11 | 発動中の kill switch で承認済み表示が件数に上書きされ誤認される | T1 | unit >= 0.90 |
+| R-12 | 409 winner が読めず失敗/誤表示、winner 理由が漏れる | T1 | unit >= 0.90 |
+| R-13 | kill switch 409 が winner と誤認され停止表示が消える | T1 | unit >= 0.90 |
+| R-14 | probe の transient 失敗で停止 pin が外れ fail-open になる | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -248,6 +264,52 @@ Scenario: TC-U14 レガシー ENV の警告付きフォールバック
   Then 正規 ENV が優先され警告は出ない
 ```
 
+### kill switch pin / 409 / probe (REQ-21〜REQ-28)
+
+```gherkin
+Scenario: TC-U15 kill switch 中の停止表示 pin
+  Given 承認が成功し kill switch が発動している
+  When 後続の poll が件数を返す
+  Then 「承認済み・実行停止」が保持され件数表示に上書きされない
+  When kill switch が解除される
+  Then pin が外れ通常の件数表示へ戻る
+```
+
+```gherkin
+Scenario: TC-U16 already-decided 409 の winner 解決
+  Given approve が already-decided の 409 を返す
+  When status 端点から winner を読む
+  Then AlreadyDecided として winner の決定を表示する
+  Then エラー表示も winner の理由本文も出さない
+  Given winner が読めない
+  When 同じ 409 を処理する
+  Then エラーとして fail-closed にする
+```
+
+```gherkin
+Scenario: TC-U17 kill switch 409 の共有本文分類
+  Given policy が固定本文 KILL_SWITCH_409_BODY の 409 を返す
+  When decide_outcome で分類する
+  Then KillSwitchBlocked として停止表示を pin する
+  Then winner 取得は行わず理由本文も表示しない
+  Given 409 本文が空または読み取り不能
+  When 同じく分類する
+  Then winner 取得へ進まず停止側へ fail-closed に分類する
+```
+
+```gherkin
+Scenario: TC-U18 probe の fail-closed と 409 優先
+  Given /health probe が timeout または読み取り不能な本文を返す
+  When kill_switch_active を評価する
+  Then true を返し停止 pin を維持する
+  Given probe が先に healthy を返した後に kill switch 409 本文が届く
+  When 停止 latch を適用する
+  Then 409 本文が probe に優先し停止表示が残る
+  Given /health が明示的に healthy を返す
+  When kill_switch_active を評価する
+  Then false を返し latch と pin が解除される
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -274,6 +336,14 @@ Scenario: TC-U14 レガシー ENV の警告付きフォールバック
 | TC-U13 | REQ-19 | v5.0.0-V14.2.1 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-U13 | REQ-20 | v5.0.0-V14.2.1 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-U14 | REQ-20 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-U15 | REQ-21 | v5.0.0-V8.3.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
+| TC-U15 | REQ-22 | v5.0.0-V8.3.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
+| TC-U16 | REQ-23 | v5.0.0-V16.5.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-U16 | REQ-24 | v5.0.0-V16.5.2 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-U17 | REQ-25 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-U18 | REQ-26 | v5.0.0-V16.5.3 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-U18 | REQ-27 | v5.0.0-V16.5.3 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-U18 | REQ-28 | - | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.8 | T1 |
 
 ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではない)。
 それ以外は ASVS を v5.0.0、SP 800-53 を Release 5.2、CC を
@@ -293,3 +363,7 @@ TC-U13 の scope 別フォールバックと TC-U14 のレガシー ENV 警告�
 `policy_client.rs` のトークン解決テストでカバー済み。
 トークン未設定時にヘッダを送らない挙動は送信側の `if let Some` ガードに依存する。
 GPUI の実描画に依存する TC-U1 / TC-U6 は未検証のままとする。
+
+TC-U15〜TC-U18 は I50-C / I52-A / I54-A の回帰テストに対応する。
+`approvals.rs` の kill switch pin・409 分類と `policy_client.rs` の
+probe fail-closed・winner 取得が根拠。実測件数は evidence を参照。

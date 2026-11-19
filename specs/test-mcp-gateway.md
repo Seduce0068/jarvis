@@ -1,7 +1,7 @@
 ---
 type: Test Specification
 title: "jarvis-mcp-gw 実行経路 テスト仕様"
-description: "policy-first / allowlist / 引数上限 / 承認トークン / kill switch 再検査"
+description: "policy-first / allowlist / 引数上限 / 承認トークン / egress fail-closed / token 定時間比較 / upstream / liveness"
 tags:
   - test-spec
   - jarvis-mcp-gw
@@ -9,7 +9,7 @@ tags:
   - security
 generated:
   by: spec-writer
-  at: "2026-11-18T01:39:29+09:00"
+  at: "2026-11-20T05:18:30+09:00"
 status: draft
 ---
 
@@ -49,6 +49,13 @@ status: draft
 | REQ-12 | 承認後の policy 再検査で kill switch 発動を検出する |
 | REQ-13 | HTTP は 400/403/500 を正しく使い分ける |
 | REQ-14 | opt-in で caller principal を `mcp_principal` に上書きする |
+| REQ-15 | `web.fetch` の egress allowlist は fail-closed。未設定・空・不正なら全 fetch を拒否する |
+| REQ-16 | host パターンは大小文字を正規化し重複を除く。IP リテラルと loopback は拒否し redirect 先も検査する |
+| REQ-17 | gRPC admin_token は固定長 SHA-256 の 32 バイトを早期終了なしで比較する |
+| REQ-18 | 提示値・設定値が空なら比較せず Unauthenticated とし、トークン値をログに出さない |
+| REQ-19 | 設定済み `[[upstreams]]` はリスナ起動前に登録し、1件でも失敗すれば起動を中止する |
+| REQ-20 | 終了シグナルでリスナを即時停止し、in-flight を drain せず正常完了と主張しない |
+| REQ-21 | 全 exit 経路（早期 return を含む）で tracer を shutdown する |
 
 ## Risk & tier
 
@@ -62,6 +69,10 @@ status: draft
 | R-6 | 承認後に kill switch が発動しても実行される | T1 | unit >= 0.90, int >= 0.80 |
 | R-7 | allowlist 破損時に空許可で起動する | T2 | unit >= 0.80 |
 | R-8 | opt-in 既定 false の残存リスクと監査粒度の低下 | T1 | unit >= 0.90 |
+| R-9 | egress allowlist 未設定・不正で外部 host へ fetch され漏洩する | T1 | unit >= 0.90 |
+| R-10 | admin token 比較がタイミング依存/空値通過し制御面が乗っ取られる | T1 | unit >= 0.90 |
+| R-11 | upstream 登録失敗を無視し機能欠落のまま起動する | T2 | unit >= 0.80 |
+| R-12 | 終了時に in-flight を正常完了と誤主張 / tracer が未 shutdown | T2 | unit >= 0.80 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -227,6 +238,58 @@ Scenario: TC-H1 入口ごとのエラー表現
   Then tool error として拒否が伝播する
 ```
 
+### egress / admin token / upstream / liveness (REQ-15〜REQ-21)
+
+```gherkin
+Scenario: TC-E1 egress allowlist の fail-closed
+  Given egress_allowlist が未設定または空
+  When web.fetch で任意の host を呼ぶ
+  Then すべての fetch が拒否される
+  Given 不正な host パターンが設定されている
+  When 設定を読み込む
+  Then 空の許可として扱い起動後も全 fetch を拒否する
+  Given 許可 host が IP リテラルまたは loopback
+  When fetch を試みる
+  Then 拒否される
+  Given 許可 host への要求が別 host へ redirect する
+  When redirect を追従する
+  Then redirect 先も allowlist で検査し未許可なら拒否する
+```
+
+```gherkin
+Scenario: TC-E2 admin token の定時間比較
+  Given 正しい admin_token が設定されている
+  When 同一トークンで RegisterMcpServer を呼ぶ
+  Then 登録が成功する
+  Given 提示トークンが誤るまたは空
+  When 同じ RPC を呼ぶ
+  Then Unauthenticated を返す
+  Then 比較は固定 32 バイトを早期終了なしで行う
+  Given 設定値が空
+  When トークンを提示して RPC を呼ぶ
+  Then 比較せず Unauthenticated としトークン値をログに出さない
+```
+
+```gherkin
+Scenario: TC-E3 起動時の upstream 登録
+  Given 設定に 2 つの [[upstreams]] がある
+  When gateway を起動する
+  Then リスナ開始前に両方が登録される
+  Given 1 つの upstream 登録が失敗する
+  When gateway を起動する
+  Then 起動は失敗し、欠落したまま稼働しない
+```
+
+```gherkin
+Scenario: TC-E4 即時停止と tracer 完了
+  Given リスナが稼働中
+  When SIGTERM または Ctrl-C を受ける
+  Then 全 accept loop が停止し即時停止する
+  Then in-flight 要求は drain せず正常完了と主張しない
+  When リスナエラーまたは早期 return で終了する
+  Then すべての exit 経路で tracer が shutdown される
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -246,6 +309,13 @@ Scenario: TC-H1 入口ごとのエラー表現
 | TC-V1 | REQ-11 | v5.0.0-V2.3.5 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-K1 | REQ-12 | v5.0.0-V8.3.2 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-H1 | REQ-13 | v5.0.0-V16.5.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.9 | T2 |
+| TC-E1 | REQ-15 | v5.0.0-V16.5.3 | SP800-53r5.2/SC-7 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-E1 | REQ-16 | v5.0.0-V8.3.1 | SP800-53r5.2/SC-7 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-E2 | REQ-17 | v5.0.0-V13.2.3 | SP800-53r5.2/IA-5 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-E2 | REQ-18 | v5.0.0-V13.2.3 | SP800-53r5.2/IA-5 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-E3 | REQ-19 | v5.0.0-V16.5.3 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.4.1 | T2 |
+| TC-E4 | REQ-20 | v5.0.0-V16.5.1 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T2 |
+| TC-E4 | REQ-21 | v5.0.0-V16.5.1 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T2 |
 
 未適用列は `-` ではなく、全行に基準 ID を割り当てた。
 ASVS は v5.0.0、SP 800-53 は Release 5.2、CC は ISO/IEC 15408-3:2022
@@ -259,3 +329,9 @@ ASVS は v5.0.0、SP 800-53 は Release 5.2、CC は ISO/IEC 15408-3:2022
 [approval.rs](../rust/jarvis-mcp-gw/src/approval.rs),
 [http.rs](../rust/jarvis-mcp-gw/src/http.rs) を参照。
 実行結果は `evidence/` の test-run JSON に記録する。
+
+TC-E1〜TC-E4 は [sandbox.rs](../rust/jarvis-mcp-gw/src/sandbox.rs)、
+[grpc.rs](../rust/jarvis-mcp-gw/src/grpc.rs)、
+[config.rs](../rust/jarvis-mcp-gw/src/config.rs)、
+[main.rs](../rust/jarvis-mcp-gw/src/main.rs) の回帰テストに対応する。
+実測件数は `evidence/` の test-run JSON を参照（仕様更新後は再実行が必要）。
