@@ -18,6 +18,18 @@ use uuid::Uuid;
 /// The wire name itself is stable and must not change.
 pub const JARVIS_CONTEXT_TOKEN_HEADER: &str = "x-jarvis-context-token";
 
+/// Fixed HTTP 409 body emitted by `jarvis-policy` when the emergency stop
+/// (kill switch) blocks an approval decision.
+///
+/// The policy handler and the approval UI both classify a 409 by this exact
+/// body: the `ALREADY_DECIDED` literal must still resolve to the authoritative
+/// winner, while this literal must pin the UI's halt display with no winner
+/// readback. Keeping one definition in `jarvis-core` prevents a policy wording
+/// change from silently pushing a kill-switch 409 into the winner path in the
+/// UI. The wire text is stable: changing it requires updating the contract pins
+/// in both consumers.
+pub const KILL_SWITCH_409_BODY: &str = "approval decisions are blocked by the kill switch";
+
 /// Unified event type used across JARVIS services
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedEvent {
@@ -149,6 +161,18 @@ mod tests {
     #[test]
     fn context_token_header_pins_the_wire_contract() {
         assert_eq!(JARVIS_CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    }
+
+    /// Single canonical pin of the approval 409 wire body. Policy and UI
+    /// reference [`KILL_SWITCH_409_BODY`] instead of repeating this literal;
+    /// the UI also keeps an independent external-contract fixture so a change
+    /// here is observable as a failing UI contract test.
+    #[test]
+    fn kill_switch_409_body_pins_the_wire_contract() {
+        assert_eq!(
+            KILL_SWITCH_409_BODY,
+            "approval decisions are blocked by the kill switch"
+        );
     }
 
     fn all_sources() -> [EventSource; 7] {

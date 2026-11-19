@@ -651,11 +651,15 @@ async fn list_approvals(State(engine): State<Arc<PolicyEngine>>) -> Json<serde_j
 /// SQL text or upstream error string can reach the caller. `QueueFull` and
 /// `Persistence` share HTTP 503 but carry different fixed messages, so a
 /// retrying client can tell queue exhaustion from a persistence outage.
+///
+/// The kill-switch 409 body is sourced from `jarvis-core` (I54-C): this module
+/// does not own that literal, so the approval UI can classify the exact same
+/// wire body without keeping a local copy that could silently drift.
 pub(crate) mod approval_error_reasons {
     pub const BAD_REQUEST: &str = "invalid approval request";
     pub const NOT_FOUND: &str = "approval request not found";
     pub const ALREADY_DECIDED: &str = "approval request already decided";
-    pub const KILL_SWITCH: &str = "approval decisions are blocked by the kill switch";
+    pub const KILL_SWITCH: &str = jarvis_core::KILL_SWITCH_409_BODY;
     pub const QUEUE_FULL: &str = "approval queue is full; retry later";
     pub const PERSISTENCE: &str = "approval persistence is unavailable; retry later";
 }
@@ -2425,6 +2429,13 @@ mod tests {
         assert_eq!(kill_body, approval_error_reasons::KILL_SWITCH);
         assert_eq!(decided_body, approval_error_reasons::ALREADY_DECIDED);
         assert_ne!(kill_body, decided_body);
+        // I54-C: the emitted 409 body must be the shared constant, never a
+        // policy-local literal that the UI cannot observe.
+        assert_eq!(
+            approval_error_reasons::KILL_SWITCH,
+            jarvis_core::KILL_SWITCH_409_BODY,
+            "policy must emit the shared kill-switch 409 body"
+        );
     }
 
     /// Backend double reporting the dedicated persistence failure on the
