@@ -2,17 +2,50 @@
 
 use anyhow::Result;
 use jarvis_policy::{PolicyEngine, config};
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use std::sync::Arc;
 use tracing::info;
+
+/// Keeps the [`SdkTracerProvider`] alive for the lifetime of `main` and makes
+/// sure the batch exporter is shut down on every exit path.
+///
+/// The provider is cloned into the tracer held by the global tracing layer, so
+/// it is not the last `Arc` reference once `init_tracing` returns. Dropping the
+/// local handle there therefore never triggers shutdown, and spans queued at
+/// process exit are lost. Holding this guard in `main` and calling `shutdown`
+/// explicitly flushes them; [`Drop`] is the safety net for early `?` returns.
+struct TracerGuard {
+    provider: SdkTracerProvider,
+}
+
+impl TracerGuard {
+    /// Flush queued spans. Errors are reported on stderr because this runs at
+    /// process teardown, where the tracing layer may already be gone. A
+    /// failure is intentionally non-fatal, matching the exporter policy.
+    fn shutdown(&self) {
+        if let Err(err) = self.provider.shutdown() {
+            eprintln!("jarvis-policy: tracer provider shutdown failed: {err}");
+        }
+    }
+}
+
+impl Drop for TracerGuard {
+    fn drop(&mut self) {
+        // Safety net for error paths that return early via `?`. A repeated
+        // shutdown is a harmless `AlreadyShutdown` error and is ignored here.
+        let _ = self.provider.shutdown();
+    }
+}
 
 /// Initialise JSON logging with OTLP trace export.
 ///
 /// The collector endpoint comes from `OTEL_EXPORTER_OTLP_ENDPOINT` and
 /// defaults to the local collector. Export failures do not stop the service.
-fn init_tracing(service: &'static str) -> Result<()> {
+/// The provider is returned so its lifetime can be tied to `main`, and an
+/// invalid endpoint still aborts startup via the `?` on `build()`.
+fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::trace::SdkTracerProvider;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -31,18 +64,19 @@ fn init_tracing(service: &'static str) -> Result<()> {
     let tracer = provider.tracer(service);
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
+    // The global default subscriber is installed exactly once, as before.
     tracing_subscriber::registry()
         .with(telemetry)
         .with(tracing_subscriber::fmt::layer().json())
         .with(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    Ok(())
+    Ok(TracerGuard { provider })
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing("jarvis-policy")?;
+    let tracer = init_tracing("jarvis-policy")?;
     jarvis_policy::http::install_metrics()?;
 
     let config = config::PolicyConfig::load()?;
@@ -56,7 +90,12 @@ async fn main() -> Result<()> {
     let grpc_addr = config.grpc_addr.parse()?;
     let http_addr = config.http_addr.parse()?;
 
-    tokio::try_join!(engine.serve_grpc(grpc_addr), engine.serve_http(http_addr),)?;
+    let result = tokio::try_join!(engine.serve_grpc(grpc_addr), engine.serve_http(http_addr),);
 
+    // Explicit shutdown on the normal path; `TracerGuard::drop` covers the
+    // early `?` returns above as well as any unwinding.
+    tracer.shutdown();
+
+    result?;
     Ok(())
 }
