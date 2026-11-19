@@ -61,6 +61,8 @@ metrics-exporter-prometheus = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+# `oneshot` for axum Router tests; already present transitively via axum 0.7.
+tower = { version = "0.5", features = ["util"] }
 proptest = { workspace = true }
 mockall = { workspace = true }
 testcontainers = { workspace = true }
