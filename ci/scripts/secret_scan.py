@@ -9,7 +9,8 @@ Safety properties:
   PII-detection regex definitions) are classified as such, not as findings.
 
 Usage: python3 ci/scripts/secret_scan.py
-Exit 0 when no value-like credentials are found, 1 otherwise.
+Exit 0 only when no value-like credentials are found and every tracked file
+was read successfully; 1 otherwise (unreadable files fail closed).
 """
 
 from __future__ import annotations
@@ -57,10 +58,16 @@ def classify(value: str) -> str:
 
 def main() -> int:
     findings: list[tuple[str, int, str, str]] = []
-    for path in tracked_files():
+    errors: list[tuple[str, str]] = []
+    tracked = tracked_files()
+    for path in tracked:
         try:
             text = open(path, encoding="utf-8", errors="replace").read()
-        except OSError:
+        except OSError as exc:
+            # An unreadable tracked file must not silently drop out of the
+            # scan: record it so the gate fails closed. Report only the path
+            # and exception class -- never file contents or a secret value.
+            errors.append((path, type(exc).__name__))
             continue
         safe = path.startswith(SAFE_PATHS)
         for lineno, line in enumerate(text.splitlines(), 1):
@@ -80,9 +87,20 @@ def main() -> int:
     value_like = [f for f in findings if f[3] == "VALUE-LIKE"]
     for path, lineno, key, kind in findings:
         print(f"{path}:{lineno}: {key} -> {kind}")
-    print(f" scanned {len(tracked_files())} tracked files, {len(findings)} matches")
+    for path, exc_type in errors:
+        print(f" ERROR: could not read {path} ({exc_type}); value withheld")
+    print(
+        f" scanned {len(tracked)} tracked files, {len(findings)} matches, "
+        f"{len(errors)} read error(s)"
+    )
+    failed = False
     if value_like:
         print(f" FAIL: {len(value_like)} value-like credential(s); values withheld")
+        failed = True
+    if errors:
+        print(f" FAIL: {len(errors)} tracked file(s) unreadable; scan incomplete")
+        failed = True
+    if failed:
         return 1
     print(" OK: no value-like credentials found")
     return 0
