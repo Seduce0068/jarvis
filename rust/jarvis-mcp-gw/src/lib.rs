@@ -169,13 +169,13 @@ impl McpGateway {
             // Human-in-the-loop (MCP-1): the call blocks on the policy
             // approval workflow until an operator decides or the approval
             // window elapses. Any failure is a denial (fail-closed).
-            use approval::ApprovalOutcome;
+            use jarvis_core::approval::ApprovalDecision;
             match self
                 .approval
                 .request_approval(principal, "execute", &resource, &args)
                 .await
             {
-                Ok(ApprovalOutcome::Approved { approved_by, .. }) => {
+                Ok(ApprovalDecision::Approved { approved_by, .. }) => {
                     tracing::info!(
                         tool,
                         principal,
@@ -183,21 +183,21 @@ impl McpGateway {
                         "tool call approved by operator"
                     );
                 }
-                Ok(ApprovalOutcome::Denied { reason }) => {
+                Ok(ApprovalDecision::Denied { reason }) => {
                     return Err(error::McpGatewayError::ApprovalDenied {
                         tool: tool.to_owned(),
                         reason,
                     }
                     .into());
                 }
-                Ok(ApprovalOutcome::Expired) => {
+                Ok(ApprovalDecision::Expired) => {
                     return Err(error::McpGatewayError::ApprovalDenied {
                         tool: tool.to_owned(),
                         reason: "approval request expired".to_owned(),
                     }
                     .into());
                 }
-                Ok(outcome @ ApprovalOutcome::Pending) => {
+                Ok(outcome @ ApprovalDecision::Pending) => {
                     tracing::error!(tool, principal, ?outcome, "unexpected pending approval");
                     return Err(error::McpGatewayError::ApprovalRequired {
                         tool: tool.to_owned(),

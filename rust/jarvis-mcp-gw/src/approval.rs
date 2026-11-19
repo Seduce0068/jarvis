@@ -18,10 +18,15 @@
 //! are derived from this one value.
 
 use anyhow::{Context, Result};
-use chrono::{Duration as ChronoDuration, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
+
+/// The gateway consumes the canonical core decision (P1-7, 案A). Keeping the
+/// old name as a re-export preserves the source path while making the received
+/// type identical to `jarvis_core::approval::ApprovalDecision`.
+pub use jarvis_core::approval::ApprovalDecision as ApprovalOutcome;
 
 /// Env override for the human approval window, in seconds. Operators must
 /// set this to the same value as the policy side's `approval_timeout_secs`.
@@ -101,13 +106,15 @@ struct ApprovalRequestHttp<'a> {
     expires_at: i64,
 }
 
-/// Decision returned by `jarvis-policy`.
+/// Thin wire DTO for the decision returned by `jarvis-policy`.
 ///
-/// Mirrors `jarvis_policy::policy::ApprovalDecision` (serde tagged with
-/// `"decision"`); `approved_at` is an RFC 3339 timestamp string.
+/// This is deliberately kept separate from [`ApprovalOutcome`]: the HTTP
+/// contract carries `approved_at` as an RFC 3339 *string*, while the canonical
+/// core type stores a `DateTime<Utc>`. The serde tag and variant field names
+/// below are the unchanged wire contract; only the receiving type is thin.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "decision")]
-pub enum ApprovalOutcome {
+enum ApprovalOutcomeWire {
     Approved {
         approved_by: String,
         approved_at: String,
@@ -117,6 +124,32 @@ pub enum ApprovalOutcome {
     },
     Pending,
     Expired,
+}
+
+/// Boundary conversion: wire DTO -> canonical core decision.
+///
+/// This is the only place where the wire `String` timestamp is parsed into a
+/// `DateTime<Utc>`; no `String` timestamps escape into the rest of the gateway.
+/// A malformed timestamp is an error, which the caller treats as fail-closed
+/// (the tool call is denied), never as an implicitly accepted approval.
+fn outcome_from_wire(wire: ApprovalOutcomeWire) -> Result<ApprovalOutcome> {
+    Ok(match wire {
+        ApprovalOutcomeWire::Approved {
+            approved_by,
+            approved_at,
+        } => {
+            let approved_at = DateTime::parse_from_rfc3339(&approved_at)
+                .with_context(|| format!("invalid approved_at: {approved_at}"))?
+                .with_timezone(&Utc);
+            ApprovalOutcome::Approved {
+                approved_by,
+                approved_at,
+            }
+        }
+        ApprovalOutcomeWire::Denied { reason } => ApprovalOutcome::Denied { reason },
+        ApprovalOutcomeWire::Pending => ApprovalOutcome::Pending,
+        ApprovalOutcomeWire::Expired => ApprovalOutcome::Expired,
+    })
 }
 
 /// HTTP client for the policy approval workflow.
@@ -209,11 +242,11 @@ impl ApprovalClient {
         if !status.is_success() {
             anyhow::bail!("approval endpoint {} returned {}", self.endpoint, status);
         }
-        let outcome: ApprovalOutcome = response
+        let wire: ApprovalOutcomeWire = response
             .json()
             .await
             .with_context(|| format!("invalid approval response from {}", self.endpoint))?;
-        Ok(outcome)
+        outcome_from_wire(wire)
     }
 }
 
@@ -314,35 +347,141 @@ mod tests {
 
     #[test]
     fn decisions_deserialize_from_policy_shape() {
-        let approved: ApprovalOutcome = serde_json::from_value(json!({
+        let approved_wire: ApprovalOutcomeWire = serde_json::from_value(json!({
             "decision": "Approved",
             "approved_by": "koppe",
             "approved_at": "2026-11-15T08:00:00Z",
         }))
         .expect("approved decision parses");
         assert_eq!(
-            approved,
+            outcome_from_wire(approved_wire).expect("approved decision converts"),
             ApprovalOutcome::Approved {
                 approved_by: "koppe".into(),
-                approved_at: "2026-11-15T08:00:00Z".into(),
+                approved_at: DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
+                    .expect("timestamp parses")
+                    .with_timezone(&Utc),
             }
         );
 
-        let denied: ApprovalOutcome = serde_json::from_value(json!({
+        let denied_wire: ApprovalOutcomeWire = serde_json::from_value(json!({
             "decision": "Denied",
             "reason": "not now",
         }))
         .expect("denied decision parses");
         assert_eq!(
-            denied,
+            outcome_from_wire(denied_wire).expect("denied decision converts"),
             ApprovalOutcome::Denied {
                 reason: "not now".into()
             }
         );
 
-        let pending: ApprovalOutcome =
+        let pending_wire: ApprovalOutcomeWire =
             serde_json::from_value(json!({ "decision": "Pending" })).expect("pending parses");
-        assert_eq!(pending, ApprovalOutcome::Pending);
+        assert_eq!(
+            outcome_from_wire(pending_wire).expect("pending converts"),
+            ApprovalOutcome::Pending
+        );
+    }
+
+    /// Golden test: the canonical core type must still serialize to the exact
+    /// tagged JSON shapes the policy service and UI consumers rely on. The
+    /// boundary conversion must not change the wire contract.
+    #[test]
+    fn approval_decision_json_contract_is_unchanged() {
+        let approved = ApprovalOutcome::Approved {
+            approved_by: "tester".into(),
+            approved_at: DateTime::from_timestamp(0, 0).expect("epoch is valid"),
+        };
+        assert_eq!(
+            serde_json::to_string(&approved).expect("serializes"),
+            r#"{"decision":"Approved","approved_by":"tester","approved_at":"1970-01-01T00:00:00Z"}"#
+        );
+
+        let denied = ApprovalOutcome::Denied {
+            reason: "not now".into(),
+        };
+        assert_eq!(
+            serde_json::to_string(&denied).expect("serializes"),
+            r#"{"decision":"Denied","reason":"not now"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalOutcome::Pending).expect("serializes"),
+            r#"{"decision":"Pending"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ApprovalOutcome::Expired).expect("serializes"),
+            r#"{"decision":"Expired"}"#
+        );
+    }
+
+    /// Golden test: every wire shape (including the extra metadata keys the
+    /// policy service injects) deserializes into the thin DTO and converts to
+    /// the canonical core decision, with `approved_at` parsed at the boundary.
+    #[test]
+    fn wire_decisions_convert_to_canonical_core_type() {
+        // The extra metadata keys the policy service injects are wire-only
+        // noise; serde ignores them, as it did before the boundary conversion.
+        let approved_json = json!({
+            "decision": "Approved",
+            "approved_by": "koppe",
+            "approved_at": "2026-11-15T08:00:00Z",
+            "id": "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88",
+            "requested_at": "2026-11-15T07:50:00Z",
+            "expires_at": "2026-11-15T07:55:00Z",
+        });
+        let approved_wire: ApprovalOutcomeWire =
+            serde_json::from_value(approved_json).expect("approved wire DTO parses");
+        assert_eq!(
+            outcome_from_wire(approved_wire).expect("converts"),
+            ApprovalOutcome::Approved {
+                approved_by: "koppe".into(),
+                approved_at: DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
+                    .expect("timestamp parses")
+                    .with_timezone(&Utc),
+            }
+        );
+
+        let denied_wire: ApprovalOutcomeWire = serde_json::from_value(json!({
+            "decision": "Denied",
+            "reason": "not now",
+        }))
+        .expect("denied wire DTO parses");
+        assert_eq!(
+            outcome_from_wire(denied_wire).expect("converts"),
+            ApprovalOutcome::Denied {
+                reason: "not now".into()
+            }
+        );
+
+        let pending_wire: ApprovalOutcomeWire =
+            serde_json::from_value(json!({ "decision": "Pending" })).expect("pending parses");
+        assert_eq!(
+            outcome_from_wire(pending_wire).expect("converts"),
+            ApprovalOutcome::Pending
+        );
+
+        let expired_wire: ApprovalOutcomeWire =
+            serde_json::from_value(json!({ "decision": "Expired" })).expect("expired parses");
+        assert_eq!(
+            outcome_from_wire(expired_wire).expect("converts"),
+            ApprovalOutcome::Expired
+        );
+    }
+
+    /// Malformed wire timestamps fail closed instead of being silently stored
+    /// as a `String` past the boundary.
+    #[test]
+    fn malformed_approved_at_fails_closed() {
+        let wire: ApprovalOutcomeWire = serde_json::from_value(json!({
+            "decision": "Approved",
+            "approved_by": "koppe",
+            "approved_at": "not-a-timestamp",
+        }))
+        .expect("wire DTO parses");
+        assert!(
+            outcome_from_wire(wire).is_err(),
+            "invalid approved_at must be rejected at the boundary"
+        );
     }
 
     #[tokio::test]
