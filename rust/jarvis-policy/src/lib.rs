@@ -8,9 +8,11 @@ pub mod error;
 pub mod grpc;
 pub mod http;
 pub mod kill_switch;
+pub mod persistence;
 pub mod policy;
 
 pub use client::PolicyClient;
+pub use persistence::PgApprovalPersistence;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -62,6 +64,11 @@ impl PolicyEngine {
                 .as_ref()
                 .map(std::path::PathBuf::from),
         ));
+        // Fail closed for programmatically built configs too when durable
+        // approval persistence is required but no URL was supplied. The
+        // file-based startup path already calls this in `PolicyConfig::load`.
+        config.validate_approval_persistence()?;
+
         // Policy evaluation is always deny-by-default (Cedar/Casbin or the
         // kill switch). Reject an explicit opt-out so operators cannot be
         // misled into believing `default_deny = false` weakens the check.
@@ -70,10 +77,31 @@ impl PolicyEngine {
                 "default_deny = false is ignored: authorization is always deny-by-default"
             );
         }
-        let approvals = approval::ApprovalStore::with_max_pending(
-            std::time::Duration::from_secs(config.approval_timeout_secs),
-            config.approval_max_pending,
-        );
+
+        // I30-A: inject the PostgreSQL backend only when a non-blank `pg_url`
+        // is configured. With no URL the store keeps its Noop/in-memory default,
+        // so existing (and all test) deployments are behaviorally unchanged.
+        // The URL itself is never logged: it may carry credentials.
+        let approval_timeout = std::time::Duration::from_secs(config.approval_timeout_secs);
+        let approvals = match config
+            .pg_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        {
+            Some(pg_url) => {
+                tracing::info!("approval persistence enabled: PostgreSQL");
+                let persistence = Arc::new(PgApprovalPersistence::connect(pg_url).await?);
+                approval::ApprovalStore::with_persistence(
+                    approval_timeout,
+                    config.approval_max_pending,
+                    persistence,
+                )
+            }
+            None => approval::ApprovalStore::with_max_pending(
+                approval_timeout,
+                config.approval_max_pending,
+            ),
+        };
 
         Ok(Self {
             config,

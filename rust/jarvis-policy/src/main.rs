@@ -147,6 +147,20 @@ async fn main() -> Result<()> {
     jarvis_policy::http::install_metrics()?;
 
     let config = config::PolicyConfig::load()?;
+
+    // I30-A: report the active approval backend without logging `pg_url` itself
+    // (the URL may carry credentials). The actual injection happens in
+    // `PolicyEngine::new`, which uses the in-memory/Noop default when unset.
+    if config
+        .pg_url
+        .as_deref()
+        .is_some_and(|url| !url.trim().is_empty())
+    {
+        info!("approval persistence backend: PostgreSQL (durable CAS + audit)");
+    } else {
+        info!("approval persistence backend: in-memory (pg_url unset)");
+    }
+
     let engine = Arc::new(PolicyEngine::new(config.clone()).await?);
 
     info!(

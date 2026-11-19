@@ -2,8 +2,10 @@
 //!
 //! A request registers a pending entry and waits until a decision is made
 //! (via the HTTP approve/deny endpoints) or the configured timeout elapses.
-//! Decisions are held in memory; PostgreSQL-backed audit persistence and
-//! user notification (HA/phone) will be layered on top later.
+//! Decisions are held in memory; an opt-in PostgreSQL backend
+//! ([`crate::persistence::PgApprovalPersistence`]) can durably CAS the decision
+//! and write the audit row in one transaction when `pg_url` is configured.
+//! User notification (HA/phone) will be layered on top later.
 //!
 //! Approval is intentionally HTTP-only: the gRPC surface is limited to
 //! authorization and kill-switch operations so a long-running human decision
@@ -44,16 +46,18 @@ pub enum ApprovalError {
 /// [`ApprovalStore::try_request`] instead of comparing this string.
 pub const QUEUE_FULL_REASON: &str = "approval queue full";
 
-/// Persistence seam for approval requests and decisions (I29-A, 案A).
+/// Persistence seam for approval requests and decisions (I29-A / I30-A, 案A).
 ///
-/// Slice 1 introduces the abstraction and a no-op default only: no database is
-/// contacted, no connection string is parsed, and the in-memory store remains
-/// authoritative. A PostgreSQL-backed implementation will be plugged in via
-/// [`ApprovalStore::with_persistence`] in a later slice.
+/// The in-memory store remains the source of truth for pending state. Two
+/// implementations exist: [`NoopPersistence`] (the default, no I/O) and
+/// [`crate::persistence::PgApprovalPersistence`] (opt-in via `pg_url`, which
+/// commits a CAS plus an audit row in one transaction).
 ///
 /// Implementations must be `Send + Sync` because [`ApprovalStore`] is cloned
-/// across Tokio tasks. Errors are treated as best-effort by the store: they are
-/// observed by the backend owner but never change a policy decision.
+/// across Tokio tasks. [`ApprovalStore::try_request`] treats `record_request`
+/// errors as best-effort so the memory-only default is unchanged. For
+/// `record_decision`, however, an error now withholds the in-memory decision:
+/// the watch channel must not announce a decision that failed to commit.
 #[async_trait::async_trait]
 pub trait ApprovalPersistence: Send + Sync {
     /// Persist a newly registered pending request with its authoritative
@@ -65,6 +69,11 @@ pub trait ApprovalPersistence: Send + Sync {
     ) -> Result<(), ApprovalError>;
 
     /// Persist the decision reached for `id`.
+    ///
+    /// For a transactional backend this must return `Ok` only after the commit
+    /// succeeded: [`ApprovalStore::decide`] publishes the in-memory decision and
+    /// wakes the waiter only after this method returns `Ok`. A failure withholds
+    /// both, so a rolled-back transaction is never observable by a waiter.
     async fn record_decision(
         &self,
         id: Uuid,
@@ -165,10 +174,11 @@ impl ApprovalStore {
 
     /// Additive constructor that installs an [`ApprovalPersistence`] backend.
     ///
-    /// The in-memory workflow stays authoritative; the backend only receives
-    /// observations through the trait hooks. Passing [`NoopPersistence`]
-    /// reproduces the default store exactly, and no implementation in this
-    /// slice opens a connection or performs external I/O.
+    /// The in-memory workflow stays authoritative for pending state; the
+    /// backend receives the trait hooks. Passing [`NoopPersistence`] reproduces
+    /// the default store exactly with no I/O. [`Self::new`] and
+    /// [`Self::with_max_pending`] keep using it, so memory-only deployments are
+    /// unchanged. A configured `pg_url` injects the PostgreSQL backend instead.
     pub fn with_persistence(
         timeout: Duration,
         max_pending: usize,
@@ -279,7 +289,9 @@ impl ApprovalStore {
         }
 
         // Best-effort seam: `NoopPersistence` is a no-op, so the default store
-        // stays memory-only and its observable behavior is unchanged.
+        // stays memory-only and its observable behavior is unchanged. For the
+        // Pg backend this auto-commits the pending INSERT here, before the wait
+        // below begins and therefore before any `decide` CAS can run.
         let _ = self
             .inner
             .persistence
@@ -336,8 +348,38 @@ impl ApprovalStore {
     }
 
     /// Record `decision` for a pending request and wake its waiter.
+    ///
+    /// Ordering is deliberate (I30-A): the durable backend commits first, and
+    /// only then is the decision published in memory and sent on the watch
+    /// channel. A failed commit (or a zero-row CAS reported as
+    /// [`ApprovalError::AlreadyDecided`]) leaves the entry pending, so a waiter
+    /// can never observe a decision that was rolled back.
     pub async fn decide(&self, id: Uuid, decision: ApprovalDecision) -> Result<(), ApprovalError> {
         let decided_at = Utc::now();
+
+        // Cheap precondition under a read lock. No `await` while holding it.
+        // This also makes a second `decide` fail closed without touching the
+        // persistence backend at all.
+        {
+            let entries = self.inner.entries.read().await;
+            let entry = entries.get(&id).ok_or(ApprovalError::NotFound(id))?;
+            if entry.decision.is_some() {
+                return Err(ApprovalError::AlreadyDecided(id));
+            }
+        }
+
+        // Persist (and, for the Pg backend, commit) BEFORE publishing. With
+        // `NoopPersistence` this is an immediate `Ok`, preserving the legacy
+        // in-memory behavior exactly.
+        self.inner
+            .persistence
+            .record_decision(id, &decision, decided_at)
+            .await?;
+
+        // Commit succeeded: publish and wake the waiter. Re-check under the
+        // write lock because a concurrent decider may have won the race while
+        // the (lock-free) persistence call was in flight; this keeps a single
+        // winner even for backends without a database CAS.
         {
             let mut entries = self.inner.entries.write().await;
             let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
@@ -346,13 +388,8 @@ impl ApprovalStore {
             }
             entry.decision = Some(decision.clone());
             entry.decided_at = Some(decided_at);
-            let _ = entry.tx.send(Some(decision.clone()));
+            let _ = entry.tx.send(Some(decision));
         }
-        let _ = self
-            .inner
-            .persistence
-            .record_decision(id, &decision, decided_at)
-            .await;
         Ok(())
     }
 
@@ -421,6 +458,7 @@ impl ApprovalStore {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     fn make_request() -> ApprovalRequest {
         let now = Utc::now();
@@ -947,5 +985,246 @@ mod tests {
         ));
         assert_eq!(*recorder.expired.lock().await, vec![id]);
         assert!(recorder.decisions.lock().await.is_empty());
+    }
+
+    // ---- I30-A commit-before-watch ordering tests (mock, no real DB) --------
+
+    async fn wait_for_registration(store: &ApprovalStore, id: Uuid) {
+        for _ in 0..200 {
+            if store.status(id).await.is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("waiter never registered the request");
+    }
+
+    /// Mock backend whose `record_decision` can be held open behind a gate and
+    /// can simulate a rolled-back transaction. No database is contacted.
+    struct GatedPersistence {
+        entered: Arc<AtomicBool>,
+        calls: Arc<AtomicUsize>,
+        gate: tokio::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+        rollback: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for GatedPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.entered.store(true, Ordering::SeqCst);
+            if let Some(rx) = self.gate.lock().await.take() {
+                // A real backend commits here. Until the gate opens, returning
+                // from this method (and therefore any watch send) is impossible.
+                let _ = rx.await;
+            }
+            if self.rollback {
+                Err(ApprovalError::QueueFull)
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn mark_expired(
+            &self,
+            _id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+    }
+
+    /// (a) A decision must not be published or sent while the durable commit is
+    /// still in flight.
+    #[tokio::test]
+    async fn watch_does_not_fire_before_commit() {
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let persistence = Arc::new(GatedPersistence {
+            entered: entered.clone(),
+            calls: calls.clone(),
+            gate: tokio::sync::Mutex::new(Some(commit_rx)),
+            rollback: false,
+        });
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence,
+        );
+        let request = make_request();
+        let id = request.id;
+        let waiter_done = Arc::new(AtomicBool::new(false));
+
+        let waiter = {
+            let store = store.clone();
+            let done = waiter_done.clone();
+            tokio::spawn(async move {
+                let decision = store.request(request).await;
+                done.store(true, Ordering::SeqCst);
+                decision
+            })
+        };
+        wait_for_registration(&store, id).await;
+
+        let decider = {
+            let store = store.clone();
+            tokio::spawn(async move { store.decide(id, approved()).await })
+        };
+        for _ in 0..200 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "record_decision was entered"
+        );
+
+        // Gate still closed: neither the in-memory view nor the waiter may see
+        // the decision yet.
+        assert!(matches!(
+            store.status(id).await,
+            Ok(ApprovalDecision::Pending)
+        ));
+        assert!(
+            !waiter_done.load(Ordering::SeqCst),
+            "waiter must stay blocked until the commit succeeds"
+        );
+
+        commit_tx.send(()).expect("release commit gate");
+        decider
+            .await
+            .expect("decide task")
+            .expect("decide succeeds");
+
+        let decision = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("waiter completes after commit")
+            .expect("waiter task");
+        assert!(matches!(decision, ApprovalDecision::Approved { .. }));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// (b) A rolled-back commit must be invisible to the waiter: no in-memory
+    /// decision, no watch send, and an error returned to the decider.
+    #[tokio::test]
+    async fn rollback_hides_decision_from_waiters() {
+        let (commit_tx, commit_rx) = tokio::sync::oneshot::channel::<()>();
+        let entered = Arc::new(AtomicBool::new(false));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let persistence = Arc::new(GatedPersistence {
+            entered: entered.clone(),
+            calls: calls.clone(),
+            gate: tokio::sync::Mutex::new(Some(commit_rx)),
+            rollback: true,
+        });
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence,
+        );
+        let request = make_request();
+        let id = request.id;
+        let waiter_done = Arc::new(AtomicBool::new(false));
+
+        let waiter = {
+            let store = store.clone();
+            let done = waiter_done.clone();
+            tokio::spawn(async move {
+                let decision = store.request(request).await;
+                done.store(true, Ordering::SeqCst);
+                decision
+            })
+        };
+        wait_for_registration(&store, id).await;
+
+        let decider = {
+            let store = store.clone();
+            tokio::spawn(async move { store.decide(id, approved()).await })
+        };
+        for _ in 0..200 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            entered.load(Ordering::SeqCst),
+            "record_decision was entered"
+        );
+        commit_tx.send(()).expect("release rollback gate");
+
+        assert!(
+            decider.await.expect("decide task").is_err(),
+            "a rolled-back commit must not be reported as success"
+        );
+        assert!(matches!(
+            store.status(id).await,
+            Ok(ApprovalDecision::Pending)
+        ));
+        // Give any erroneous watch send a chance to arrive before asserting.
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            !waiter_done.load(Ordering::SeqCst),
+            "waiter must never observe a rolled-back decision"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        waiter.abort();
+        let _ = waiter.await;
+    }
+
+    /// (c) With the mock persistence installed, a second decide still fails
+    /// closed with `AlreadyDecided` and does not hit the backend again.
+    #[tokio::test]
+    async fn double_decide_is_already_decided_with_mock_persistence() {
+        let persistence = Arc::new(RecordingPersistence::default());
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let request = make_request();
+        let id = request.id;
+        let waiter = {
+            let store = store.clone();
+            tokio::spawn(async move { store.request(request).await })
+        };
+        wait_for_registration(&store, id).await;
+
+        store.decide(id, approved()).await.expect("first decide");
+        assert!(matches!(
+            store.decide(id, approved()).await,
+            Err(ApprovalError::AlreadyDecided(_))
+        ));
+        assert_eq!(
+            persistence.decisions.lock().await.len(),
+            1,
+            "the losing decide must not reach persistence"
+        );
+
+        let decision = waiter.await.expect("waiter task");
+        assert!(matches!(decision, ApprovalDecision::Approved { .. }));
     }
 }
