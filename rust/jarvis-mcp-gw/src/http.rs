@@ -37,6 +37,11 @@ struct ExecuteToolResponse {
     result: serde_json::Value,
 }
 
+/// Header carrying the shared admin token on the HTTP listener. It is kept
+/// distinct from the gRPC header (`x-jarvis-grpc-token`) but is backed by the
+/// same `admin_token` configuration value.
+const ADMIN_TOKEN_HEADER: &str = "x-jarvis-admin-token";
+
 pub fn router(gateway: Arc<McpGateway>) -> Router {
     // OpenCode connects to this endpoint as a remote MCP server
     // (`oauth: false`); the principal is fixed server-side.
@@ -51,13 +56,63 @@ pub fn router(gateway: Arc<McpGateway>) -> Router {
             StreamableHttpServerConfig::default(),
         );
 
+    // Only the data-plane endpoints are gated. `/health`, `/metrics` and the
+    // approval flow (served by jarvis-policy under its own
+    // `x-jarvis-approval-token` middleware) keep their existing scope.
+    let protected = Router::new()
+        .route("/v1/execute", post(execute_tool))
+        .nest_service("/mcp", mcp_service)
+        .layer(axum::middleware::from_fn_with_state(
+            gateway.clone(),
+            require_admin_token,
+        ));
+
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
-        .route("/v1/execute", post(execute_tool))
-        .nest_service("/mcp", mcp_service)
+        .merge(protected)
         .with_state(gateway)
         .layer(axum::middleware::from_fn(track_metrics))
+}
+
+/// Optional admin-token gate for the data-plane HTTP endpoints
+/// (`/v1/execute` and `/mcp`).
+///
+/// When `admin_token` is unset the listener keeps its historical
+/// unauthenticated behavior so existing loopback clients keep working. Unlike
+/// gRPC's administrative RPCs, the HTTP data plane is deliberately *not*
+/// fail-closed when no token is configured. When a token is set, callers must
+/// send the exact value in the `x-jarvis-admin-token` header.
+///
+/// This gate is intentionally separate from the policy service's
+/// approval-token middleware (`x-jarvis-approval-token`): the two protect
+/// different hops and must not be confused.
+async fn require_admin_token(
+    State(gateway): State<Arc<McpGateway>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    let Some(expected) = gateway.config.admin_token.as_deref() else {
+        return Ok(next.run(request).await);
+    };
+    let provided = request
+        .headers()
+        .get(ADMIN_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok());
+    // Constant-time-ish comparison, mirroring the gRPC and approval-token
+    // gates: check the length first, then XOR-fold every byte so a mismatch
+    // does not short-circuit on the first differing byte.
+    let authorized = provided.is_some_and(|p| {
+        p.len() == expected.len()
+            && p.bytes()
+                .zip(expected.bytes())
+                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+                == 0
+    });
+    if !authorized {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
 }
 
 /// Count every HTTP request so `/metrics` exposes more than an empty page.
@@ -217,6 +272,36 @@ requires_approval = true
             // Unreachable by construction: tests must not reach a policy
             // service that happens to listen on the default address.
             policy_http_addr: "http://127.0.0.1:1".into(),
+            ..Default::default()
+        };
+        let policy = Arc::new(testing::shipped_policy_client(label).await);
+        Arc::new(
+            McpGateway::new(config, policy)
+                .await
+                .expect("gateway starts"),
+        )
+    }
+
+    /// Like [`test_gateway`], but with an explicit `admin_token` setting so the
+    /// HTTP auth gate can be exercised in both configured and unset states.
+    async fn test_gateway_with_admin_token(
+        label: &str,
+        admin_token: Option<&str>,
+    ) -> Arc<McpGateway> {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-http-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist_path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist_path, EXECUTE_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+
+        let config = McpGatewayConfig {
+            allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            policy_http_addr: "http://127.0.0.1:1".into(),
+            admin_token: admin_token.map(str::to_owned),
             ..Default::default()
         };
         let policy = Arc::new(testing::shipped_policy_client(label).await);
@@ -420,5 +505,156 @@ requires_approval = true
             "refusing to fetch non-public address 127.0.0.1"
         ));
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    /// When an admin token is configured, `/v1/execute` requires it in
+    /// `x-jarvis-admin-token`. Missing/wrong values are rejected before any
+    /// tool work, and neither the approval-token nor the gRPC-token header
+    /// satisfies the gate.
+    #[tokio::test]
+    async fn admin_token_gate_requires_header_when_configured() {
+        let gateway = test_gateway_with_admin_token("auth-required", Some("secret-admin")).await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(testing::run_mock_mcp_server(
+            server_side,
+            "filesystem.read",
+            false,
+        ));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock server registers");
+
+        let base = start_server(gateway).await;
+        let client = reqwest::Client::new();
+        let payload = json!({
+            "tool": "filesystem.read",
+            "args": { "path": "/tmp/example" },
+            "principal": "opencode",
+        });
+
+        let missing = client
+            .post(format!("{base}/v1/execute"))
+            .json(&payload)
+            .send()
+            .await
+            .expect("missing-token request runs");
+        assert_eq!(missing.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let wrong = client
+            .post(format!("{base}/v1/execute"))
+            .header(ADMIN_TOKEN_HEADER, "wrong-token")
+            .json(&payload)
+            .send()
+            .await
+            .expect("wrong-token request runs");
+        assert_eq!(wrong.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // The HTTP approval-token gate is a different hop and must not work.
+        let approval_header = client
+            .post(format!("{base}/v1/execute"))
+            .header("x-jarvis-approval-token", "secret-admin")
+            .json(&payload)
+            .send()
+            .await
+            .expect("approval-token request runs");
+        assert_eq!(approval_header.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // The gRPC header is a different surface and must not work either.
+        let grpc_header = client
+            .post(format!("{base}/v1/execute"))
+            .header("x-jarvis-grpc-token", "secret-admin")
+            .json(&payload)
+            .send()
+            .await
+            .expect("grpc-token request runs");
+        assert_eq!(grpc_header.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        // The correct header passes the gate and reaches the handler.
+        let authorized = client
+            .post(format!("{base}/v1/execute"))
+            .header(ADMIN_TOKEN_HEADER, "secret-admin")
+            .json(&payload)
+            .send()
+            .await
+            .expect("authorized request runs");
+        assert_eq!(authorized.status(), reqwest::StatusCode::OK);
+    }
+
+    /// With no admin token configured the HTTP data plane keeps its legacy
+    /// unauthenticated behavior, so existing loopback clients stay compatible.
+    #[tokio::test]
+    async fn admin_token_gate_is_optional_when_unset() {
+        let gateway = test_gateway_with_admin_token("auth-unset", None).await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(testing::run_mock_mcp_server(
+            server_side,
+            "filesystem.read",
+            false,
+        ));
+        gateway
+            .register_transport("mock", client_side)
+            .await
+            .expect("mock server registers");
+
+        let base = start_server(gateway).await;
+        let response = reqwest::Client::new()
+            .post(format!("{base}/v1/execute"))
+            .json(&json!({
+                "tool": "filesystem.read",
+                "args": { "path": "/tmp/example" },
+                "principal": "opencode",
+            }))
+            .send()
+            .await
+            .expect("unauthenticated legacy request runs");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+    }
+
+    /// Health and metrics stay reachable without the token even when it is
+    /// configured, preserving the approval-token middleware's narrow scope.
+    #[tokio::test]
+    async fn admin_token_gate_exempts_health_and_metrics() {
+        let gateway = test_gateway_with_admin_token("auth-exempt", Some("secret-admin")).await;
+        let base = start_server(gateway).await;
+        let client = reqwest::Client::new();
+
+        for path in ["/health", "/metrics"] {
+            let response = client
+                .get(format!("{base}{path}"))
+                .send()
+                .await
+                .expect("exempt endpoint responds");
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
+        }
+    }
+
+    /// The nested `/mcp` streamable-HTTP service is inside the gated scope:
+    /// it is rejected without the token and reachable with it.
+    #[tokio::test]
+    async fn admin_token_gate_protects_mcp_endpoint() {
+        let gateway = test_gateway_with_admin_token("auth-mcp", Some("secret-admin")).await;
+        let base = start_server(gateway).await;
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("client builds");
+
+        let unauthorized = client
+            .post(format!("{base}/mcp"))
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("unauthenticated MCP request runs");
+        assert_eq!(unauthorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+        let authorized = client
+            .post(format!("{base}/mcp"))
+            .header(ADMIN_TOKEN_HEADER, "secret-admin")
+            .json(&json!({}))
+            .send()
+            .await
+            .expect("authenticated MCP request runs");
+        assert_ne!(authorized.status(), reqwest::StatusCode::UNAUTHORIZED);
     }
 }
