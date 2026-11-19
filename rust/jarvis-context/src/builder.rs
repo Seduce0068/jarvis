@@ -257,16 +257,44 @@ const MAX_RETRY_BACKOFF_MINUTES: i64 = 60 * 24; // 24 h
 /// no longer occupy a slot of [`RECONCILE_BATCH_LIMIT`] on every startup.
 const MAX_RECONCILE_ATTEMPTS: i32 = 10;
 
+/// Selection query for one reconcile batch (I30-C / I61-B / I63-A).
+///
+/// Named so the three eligibility gates are stated once and can be asserted in
+/// a pure test without a live PostgreSQL connection. A dead-lettered row is
+/// retained in the table for auditing but can never be selected again; an
+/// exhausted row stays visible to the gauge while being excluded from retries.
+const LIST_PENDING_SQL: &str = "SELECT id, content, metadata, embedding, attempts, next_retry_at
+                 FROM pending_embeddings
+                 WHERE dead_lettered_at IS NULL
+                   AND attempts < $2
+                   AND (next_retry_at IS NULL OR next_retry_at <= NOW())
+                 ORDER BY created_at ASC LIMIT $1";
+
 /// `true` when a vector holds at least one non-finite component — NaN, a
 /// signed infinity, or a finite f64 that saturated on the f32 cast (I61-B).
 ///
-/// Re-embedding the same content cannot repair a poisoned embedding source,
-/// so detection must dead-letter the row rather than defer it. An empty vector
-/// is deliberately *not* poison: that is the recoverable "stale dimension"
-/// case which still uses the embedder/retry path. Pure and data-free, so no
+/// Detection alone is not a death sentence (I63-B): re-embedding can repair a
+/// poisoned snapshot when its dimension is stale, because [`vector_for_pending`]
+/// then calls the embedder instead of replaying the stored vector. Only poison
+/// at the configured dimension is unrecoverable — see
+/// [`is_unrecoverable_poison`]. An empty vector is deliberately *not* poison:
+/// it is the recoverable "stale dimension" case too. Pure and data-free, so no
 /// vector value can ever reach a log record.
 fn is_non_finite_vector(vector: &[f32]) -> bool {
     vector.iter().any(|value| !value.is_finite())
+}
+
+/// Whether a non-finite stored vector is beyond repair by re-embedding
+/// (I63-B).
+///
+/// [`vector_for_pending`] re-embeds the content only when the stored dimension
+/// differs from the configured one. When the dimensions already match it just
+/// re-validates and replays the stored vector, so a non-finite value there
+/// cannot be repaired and the row is dead-lettered. A stale-dimension poison is
+/// *not* unrecoverable: it stays on the re-embed/retry path so a healthy
+/// embedding can replace it instead of losing the memory. Pure and data-free.
+fn is_unrecoverable_poison(stored: &[f32], embedding_dim: usize) -> bool {
+    is_non_finite_vector(stored) && embedding_dim > 0 && stored.len() == embedding_dim
 }
 
 /// Exponential backoff after `attempts` failures: `2^attempts` minutes, capped
@@ -344,6 +372,16 @@ trait PendingStore: Send + Sync {
         attempts: i32,
         next_retry_at: DateTime<Utc>,
     ) -> Result<()>;
+    /// Persist a terminal dead-letter decision (I63-A).
+    ///
+    /// The default keeps the historical delete semantics used by the in-memory
+    /// test stores, so the existing outbox/reconcile/log-safety regressions are
+    /// unchanged. `PgPendingStore` overrides it to retain an auditable row:
+    /// `dead_lettered_at`/`vector_state` are written and the `list` gate keeps
+    /// the row out of every future batch without deleting the memory.
+    async fn dead_letter(&self, id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+        self.remove(id).await
+    }
 }
 
 struct QdrantVectorSink {
@@ -379,7 +417,10 @@ impl PendingStore for PgPendingStore {
                      created_at = NOW(),
                      -- A fresh failure restarts the backoff: this row is due now.
                      attempts = 0,
-                     next_retry_at = NULL",
+                     next_retry_at = NULL,
+                     -- ...and clears any earlier terminal decision (I63-A).
+                     dead_lettered_at = NULL,
+                     vector_state = 'pending'",
                 &[
                     &memory.id,
                     &memory.content,
@@ -388,26 +429,46 @@ impl PendingStore for PgPendingStore {
                 ],
             )
             .await?;
+        // Best-effort observability (I63-A): a failed COUNT must not turn a
+        // successfully queued embedding into a reported store failure.
+        if let Ok(row) = client
+            .query_one(
+                "SELECT COUNT(*) FROM pending_embeddings WHERE dead_lettered_at IS NULL",
+                &[],
+            )
+            .await
+        {
+            let count: i64 = row.get(0);
+            crate::http::observe_pending_embeddings(count);
+        }
         Ok(())
     }
 
     async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
         let client = self.pool.get().await?;
-        // Only rows that are due AND still inside the attempt budget are
-        // selected. A permanently-failing row deferred with a future
-        // `next_retry_at` drops out of the head of the batch (I30-C); once its
+        // Only live, due rows still inside the attempt budget are selected. A
+        // deferred row drops out of the head of the batch (I30-C); once its
         // attempts reach `MAX_RECONCILE_ATTEMPTS` it drops out entirely
-        // (I61-B), so poison rows can never starve healthy PG-only memories.
+        // (I61-B); a dead-lettered row is never selected again (I63-A). Poison
+        // rows therefore cannot starve healthy PG-only memories.
         let rows = client
             .query(
-                "SELECT id, content, metadata, embedding, attempts, next_retry_at
-                 FROM pending_embeddings
-                 WHERE attempts < $2
-                   AND (next_retry_at IS NULL OR next_retry_at <= NOW())
-                 ORDER BY created_at ASC LIMIT $1",
+                LIST_PENDING_SQL,
                 &[&(limit as i64), &MAX_RECONCILE_ATTEMPTS],
             )
             .await?;
+        // Best-effort gauge (I63-A): count every retained, non-dead-lettered
+        // row, including exhausted ones that this batch cannot select.
+        if let Ok(row) = client
+            .query_one(
+                "SELECT COUNT(*) FROM pending_embeddings WHERE dead_lettered_at IS NULL",
+                &[],
+            )
+            .await
+        {
+            let count: i64 = row.get(0);
+            crate::http::observe_pending_embeddings(count);
+        }
         rows.into_iter()
             .map(|row| {
                 let embedding_json: Value = row.get(3);
@@ -444,6 +505,22 @@ impl PendingStore for PgPendingStore {
             .execute(
                 "UPDATE pending_embeddings SET attempts = $2, next_retry_at = $3 WHERE id = $1",
                 &[&id, &attempts, &next_retry_at],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn dead_letter(&self, id: Uuid, dead_lettered_at: DateTime<Utc>) -> Result<()> {
+        let client = self.pool.get().await?;
+        // Retain the row (and therefore the memory's audit trail) instead of
+        // deleting it. `dead_lettered_at IS NULL` in LIST_PENDING_SQL is what
+        // permanently excludes it from every future reconcile batch (I63-A).
+        client
+            .execute(
+                "UPDATE pending_embeddings
+                 SET dead_lettered_at = $2, vector_state = 'dead_lettered'
+                 WHERE id = $1",
+                &[&id, &dead_lettered_at],
             )
             .await?;
         Ok(())
@@ -486,6 +563,24 @@ async fn store_memory_with_sinks(
     }
 }
 
+/// Injectable re-embedding seam (I63-B). Production delegates to
+/// [`crate::embedding::EmbeddingClient`]; tests can return a canned vector so
+/// the stale-dimension recovery path is exercised without a live endpoint, DB
+/// or Qdrant connection.
+#[async_trait::async_trait]
+trait Reembed {
+    async fn reembed(&self, content: &str) -> Result<Vec<f32>>;
+}
+
+#[async_trait::async_trait]
+impl Reembed for crate::embedding::EmbeddingClient {
+    async fn reembed(&self, content: &str) -> Result<Vec<f32>> {
+        self.embed(content)
+            .await
+            .context("re-embedding a pending memory during reconcile")
+    }
+}
+
 /// Choose the vector used to retry a queued upsert (P1-2).
 ///
 /// The vector captured when the upsert failed is preferred: retrying is then
@@ -495,13 +590,28 @@ async fn store_memory_with_sinks(
 ///
 /// Both the replayed and the re-embedded vector pass the shared embedding
 /// validator. A queued vector can be non-finite (an f64 that saturated on the
-/// f32 cast before it was persisted); replaying it would feed a poisoned value
-/// straight into Qdrant. `reconcile_pending` detects that case before calling
-/// this helper and dead-letters the row (I61-B); the validator here stays as
-/// the helper's own fail-closed boundary.
+/// f32 cast before it was persisted). With a stale dimension this helper
+/// re-embeds the content and thereby repairs the poison; with a matching
+/// dimension it only re-validates the same vector and fails, which is the sole
+/// case where `reconcile_pending` dead-letters the row (I63-B). The validator
+/// here stays as the helper's own fail-closed boundary.
 async fn vector_for_pending(
     pending: &PendingEmbedding,
     embedder: Option<&crate::embedding::EmbeddingClient>,
+    embedding_dim: usize,
+) -> Result<Vec<f32>> {
+    let seam = embedder
+        .filter(|client| client.is_enabled())
+        .map(|client| client as &dyn Reembed);
+    vector_for_pending_with(pending, seam, embedding_dim).await
+}
+
+/// [`vector_for_pending`] with the embed call injected, so the recovery path is
+/// testable without any live service (I63-B). `reembed` is `None` when no
+/// embedding endpoint is enabled.
+async fn vector_for_pending_with(
+    pending: &PendingEmbedding,
+    reembed: Option<&dyn Reembed>,
     embedding_dim: usize,
 ) -> Result<Vec<f32>> {
     if embedding_dim > 0 && pending.embedding.len() == embedding_dim {
@@ -509,7 +619,7 @@ async fn vector_for_pending(
         return Ok(pending.embedding.clone());
     }
 
-    let Some(embedder) = embedder.filter(|client| client.is_enabled()) else {
+    let Some(seam) = reembed else {
         anyhow::bail!(
             "pending memory {} has no stored vector of dimension {embedding_dim} \
              and no embedding endpoint is configured",
@@ -517,10 +627,7 @@ async fn vector_for_pending(
         );
     };
 
-    let vector = embedder
-        .embed(&pending.content)
-        .await
-        .context("re-embedding a pending memory during reconcile")?;
+    let vector = seam.reembed(&pending.content).await?;
     if vector.len() != embedding_dim {
         anyhow::bail!(
             "re-embedded pending memory {} produced {} dimensions, expected {embedding_dim}",
@@ -550,14 +657,22 @@ async fn defer_failed(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
     }
 }
 
-/// Dead-letter a pending row whose vector is non-finite (I61-B).
+/// Dead-letter a pending row whose vector is non-finite and unrecoverable
+/// (I61-B / I63-A / I63-B).
 ///
-/// A poisoned embedding source cannot be repaired by re-embedding the same
-/// content, so deferring only retries the same bad vector every 24h forever:
-/// once [`RECONCILE_BATCH_LIMIT`] rows were poisoned, healthy PG-only memories
-/// were starved of their Qdrant reflection. The row is deleted instead, with a
-/// single decision warning using only the fixed `id`/`attempts`/`error_kind`
-/// vocabulary. No raw error, payload or vector value is ever formatted.
+/// Only poison at the configured dimension is handled here:
+/// [`vector_for_pending`] does not re-embed in that case, so deferring would
+/// replay the same bad vector every 24h forever and starve healthy PG-only
+/// memories once [`RECONCILE_BATCH_LIMIT`] rows were poisoned. A stale-dimension
+/// poison gets a re-embedding attempt first and is never dead-lettered here
+/// (I63-B). The row is retired instead: the
+/// production store writes `dead_lettered_at`/`vector_state` and keeps the row
+/// for inspection, while the `dead_lettered_at IS NULL` selection gate makes
+/// any retry impossible. In-memory test stores keep the historical delete
+/// behaviour through the seam's default method. A single decision warning uses
+/// only the fixed `id`/`attempts`/`error_kind` vocabulary, and the decision is
+/// counted by a fixed-label metric; no raw error, payload or vector value is
+/// ever formatted or exported.
 async fn dead_letter_retry(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
     warn!(
         id = %id,
@@ -565,11 +680,13 @@ async fn dead_letter_retry(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
         error_kind = ErrorKind::Embedding.as_str(),
         "pending memory has a non-finite vector; dead-lettering this row"
     );
-    if let Err(error) = outbox.remove(id).await {
+    // I63-A: count the terminal decision. Labels are fixed vocabulary only.
+    crate::http::record_dead_lettered_embedding();
+    if let Err(error) = outbox.dead_letter(id, Utc::now()).await {
         warn!(
             id = %id,
             error_kind = error_kind(&error, ErrorKind::Persistence),
-            "could not delete a dead-lettered pending memory"
+            "could not persist a dead-letter decision for a pending memory"
         );
     }
 }
@@ -580,9 +697,13 @@ async fn dead_letter_retry(outbox: &dyn PendingStore, id: Uuid, attempts: i32) {
 /// `attempts` and sets a future `next_retry_at`, so a permanently-failing row
 /// is filtered out of the next batch instead of starving later rows (I30-C);
 /// at [`MAX_RECONCILE_ATTEMPTS`] it is excluded from every batch (I61-B). A
-/// non-finite vector is different: re-embedding cannot repair it, so it is
-/// dead-lettered (deleted) on detection with a single warning rather than
-/// retried forever (I61-B).
+/// non-finite vector is only dead-lettered when it is *unrecoverable*:
+/// [`vector_for_pending`] gets the first chance to re-embed the content, which
+/// repairs poison stored at a stale dimension; only poison at the configured
+/// dimension — where no re-embed happens — is retired with a single warning
+/// rather than retried forever (I63-B, refining I61-B). I63-A persists that
+/// terminal decision on the row and excludes it from every later batch, so it
+/// warns once while remaining auditable.
 async fn reconcile_pending(
     outbox: &dyn PendingStore,
     sink: &dyn VectorSink,
@@ -606,25 +727,36 @@ async fn reconcile_pending(
         // below, so the failure path can still defer this row.
         let attempts = item.attempts;
 
-        // I61-B: detect poison before any re-embedding is attempted. An empty
-        // vector is not poison (it is the recoverable stale-dimension case), so
-        // only real non-finite components take the dead-letter branch. The row
-        // is deleted, so it cannot reappear in a later batch and warn again.
-        if is_non_finite_vector(&item.embedding) {
-            dead_letter_retry(outbox, item.id, attempts).await;
-            continue;
-        }
-
+        // I63-B: do NOT dead-letter a non-finite vector up front. Give
+        // `vector_for_pending` the first chance to re-embed the content: that
+        // is the only path that can repair poison stored at a stale dimension.
+        // The terminal decision is therefore taken in the failure branch below,
+        // and only for unrecoverable poison (dimension already matches, so no
+        // re-embed would happen). An empty vector was never poison; it already
+        // used the embedder/retry path.
         let vector = match vector_for_pending(&item, embedder, embedding_dim).await {
             Ok(vector) => vector,
             Err(error) => {
-                warn!(
-                    id = %item.id,
-                    attempts = attempts,
-                    error_kind = error_kind(&error, ErrorKind::Embedding),
-                    "could not produce a vector for a pending memory; deferring this row"
-                );
-                defer_failed(outbox, item.id, attempts).await;
+                if is_unrecoverable_poison(&item.embedding, embedding_dim) {
+                    // Non-finite + matching dimension: `vector_for_pending` only
+                    // replayed and re-validated the same poison, so re-embedding
+                    // cannot help. I61-B: retire it instead of retrying forever;
+                    // I63-A: mark it rather than delete, and the
+                    // `dead_lettered_at IS NULL` gate keeps it out of later
+                    // batches, so it cannot reappear and warn again.
+                    dead_letter_retry(outbox, item.id, attempts).await;
+                } else {
+                    // Stale-dimension poison (or any transient failure) keeps the
+                    // re-embed/retry path: a later pass with an embedder may
+                    // still repair the row instead of losing the memory.
+                    warn!(
+                        id = %item.id,
+                        attempts = attempts,
+                        error_kind = error_kind(&error, ErrorKind::Embedding),
+                        "could not produce a vector for a pending memory; deferring this row"
+                    );
+                    defer_failed(outbox, item.id, attempts).await;
+                }
                 continue;
             }
         };
@@ -643,8 +775,9 @@ async fn reconcile_pending(
 
         // Last line of defense immediately before Qdrant: `vector_for_pending`
         // already validates, but gate again so no future caller can feed an
-        // invalid vector into the upsert/distance computation. I61-B: a
-        // non-finite vector is dead-lettered (never deferred); a merely
+        // invalid vector into the upsert/distance computation. With I63-B the
+        // outbox poison is already resolved above, so this is defense in depth:
+        // a non-finite vector is dead-lettered (never deferred); a merely
         // wrong-shaped vector keeps the transient retry path. Only the fixed
         // `error_kind` vocabulary is logged.
         if validate_embedding(&memory.embedding, embedding_dim).is_err() {
@@ -2520,8 +2653,9 @@ mod tests {
         }
     }
 
-    /// I61-B: a non-finite pending vector cannot be repaired by re-embedding,
-    /// so reconcile must dead-letter (delete) the row rather than defer it.
+    /// I61-B / I63-B: the stored vector is 384-dim, so `vector_for_pending`
+    /// only re-validates it and never re-embeds. The dead-letter expectation is
+    /// therefore unchanged by I63-B: this poison is genuinely unrecoverable.
     /// The sink has no scripted result, so any upsert attempt would panic; the
     /// in-memory outbox and mock sink keep this free of live DB/Qdrant access.
     #[tokio::test]
@@ -2537,6 +2671,64 @@ mod tests {
         assert!(
             rows.is_empty(),
             "a poisoned vector must be deleted, not deferred: {rows:?}"
+        );
+    }
+
+    /// I63-B regression: a poisoned vector stored at an old dimension must NOT
+    /// be dead-lettered before the embedder gets a chance to repair it. With no
+    /// endpoint configured the row is deferred (retry path), not deleted, so a
+    /// later pass with an embedder can still recover the memory.
+    #[tokio::test]
+    async fn reconcile_defers_stale_dimension_poison_instead_of_dead_lettering() {
+        let mut pending = pending_entry();
+        pending.embedding = vec![f32::NAN; 1536]; // poisoned, stale dimension
+        let outbox = MemoryOutbox::with_backoff_filter(vec![pending]);
+        let embedder = disabled_embedder();
+
+        reconcile_pending(&outbox, &ScriptedSink::new(vec![]), Some(&embedder), 384).await;
+
+        let rows = outbox.snapshot();
+        assert_eq!(
+            rows.len(),
+            1,
+            "a stale-dimension poison must stay on the retry path, not be deleted: {rows:?}"
+        );
+        assert_eq!(
+            rows[0].attempts, 1,
+            "the row must be deferred for a later recovery attempt"
+        );
+    }
+
+    /// I63-B regression: the core of `vector_for_pending` repairs a non-finite
+    /// snapshot at a stale dimension by re-embedding the content. The injected
+    /// embedder returns a finite 384-dim vector, so no endpoint, DB or Qdrant is
+    /// contacted and the recovery is deterministic.
+    #[tokio::test]
+    async fn stale_dimension_poison_is_repaired_by_reembedding() {
+        struct FakeEmbedder {
+            vector: Vec<f32>,
+        }
+
+        #[async_trait::async_trait]
+        impl Reembed for FakeEmbedder {
+            async fn reembed(&self, _content: &str) -> Result<Vec<f32>> {
+                Ok(self.vector.clone())
+            }
+        }
+
+        let fresh = vec![0.25_f32; 384];
+        let fake = FakeEmbedder {
+            vector: fresh.clone(),
+        };
+        let mut pending = pending_entry();
+        pending.embedding = vec![f32::NAN; 1536];
+
+        let vector = vector_for_pending_with(&pending, Some(&fake), 384)
+            .await
+            .expect("a stale-dimension poison must be repaired by re-embedding");
+        assert_eq!(
+            vector, fresh,
+            "the fresh embedding must be replayed, not the poisoned snapshot"
         );
     }
 
@@ -2711,6 +2903,24 @@ mod tests {
 
     // --- I61-B: poison dead-lettering + bounded retry attempts (pure/mock) ---
 
+    /// I63-A: the production selection query must gate on all three retirement
+    /// mechanisms. Pure string assertion: no PostgreSQL connection is needed.
+    #[test]
+    fn pending_selection_query_requires_live_rows() {
+        assert!(
+            LIST_PENDING_SQL.contains("dead_lettered_at IS NULL"),
+            "dead-lettered rows must never be retried: {LIST_PENDING_SQL}"
+        );
+        assert!(
+            LIST_PENDING_SQL.contains("attempts < $2"),
+            "exhausted rows must stay out of the batch: {LIST_PENDING_SQL}"
+        );
+        assert!(
+            LIST_PENDING_SQL.contains("next_retry_at IS NULL OR next_retry_at <= NOW()"),
+            "deferred rows must only be selected when due: {LIST_PENDING_SQL}"
+        );
+    }
+
     #[test]
     fn is_non_finite_vector_only_matches_actual_poison() {
         // An empty vector is the recoverable stale-dimension case and must keep
@@ -2723,6 +2933,18 @@ mod tests {
                 "a non-finite component must be detected"
             );
         }
+    }
+
+    /// I63-B: the terminal decision is limited to poison at the configured
+    /// dimension, where no re-embed happens. Poison at a stale dimension, finite
+    /// vectors and empty vectors all stay on the recoverable/retry path.
+    #[test]
+    fn unrecoverable_poison_requires_matching_dimension() {
+        assert!(is_unrecoverable_poison(&[f32::NAN; 384], 384));
+        assert!(is_unrecoverable_poison(&[f32::INFINITY; 384], 384));
+        assert!(!is_unrecoverable_poison(&[f32::NAN; 1536], 384));
+        assert!(!is_unrecoverable_poison(&[0.1; 384], 384));
+        assert!(!is_unrecoverable_poison(&[], 384));
     }
 
     #[test]

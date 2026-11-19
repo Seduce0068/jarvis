@@ -27,6 +27,35 @@ pub fn install_metrics() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Terminal dead-letter decisions, counted with fixed labels only (I63-A).
+///
+/// Uses the same `metrics` crate as [`track_metrics`], so the counter is
+/// rendered by `/metrics` next to `jarvis_http_requests_total`. No id, vector
+/// value, content, endpoint or raw error text is attached — just the fixed
+/// `service` and per-decision `error_kind` tokens.
+pub(crate) fn record_dead_lettered_embedding() {
+    metrics::counter!(
+        "jarvis_dead_lettered_embeddings_total",
+        "service" => "jarvis-context",
+        "error_kind" => "embedding",
+    )
+    .increment(1);
+}
+
+/// Current non-dead-lettered outbox size as a gauge (I63-A).
+///
+/// `count` is a bare number produced by a `COUNT(*)`; only the numeric value
+/// and fixed labels are exported, never a row id or payload. Exhausted rows
+/// (attempts at the cap) are still counted: they remain in the table but are no
+/// longer retried, and that backlog must stay visible.
+pub(crate) fn observe_pending_embeddings(count: i64) {
+    metrics::gauge!(
+        "jarvis_pending_embeddings",
+        "service" => "jarvis-context",
+    )
+    .set(count as f64);
+}
+
 #[derive(Debug, Deserialize)]
 struct BuildContextRequest {
     event_id: String,
