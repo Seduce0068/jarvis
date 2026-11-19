@@ -5,6 +5,8 @@
 # 既定は乾燥実行。--apply で実行（要root）。--allow-web-fetch は後方互換用。
 set -uo pipefail
 apply=0; allow=0; repo_allowlist_changed=0
+# step2 の /etc allowlist パッチを復元するためのフラグ（step3 の allowlist_changed とは独立）
+allowlist_step2_changed=0
 for arg in "$@"; do
   case "$arg" in
     --apply) apply=1 ;;
@@ -26,15 +28,20 @@ rollback() {
   if [ -f "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" ]; then
     install -o root -g root -m 0755 "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" /opt/jarvis/bin/jarvis-mcp-gw
   fi
-  if [ "${allowlist_changed:-0}" -eq 1 ] && [ -f "$allowlist.bak-$ts" ]; then
-    install -o root -g root -m 0644 "$allowlist.bak-$ts" "$allowlist"
+  # /etc allowlist は step2(承認必須化パッチ) -> step3(repo版 install) の順に更新する。
+  # よって復元は逆順(step3 -> step2)が必須。step2 のバックアップが元の内容を保持する。
+  if [ "${allowlist_changed:-0}" -eq 1 ] && [ -f "$allowlist.bak-step3-$ts" ]; then
+    install -o root -g root -m 0644 "$allowlist.bak-step3-$ts" "$allowlist"
+  fi
+  if [ "${allowlist_step2_changed:-0}" -eq 1 ] && [ -f "$allowlist.bak-step2-$ts" ]; then
+    install -o root -g root -m 0644 "$allowlist.bak-step2-$ts" "$allowlist"
   fi
   # web.fetch 承認必須化で書き換えた repo 側 allowlist も元へ戻す（配備版だけの復元は不整合が残る）
-  if [ "${repo_allowlist_changed:-0}" -eq 1 ] && [ -f "$repo_allowlist.bak-$ts" ]; then
-    cp -a "$repo_allowlist.bak-$ts" "$repo_allowlist"
+  if [ "${repo_allowlist_changed:-0}" -eq 1 ] && [ -f "$repo_allowlist.bak-step2-$ts" ]; then
+    cp -a "$repo_allowlist.bak-step2-$ts" "$repo_allowlist"
   fi
-  if [ "${unit_changed:-0}" -eq 1 ] && [ -f "$unit.bak-$ts" ]; then
-    install -o root -g root -m 0644 "$unit.bak-$ts" "$unit"
+  if [ "${unit_changed:-0}" -eq 1 ] && [ -f "$unit.bak-step3-$ts" ]; then
+    install -o root -g root -m 0644 "$unit.bak-step3-$ts" "$unit"
     systemctl daemon-reload || true
   fi
   systemctl restart jarvis-mcp-gw || true
@@ -65,9 +72,9 @@ if grep -A8 'name = "web.fetch"' "$allowlist" 2>/dev/null | grep -q 'requires_ap
   if [ "$allow" -eq 1 ]; then
     echo "== 2. web.fetch承認必須化（repo + /etc） =="
     if [ "$apply" -eq 1 ]; then
-      cp -a "$allowlist" "$allowlist.bak-$ts"
-      # repo 側 allowlist もここで .bak-$ts へ退避（ロールバック時に復元するため）
-      cp -a "$repo_allowlist" "$repo_allowlist.bak-$ts" 2>/dev/null || true
+      cp -a "$allowlist" "$allowlist.bak-step2-$ts"
+      # repo 側 allowlist もここで .bak-step2-$ts へ退避（ロールバック時に復元するため）
+      cp -a "$repo_allowlist" "$repo_allowlist.bak-step2-$ts" 2>/dev/null || true
       python3 - "$allowlist" "$repo_allowlist" <<'PY'
 import sys
 for path in sys.argv[1:]:
@@ -83,8 +90,11 @@ requires_approval = false'''
         open(path, 'w').write(text.replace(old, new, 1))
         print('  patched:', path)
 PY
-      # repo 側が実際に書き換わった場合のみロールバック対象にする
-      if [ -f "$repo_allowlist.bak-$ts" ] && ! cmp -s "$repo_allowlist" "$repo_allowlist.bak-$ts"; then
+      # 実際に書き換わった場合のみロールバック対象にする（step2 は /etc と repo の両方をパッチ）
+      if [ -f "$allowlist.bak-step2-$ts" ] && ! cmp -s "$allowlist" "$allowlist.bak-step2-$ts"; then
+        allowlist_step2_changed=1
+      fi
+      if [ -f "$repo_allowlist.bak-step2-$ts" ] && ! cmp -s "$repo_allowlist" "$repo_allowlist.bak-step2-$ts"; then
         repo_allowlist_changed=1
       fi
     else
@@ -104,14 +114,14 @@ if [ -f "$unit" ] && cmp -s "$unit" "$repo_unit"; then
 else
   unit_changed=1
   echo "  unit: 差分あり -> $unit を $repo_unit で更新"
-  [ "$apply" -eq 1 ] && cp -a "$unit" "$unit.bak-$ts" 2>/dev/null || true
+  [ "$apply" -eq 1 ] && cp -a "$unit" "$unit.bak-step3-$ts" 2>/dev/null || true
 fi
 if [ -f "$allowlist" ] && cmp -s "$allowlist" "$repo_allowlist"; then
   echo "  allowlist: 既に一致（スキップ）"
 else
   allowlist_changed=1
   echo "  allowlist: 差分あり -> $allowlist を repo 版で更新"
-  [ "$apply" -eq 1 ] && cp -a "$allowlist" "$allowlist.bak-$ts" 2>/dev/null || true
+  [ "$apply" -eq 1 ] && cp -a "$allowlist" "$allowlist.bak-step3-$ts" 2>/dev/null || true
 fi
 if [ "$apply" -eq 1 ]; then
   if [ "$unit_changed" -eq 1 ]; then
