@@ -63,6 +63,20 @@ fn error_kind(err: &anyhow::Error, fallback: ErrorKind) -> &'static str {
     }
 }
 
+/// Reduce any Qdrant client failure to the fixed `error_kind` vocabulary.
+///
+/// The raw error `E` is consumed by `_` and never formatted: its `Display` can
+/// embed endpoint URLs and response fragments. Only
+/// [`crate::error::QdrantErrorKind::Failed`] is accepted by the `ContextError`
+/// constructor, so the returned error chain cannot carry client-supplied text
+/// into stderr/journal/OTLP. Every Qdrant call site in this module uses this
+/// single mapper.
+fn discard_qdrant_error<T, E>(
+    result: std::result::Result<T, E>,
+) -> std::result::Result<T, crate::error::ContextError> {
+    result.map_err(|_| crate::error::ContextError::qdrant(crate::error::QdrantErrorKind::Failed))
+}
+
 /// Reassemble PostgreSQL rows in the relevance order supplied by Qdrant.
 /// `WHERE id = ANY($1)` does not preserve the input order, so without this
 /// the vector-search ranking is silently discarded (P1-1).
@@ -933,8 +947,10 @@ pub mod memory {
         // qdrant-client 1.19.0 a compatibility probe that cannot reach the
         // server (or cannot obtain its version) is otherwise only `println!`ed,
         // so the service would still start. With this flag `build()` returns
-        // `Err`, which is mapped below to `ContextError::Qdrant` and propagated
-        // by `ContextBuilder::new()` — startup fails with a clear error.
+        // `Err`, which is mapped below through `discard_qdrant_error` to a
+        // fixed-vocabulary `ContextError` and propagated by
+        // `ContextBuilder::new()` — startup fails closed without echoing the
+        // client's endpoint-bearing error text.
         //
         // CI note (out-of-scope test, intentionally unchanged): the Docker
         // integration test in `tests/integration.rs` starts
@@ -948,9 +964,7 @@ pub mod memory {
         if let Some(key) = config.qdrant_api_key() {
             client = client.api_key(key);
         }
-        Ok(client
-            .build()
-            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?)
+        Ok(discard_qdrant_error(client.build())?)
     }
 
     /// Reject a nonsensical configured dimension before touching Qdrant.
@@ -970,9 +984,11 @@ pub mod memory {
     /// value. Qdrant cannot resize an existing collection, so a mismatch fails
     /// fast with an actionable message instead of surfacing later as an opaque
     /// upsert/search error. An unreadable dimension (`actual = None`) only
-    /// warns and keeps starting, for compatibility with older servers and
-    /// multi-vector collections. A *failed inspection* is a different case and
-    /// is fail-closed in [`check_inspected_dimension`] (I47-C).
+    /// warns and keeps starting, for compatibility with multi-vector
+    /// collections. Callers must pass `None` only for a *fully parsed*
+    /// multi-vector response ([`inspected_dimension_from_info`], I49-C); a
+    /// *failed inspection* or an unparsed response is a different case and is
+    /// fail-closed in [`check_inspected_dimension`] (I47-C).
     pub(super) fn check_existing_dimension(
         name: &str,
         expected: usize,
@@ -997,22 +1013,25 @@ pub mod memory {
     }
 
     /// Apply the I47-C dimension-verification policy to a `collection_info`
-    /// outcome. `inspected` is `Ok(actual)` when the inspection succeeded
-    /// (`actual` is `None` when the response carried no single dense size), and
-    /// `Err(())` when the inspection call itself failed.
+    /// outcome. `inspected` is normally produced by
+    /// [`inspected_dimension_from_info`]: `Ok(Some(actual))` when an exact size
+    /// was parsed, `Ok(None)` **only** for a fully parsed multi-vector
+    /// collection, and `Err(())` when the call failed *or* the response could
+    /// not be parsed (I49-C).
     ///
     /// Adopted policy: **fail closed on inspection failure**. The only reliable
     /// way to establish that an existing collection can serve the configured
-    /// embedding dimension is a successful `collection_info` response. If that
-    /// call fails (transport error, Qdrant 5xx, response-shape change that the
-    /// client rejects), starting anyway would defer a dimension mismatch to
-    /// every subsequent upsert/search and leave the outbox retrying forever.
-    /// Startup must therefore fail with an actionable error instead.
+    /// embedding dimension is a successful, parseable `collection_info`
+    /// response. If that call fails (transport error, Qdrant 5xx) or its shape
+    /// changes so the dimension cannot be read, starting anyway would defer a
+    /// dimension mismatch to every subsequent upsert/search and leave the
+    /// outbox retrying forever. Startup must therefore fail with an actionable
+    /// error instead.
     ///
     /// The two successful-response outcomes keep their historical behavior:
-    /// a readable mismatch is a hard error, while an unreadable dimension
-    /// (`Ok(None)`) only warns and continues (older servers / multi-vector
-    /// collections), so `unknown_existing_dimension_only_warns` stays valid.
+    /// a readable mismatch is a hard error, while a confirmed multi-vector
+    /// collection (`Ok(None)`) only warns and continues, so
+    /// `unknown_existing_dimension_only_warns` stays valid.
     ///
     /// The raw Qdrant error is deliberately discarded at the call site: its
     /// `Display` can embed endpoints and response fragments. Only the fixed
@@ -1066,6 +1085,44 @@ pub mod memory {
         }
     }
 
+    /// Parse a `collection_info` response into the three-way input consumed by
+    /// [`check_inspected_dimension`].
+    ///
+    /// The plain `Option` returned by [`configured_vector_size`] cannot tell a
+    /// *confirmed* multi-vector collection from a *shape change* in the
+    /// response: both produce `None` through its chain of `?`. `Ok(None)` must
+    /// only mean the former (the historical warn-only case), so this helper
+    /// first verifies that every field on the path is present and that a named
+    /// vector map is non-empty. Anything else is "unparsed" and is mapped to
+    /// `Err(())`, the same fail-closed branch used for a failed
+    /// `collection_info` call (I49-C).
+    ///
+    /// - `Ok(Some(size))` — a single dense vector or a single named vector was
+    ///   parsed; the exact dimension is known.
+    /// - `Ok(None)` — the response was fully parsed and holds 2+ named vectors
+    ///   (no single dimension to compare); warn and keep starting.
+    /// - `Err(())` — a field was missing, the named-vector map was empty, or
+    ///   the response could not otherwise be interpreted; fail startup.
+    pub(super) fn inspected_dimension_from_info(
+        info: &qdrant_client::qdrant::CollectionInfo,
+    ) -> std::result::Result<Option<u64>, ()> {
+        use qdrant_client::qdrant::vectors_config::Config;
+
+        let config = info.config.as_ref().ok_or(())?;
+        let params = config.params.as_ref().ok_or(())?;
+        let vectors = params.vectors_config.as_ref().ok_or(())?;
+        match vectors.config.as_ref().ok_or(())? {
+            // A single dense vector config always yields an exact size.
+            Config::Params(_) => Ok(configured_vector_size(info)),
+            // An empty named-vector map carries no usable dimension; that is
+            // an unparseable response, not a confirmed multi-vector collection.
+            Config::ParamsMap(params_map) if params_map.map.is_empty() => Err(()),
+            // Fully parsed. `configured_vector_size` returns None here only
+            // when the map holds 2+ named vectors (confirmed multi-vector).
+            Config::ParamsMap(_) => Ok(configured_vector_size(info)),
+        }
+    }
+
     pub async fn ensure_collection(
         client: &Qdrant,
         name: &str,
@@ -1073,26 +1130,32 @@ pub mod memory {
     ) -> Result<()> {
         validate_embedding_dim(name, embedding_dim)?;
 
-        let collections = client
-            .list_collections()
-            .await
-            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+        let collections = discard_qdrant_error(client.list_collections().await)?;
         if !collections.collections.iter().any(|c| c.name == name) {
             let vectors = VectorParamsBuilder::new(embedding_dim as u64, Distance::Cosine);
-            client
-                .create_collection(CreateCollectionBuilder::new(name).vectors_config(vectors))
-                .await
-                .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
-            return Ok(());
+            discard_qdrant_error(
+                client
+                    .create_collection(CreateCollectionBuilder::new(name).vectors_config(vectors))
+                    .await,
+            )?;
+            // A successful create response is not proof that the collection can
+            // serve the configured dimension. Fall through and read the real
+            // size back below, using the same fail-closed path as a collection
+            // that already existed (I49-C).
         }
 
-        // Existing collection: measure its vector size and fail fast on a
-        // mismatch rather than letting upsert/search fail with an opaque error.
-        // An inspection failure is fail-closed (I47-C): without a successful
-        // `collection_info` response we cannot verify dimension compatibility,
-        // so `Builder::new` must not report a healthy startup.
+        // Shared verification for both newly created and pre-existing
+        // collections. Measure the real vector size and fail fast on a mismatch
+        // rather than letting upsert/search fail with an opaque error. Without
+        // a successful, parseable `collection_info` response we cannot verify
+        // dimension compatibility, so `Builder::new` must not report a healthy
+        // startup: a failed call, a missing `result` payload and an unparsed
+        // response all map to `Err(())` and fail closed (I47-C / I49-C).
         let inspected = match client.collection_info(name).await {
-            Ok(info) => Ok(info.result.as_ref().and_then(configured_vector_size)),
+            Ok(response) => match response.result.as_ref() {
+                Some(info) => inspected_dimension_from_info(info),
+                None => Err(()),
+            },
             // Drop the raw error: its Display can embed endpoints and response
             // fragments, which must never reach logs. The failure kind is
             // conveyed by the fixed `error_kind` vocabulary in the helper.
@@ -1113,10 +1176,11 @@ pub mod memory {
             }
         }
         let point = PointStruct::new(memory.id.to_string(), memory.embedding.clone(), payload_map);
-        client
-            .upsert_points(UpsertPointsBuilder::new(collection, vec![point]))
-            .await
-            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+        discard_qdrant_error(
+            client
+                .upsert_points(UpsertPointsBuilder::new(collection, vec![point]))
+                .await,
+        )?;
         Ok(())
     }
 
@@ -1145,13 +1209,14 @@ pub mod memory {
         embedding: &[f32],
         limit: usize,
     ) -> Result<Vec<(Uuid, f32)>> {
-        let response = client
-            .search_points(
-                SearchPointsBuilder::new(collection, embedding.to_vec(), limit as u64)
-                    .with_payload(true),
-            )
-            .await
-            .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+        let response = discard_qdrant_error(
+            client
+                .search_points(
+                    SearchPointsBuilder::new(collection, embedding.to_vec(), limit as u64)
+                        .with_payload(true),
+                )
+                .await,
+        )?;
 
         let scores: HashMap<Uuid, f32> = response
             .result
@@ -1598,6 +1663,186 @@ mod tests {
             memory::configured_vector_size(&CollectionInfo::default()),
             None
         );
+    }
+
+    #[test]
+    fn unparsed_collection_info_response_fails_closed() {
+        use qdrant_client::qdrant::vectors_config::Config;
+        use qdrant_client::qdrant::{
+            CollectionConfig, CollectionInfo, CollectionParams, VectorParams, VectorParamsMap,
+            VectorsConfig,
+        };
+
+        // A missing `config` field (e.g. an upstream response-shape change)
+        // must NOT be mistaken for a confirmed multi-vector collection.
+        let no_config = memory::inspected_dimension_from_info(&CollectionInfo::default());
+        assert_eq!(no_config, Err(()), "an empty response is unparsed");
+        let err = memory::check_inspected_dimension("jarvis_memories", 384, no_config)
+            .expect_err("an unparsed response must fail startup like a failed call");
+        let message = format!("{err:#}");
+        assert!(message.contains("error_kind=qdrant"), "{message}");
+        assert!(message.contains("jarvis_memories"), "{message}");
+        assert!(message.contains("384"), "{message}");
+        assert!(
+            !message.contains("http") && !message.contains("response"),
+            "no endpoint or response fragment may leak: {message}"
+        );
+
+        // Every intermediate field on the parse path is required. Missing any
+        // one of them is "unparsed", not the historical warn-only case.
+        let no_params = CollectionInfo {
+            config: Some(CollectionConfig::default()),
+            ..Default::default()
+        };
+        assert_eq!(memory::inspected_dimension_from_info(&no_params), Err(()));
+
+        let no_vectors_config = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams::default()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            memory::inspected_dimension_from_info(&no_vectors_config),
+            Err(())
+        );
+
+        let no_inner_config = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig::default()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            memory::inspected_dimension_from_info(&no_inner_config),
+            Err(())
+        );
+
+        // An empty named-vector map has no usable dimension: unparsed.
+        let empty_map = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::ParamsMap(VectorParamsMap::default())),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(memory::inspected_dimension_from_info(&empty_map), Err(()));
+
+        // Over-correction guard: a fully parsed multi-vector collection keeps
+        // the historical warn-only behavior (`Ok(None)` -> startup succeeds).
+        let multi = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::ParamsMap(VectorParamsMap {
+                            map: HashMap::from([
+                                (
+                                    "a".to_string(),
+                                    VectorParams {
+                                        size: 384,
+                                        ..Default::default()
+                                    },
+                                ),
+                                (
+                                    "b".to_string(),
+                                    VectorParams {
+                                        size: 768,
+                                        ..Default::default()
+                                    },
+                                ),
+                            ]),
+                        })),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(memory::inspected_dimension_from_info(&multi), Ok(None));
+        assert!(
+            memory::check_inspected_dimension("jarvis_memories", 384, Ok(None)).is_ok(),
+            "confirmed multi-vector collections must keep the warn-only path"
+        );
+    }
+
+    #[test]
+    fn newly_created_collection_dimension_is_read_back_and_verified() {
+        use qdrant_client::qdrant::vectors_config::Config;
+        use qdrant_client::qdrant::{
+            CollectionConfig, CollectionInfo, CollectionParams, VectorParams, VectorParamsMap,
+            VectorsConfig,
+        };
+
+        // `ensure_collection` no longer trusts the create response: it calls
+        // `collection_info` for the new collection and verifies the real size
+        // through `inspected_dimension_from_info` + `check_inspected_dimension`,
+        // the same fail-closed path used for pre-existing collections.
+        let info_for = |size| CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::Params(VectorParams {
+                            size,
+                            ..Default::default()
+                        })),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Real dimension matches the configured embedding_dim: startup OK.
+        let matching = memory::inspected_dimension_from_info(&info_for(384));
+        assert_eq!(matching, Ok(Some(384)));
+        assert!(memory::check_inspected_dimension("jarvis_memories", 384, matching).is_ok());
+
+        // The read-back size differs from the configured embedding_dim: even
+        // for a freshly created collection this must fail startup.
+        let mismatched = memory::inspected_dimension_from_info(&info_for(768));
+        assert_eq!(mismatched, Ok(Some(768)));
+        let err = memory::check_inspected_dimension("jarvis_memories", 384, mismatched)
+            .expect_err("a wrong real dimension must fail startup even after create");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("768") && message.contains("384"),
+            "{message}"
+        );
+
+        // A single named vector also yields an exact, verified size.
+        let named = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::ParamsMap(VectorParamsMap {
+                            map: HashMap::from([(
+                                "dense".to_string(),
+                                VectorParams {
+                                    size: 384,
+                                    ..Default::default()
+                                },
+                            )]),
+                        })),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(memory::inspected_dimension_from_info(&named), Ok(Some(384)));
     }
 
     #[tokio::test]
@@ -2290,5 +2535,58 @@ mod log_safety_tests {
         let err: anyhow::Error = anyhow::anyhow!("{PROBE}");
         assert_eq!(error_kind(&err, ErrorKind::Persistence), "persistence");
         assert_eq!(error_kind(&err, ErrorKind::Embedding), "embedding");
+    }
+
+    /// I49-B: all five Qdrant call sites (build, list, create, upsert, search)
+    /// share this mapper. Feed it a raw error whose `Display` carries the
+    /// credential probe and a response fragment: neither may survive into the
+    /// returned error, and the fixed `error_kind` token must. No live Qdrant is
+    /// needed, so this is a deterministic regression for all five paths.
+    #[test]
+    fn qdrant_error_mapper_discards_raw_client_text() {
+        let raw: std::result::Result<(), String> =
+            Err(format!("POST {PROBE} -> 500 {{response fragment}}"));
+        let err = discard_qdrant_error(raw).expect_err("raw Qdrant error must fail closed");
+        let err: anyhow::Error = err.into();
+
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains(PROBE),
+            "raw Qdrant error text leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains("response fragment"),
+            "Qdrant response fragment leaked: {rendered}"
+        );
+        assert!(
+            rendered.contains("qdrant"),
+            "fixed error_kind token must survive: {rendered}"
+        );
+        assert_eq!(error_kind(&err, ErrorKind::Persistence), "qdrant");
+    }
+
+    /// I49-B: pin every Qdrant call site to the fixed-kind mapper and forbid
+    /// reintroducing `e.to_string()` at any of them.
+    #[test]
+    fn all_qdrant_call_sites_use_fixed_kind_mapper() {
+        const SOURCE: &str = include_str!("builder.rs");
+        // Build every needle at runtime: a literal would appear in this very
+        // source file and make the scan match itself.
+        let raw_needle = String::from("Qdrant(e.") + "to_string())";
+        assert!(
+            !SOURCE.contains(&raw_needle),
+            "raw Qdrant error must never be formatted into a ContextError"
+        );
+        let closure_needle = String::from("map_err(") + "|e|";
+        assert!(
+            !SOURCE.contains(&closure_needle),
+            "no mapper may read the raw Qdrant error's Display"
+        );
+        let needle = String::from("discard_qdrant_") + "error(";
+        let uses = SOURCE.matches(&needle).count();
+        assert!(
+            uses >= 5,
+            "expected five Qdrant mapper call sites plus this test, found {uses}"
+        );
     }
 }
