@@ -1427,3 +1427,36 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、テスト専用 API（approve / deny / into_decision）へ
   `#[cfg(test)]` 付与。
+
+### Round 49（R4 で修正済み）
+
+- [x] jarvis-context HTTP が anyhow チェーン全体を OTLP ログへ送出
+  （confirmed high）→ `log_internal_error` を gRPC と同じ7語彙の variant トークン
+  のみへ変更、PROBE 非漏洩＋語彙パリティ回帰2件。
+- [x] 3サービスの SdkTracerProvider 未 shutdown（medium）→ 各 main に
+  TracerGuard（Drop で shutdown）導入、固定語彙 warn、回帰2件×3。
+- [x] 多ベクトル collection の warn 継続が fail-open（medium）→ 起動時
+  fail-closed（名前なしベクトル固定のため全 upsert/search が失敗する経路を遮断）、回帰3件。
+- [x] Qdrant バリアントの公開 String（medium）→ private-token newtype
+  `QdrantErrorKind` へ変更、`pub(crate)` コンストラクタのみで生成。
+
+### Round 49 の残り指摘（未対応）
+
+- [ ] **kill switch 発動の HTTP 409 を UI が AlreadyDecided と誤認**
+  （confirmed high）— `http.rs:670-671` が KillSwitchActivated と AlreadyDecided
+  の双方を409へマップし、UI が「既に決定済み: 保留中」と false-success 表示。
+  固定本文で分岐するか 423 等へ分離。
+- [ ] 409 winner 取得が API スコープトークン固定（medium）— admin-only 構成で
+  401 に後退。`winner_decision()` も `effective_admin_token()` を使う。
+- [ ] deploy/drift の BASE_DIR 必須キー検査が空値を OK（medium）—
+  非空・絶対パス・実在ディレクトリを必須化（egress の空値は正当として維持）。
+- [ ] build-selfhost.sh が mcp_gateway.env を配置せず新規導入で fail-open
+  （high）— config 配置ブロックへ追加するか EnvironmentFile の `-` を外す。
+- [ ] probe timeout 回帰が vacuous（medium）— 600ms 応答で3秒未満アサート
+  を満たしてしまう。5秒以上応答にして timeout 発動を直接観測。
+- [ ] 3サービスのシグナル停止（SIGTERM）で Drop が走らずスパン未フラッシュ
+  （low）— policy 同様の shutdown_signal + select! が必要。
+
+- 親が対応: fmt 差分、tracer shutdown の `&raw_err`（3箇所）、
+  `CollectionInfo` 完全修飾、http.rs の旧 Qdrant String API（2箇所）、
+  `anyhow::Error::from` 明示。
