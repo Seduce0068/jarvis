@@ -1368,3 +1368,33 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 親が対応: ureq 3 の `Error::StatusCode`（ボディ破棄）に対応するため
   プローブ専用 agent（`http_status_as_error(false)`）を追加。仕様変更に伴い
   evidence を実測再生成（policy 193件）。
+
+### Round 47（R4 で修正済み）
+
+- [x] OTLP 契約が policy のみ（medium）→ event / context / mcp-gw も固定語彙
+  warn＋起動継続へ統一（定数名・値も policy と一致）、PROBE 回帰各1件。
+- [x] Qdrant の生エラー `e.to_string()` が5経路に残存（medium）→
+  `QdrantErrorKind` ＋ `discard_qdrant_error` で型レベル破棄、非漏洩回帰2件。
+- [x] 次元レスポンス未解析の fail-open と新規コレクションの実次元未検証
+  （medium/low）→ 未解析は Err 化、作成後も collection_info で検証、回帰2件。
+
+### Round 47 の残り指摘（未対応）
+
+- [ ] **EnvironmentFile のパス不一致**（confirmed high）— unit は
+  `/etc/jarvis/jarvis-mcp-gw.env` を読むが repo テンプレートは
+  `infra/config/mcp_gateway.env` のままで配置経路が無い。未配置だと
+  BASE_DIR が開発用リテラルのまま filesystem.* 全失敗、egress が
+  example.com を許可する fail-open。パス統一＋配置スクリプト追加。
+- [ ] kill_switch.rs の restore() / persist() に state ファイル絶対パスと
+  生エラーが残存（medium）— activation と同じ固定語彙化、PROBE 回帰拡張。
+- [ ] UI の「承認済み・実行は非常停止中」が2ポールで消える（medium）—
+  kill switch 中表示用の独立フラグで status 上書きを抑制。
+- [ ] I48-C の 409/AlreadyDecided を UI が「失敗」と表示（medium）—
+  競合時に勝者の決定を返すか UI で勝者 status を表示。
+- [ ] health probe 用 ureq agent にタイムアウトが無い（medium）—
+  メイン agent と同じ timeout_global / timeout_connect を設定。
+- [ ] 発掘: code-server PASSWORD_FILE テンプレート残存、未使用 dev-deps
+  （mockall / proptest）、specs/index.md の REQ 同期、dsh.md / tool-matrix.md
+  の tools/list 非表示記述。
+
+- 親が対応: fmt 差分のみ。
