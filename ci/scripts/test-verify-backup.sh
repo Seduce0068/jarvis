@@ -120,7 +120,8 @@ record_manifest_entries() { # dir name...
 }
 
 base="$tmp/backups"
-mkdir -p "$base/good" "$base/corrupt" "$base/partial" "$base/legacy"
+mkdir -p "$base/good" "$base/corrupt" "$base/partial" "$base/legacy" \
+  "$base/legacy_empty" "$base/legacy_trivial"
 
 # GOOD: complete set with valid hashes, required payloads and marker.
 printf 'content-A' > "$base/good/a.txt"
@@ -148,14 +149,32 @@ printf 'complete 2026-11-17T00:00:00Z\n' > "$base/corrupt/COMPLETE"
 printf 'content-A' > "$base/partial/a.txt"
 printf '# created_at=2026-11-17T00:00:00Z\na.txt 9 %s\n' "$sha" > "$base/partial/manifest.txt"
 
-# LEGACY: no created_at header, no marker (accepted for compatibility).
+# LEGACY: no created_at header and no marker, but WITH full payloads. The
+# exemption now applies only because postgres/qdrant/config-* really exist.
 printf 'content-A' > "$base/legacy/a.txt"
-printf 'a.txt 9 %s\n' "$sha" > "$base/legacy/manifest.txt"
+{ printf '%s\n' '-- PostgreSQL database dump' '-- PostgreSQL database dump complete'; } \
+  | gzip > "$base/legacy/postgres-jarvis.sql.gz"
+mkdir -p "$tmp/legacy-qdrant"
+printf 'snapshot' > "$tmp/legacy-qdrant/snapshot.json"
+tar -cf "$base/legacy/qdrant-snapshot.bin" -C "$tmp/legacy-qdrant" snapshot.json
+printf 'allow = ["tool.read"]\n' > "$base/legacy/config-mcp_allowlist.toml"
+record_manifest_entries "$base/legacy" a.txt postgres-jarvis.sql.gz \
+  qdrant-snapshot.bin config-mcp_allowlist.toml | tail -n +2 > "$base/legacy/manifest.txt"
+
+# LEGACY-EMPTY: header-less, empty manifest, no payloads at all (rejected).
+: > "$base/legacy_empty/manifest.txt"
+
+# LEGACY-TRIVIAL: header-less manifest listing only a trivial file, no
+# postgres/qdrant/config payloads (rejected).
+printf 'content-A' > "$base/legacy_trivial/a.txt"
+printf 'a.txt 9 %s\n' "$sha" > "$base/legacy_trivial/manifest.txt"
 
 check "good set passes" 0 "$base/good"
 check "corrupt set fails" 1 "$base/corrupt"
 check "partial set fails" 1 "$base/partial"
-check "legacy set accepted" 0 "$base/legacy"
+check "legacy set with full payloads accepted" 0 "$base/legacy"
+check "legacy set with empty manifest rejected" 1 "$base/legacy_empty"
+check "trivial-only set rejected" 1 "$base/legacy_trivial"
 check "all sets: corrupt detected" 1 --backup-dir "$base"
 check "latest set detects partial" 1 --latest --backup-dir "$base"
 

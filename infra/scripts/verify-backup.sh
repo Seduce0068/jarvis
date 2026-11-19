@@ -48,41 +48,47 @@ for set in "${sets[@]}"; do
   # A partially failed run leaves a set whose recorded files are all valid.
   # Require the marker written only after every step succeeded. Sets created
   # before the marker existed are identified by a manifest header lacking the
-  # created_at field; those are accepted for backward compatibility.
+  # created_at field; those are legacy candidates, not a blanket pass.
   created_at="$(sed -n 's/^# created_at=//p' "$manifest" | head -1)"
   if [ -f "$set/COMPLETE" ]; then
     echo "  COMPLETE marker: present"
     ok=$((ok+1))
   elif [ -z "$created_at" ]; then
-    echo "  COMPLETE marker: absent (legacy set, accepted)"
+    echo "  COMPLETE marker: absent (legacy set)"
   else
     echo "  FAIL: COMPLETE marker missing (partial run)"
     fail=$((fail+1))
   fi
 
-  # Required components: manifest.txt and COMPLETE are checked above. A set
-  # that carries the COMPLETE marker claims a successful run, so the mandatory
-  # payloads must exist on disk as well. Validating only manifest-listed files
-  # lets a run whose dump/snapshot steps produced nothing still pass, because
-  # record() appends an entry only after each step succeeds. Legacy sets (no
-  # marker, no created_at) stay accepted for backward compatibility.
-  if [ -f "$set/COMPLETE" ]; then
-    for required in postgres-jarvis.sql.gz qdrant-snapshot.bin; do
-      if [ ! -f "$set/$required" ]; then
-        echo "  REQUIRED MISSING: $required"
-        fail=$((fail+1))
-      fi
-    done
-    config_found=0
-    for config in "$set"/config-*; do
-      [ -f "$config" ] || continue
-      config_found=1
-      break
-    done
-    if [ "$config_found" -eq 0 ]; then
-      echo "  REQUIRED MISSING: config-* (at least one config file)"
+  # An empty / header-only manifest records nothing verifiable. Reject it so a
+  # vacuous manifest cannot escape integrity checks.
+  manifest_entries="$(grep -c -v -e '^#' -e '^[[:space:]]*$' "$manifest" || true)"
+  if [ "$manifest_entries" -eq 0 ]; then
+    echo "  FAIL: manifest has no file entries"
+    fail=$((fail+1))
+  fi
+
+  # Mandatory payloads must exist on disk for EVERY set with a manifest,
+  # including legacy sets. This check used to be gated behind the COMPLETE
+  # marker, so a manifest-only directory (no created_at, no payloads) was
+  # reported as an accepted legacy set and exited 0. Requiring the payloads
+  # unconditionally limits the legacy exemption to sets that actually carry
+  # postgres / qdrant / config-*; empty manifests and zero payloads now fail.
+  for required in postgres-jarvis.sql.gz qdrant-snapshot.bin; do
+    if [ ! -f "$set/$required" ]; then
+      echo "  REQUIRED MISSING: $required"
       fail=$((fail+1))
     fi
+  done
+  config_found=0
+  for config in "$set"/config-*; do
+    [ -f "$config" ] || continue
+    config_found=1
+    break
+  done
+  if [ "$config_found" -eq 0 ]; then
+    echo "  REQUIRED MISSING: config-* (at least one config file)"
+    fail=$((fail+1))
   fi
 
   while read -r name expected_bytes expected_sha; do
