@@ -208,6 +208,10 @@ for f in evidence_files:
     ok += 1
 
 spec_files = sorted(glob.glob("specs/test-*.md"))
+# Normalised set of every spec the gate actually inspects. An evidence file
+# that names a path outside this set never reaches the REQ comparison loop,
+# so it must be rejected explicitly below (I64-A (b)).
+spec_set = {os.path.normpath(s) for s in spec_files}
 for spec in spec_files:
     if os.path.normpath(spec) not in covered:
         errors.append(f"MISSING_EVIDENCE:{spec}")
@@ -301,6 +305,18 @@ for spec in spec_files:
     if not re.search(r'full conformance\s+は主張しない', doc_map):
         errors.append(f"MISSING_CONFORMANCE:{spec}:no-full-claim")
 
+# I64-A (b): every evidence declaration must point at one of the globbed
+# specs/test-*.md files. A path outside that set is never compared against a
+# spec's REQ table above, so an evidence file with requirements=[] would pass
+# every other gate. Reject it explicitly, and constrain the path to the
+# repository's specs/ tree: absolute paths and ".." escapes are never valid.
+for evi_file, spec_norm, _evi_reqs in evi_reqs_entries:
+    if (os.path.isabs(spec_norm)
+            or spec_norm == '..' or spec_norm.startswith('..' + os.sep)
+            or spec_norm.split(os.sep)[0] != 'specs'
+            or spec_norm not in spec_set):
+        errors.append(f"REQ_SPEC_UNRESOLVED:{evi_file}:{spec_norm}")
+
 # Index validation (cross-review arch #3). Both inline links
 # "[text](target)" and reference-style definitions "[label]: target" are
 # collected; external URLs, protocol-relative paths and pure anchors are
@@ -332,37 +348,61 @@ def index_targets(index_path):
 # evidence entries. Values are withheld: errors are value-less.
 ENTRY_START = re.compile(r'^[ \t]*-[ \t]+\[', re.MULTILINE)
 REF_USAGE = re.compile(r'\]\[([^\]]+)\]')
+# A result-count claim ("N passed") marks a bullet as an evidence entry even
+# when its JSON link has been removed. The "関連" heading separates the
+# evidence list from the related-links section, whose bullets are not entries.
+COUNT_CLAIM = re.compile(r'\d+[ \t]+(?:passed|failed|skipped)\b', re.IGNORECASE)
+RELATED_HEADING = re.compile(
+    r'^#{1,6}[ \t]+[^\n]*(?:関連|related|参照|notes)[^\n]*$',
+    re.MULTILINE | re.IGNORECASE)
 
-def index_result_entries(index_path):
+def index_result_entries(index_path, kind):
+    # specs/index.md bullets describe specs, not test executions; they carry
+    # no result counts and are never evidence entries.
+    if kind == "SPEC":
+        return
     with open(index_path, encoding="utf-8") as fh:
         text = fh.read()
     ref_defs = {m.group(1): m.group(2) for m in REF_DEF.finditer(text)}
     starts = [m.start() for m in ENTRY_START.finditer(text)]
     base = os.path.dirname(index_path)
+    related = RELATED_HEADING.search(text)
+    main_end = related.start() if related else len(text)
     for i, start in enumerate(starts):
         end = starts[i + 1] if i + 1 < len(starts) else len(text)
         block = text[start:end]
         # A block may hold both forms and several reference links (the
         # continuation line links the spec .md). Resolve EVERY reference link
         # and inline link; a second link to a different JSON must be validated
-        # too instead of hiding behind the first one.
-        candidates = []
-        for usage in REF_USAGE.finditer(block):
-            candidates.append(ref_defs.get(usage.group(1), ""))
+        # too instead of hiding behind the first one. A reference usage whose
+        # label has no REF_DEF contributes an empty candidate and therefore no
+        # JSON path, which is reported as INDEX_UNRESOLVED_ENTRY below.
+        candidates = [ref_defs.get(usage.group(1), "")
+                      for usage in REF_USAGE.finditer(block)]
         candidates.extend(m.group(1) for m in INLINE_LINK.finditer(block))
         json_paths = []
-        evidence_entry = False
+        md_names = []
         for item in candidates:
             raw = unquote(item.strip()).split('#', 1)[0]
             if not raw or raw.startswith(NON_LOCAL):
                 continue
+            if raw.endswith('.md'):
+                md_names.append(os.path.basename(raw))
             if not (raw.endswith('.json') or 'test-run-' in raw):
                 continue
-            evidence_entry = True
             resolved = os.path.normpath(os.path.join(base, raw))
             if resolved.endswith('.json') and resolved not in json_paths:
                 json_paths.append(resolved)
-        if not evidence_entry:
+        # Classify entries structurally instead of by the survival of a JSON
+        # link (I64-A (a)/(d)). Bullets in the main list are evidence entries;
+        # the "関連" section's index.md/todo.md links are not, but an evidence
+        # marker (count claim, JSON target or test-*.md link) still qualifies
+        # one wherever it appears.
+        is_evidence = (start < main_end or bool(json_paths)
+                       or bool(COUNT_CLAIM.search(block))
+                       or any(n.startswith('test-') and n.endswith('.md')
+                              for n in md_names))
+        if not is_evidence:
             continue
         # Collect EVERY "N passed/failed/skipped" claim in the entry. re.search
         # kept only the first match, so a second, contradictory count was
@@ -373,9 +413,10 @@ def index_result_entries(index_path):
                 r'(\d+)[ \t]+' + key + r'\b', block, re.IGNORECASE)]
             if claims:
                 found[key] = claims
-        # None marks an evidence entry whose JSON target cannot be resolved.
+        # None marks an evidence entry whose JSON target cannot be resolved;
+        # the validation loop emits INDEX_UNRESOLVED_ENTRY for it.
         for json_path in json_paths or [None]:
-            yield json_path, found
+            yield json_path, found, md_names
 
 for index_path, artifacts, kind in (
     ("specs/index.md", spec_files, "SPEC"),
@@ -396,20 +437,25 @@ for index_path, artifacts, kind in (
     # adds a second reference link to a different JSON must fail closed. Missing
     # claims are reported as INDEX_RESULT_MISSING; a broken file link is already
     # reported by the link check above.
-    for json_path, found in index_result_entries(index_path):
-        # Mandatory claims: an evidence entry without passed/failed, or one
-        # whose JSON target is unresolvable, fails closed. Previously such an
-        # entry was silently skipped, so deleting counts hid tampered results.
-        if json_path is None or "passed" not in found or "failed" not in found:
+    consumed = set()
+    for json_path, found, md_names in index_result_entries(index_path, kind):
+        # An evidence entry with no resolvable JSON is reported with its own
+        # code (I64-A (a)); a resolvable entry still needs its count claims.
+        if json_path is None:
+            errors.append(f"INDEX_UNRESOLVED_ENTRY:{index_path}")
+            continue
+        if "passed" not in found or "failed" not in found:
             errors.append(f"INDEX_RESULT_MISSING:{index_path}")
             continue
         if not os.path.isfile(json_path):
             continue  # broken link already reported above
+        consumed.add(json_path)
         try:
             with open(json_path, encoding="utf-8") as fh:
-                res = json.load(fh).get("results", {})
+                doc = json.load(fh)
         except Exception:
             continue
+        res = doc.get("results", {})
         if not isinstance(res, dict):
             continue
         for key, claims in found.items():
@@ -419,6 +465,34 @@ for index_path, artifacts, kind in (
             # (which is exactly what re.search did).
             if type(actual) is not int or any(c != actual for c in claims):
                 errors.append(f"INDEX_RESULT_MISMATCH:{index_path}")
+                break
+        # The .md link inside an entry must name the same spec as the JSON's
+        # test_basis_ref.spec_path, so pointing the entry at a different spec
+        # cannot pass (I64-A (c)). No spec path value is emitted.
+        ref = doc.get("test_basis_ref")
+        spec_ref_name = ""
+        if isinstance(ref, dict) and isinstance(ref.get("spec_path"), str):
+            spec_ref_name = os.path.basename(ref["spec_path"])
+        if spec_ref_name and (not md_names
+                              or any(name != spec_ref_name for name in md_names)):
+            errors.append(f"INDEX_SPEC_MISMATCH:{index_path}")
+    # A REF_DEF naming an evidence JSON that no entry actually cites is a
+    # leftover definition whose counts are no longer verified (I64-A (d)).
+    # Checking the resolved JSON target (not just the label) keeps the
+    # legitimate inline-link form accepted.
+    if kind == "EVIDENCE":
+        with open(index_path, encoding="utf-8") as fh:
+            idx_text = fh.read()
+        base = os.path.dirname(index_path)
+        for m in REF_DEF.finditer(idx_text):
+            raw = unquote(m.group(2).strip()).split('#', 1)[0]
+            if not raw or raw.startswith(NON_LOCAL):
+                continue
+            if not (raw.endswith('.json') or 'test-run-' in raw):
+                continue
+            resolved = os.path.normpath(os.path.join(base, raw))
+            if resolved.endswith('.json') and resolved not in consumed:
+                errors.append(f"INDEX_UNRESOLVED_ENTRY:{index_path}")
                 break
 
 print(f"ok={ok} errors={len(errors)}")

@@ -201,6 +201,18 @@ elif mode == 'req_removed':
     if not isinstance(reqs, list) or len(reqs) < 2:
         raise SystemExit('requirements array too short for tamper')
     reqs.pop()
+elif mode in ('spec_outside_glob', 'spec_dotdot', 'spec_absolute'):
+    # I64-A (b): name a spec outside specs/test-*.md, or escape the specs/
+    # tree. requirements=[] reproduces the original forgery; only the
+    # REQ_SPEC_UNRESOLVED gate can reject these copies.
+    ref = data['test_basis_ref']
+    if mode == 'spec_outside_glob':
+        ref['spec_path'] = 'specs/test-rogue.md'
+    elif mode == 'spec_dotdot':
+        ref['spec_path'] = 'specs/../../etc/passwd'
+    else:
+        ref['spec_path'] = '/nonexistent/specs/test-absolute.md'
+    ref['requirements'] = []
 elif mode in ('scenario_shortfall', 'skipped_inflated'):
     # Report fewer executions than the spec declares while keeping results,
     # notes and the index entry mutually consistent. Only the Scenario gate
@@ -677,6 +689,120 @@ PY
     fi
   fi
 fi
+
+# I64-A: index entries and evidence spec paths must fail closed. Use a fresh
+# tree so every fixture below starts from pristine specs, JSON and indexes.
+i64_tmp="$tmp/i64_negative"
+mkdir -p "$i64_tmp/ci/scripts" "$i64_tmp/evidence" "$i64_tmp/specs"
+i64_gate="$i64_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/ci/scripts/check-evidence.sh" "$i64_gate"
+cp "$repo/specs/index.md" "$i64_tmp/specs/index.md"
+cp "$repo/todo.md" "$i64_tmp/todo.md"
+cp "$repo/evidence/index.md" "$i64_tmp/evidence/index.md"
+cp "$repo"/evidence/test-run-*.json "$i64_tmp/evidence/"
+for spec in "${spec_files[@]}"; do
+  ln -s "$spec" "$i64_tmp/specs/$(basename "$spec")"
+done
+
+if bash "$i64_gate" >/dev/null 2>&1; then
+  echo "  PASS: I64-A pristine evidence index accepted"
+  ok=$((ok+1))
+else
+  echo "  FAIL: I64-A pristine evidence index rejected"
+  fail=$((fail+1))
+fi
+
+# (b) A spec_path outside the globbed set, a ".." escape and an absolute path
+# must each be rejected with REQ_SPEC_UNRESOLVED.
+for mode in spec_outside_glob spec_dotdot spec_absolute; do
+  cp "$repo/evidence/index.md" "$i64_tmp/evidence/index.md"
+  cp "$repo"/evidence/test-run-*.json "$i64_tmp/evidence/"
+  i64_source="${evidence_files[0]}"
+  i64_copy="$i64_tmp/evidence/$(basename "$i64_source")"
+  if ! tamper_evidence "$i64_source" "$i64_copy" "$mode"; then
+    echo "  FAIL: could not prepare I64-A evidence tamper ($mode)"
+    fail=$((fail+1))
+    continue
+  fi
+  out=$(bash "$i64_gate" 2>&1); code=$?
+  if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'REQ_SPEC_UNRESOLVED'; then
+    echo "  PASS: check-evidence.sh rejects I64-A $mode"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: check-evidence.sh accepted I64-A $mode (exit $code)"
+    printf '%s\n' "$out" | head -3 >&2
+    fail=$((fail+1))
+  fi
+done
+
+# (a)/(c)/(d) Index-side fixtures. Each mode restores a pristine index and
+# JSON first, so no earlier tamper can mask the targeted error code.
+for mode in unlink_and_tamper spec_link_swap unhandled_entry orphan_ref_def; do
+  cp "$repo/evidence/index.md" "$i64_tmp/evidence/index.md"
+  cp "$repo"/evidence/test-run-*.json "$i64_tmp/evidence/"
+  if ! python3 - "$repo/evidence/index.md" "$i64_tmp/evidence/index.md" "$mode" <<'PY'
+import re, sys
+
+src, dst, mode = sys.argv[1:4]
+with open(src, encoding='utf-8') as fh:
+    text = fh.read()
+starts = [m.start() for m in re.finditer(r'^[ \t]*-[ \t]+\[', text, re.MULTILINE)]
+
+def entry_bounds(label):
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(text)
+        if '][' + label + ']' in text[start:end]:
+            return start, end
+    raise SystemExit('entry not found for ' + label)
+
+if mode == 'unlink_and_tamper':
+    start, end = entry_bounds('run-policy')
+    block = text[start:end].replace('][run-policy]', '] (link removed)', 1)
+    block, n = re.subn(r'\d+([ \t]+passed)', r'999\1', block, count=1)
+    if n != 1:
+        raise SystemExit('passed count not found')
+    text = text[:start] + block + text[end:]
+elif mode == 'spec_link_swap':
+    text, n = re.subn(r'\]\(\.\./specs/test-policy-approval\.md\)',
+                      '](../specs/test-ui.md)', text, count=1)
+    if n != 1:
+        raise SystemExit('spec link not found')
+elif mode == 'unhandled_entry':
+    marker = '\n## 関連\n'
+    if marker not in text:
+        raise SystemExit('related section marker not found')
+    bullet = ('- [unhandled][run-unknown]\n'
+              '  999 passed / 0 failed。\n')
+    text = text.replace(marker, '\n' + bullet + marker, 1)
+elif mode == 'orphan_ref_def':
+    start, end = entry_bounds('run-policy')
+    text = text[:start] + text[end:]
+else:
+    raise SystemExit('unknown I64-A index mode: ' + mode)
+with open(dst, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+  then
+    echo "  FAIL: could not prepare I64-A index variant $mode"
+    fail=$((fail+1))
+    continue
+  fi
+  out=$(bash "$i64_gate" 2>&1); code=$?
+  case "$mode" in
+    unlink_and_tamper) pattern='INDEX_UNRESOLVED_ENTRY' ;;
+    spec_link_swap) pattern='INDEX_SPEC_MISMATCH' ;;
+    unhandled_entry) pattern='INDEX_UNRESOLVED_ENTRY' ;;
+    orphan_ref_def) pattern='INDEX_UNRESOLVED_ENTRY' ;;
+  esac
+  if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
+    echo "  PASS: check-evidence.sh rejects I64-A $mode"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: check-evidence.sh accepted I64-A $mode (exit $code)"
+    printf '%s\n' "$out" | head -3 >&2
+    fail=$((fail+1))
+  fi
+done
 
 # secret_scan.py must fail closed on a value-like credential and must never
 # echo the value itself. Build a throwaway git repo with a synthetic token
