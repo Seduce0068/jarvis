@@ -1753,3 +1753,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] 410／health 語彙の cross-crate pin テスト追加。
 
 - 親が対応: fmt 差分、`features=["http"]` の workspace 配線（blocker）。
+
+### Round 60（R4 で修正済み）
+
+- [x] 証跡 index の件数照合が最初の一致のみ（medium）→ `finditer` で全一致
+  を個別照合、複数参照リンクも全件解決。矛盾値の tamper 2件追加。
+- [x] HTTP 410 本文が未検証・ローカル定数（medium）→ jarvis-core 共有定数
+  `APPROVAL_EXPIRED_BODY`、trim 後完全一致、不一致時 Err fail-closed。
+  core/policy/UI の3箇所 pin。
+- [x] health probe の本文分類が非対称（medium）→ 200 は status=ok かつ
+  reason 不在、503 は status=degraded かつ reason 完全一致、他は Err。
+  status/reason 語彙を共有定数化し cross-crate pin。UI 79 tests。
+- [x] context/event の jarvis-core 依存へ `features=["http"]` を配線
+  （単体 `-p` ビルドの blocker を解消）。
+
+### Round 60 の残り指摘（未対応）
+
+- [ ] dead-letter／attempts 上限がログのみで永続状態・観測が無い（medium）—
+  `dead_lettered_at`／`vector_state` カラムとメトリクス、migration 004 の
+  選択クエリ説明を実状へ同期。
+- [ ] poison 判定が再埋め込みより先行し、回復可能な旧次元行を削除
+  （medium）— dimension 不一致は retry 経路に残す。
+- [ ] BareJson の 413/415 再分類が仕様・証跡に未反映（medium）—
+  4仕様の該当 TC へ契約明記＋evidence 再生成。
+- [ ] BytesRejection を無条件413へ丸め（low）— `LengthLimitError` のみ413、
+  他は400（axum 準拠）。
+
+- 親が対応: fmt 差分、context/event の feature 配線（Runtime Proof で発見）。
