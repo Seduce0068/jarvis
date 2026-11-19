@@ -57,8 +57,11 @@ generated:
 - **migration unit のデプロイ配線**: `jarvis-migrations.service` を
   [build-selfhost.sh](../../infra/scripts/build-selfhost.sh) の
   `JARVIS_SERVICE_UNITS` と配置ループへ追加（`User=jarvis` を保持したまま
-  通常デプロイで配置）。sqlx-cli の導入と、配置・有効化・検証手順は後述
-  「承認待ち実機タスクの実行手順」の MIG 節に集約。
+  通常デプロイで配置）。2026-11-19 に migration ソース
+  （`rust/migrations/*.sql`）の `/opt/jarvis/rust/migrations/` への配置と
+  `.jarvis-source-commit` 生成も同スクリプトへ統合し、ソース／マーカー
+  欠落時は fail-fast 化（I36-A）。sqlx-cli の導入と、配置・有効化・検証手順は
+  後述「承認待ち実機タスクの実行手順」の MIG 節に集約。
 
 ## 確認前提（2026-11-17 の洗い出し時点・履歴として保持）
 
@@ -874,6 +877,36 @@ migration を実行する unit で、policy / context が `After=` + `Wants=` �
 `failed` になる。開発環境では `cargo sqlx --version` が
 `no such command: sqlx` を返すことを確認済み（未導入の根拠）。
 
+#### systemd `Wants=` の意味（2026-11-19 訂正・I36-A）
+
+**訂正**: `Wants=` は弱い依存であり、対象 unit が `failed` になっても
+依存元（policy / context）の起動は失敗しない（fail-open）。従来の
+「`Wants=` の unit が failed なら依存元も起動失敗」という記述は誤り。
+health check（例: `curl http://127.0.0.1:8081/health`）が 200 でも
+migration 成功は証明されない。必ず
+`systemctl is-active jarvis-migrations`（`active (exited)` を期待）と
+`journalctl -u jarvis-migrations -n 50 --no-pager` で個別に確認する。
+
+なお I35-A の方針どおり context は `sqlx::migrate!()` で起動時に自ら
+スキーマを完了させるため、pre-flight の失敗が直ちに「未適用」を意味するとは
+限らない。それでも失敗を放置せず原因を確認する運用とする。
+
+**真に fail-closed にする選択肢（今回は採用せず、記録のみ）**:
+
+- **Requires= + After= を依存元へ追加**: policy / context の unit に
+  `Requires=jarvis-migrations.service` と `After=jarvis-migrations.service`
+  を宣言すると、migration が起動失敗／停止した場合に依存元も起動しない
+  （`After=` 単独は順序のみで失敗を伝播しない）。実行中に後から migration が
+  failed になった場合の自動停止までは保証しない点に注意。
+- **ExecStartPre の CHECK を依存元へ追加**: policy / context の `ExecStartPre=`
+  で migration の完了状態（`active (exited)` または `_sqlx_migrations` の
+  適用履歴）を検査し、不充足なら起動を中止する。既存 unit の `ExecStart=` や
+  hardening を変えずに fail-closed を実現できるが、検査条件の設計と保守が
+  必要になる。
+
+今回は記述訂正に留め、3 unit の `After=` / `Wants=` / `ExecStart=` /
+hardening は変更しない。
+
 #### sqlx-cli の導入方法の比較（既存依存を活かす観点）
 
 - **A. feature を絞った `cargo install` でロック済み依存を再利用（採用）**:
@@ -930,7 +963,7 @@ sudo systemctl start jarvis-migrations
 systemctl is-active jarvis-migrations
 systemctl status jarvis-migrations --no-pager -l
 
-echo "== 再確認: policy 起動確認（Wants で migration が引かれること）=="
+echo "== 再確認: policy 起動確認（Wants= は失敗を伝播しないので migration 成否は別途確認）=="
 systemctl is-active jarvis-policy
 curl -fsS http://127.0.0.1:8081/health
 ```
@@ -986,13 +1019,18 @@ curl -fsS http://127.0.0.1:8081/health
 - 3 unit のコメントから "Single owner" に相当する表現を削除し、
   上記の方針（context が最終適用主体、unit は pre-flight）へ置換した。
   `After=` / `Wants=` / `ExecStart=` / hardening は不変。
+  `Wants=` は失敗を伝播しない（fail-open）ため、記述も合わせて訂正した
+  （選択肢とともに MIG 節の「systemd `Wants=` の意味」を参照）。
 - [build-selfhost.sh](../../infra/scripts/build-selfhost.sh) に、
-  ビルド元 HEAD を `/opt/jarvis/bin/.jarvis-build-commit` へ記録し、
-  配布済み migration ソースの
-  `/opt/jarvis/rust/migrations/.jarvis-source-commit` と照合するガードを
-  追加した（不一致ならデプロイ停止、マーカー未配置なら注意喚起）。
-  migration ソースの自動コピーは行わず、同一コミット配置は運用側の手順として
-  明示する（大幅なロジック変更の回避）。
+  ビルド元 HEAD を `/opt/jarvis/bin/.jarvis-build-commit` へ記録するのに加え、
+  `rust/migrations/*.sql` を `/opt/jarvis/rust/migrations/` へ配置し、
+  同一 HEAD を `.jarvis-source-commit` として生成するようにした（I36-A）。
+  ソースディレクトリ・`*.sql`・マーカーの欠落は警告ではなく fail-fast とし、
+  新規導入でも `--source` が空にならないことを保証する。
+  マーカー不一致も従来どおりデプロイを停止する。
+  既存のビルド／バイナリ配置／unit 生成／daemon-reload の各処理と、
+  「jarvis ユーザーで実行し sudo を使う」「dry-run モードは持たない」という
+  契約は変更していない。
 - なお P1-3 の「現状」節は `migrate!()` 導入前のスナップショットであり、
   現在は [builder.rs](../../rust/jarvis-context/src/builder.rs):862 に
   `migrate!()` が存在する。本節の記述を現状として優先する。

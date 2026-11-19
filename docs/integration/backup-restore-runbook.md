@@ -250,6 +250,22 @@ sqlx-cli（`cargo-sqlx`）が service の PATH に無いと unit は `failed` �
 `cargo install sqlx-cli --no-default-features --features postgres --locked`
 を採用する（値・秘密情報なし。詳細は残タスク一覧 MIG 節）。
 
+**`Wants=` の扱い（2026-11-19 訂正・I36-A）**: `Wants=` は弱い依存であり、
+migration unit が `failed` になっても policy / context の起動は失敗しない
+（fail-open）。「`Wants=` の unit が failed なら依存元も起動失敗」という記述は
+誤り。したがって `curl -fsS http://127.0.0.1:8081/health` が成功しても
+migration 成功は証明されない。下記の再確認では
+`systemctl is-active jarvis-migrations`（`active (exited)` を期待）を必ず
+個別に実施する。なお context は `sqlx::migrate!()` で起動時に自らスキーマを
+完了させるため（残タスク一覧 I35-A の方針）、pre-flight の失敗が直ちに
+「未適用」を意味するとは限らないが、失敗は放置せず原因を確認する。
+
+真に fail-closed にする場合は、policy / context の unit へ
+`Requires=jarvis-migrations.service` + `After=jarvis-migrations.service`
+を追加するか、`ExecStartPre=` で migration 完了を検査する方法がある。
+今回は unit を変更せず、記述訂正と選択肢の記録に留める
+（詳細は [残タスク一覧](remaining-tasks.md) の MIG 節）。
+
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail

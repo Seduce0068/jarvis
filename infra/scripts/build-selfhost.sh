@@ -28,6 +28,16 @@ if [[ ! -d "${MIGRATIONS_SRC}" ]]; then
   echo "migration sources not found at ${MIGRATIONS_SRC}" >&2
   exit 1
 fi
+# I36-A: a fresh install must always have SQL to apply. An empty source tree
+# would leave jarvis-migrations.service --source pointing at no migrations,
+# so fail fast instead of deploying a pre-flight unit that can do nothing.
+shopt -s nullglob
+MIGRATION_SQL_FILES=("${MIGRATIONS_SRC}"/*.sql)
+shopt -u nullglob
+if (( ${#MIGRATION_SQL_FILES[@]} == 0 )); then
+  echo "no *.sql migration files found in ${MIGRATIONS_SRC}" >&2
+  exit 1
+fi
 BUILD_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || echo unknown)"
 
 cd "${REPO_DIR}/rust"
@@ -37,22 +47,32 @@ for bin in jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context; do
   install -m 755 "target/release/${bin}" "/opt/jarvis/bin/${bin}"
 done
 
-# I35-A guard: record the commit that produced the binaries and compare it
-# with the marker shipped alongside the deployed migration source. This is a
-# check, not an auto-fix: a mismatch stops the deploy before units are
-# installed, so a half-updated binary/source pair is never left behind.
+# I35-A / I36-A: record the commit that produced the binaries, then distribute
+# the migration sources from this SAME checkout. Previously a missing marker
+# only produced a warning (fail-open), so a fresh install could end up with
+# jarvis-migrations.service --source pointing at a directory with no SQL.
+# Now the source directory, its *.sql files and the marker are installed here;
+# every missing input is fatal, so a fresh install always has usable SQL.
 bin_commit_file="/opt/jarvis/bin/.jarvis-build-commit"
 printf '%s\n' "${BUILD_COMMIT}" | sudo tee "${bin_commit_file}" >/dev/null
 
-mig_commit_file="/opt/jarvis/rust/migrations/.jarvis-source-commit"
-if [[ -f "${mig_commit_file}" ]]; then
-  mig_commit="$(<"${mig_commit_file}")"
-  if [[ "${mig_commit}" != "${BUILD_COMMIT}" ]]; then
-    echo "migration source commit ${mig_commit} != binary commit ${BUILD_COMMIT}; deploy both from the same commit" >&2
-    exit 1
-  fi
-else
-  echo "note: ${mig_commit_file} missing; deploy ${MIGRATIONS_SRC} from commit ${BUILD_COMMIT} (same as binaries)" >&2
+MIGRATIONS_DST="/opt/jarvis/rust/migrations"
+sudo install -d -o root -g root -m 0755 "${MIGRATIONS_DST}"
+sudo install -o root -g root -m 0644 "${MIGRATION_SQL_FILES[@]}" "${MIGRATIONS_DST}/"
+mig_commit_file="${MIGRATIONS_DST}/.jarvis-source-commit"
+printf '%s\n' "${BUILD_COMMIT}" | sudo tee "${mig_commit_file}" >/dev/null
+
+# Fail-fast verification (replaces the former warn-only branch): the marker
+# must exist, be non-empty and match the binary commit before units are
+# installed, so a half-updated binary/source pair is never left behind.
+if [[ ! -s "${mig_commit_file}" ]]; then
+  echo "migration source marker missing or empty at ${mig_commit_file}" >&2
+  exit 1
+fi
+mig_commit="$(<"${mig_commit_file}")"
+if [[ "${mig_commit}" != "${BUILD_COMMIT}" ]]; then
+  echo "migration source commit ${mig_commit} != binary commit ${BUILD_COMMIT}; deploy both from the same commit" >&2
+  exit 1
 fi
 
 sudo mkdir -p /etc/jarvis
@@ -96,8 +116,12 @@ sudo install -o root -g root -m 0644 "${OTEL_SRC}" "${OTEL_DST}"
 # jarvis-migrations.service は Type=oneshot / RemainAfterExit の共有 migration 実行 unit。
 # policy / context が After + Wants で引くため個別 enable は不要だが、ExecStart が
 # `/usr/local/bin/cargo sqlx migrate run` を使うので sqlx-cli (cargo-sqlx) が必須。
-# 未導入なら unit は failed になり Wants 元の起動も失敗する（導入手順は
-# docs/integration/backup-restore-runbook.md の MIG 節を参照）。
+# 未導入なら unit は failed になる。ただし systemd の Wants= は弱い依存であり、
+# 失敗を依存元へ伝播しない（fail-open）。policy / context は起動しうるため、
+# migration の成否は `systemctl is-active jarvis-migrations` で個別に確認する。
+# 真に fail-closed にするなら Requires=+After または ExecStartPre の CHECK が必要だが、
+# 今回は記述訂正のみ（選択肢は docs/integration/remaining-tasks.md の MIG 節）。
+# 導入手順は docs/integration/backup-restore-runbook.md の MIG 節を参照。
 JARVIS_SERVICE_UNITS=(
   jarvis-migrations.service
   jarvis-policy.service
@@ -140,8 +164,8 @@ done
 sudo systemctl daemon-reload
 
 echo "binaries and units installed; create /etc/jarvis/bws.env before starting services"
-echo "migrations: install sqlx-cli (cargo-sqlx) on the service PATH before starting policy/context"
-echo "migration sources: deploy ${MIGRATIONS_SRC} -> /opt/jarvis/rust/migrations from commit ${BUILD_COMMIT} (same as binaries); drift causes a context checksum mismatch"
+echo "migrations: install sqlx-cli (cargo-sqlx) on the service PATH before starting policy/context; Wants= will NOT stop them if the migration unit fails"
+echo "migration sources: deployed ${MIGRATIONS_SRC} -> ${MIGRATIONS_DST} from commit ${BUILD_COMMIT} (same as binaries); verify with 'systemctl is-active jarvis-migrations'"
 echo "start with:"
 echo "  sudo systemctl enable --now qdrant opencode jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context"
-echo "jarvis-migrations.service is pulled in via Wants= from policy/context (no separate enable needed)"
+echo "jarvis-migrations.service is pulled in via Wants= from policy/context (no separate enable needed; Wants= does not propagate a failed unit to its dependants)"
