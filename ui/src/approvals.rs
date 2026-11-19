@@ -6,7 +6,8 @@ use gpui::{
     Styled, Window, actions, div, prelude::*, rgb,
 };
 
-use crate::policy_client::{ApprovalRequest, PolicyClient};
+use crate::policy_client::{ApprovalRequest, PolicyClient, request_to_core};
+use anyhow::Context as _;
 use jarvis_core::approval::ApprovalDecision as CoreApprovalDecision;
 
 // Tab navigation for the focusable approval buttons. GPUI has no default Tab
@@ -114,20 +115,33 @@ impl ApprovalsView {
 
     /// Apply an operator decision, then refresh immediately.
     fn decide(&mut self, id: String, approve: bool, cx: &mut Context<Self>) {
+        let label: SharedString = if approve { "承認" } else { "却下" }.into();
+        // Project the target through the canonical request boundary at decision
+        // time: the row id is a tolerant wire value, the POST URL needs the
+        // canonical UUID. Fail closed when the row vanished or its id is bad.
+        let canonical_id = match decision_target(&self.pending, &id) {
+            Ok(id) => id,
+            Err(error) => {
+                self.status = format!("{label}に失敗しました").into();
+                self.error = Some(format!("{error:#}").into());
+                self.action_status = true;
+                cx.notify();
+                return;
+            }
+        };
         let client = self.client.clone();
         // Name the operator's intent with the canonical core decision type.
         // Only the fields consumed by the unchanged HTTP body are read below.
-        let decision = operator_decision(approve);
-        let label: SharedString = if approve { "承認" } else { "却下" }.into();
+        let intent = operator_decision(approve);
         self.status = format!("{label}を送信中… ({id})").into();
 
         cx.spawn(async move |weak, cx| {
             let decide_client = client.clone();
-            let decide_id = id.clone();
+            let decide_id = canonical_id.clone();
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    match &decision {
+                    match &intent {
                         CoreApprovalDecision::Approved { approved_by, .. } => {
                             decide_client.approve(&decide_id, approved_by)
                         }
@@ -150,8 +164,11 @@ impl ApprovalsView {
                 // the poll result cannot overwrite it (P0-8).
                 view.apply_poll(refresh);
                 match result {
-                    Ok(()) => {
-                        view.status = format!("{label}しました").into();
+                    Ok(decision) => {
+                        // The service's tagged decision JSON crossed the core
+                        // boundary in the client; project it onto the UI view
+                        // instead of echoing the pre-send intent.
+                        view.status = status_for_decision(&decision).into();
                         view.error = None;
                         view.action_status = true;
                     }
@@ -332,6 +349,52 @@ fn format_args(context: &serde_json::Value) -> String {
     format!("args: {body}")
 }
 
+/// Resolve the operator's target through the canonical request boundary.
+///
+/// Row ids originate in the tolerant UI wire DTO, so they are projected onto
+/// the core request type at decision time. A stale or malformed id fails
+/// closed instead of being interpolated into a POST URL as-is.
+fn decision_target(pending: &[ApprovalRequest], id: &str) -> anyhow::Result<String> {
+    let wire = pending
+        .iter()
+        .find(|request| request.id == id)
+        .context("approval request is no longer pending")?;
+    Ok(request_to_core(wire)?.id.to_string())
+}
+
+/// UI-facing projection of the canonical core decision.
+///
+/// `decision_from_json` parses the POST response into the core type; this is
+/// the UI-side view used to render the operator status text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UiDecision {
+    Approved,
+    Denied,
+    Pending,
+    Expired,
+}
+
+impl From<&CoreApprovalDecision> for UiDecision {
+    fn from(decision: &CoreApprovalDecision) -> Self {
+        match decision {
+            CoreApprovalDecision::Approved { .. } => Self::Approved,
+            CoreApprovalDecision::Denied { .. } => Self::Denied,
+            CoreApprovalDecision::Pending => Self::Pending,
+            CoreApprovalDecision::Expired => Self::Expired,
+        }
+    }
+}
+
+/// Operator-visible status for the canonical decision returned by the service.
+fn status_for_decision(decision: &CoreApprovalDecision) -> &'static str {
+    match UiDecision::from(decision) {
+        UiDecision::Approved => "承認しました",
+        UiDecision::Denied => "却下しました",
+        UiDecision::Pending => "保留中",
+        UiDecision::Expired => "期限切れ",
+    }
+}
+
 /// Represent the operator action with the canonical core decision type.
 ///
 /// The values read from this type are exactly the ones the existing HTTP
@@ -360,7 +423,10 @@ fn is_expired(request: &ApprovalRequest, now: chrono::DateTime<chrono::Utc>) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{ApprovalsView, CoreApprovalDecision, format_args, is_expired, operator_decision};
+    use super::{
+        ApprovalsView, CoreApprovalDecision, UiDecision, decision_target, format_args, is_expired,
+        operator_decision, status_for_decision,
+    };
     use crate::policy_client::{ApprovalRequest, PolicyClient, request_to_core};
     use serde_json::json;
 
@@ -504,5 +570,58 @@ mod tests {
         assert_eq!(core.action, wire.action);
         assert_eq!(core.resource, wire.resource);
         assert_eq!(core.context, wire.context);
+    }
+
+    /// I30-D regression: the decision target is canonicalized at decision
+    /// time through `request_to_core`; a stale or malformed wire id fails closed.
+    #[test]
+    fn decision_target_projects_wire_id_through_core_at_decision_time() {
+        let id = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
+        let pending = vec![request_with_expiry(id, None)];
+        assert_eq!(decision_target(&pending, id).expect("canonical id"), id);
+
+        let legacy = vec![request_with_expiry("not-a-uuid", None)];
+        assert!(
+            decision_target(&legacy, "not-a-uuid").is_err(),
+            "a non-UUID wire id must not reach the POST URL"
+        );
+        assert!(
+            decision_target(&pending, "missing-id").is_err(),
+            "a stale row must not be decided"
+        );
+    }
+
+    /// I30-D regression: the canonical core decision parsed from the service
+    /// response is projected onto the UI decision and its status text.
+    #[test]
+    fn core_decision_projects_to_ui_decision_and_status() {
+        let now = chrono::Utc::now();
+        let cases = [
+            (
+                CoreApprovalDecision::Approved {
+                    approved_by: "koppe".into(),
+                    approved_at: now,
+                },
+                UiDecision::Approved,
+                "承認しました",
+            ),
+            (
+                CoreApprovalDecision::Denied {
+                    reason: "because".into(),
+                },
+                UiDecision::Denied,
+                "却下しました",
+            ),
+            (CoreApprovalDecision::Pending, UiDecision::Pending, "保留中"),
+            (
+                CoreApprovalDecision::Expired,
+                UiDecision::Expired,
+                "期限切れ",
+            ),
+        ];
+        for (core, ui, expected_status) in cases {
+            assert_eq!(UiDecision::from(&core), ui);
+            assert_eq!(status_for_decision(&core), expected_status);
+        }
     }
 }

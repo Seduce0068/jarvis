@@ -5,6 +5,10 @@
 //! - `POST /v1/approval/{id}/approve` -> `{ "decision": "Approved", .. }`
 //! - `POST /v1/approval/{id}/deny`    -> `{ "decision": "Denied", .. }`
 //!
+//! The POST endpoints return a canonical tagged decision JSON. That body is
+//! parsed through the core boundary on the real RUN path (never only in tests)
+//! before it reaches the UI; see [`decision_from_json`] and [`PolicyClient::decide`].
+//!
 //! This client is intentionally **blocking**: GPUI drives its own executor,
 //! so a Tokio-based client such as reqwest has no reactor here. Callers must
 //! run these methods on GPUI's background executor (see `approvals.rs`).
@@ -40,7 +44,6 @@ pub struct ApprovalRequest {
 /// `approved_at` as an RFC 3339 *string*, while the canonical core type stores
 /// a `DateTime<Utc>`. The serde tag and field names below are the unchanged
 /// wire contract; only the receiving type is thin.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(tag = "decision")]
 enum DecisionWire {
@@ -57,17 +60,17 @@ enum DecisionWire {
 
 /// Boundary: incoming decision JSON -> canonical core [`Decision`].
 ///
-/// The tagged shape is the current `jarvis-policy` contract. The legacy
-/// two-variant shape (`"Approved"` / `{"Denied":{"reason":".."}}`) is accepted
-/// as a fallback so already-queued decisions keep working. A legacy `Approved`
-/// carries no author/timestamp, so those canonical fields use documented
-/// defaults. A malformed RFC 3339 timestamp is an explicit error, never an
-/// implicitly accepted approval.
+/// The tagged shape is the current `jarvis-policy` contract: `approve`/`deny`
+/// respond with the serialized canonical `ApprovalDecision` (see
+/// `rust/jarvis-policy/src/http.rs`). The legacy two-variant shape
+/// (`"Approved"` / `{"Denied":{"reason":".."}}`) was removed together with the
+/// core legacy type (P1-7 slice 4) and is **explicitly rejected** here: an
+/// unrecognized shape or a malformed RFC 3339 `approved_at` fails closed. No
+/// author/timestamp is fabricated for a partially populated decision.
 ///
-/// The approve/deny HTTP flow deliberately keeps checking status only and
-/// ignores the response body (its legacy body omits these fields), so this
-/// boundary is exposed as API and exercised by the regression tests below.
-#[allow(dead_code)]
+/// This boundary is on the real RUN path: [`PolicyClient::decide`] parses the
+/// POST approve/deny response body through it, and `approvals.rs` projects the
+/// returned core decision onto the UI-facing decision state.
 pub fn decision_from_json(value: &serde_json::Value) -> Result<Decision> {
     if let Ok(wire) = serde_json::from_value::<DecisionWire>(value.clone()) {
         return match wire {
@@ -89,8 +92,8 @@ pub fn decision_from_json(value: &serde_json::Value) -> Result<Decision> {
         };
     }
     // The legacy two-variant core type was removed with P1-7 slice 4; an
-    // unrecognized tagged decision must now fail explicitly (fail-closed)
-    // rather than being misread as a legacy shape.
+    // unrecognized tagged decision fails explicitly (fail-closed) rather than
+    // being misread as a legacy shape or defaulted into an approval.
     Err(anyhow::anyhow!("unrecognized approval decision JSON"))
 }
 
@@ -101,7 +104,10 @@ pub fn decision_from_json(value: &serde_json::Value) -> Result<Decision> {
 /// directly: missing timestamps become the epoch, while a missing/malformed
 /// UUID id fails explicitly instead of silently producing a canonical request
 /// with a fabricated identity.
-#[allow(dead_code)]
+///
+/// Called at decision time by `ApprovalsView::decide`: the target id is
+/// resolved through this boundary before it is used in the POST URL, so a
+/// tolerant-wire id can never be mistaken for a canonical one.
 pub fn request_to_core(wire: &ApprovalRequest) -> Result<CoreApprovalRequest> {
     let id = uuid::Uuid::parse_str(&wire.id).context("invalid approval id at UI boundary")?;
     let epoch = chrono::DateTime::from_timestamp(0, 0).expect("epoch is valid");
@@ -183,6 +189,10 @@ impl PolicyClient {
     }
 
     /// Requests currently awaiting an operator decision.
+    ///
+    /// This endpoint returns only request DTOs — no decision field — so the
+    /// decision JSON boundary lives on the POST approve/deny path instead;
+    /// see [`PolicyClient::decide`].
     pub fn pending(&self) -> Result<Vec<ApprovalRequest>> {
         let url = format!("{}/v1/approvals", self.base_url);
         let mut request = self.agent.get(&url);
@@ -206,22 +216,26 @@ impl PolicyClient {
     }
 
     /// Approve the request `id` as `approved_by`.
-    pub fn approve(&self, id: &str, approved_by: &str) -> Result<()> {
+    ///
+    /// Returns the canonical decision parsed from the response body.
+    pub fn approve(&self, id: &str, approved_by: &str) -> Result<Decision> {
         self.decide(id, "approve", &ApproveBody { approved_by })
     }
 
     /// Deny the request `id` with `reason`.
-    pub fn deny(&self, id: &str, reason: &str) -> Result<()> {
+    ///
+    /// Returns the canonical decision parsed from the response body.
+    pub fn deny(&self, id: &str, reason: &str) -> Result<Decision> {
         self.decide(id, "deny", &DenyBody { reason })
     }
 
-    fn decide<B: Serialize + ?Sized>(&self, id: &str, verb: &str, body: &B) -> Result<()> {
+    fn decide<B: Serialize + ?Sized>(&self, id: &str, verb: &str, body: &B) -> Result<Decision> {
         let url = format!("{}/v1/approval/{id}/{verb}", self.base_url);
         let mut request = self.agent.post(&url);
         if let Some(token) = &self.token {
             request = request.header("X-Jarvis-Approval-Token", token);
         }
-        let response = request
+        let mut response = request
             .send_json(body)
             .with_context(|| format!("POST {url} failed"))?;
         // send_json() succeeds for any HTTP response; a 401/500/3xx must not
@@ -230,7 +244,15 @@ impl PolicyClient {
         if !status.is_success() {
             bail!("POST {url} returned HTTP {}", status.as_u16());
         }
-        Ok(())
+        // A 2xx body is the canonical tagged decision. Route it through the
+        // same boundary as any other decision JSON before it reaches the UI:
+        // a malformed body must not be reported as a successful approval.
+        let value: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .with_context(|| format!("invalid decision JSON from POST {url}"))?;
+        decision_from_json(&value)
+            .with_context(|| format!("unexpected decision JSON from POST {url}"))
     }
 }
 
@@ -483,7 +505,7 @@ mod tests {
                 *seen_for_thread.lock().expect("lock") = Some(request);
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 23\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
                 );
             },
             1,
@@ -496,6 +518,10 @@ mod tests {
         let result = client.approve("req-1", "koppe");
         handle.join().expect("server thread");
         assert!(result.is_ok(), "2xx approve must succeed: {result:?}");
+        assert!(matches!(
+            result.expect("canonical decision returned"),
+            Decision::Approved { .. }
+        ));
 
         let request = seen.lock().expect("lock").clone().expect("request seen");
         assert!(
@@ -518,7 +544,7 @@ mod tests {
                 *seen_for_thread.lock().expect("lock") = Some(request);
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 21\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
                 );
             },
             1,
@@ -529,6 +555,10 @@ mod tests {
         let result = client.deny("req-2", "because");
         handle.join().expect("server thread");
         assert!(result.is_ok(), "2xx deny must succeed: {result:?}");
+        assert!(matches!(
+            result.expect("canonical decision returned"),
+            Decision::Denied { .. }
+        ));
 
         let request = seen.lock().expect("lock").clone().expect("request seen");
         assert!(
@@ -579,6 +609,82 @@ mod tests {
 
     fn timestamp(secs: i64) -> chrono::DateTime<chrono::Utc> {
         chrono::DateTime::from_timestamp(secs, 0).expect("valid timestamp")
+    }
+
+    /// I30-D regression: the POST approve response body crosses the canonical
+    /// core boundary on the real RUN path, not only in a direct unit test.
+    #[test]
+    fn approve_response_body_crosses_the_core_boundary() {
+        let (addr, handle) = spawn_test_server(
+            |stream, _request| {
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+                );
+            },
+            1,
+        );
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let decision = client.approve("4d1a1f2e-0000-0000-0000-000000000000", "koppe");
+        handle.join().expect("server thread");
+        match decision.expect("approve response parses as canonical decision") {
+            Decision::Approved {
+                approved_by,
+                approved_at,
+            } => {
+                assert_eq!(approved_by, "koppe");
+                assert_eq!(
+                    approved_at,
+                    chrono::DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
+                        .expect("timestamp parses")
+                        .with_timezone(&chrono::Utc)
+                );
+            }
+            other => panic!("expected canonical Approved, got {other:?}"),
+        }
+    }
+
+    /// I30-D regression: the same boundary is applied to deny responses.
+    #[test]
+    fn deny_response_body_crosses_the_core_boundary() {
+        let (addr, handle) = spawn_test_server(
+            |stream, _request| {
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
+                );
+            },
+            1,
+        );
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let decision = client.deny("4d1a1f2e-0000-0000-0000-000000000000", "because");
+        handle.join().expect("server thread");
+        match decision.expect("deny response parses as canonical decision") {
+            Decision::Denied { reason } => assert_eq!(reason, "because"),
+            other => panic!("expected canonical Denied, got {other:?}"),
+        }
+    }
+
+    /// I30-D regression: a malformed decision on the real path fails closed
+    /// instead of being reported as a successful approval.
+    #[test]
+    fn malformed_decision_response_fails_on_the_real_path() {
+        let (addr, handle) = spawn_test_server(
+            |stream, _request| {
+                respond(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 77\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"not-a-timestamp\"}",
+                );
+            },
+            1,
+        );
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let decision = client.approve("4d1a1f2e-0000-0000-0000-000000000000", "koppe");
+        handle.join().expect("server thread");
+        assert!(
+            decision.is_err(),
+            "a malformed 2xx decision must not be reported as success: {decision:?}"
+        );
     }
 
     /// TC-U5: tagged decision JSON converts to the canonical core type; the
