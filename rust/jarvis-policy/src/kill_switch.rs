@@ -63,8 +63,22 @@ impl KillSwitch {
         switch
     }
 
+    /// Activate with the historical `"system"` actor. Kept as a compatibility
+    /// wrapper; callers that know the requesting principal should use
+    /// [`Self::activate_with_actor`].
     pub fn activate(&self, reason: String) {
-        self.arm(reason.clone());
+        self.activate_with_actor(reason, "system".into());
+    }
+
+    /// Activate the switch and record `actor` in the audit slot.
+    ///
+    /// `lib.rs` / `http.rs` are outside this file's ownership, so this is
+    /// added now as the future connection point: once those callers are
+    /// updated they can pass the authenticated principal here. Until then
+    /// every existing path goes through [`Self::activate`] and still records
+    /// `"system"`.
+    pub fn activate_with_actor(&self, reason: String, actor: String) {
+        self.arm_with_actor(reason.clone(), actor);
         if let Err(error) = self.persist() {
             // `persist()` re-arms the switch fail-closed, so the in-memory
             // state stays activated. The state file was NOT written though:
@@ -136,9 +150,19 @@ impl KillSwitch {
         )
     }
 
-    /// Set the in-memory state without persisting. Used by [`Self::restore`]
-    /// so a corrupt state file is not overwritten during recovery.
+    /// Set the in-memory state without persisting, attributing the activation
+    /// to the system. Used by [`Self::restore`] so a corrupt state file is not
+    /// overwritten during recovery, and by the fail-closed paths in
+    /// [`Self::persist`] / poisoned-lock recovery.
     fn arm(&self, reason: String) {
+        self.arm_with_actor(reason, "system".into());
+    }
+
+    /// Set the in-memory state without persisting, recording `actor` in the
+    /// audit slot. `arm()` delegates here with `"system"` so the existing
+    /// fail-closed behavior stays unchanged; `arm_with_actor` never calls
+    /// `persist()`.
+    fn arm_with_actor(&self, reason: String, actor: String) {
         // `duration_since` returns Err when the clock is before UNIX_EPOCH
         // (e.g. on time regression). Never unwrap here: this is the emergency
         // stop path and a panic is fatal under `panic = "abort"`. Fail closed
@@ -154,7 +178,7 @@ impl KillSwitch {
         self.activated.store(true, Ordering::SeqCst);
         self.activated_at.store(now, Ordering::SeqCst);
         Self::write_slot(&self.reason, Some(reason));
-        Self::write_slot(&self.activated_by, Some("system".into()));
+        Self::write_slot(&self.activated_by, Some(actor));
     }
 
     pub fn deactivate(&self, admin_token: &str) -> Result<()> {
@@ -446,6 +470,77 @@ mod tests {
             Some(PERSIST_FAILURE_REASON),
             "degradation must be recorded instead of the caller's reason"
         );
+
+        std::fs::remove_file(parent).expect("clean blocker file");
+    }
+
+    /// `activate_with_actor` must make the public `activated_by` audit field
+    /// reflect the real caller, both in memory and after a restart.
+    #[test]
+    fn activate_with_actor_records_actor_in_status_and_state_file() {
+        let path = temp_path("actor");
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+
+        switch.activate_with_actor("maintenance".into(), "admin:alice".into());
+
+        let status = switch.status();
+        assert!(status.activated);
+        assert_eq!(status.reason.as_deref(), Some("maintenance"));
+        assert_eq!(status.activated_by.as_deref(), Some("admin:alice"));
+
+        let restored = KillSwitch::new("admin-token", Some(path.clone()));
+        assert_eq!(
+            restored.status().activated_by.as_deref(),
+            Some("admin:alice")
+        );
+
+        restored
+            .deactivate("admin-token")
+            .expect("admin token deactivates");
+        assert_eq!(restored.status().activated_by, None);
+
+        std::fs::remove_dir_all(path.parent().unwrap()).expect("clean temp dir");
+    }
+
+    /// The legacy entry point and the token-gated path must keep their
+    /// historical `"system"` attribution until their callers pass an actor.
+    #[test]
+    fn legacy_activation_paths_keep_system_actor() {
+        let switch = KillSwitch::new("admin-token", None);
+        switch.activate("legacy".into());
+        assert_eq!(switch.status().activated_by.as_deref(), Some("system"));
+
+        let token_switch = KillSwitch::new("admin-token", None);
+        token_switch
+            .activate_with_token("token-request".into(), "admin-token")
+            .expect("valid admin token");
+        assert_eq!(
+            token_switch.status().activated_by.as_deref(),
+            Some("system")
+        );
+    }
+
+    /// The new actor-aware entry point must not weaken the fail-closed
+    /// behavior on a persist failure: the switch stays armed and records
+    /// `PERSIST_FAILURE_REASON` just like `activate()` does.
+    #[test]
+    fn activate_with_actor_on_persist_failure_stays_armed_and_records_degradation() {
+        let path = temp_path("actor-persist-fail");
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+        assert!(!switch.is_activated());
+
+        let parent = path.parent().expect("state path has a parent");
+        std::fs::remove_dir_all(parent).expect("remove temp dir");
+        std::fs::write(parent, b"blocker").expect("create blocker file");
+
+        switch.activate_with_actor("operator-requested-reason".into(), "admin:alice".into());
+
+        let status = switch.status();
+        assert!(
+            status.activated,
+            "failed persist must leave the switch armed"
+        );
+        assert_eq!(status.reason.as_deref(), Some(PERSIST_FAILURE_REASON));
 
         std::fs::remove_file(parent).expect("clean blocker file");
     }
