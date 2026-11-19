@@ -26,6 +26,9 @@ unsafe_code = "forbid"
 undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
+# Local crates
+jarvis-core = { path = "jarvis-core" }
+
 # Async runtime
 tokio = { version = "1.40", features = ["full", "tracing"] }
 async-trait = "0.1.79"
