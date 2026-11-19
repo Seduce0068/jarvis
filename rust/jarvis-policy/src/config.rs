@@ -31,6 +31,13 @@ pub struct PolicyConfig {
     /// listener beyond loopback.
     #[serde(default)]
     pub approval_api_token: Option<String>,
+    /// Optional separate token for the approve/deny routes only. When set,
+    /// decisions must present this value in `X-Jarvis-Approval-Token` while
+    /// request/list/status keep using `approval_api_token`. This prevents a
+    /// caller holding the gateway API token from approving its own request.
+    /// Unset (default) keeps the legacy single-token behavior.
+    #[serde(default)]
+    pub approval_admin_token: Option<String>,
     /// Opt-in P0-1 guard: when true, approval endpoints fail closed with 503
     /// while `approval_api_token` is unset. Default false keeps the legacy
     /// loopback-only, unauthenticated behavior.
@@ -73,6 +80,7 @@ impl Default for PolicyConfig {
             approval_timeout_secs: 300,
             approval_max_pending: default_approval_max_pending(),
             approval_api_token: None,
+            approval_admin_token: None,
             require_approval_api_token: false,
             require_kill_switch_admin_token: false,
             default_deny: true,
@@ -296,5 +304,94 @@ default_deny = true
             .extract()
             .expect("config parses");
         assert!(config.require_approval_api_token);
+    }
+
+    /// Legacy configs have no admin token: the field defaults to `None`, so
+    /// approve/deny keep using the single `approval_api_token`.
+    #[test]
+    fn approval_admin_token_defaults_to_none_for_legacy_config() {
+        assert!(PolicyConfig::default().approval_admin_token.is_none());
+
+        let toml = format!(
+            r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "{token}"
+approval_timeout_secs = 300
+default_deny = true
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("legacy config parses");
+        assert!(config.approval_admin_token.is_none());
+    }
+
+    /// `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN` becomes `approval_admin_token`
+    /// through the same `Env::prefixed("JARVIS_POLICY_")` chain used by
+    /// `load()`. As in the other env test, no OS env var is mutated.
+    #[test]
+    fn approval_admin_token_env_key_maps_to_field() {
+        const ENV_PREFIX: &str = "JARVIS_POLICY_";
+        const ENV_KEY: &str = "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN";
+
+        let field = ENV_KEY
+            .strip_prefix(ENV_PREFIX)
+            .expect("key uses the policy env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "approval_admin_token");
+
+        let toml = format!(
+            r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "{token}"
+approval_timeout_secs = 300
+default_deny = true
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .merge(Env::prefixed(ENV_PREFIX).only(&[field.as_str()]))
+            .merge(Serialized::default(field.as_str(), "admin-secret"))
+            .extract()
+            .expect("env-style key merges into the admin token field");
+        assert_eq!(config.approval_admin_token.as_deref(), Some("admin-secret"));
+        // The two tokens stay independent.
+        assert!(config.approval_api_token.is_none());
+    }
+
+    #[test]
+    fn approval_admin_token_can_be_set_in_toml() {
+        let toml = format!(
+            r#"
+grpc_addr = "127.0.0.1:50051"
+http_addr = "127.0.0.1:8081"
+cedar_policy_dir = "/etc/jarvis/policy"
+casbin_model_path = "/etc/jarvis/policy/casbin_model.conf"
+casbin_policy_path = "/etc/jarvis/policy/casbin_policy.csv"
+kill_switch_admin_token = "{token}"
+approval_timeout_secs = 300
+approval_api_token = "gateway-api-token"
+approval_admin_token = "admin-secret"
+default_deny = true
+"#,
+            token = PLACEHOLDER_KILL_SWITCH_TOKEN
+        );
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("config parses");
+        assert_eq!(
+            config.approval_api_token.as_deref(),
+            Some("gateway-api-token")
+        );
+        assert_eq!(config.approval_admin_token.as_deref(), Some("admin-secret"));
     }
 }

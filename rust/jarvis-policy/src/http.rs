@@ -77,20 +77,42 @@ fn default_deny_reason() -> String {
 // the same value from their own configuration and send it on every call.
 // P0-1 staged rollout: set `JARVIS_POLICY_REQUIRE_APPROVAL_API_TOKEN` to fail
 // closed (503) when no token is configured, instead of silently staying open.
+// I7-A: when `JARVIS_POLICY_APPROVAL_ADMIN_TOKEN` is set, approve/deny require
+// that separate admin token. A caller holding only the API token can then no
+// longer submit a request and approve it themselves. Unset keeps the legacy
+// single-token contract.
+
+/// Which token guards a given approval route.
+#[derive(Clone, Copy)]
+enum ApprovalScope {
+    /// request/list/status: gateway-facing `approval_api_token`.
+    Api,
+    /// approve/deny: `approval_admin_token` when configured, otherwise the
+    /// legacy `approval_api_token` fallback.
+    Admin,
+}
 
 pub fn router(engine: Arc<PolicyEngine>) -> Router {
-    // Approval routes are grouped so optional token auth can be applied to
-    // them without affecting health/metrics/check/kill-switch endpoints.
-    let approvals = Router::new()
+    // Approval routes are split by authority so health/metrics/check and the
+    // kill-switch endpoints keep their existing authentication scope. The two
+    // sub-routers are merged only after their layers are applied, otherwise
+    // the second layer would also wrap the first group's routes.
+    let api_approvals = Router::new()
         .route("/", post(request_approval))
         .route("/list", get(list_approvals))
         .route("/:id", get(approval_status))
+        .layer(axum::middleware::from_fn_with_state(
+            (engine.clone(), ApprovalScope::Api),
+            require_approval_token,
+        ));
+    let admin_approvals = Router::new()
         .route("/:id/approve", post(approve_approval))
         .route("/:id/deny", post(deny_approval))
         .layer(axum::middleware::from_fn_with_state(
-            engine.clone(),
+            (engine.clone(), ApprovalScope::Admin),
             require_approval_token,
         ));
+    let approvals = api_approvals.merge(admin_approvals);
 
     Router::new()
         .route("/health", get(health))
@@ -100,7 +122,7 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
         .route(
             "/v1/approvals",
             get(list_approvals).layer(axum::middleware::from_fn_with_state(
-                engine.clone(),
+                (engine.clone(), ApprovalScope::Api),
                 require_approval_token,
             )),
         )
@@ -111,20 +133,27 @@ pub fn router(engine: Arc<PolicyEngine>) -> Router {
         .layer(axum::middleware::from_fn(track_metrics))
 }
 
-/// Optional token gate for approval endpoints.
+/// Scope-aware token gate for approval endpoints.
 ///
-/// When `approval_api_token` is unset the endpoint keeps its historical
-/// loopback-only behavior, unless the opt-in `require_approval_api_token`
-/// guard is enabled: then it fails closed with 503. When a token is set,
-/// callers must send the exact value in the `X-Jarvis-Approval-Token` header.
-/// This lets the same HTTP contract be used safely if the listener is ever
-/// exposed beyond loopback.
+/// `Api` routes use `approval_api_token`; `Admin` routes use the separate
+/// `approval_admin_token` when configured and fall back to `approval_api_token`
+/// when it is not (legacy compatibility). When the effective token is unset
+/// the endpoint keeps its historical loopback-only behavior, unless the opt-in
+/// `require_approval_api_token` guard is enabled: then it fails closed with
+/// 503. A configured token must be sent in the `X-Jarvis-Approval-Token`
+/// header. Health/metrics/check are not covered by this middleware.
 async fn require_approval_token(
-    State(engine): State<Arc<PolicyEngine>>,
+    State((engine, scope)): State<(Arc<PolicyEngine>, ApprovalScope)>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, axum::http::StatusCode> {
-    let Some(expected) = engine.approval_api_token() else {
+    let expected = match scope {
+        ApprovalScope::Api => engine.approval_api_token(),
+        ApprovalScope::Admin => engine
+            .approval_admin_token()
+            .or_else(|| engine.approval_api_token()),
+    };
+    let Some(expected) = expected else {
         if engine.require_approval_api_token() {
             tracing::warn!(
                 "Approval endpoints are disabled: approval token is required but not configured"
@@ -137,19 +166,34 @@ async fn require_approval_token(
         .headers()
         .get("x-jarvis-approval-token")
         .and_then(|v| v.to_str().ok());
-    // Constant-time-ish comparison: length check then byte compare. Tokens
-    // are low-value local secrets, but avoid trivial timing leaks.
-    let authorized = provided.is_some_and(|p| {
-        p.len() == expected.len()
-            && p.bytes()
-                .zip(expected.bytes())
-                .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-                == 0
-    });
-    if !authorized {
+    // A missing (or non-UTF-8) header is never a valid token, even when the
+    // configured value happens to be empty.
+    if !provided.is_some_and(|p| constant_time_eq(p, expected)) {
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
+}
+
+/// Compare two tokens without an early exit on the first mismatch.
+///
+/// The loop always covers the longer input and pads the shorter one, so
+/// neither a content mismatch nor a length mismatch short-circuits. No
+/// additional crate is needed and no `unsafe` code is involved.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let max = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for (x, y) in a
+        .iter()
+        .map(Some)
+        .chain(std::iter::repeat(None))
+        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
+        .take(max)
+    {
+        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
+    }
+    diff == 0
 }
 
 /// Count every HTTP request so `/metrics` exposes more than an empty page
@@ -195,7 +239,7 @@ async fn metrics() -> String {
     }
 }
 
-#[instrument(skip(engine))]
+#[instrument(skip(engine, req))]
 async fn check(
     State(engine): State<Arc<PolicyEngine>>,
     Json(req): Json<CheckRequest>,
@@ -215,6 +259,12 @@ async fn check(
 /// 公開シグネチャを変えずに区別を追加するため、このヘルパーは HTTP モジュール内
 /// に置き、`request_approval` 自体は gRPC/既存クライアント互換のまま維持する。
 impl PolicyEngine {
+    /// Optional separate token for approve/deny. Kept next to the HTTP-only
+    /// helpers so the rest of the engine is untouched.
+    fn approval_admin_token(&self) -> Option<&str> {
+        self.config.approval_admin_token.as_deref()
+    }
+
     async fn request_approval_http(
         &self,
         request: ApprovalRequest,
@@ -229,7 +279,7 @@ impl PolicyEngine {
     }
 }
 
-#[instrument(skip(engine))]
+#[instrument(skip(engine, req))]
 async fn request_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Json(req): Json<ApprovalRequestHttp>,
@@ -250,7 +300,7 @@ async fn request_approval(
     Ok(Json(serde_json::to_value(decision).unwrap_or_default()))
 }
 
-#[instrument(skip(engine))]
+#[instrument(skip(engine, req))]
 async fn approve_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Path(id): Path<String>,
@@ -264,7 +314,7 @@ async fn approve_approval(
     Ok(Json(serde_json::to_value(decision).unwrap_or_default()))
 }
 
-#[instrument(skip(engine))]
+#[instrument(skip(engine, req))]
 async fn deny_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Path(id): Path<String>,
@@ -345,6 +395,14 @@ async fn deactivate_kill_switch(
 }
 
 pub async fn serve(engine: Arc<PolicyEngine>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
+    if engine.approval_admin_token().is_none() {
+        tracing::warn!(
+            "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN is not set: approve/deny fall back to \
+             JARVIS_POLICY_APPROVAL_API_TOKEN, so a caller holding that token can \
+             approve its own request. Set a distinct admin token to enforce \
+             separation of duties."
+        );
+    }
     let app = router(engine);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -371,6 +429,16 @@ mod tests {
         token: Option<String>,
         require_token: bool,
     ) -> (Arc<PolicyEngine>, PathBuf) {
+        test_engine_with_full_approval_config(label, max_pending, token, None, require_token).await
+    }
+
+    async fn test_engine_with_full_approval_config(
+        label: &str,
+        max_pending: usize,
+        token: Option<String>,
+        admin_token: Option<String>,
+        require_token: bool,
+    ) -> (Arc<PolicyEngine>, PathBuf) {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
         let dir = temp_dir(label);
         let model = dir.join("casbin_model.conf");
@@ -386,6 +454,7 @@ mod tests {
             approval_timeout_secs: 5,
             approval_max_pending: max_pending,
             approval_api_token: token,
+            approval_admin_token: admin_token,
             require_approval_api_token: require_token,
             ..Default::default()
         };
@@ -889,5 +958,192 @@ mod tests {
             .expect("request")
             .status();
         assert_eq!(list, reqwest::StatusCode::OK);
+    }
+
+    /// POST a pending approval carrying the given token and keep the blocking
+    /// request task alive until a decision arrives.
+    fn spawn_approval_request(
+        client: &reqwest::Client,
+        base: &str,
+        token: &str,
+    ) -> tokio::task::JoinHandle<Value> {
+        let client = client.clone();
+        let url = format!("{base}/v1/approval");
+        let token = token.to_string();
+        tokio::spawn(async move {
+            client
+                .post(url)
+                .header("x-jarvis-approval-token", token)
+                .json(&pending_request(chrono::Utc::now().timestamp() + 60))
+                .send()
+                .await
+                .expect("approval request runs")
+                .json::<Value>()
+                .await
+                .expect("approval response is JSON")
+        })
+    }
+
+    /// `/v1/approvals` is API-scoped, so the list poll must send the API token.
+    async fn wait_for_pending_with_token(
+        client: &reqwest::Client,
+        base: &str,
+        token: &str,
+    ) -> String {
+        for _ in 0..50 {
+            let body: Value = client
+                .get(format!("{base}/v1/approvals"))
+                .header("x-jarvis-approval-token", token)
+                .send()
+                .await
+                .expect("list request runs")
+                .json()
+                .await
+                .expect("list response is JSON");
+            if let Some(id) = body["pending"]
+                .as_array()
+                .and_then(|pending| pending.first())
+                .and_then(|request| request["id"].as_str())
+            {
+                return id.to_string();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("approval request never appeared");
+    }
+
+    /// I7-A separation: the gateway API token can submit and read a request,
+    /// but cannot approve/deny it; that requires the distinct admin token.
+    #[tokio::test]
+    async fn admin_token_splits_decision_authority_from_api_token() {
+        let (engine, _dir) = test_engine_with_full_approval_config(
+            "http-admin-split",
+            10,
+            Some("gateway-api-token".into()),
+            Some("admin-secret".into()),
+            false,
+        )
+        .await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let pending = spawn_approval_request(&client, &base, "gateway-api-token");
+        let id = wait_for_pending_with_token(&client, &base, "gateway-api-token").await;
+
+        // request/list/status stay on the API token.
+        let status = client
+            .get(format!("{base}/v1/approval/{id}"))
+            .header("x-jarvis-approval-token", "gateway-api-token")
+            .send()
+            .await
+            .expect("status request")
+            .status();
+        assert_eq!(status, reqwest::StatusCode::OK);
+
+        // The admin token does not unlock API-scoped routes.
+        let list_with_admin = client
+            .get(format!("{base}/v1/approvals"))
+            .header("x-jarvis-approval-token", "admin-secret")
+            .send()
+            .await
+            .expect("list request")
+            .status();
+        assert_eq!(list_with_admin, reqwest::StatusCode::UNAUTHORIZED);
+
+        // Holding only the API token is not enough to decide the request.
+        for action in ["approve", "deny"] {
+            let payload = if action == "approve" {
+                json!({ "approved_by": "insider" })
+            } else {
+                json!({ "reason": "insider" })
+            };
+            let rejected = client
+                .post(format!("{base}/v1/approval/{id}/{action}"))
+                .header("x-jarvis-approval-token", "gateway-api-token")
+                .json(&payload)
+                .send()
+                .await
+                .expect("decision request")
+                .status();
+            assert_eq!(rejected, reqwest::StatusCode::UNAUTHORIZED);
+        }
+
+        // Only the admin token can approve.
+        let approved = client
+            .post(format!("{base}/v1/approval/{id}/approve"))
+            .header("x-jarvis-approval-token", "admin-secret")
+            .json(&json!({ "approved_by": "admin" }))
+            .send()
+            .await
+            .expect("approve request")
+            .status();
+        assert_eq!(approved, reqwest::StatusCode::OK);
+
+        let decision = pending.await.expect("request task joins");
+        assert_eq!(decision["decision"], "Approved");
+        assert_eq!(decision["approved_by"], "admin");
+    }
+
+    /// I7-A compatibility: with no admin token configured, the API token
+    /// still authorizes approve/deny exactly as before.
+    #[tokio::test]
+    async fn api_token_still_approves_when_admin_token_is_unset() {
+        let (engine, _dir) = test_engine_with_full_approval_config(
+            "http-admin-compat",
+            10,
+            Some("gateway-api-token".into()),
+            None,
+            false,
+        )
+        .await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let pending = spawn_approval_request(&client, &base, "gateway-api-token");
+        let id = wait_for_pending_with_token(&client, &base, "gateway-api-token").await;
+
+        let approved = client
+            .post(format!("{base}/v1/approval/{id}/approve"))
+            .header("x-jarvis-approval-token", "gateway-api-token")
+            .json(&json!({ "approved_by": "gateway-user" }))
+            .send()
+            .await
+            .expect("approve request")
+            .status();
+        assert_eq!(approved, reqwest::StatusCode::OK);
+
+        let decision = pending.await.expect("request task joins");
+        assert_eq!(decision["decision"], "Approved");
+        assert_eq!(decision["approved_by"], "gateway-user");
+
+        // The token gate is still enforced on decisions.
+        let missing = client
+            .post(format!("{base}/v1/approval/{id}/approve"))
+            .json(&json!({ "approved_by": "no-token" }))
+            .send()
+            .await
+            .expect("approve request")
+            .status();
+        assert_eq!(missing, reqwest::StatusCode::UNAUTHORIZED);
+
+        // deny keeps the same legacy fallback (404 means auth passed).
+        let deny_with_api = client
+            .post(format!("{base}/v1/approval/{}/deny", uuid::Uuid::new_v4()))
+            .header("x-jarvis-approval-token", "gateway-api-token")
+            .json(&json!({ "reason": "compat" }))
+            .send()
+            .await
+            .expect("deny request")
+            .status();
+        assert_eq!(deny_with_api, reqwest::StatusCode::NOT_FOUND);
+
+        let deny_without_token = client
+            .post(format!("{base}/v1/approval/{}/deny", uuid::Uuid::new_v4()))
+            .json(&json!({ "reason": "compat" }))
+            .send()
+            .await
+            .expect("deny request")
+            .status();
+        assert_eq!(deny_without_token, reqwest::StatusCode::UNAUTHORIZED);
     }
 }
