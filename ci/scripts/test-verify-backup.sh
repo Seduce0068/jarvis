@@ -122,11 +122,21 @@ record_manifest_entries() { # dir name...
 base="$tmp/backups"
 mkdir -p "$base/good" "$base/corrupt" "$base/partial" "$base/legacy"
 
-# GOOD: complete set with valid hashes and marker.
+# GOOD: complete set with valid hashes, required payloads and marker.
 printf 'content-A' > "$base/good/a.txt"
 printf 'hash' > "$base/good/unused"
 sha=$(sha256sum "$base/good/a.txt" | cut -d' ' -f1)
-printf '# created_at=2026-11-17T00:00:00Z\na.txt 9 %s\n' "$sha" > "$base/good/manifest.txt"
+{ printf '%s\n' '-- PostgreSQL database dump' '-- PostgreSQL database dump complete'; } \
+  | gzip > "$base/good/postgres-jarvis.sql.gz"
+mkdir -p "$tmp/good-qdrant"
+printf 'snapshot' > "$tmp/good-qdrant/snapshot.json"
+tar -cf "$base/good/qdrant-snapshot.bin" -C "$tmp/good-qdrant" snapshot.json
+printf 'allow = ["tool.read"]\n' > "$base/good/config-mcp_allowlist.toml"
+{
+  printf '# created_at=2026-11-17T00:00:00Z\n'
+  record_manifest_entries "$base/good" a.txt postgres-jarvis.sql.gz \
+    qdrant-snapshot.bin config-mcp_allowlist.toml
+} > "$base/good/manifest.txt"
 printf 'complete 2026-11-17T00:00:00Z\n' > "$base/good/COMPLETE"
 
 # CORRUPT: same manifest but file content changed.
@@ -161,7 +171,13 @@ printf 'allow = ["tool.read"]\n' > "$tmp/staging/mcp_allowlist.toml"
 no_secrets="$extra/no_secrets"
 mkdir -p "$no_secrets"
 cp "$tmp/staging/mcp_allowlist.toml" "$no_secrets/config-mcp_allowlist.toml"
-record_manifest_entries "$no_secrets" config-mcp_allowlist.toml > "$no_secrets/manifest.txt"
+{ printf '%s\n' '-- PostgreSQL database dump' '-- PostgreSQL database dump complete'; } \
+  | gzip > "$no_secrets/postgres-jarvis.sql.gz"
+mkdir -p "$tmp/no-secrets-qdrant"
+printf 'snapshot' > "$tmp/no-secrets-qdrant/snapshot.json"
+tar -cf "$no_secrets/qdrant-snapshot.bin" -C "$tmp/no-secrets-qdrant" snapshot.json
+record_manifest_entries "$no_secrets" config-mcp_allowlist.toml \
+  postgres-jarvis.sql.gz qdrant-snapshot.bin > "$no_secrets/manifest.txt"
 printf 'complete 2026-11-18T00:00:00Z\n' > "$no_secrets/COMPLETE"
 
 check "TC-B3: secret-free set verifies" 0 "$no_secrets"
