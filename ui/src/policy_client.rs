@@ -61,6 +61,25 @@ const TOKEN_WIRE_PREFIX: &str = "jarvis-tokens-v1:";
 /// status-code contract stays compatible.
 const KILL_SWITCH_409_BODY: &str = jarvis_core::KILL_SWITCH_409_BODY;
 
+/// Classify the bounded read of a 409 response body (I56-B).
+///
+/// The emergency-stop rejection carries a fixed body, but the read itself can
+/// fail (truncated or size-limited body) or yield an empty string. Neither
+/// case proves the 409 was the benign "already decided" variant, so both fail
+/// closed to the halt pin instead of being routed to `winner_decision`. Only a
+/// non-empty body that differs from the fixed literal keeps the legacy
+/// winner-preservation contract. The body is never returned, displayed or
+/// logged.
+fn kill_switch_body_blocks<E>(body: &std::result::Result<String, E>) -> bool {
+    match body {
+        Ok(body) => {
+            let body = body.trim();
+            body.is_empty() || body == KILL_SWITCH_409_BODY
+        }
+        Err(_) => true,
+    }
+}
+
 /// Tokens resolved for the two approval scopes.
 ///
 /// Mirrors `jarvis-policy`: API routes (request/list/status) use `api_token`,
@@ -595,19 +614,23 @@ impl PolicyClient {
         let status = response.status();
         if status.as_u16() == 409 {
             // Bounded read: only the fixed vocabulary matters. The body is
-            // never returned, displayed or logged.
+            // never returned, displayed or logged. Keep the read as a Result:
+            // `.unwrap_or_default()` turned a read error into "" and let an
+            // unclassifiable kill-switch 409 fall through to the winner
+            // readback — fail-open on the exact path that must fail closed
+            // (I56-B).
             let error_body = response
                 .body_mut()
                 .with_config()
                 .limit(256)
-                .read_to_string()
-                .unwrap_or_default();
-            // I54-C: compare against the single `jarvis-core` definition that
-            // `jarvis-policy` also emits. A local duplicate used to let a policy
-            // wording change silently turn this into a false AlreadyDecided
-            // winner. Any other body still keeps the legacy winner-preservation
-            // contract, including peers that predate the fixed-vocabulary body.
-            if error_body.trim() == KILL_SWITCH_409_BODY {
+                .read_to_string();
+            // I54-C compares against the single `jarvis-core` definition that
+            // `jarvis-policy` also emits. A non-empty, distinct body keeps the
+            // legacy winner-preservation contract (including older peers); an
+            // unreadable or empty body pins the halt instead. In particular an
+            // empty body is never treated as "another 409" and sent to
+            // `winner_decision`.
+            if kill_switch_body_blocks(&error_body) {
                 return Ok(DecisionOutcome::KillSwitchBlocked);
             }
             return Ok(DecisionOutcome::AlreadyDecided(self.winner_decision(id)?));
@@ -1925,6 +1948,62 @@ mod tests {
             requests[0].starts_with("POST /v1/approval/req-1/approve "),
             "only the decision POST must be sent"
         );
+    }
+
+    /// I56-B: an empty 409 body must not be treated as "another 409" and
+    /// routed to the winner readback. The old `.unwrap_or_default()` made both
+    /// a read error and a literal empty body fall through to `winner_decision`,
+    /// which is fail-open: an unreadable kill-switch body would be reported as
+    /// a decided winner. Now the halt is pinned and no status GET is issued.
+    #[test]
+    fn empty_409_body_pins_halt_without_winner_fetch() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                seen_for_thread.lock().expect("lock").push(request);
+                respond(
+                    stream,
+                    "HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            },
+            1,
+        );
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let outcome = client.approve_outcome("req-1", "koppe");
+        handle.join().expect("server thread");
+
+        assert_eq!(
+            outcome.expect("empty 409 is still a classified outcome"),
+            DecisionOutcome::KillSwitchBlocked
+        );
+        let requests = seen.lock().expect("lock");
+        assert_eq!(
+            requests.len(),
+            1,
+            "no winner GET may follow an empty 409 body"
+        );
+    }
+
+    /// I56-B: pure classification of the bounded 409 body read. A read error
+    /// and an empty/whitespace body fail closed; a non-empty, distinct body
+    /// still takes the winner path.
+    #[test]
+    fn kill_switch_409_body_classification_fails_closed() {
+        type Body = std::result::Result<String, ()>;
+        let kill_switch: Body = Ok(KILL_SWITCH_409_BODY.to_string());
+        let already_decided: Body = Ok("approval request already decided".to_string());
+        let empty: Body = Ok(String::new());
+        let whitespace: Body = Ok("  \n\t ".to_string());
+        let read_error: Body = Err(());
+        assert!(kill_switch_body_blocks(&kill_switch));
+        assert!(!kill_switch_body_blocks(&already_decided));
+        assert!(kill_switch_body_blocks(&empty));
+        assert!(kill_switch_body_blocks(&whitespace));
+        assert!(kill_switch_body_blocks(&read_error));
     }
 
     /// I52-A (a): the canonical already-decided literal still takes the legacy

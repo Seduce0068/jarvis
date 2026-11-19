@@ -36,15 +36,29 @@ pub struct ApprovalsView {
     kill_switch_active: bool,
     /// Sticky confirmation from a kill-switch 409 body (I54-A). OR-ed into
     /// every observation so the authoritative 409 body outranks a racing or
-    /// transient probe result. Cleared only by an explicit healthy /health
-    /// answer, which `kill_switch_active()` reports as `false` (fail-closed).
+    /// transient probe result. Cleared only by a definitive healthy /health
+    /// answer from a probe started after the latch was confirmed (I56-B).
     kill_switch_blocked: bool,
+    /// Generation of the 409-confirmed latch. A probe that started before the
+    /// current generation is a stale observation; when its result is applied
+    /// after the latch it must not clear it (I56-B TOCTOU).
+    kill_switch_latch_generation: u64,
     /// Independent pin for the "approved, execution halted" row status
     /// (I50-C (a)). While this and `kill_switch_active` are both true, polls
     /// must not overwrite `status` with the queue count. Deliberately separate
     /// from `action_status`, whose one-poll clearing contract still governs
     /// ordinary decision/error messages.
     halted_decision_status: bool,
+}
+
+/// A `/health` observation paired with the latch generation observed when the
+/// probe was *started* (I56-B). A definitive "ok" answer may clear a 409 latch
+/// only when the probe began after that latch was confirmed; an older probe
+/// whose result is applied late is stale and must be ignored for release.
+#[derive(Debug, Clone, Copy)]
+struct KillSwitchProbe {
+    active: bool,
+    generation: u64,
 }
 
 impl ApprovalsView {
@@ -65,6 +79,7 @@ impl ApprovalsView {
             action_status: false,
             kill_switch_active: false,
             kill_switch_blocked: false,
+            kill_switch_latch_generation: 0,
             halted_decision_status: false,
         };
         view.spawn_poller(cx);
@@ -79,7 +94,12 @@ impl ApprovalsView {
                 let Some(entity) = weak.upgrade() else {
                     return;
                 };
-                let client = entity.read_with(cx, |view, _| view.client.clone());
+                // Snapshot the latch generation together with the client: this
+                // marks when the probe starts, so a result applied after a 409
+                // latch can be recognised as stale and denied release (I56-B).
+                let (client, probe_generation) = entity.read_with(cx, |view, _| {
+                    (view.client.clone(), view.kill_switch_latch_generation)
+                });
                 // The health probe is a second, independent loopback call; a
                 // failure there must not change the queue result or its error.
                 let probe_client = client.clone();
@@ -97,7 +117,10 @@ impl ApprovalsView {
                 let stopped = weak
                     .update(cx, |view, cx| {
                         view.apply_poll(result);
-                        view.apply_kill_switch(kill_switch_active);
+                        view.apply_kill_switch(KillSwitchProbe {
+                            active: kill_switch_active,
+                            generation: probe_generation,
+                        });
                         cx.notify();
                     })
                     .is_err();
@@ -155,18 +178,38 @@ impl ApprovalsView {
     ///
     /// A kill-switch 409 latches `kill_switch_blocked` independently of the
     /// probe (I54-A), so the fixed 409 body wins over a racing or transient
-    /// probe result. `kill_switch_active()` fails closed, therefore a `false`
-    /// here is an explicit healthy /health answer and is the only signal that
-    /// clears the latch and lifts the pin (I54-A release contract).
-    fn apply_kill_switch(&mut self, active: bool) {
-        if !active {
+    /// probe result. `kill_switch_active()` fails closed, therefore an
+    /// `active: false` observation is an explicit healthy /health answer and
+    /// is the only signal that clears the latch (I54-A release contract).
+    ///
+    /// I56-B: the probe carries the latch generation observed at its start.
+    /// A probe started before the current latch is stale: even if its result
+    /// is applied after the 409 latched the halt, it may not clear the latch.
+    /// This closes the TOCTOU where a /health 200 captured before the 409 was
+    /// applied later and silently dropped the halt pin. An active observation
+    /// (fail-closed error, timeout, or degraded reason) always folds in.
+    fn apply_kill_switch(&mut self, probe: KillSwitchProbe) {
+        let can_clear = !probe.active && probe.generation >= self.kill_switch_latch_generation;
+        if can_clear {
             self.kill_switch_blocked = false;
         }
-        let effective = active || self.kill_switch_blocked;
+        let effective = probe.active || self.kill_switch_blocked;
         self.kill_switch_active = effective;
         if !effective {
             self.halted_decision_status = false;
         }
+    }
+
+    /// Confirm a kill-switch 409 from the authoritative response body. Bumps
+    /// the latch generation so only probes started from this point on may
+    /// release it (I56-B), then folds the halt into the view.
+    fn latch_kill_switch_blocked(&mut self) {
+        self.kill_switch_blocked = true;
+        self.kill_switch_latch_generation = self.kill_switch_latch_generation.wrapping_add(1);
+        self.apply_kill_switch(KillSwitchProbe {
+            active: true,
+            generation: self.kill_switch_latch_generation,
+        });
     }
 
     /// Apply an operator decision, then refresh immediately.
@@ -187,6 +230,10 @@ impl ApprovalsView {
             }
         };
         let client = self.client.clone();
+        // Snapshot the latch generation when this probe is started: only a
+        // healthy answer observed from here on may release a latch that the
+        // 409 confirms later in this same task (I56-B).
+        let probe_generation = self.kill_switch_latch_generation;
         // Name the operator's intent with the canonical core decision type.
         // Only the fields consumed by the unchanged HTTP body are read below.
         let intent = operator_decision(approve);
@@ -231,7 +278,10 @@ impl ApprovalsView {
                 // Refresh the queue first; then set the decision outcome so
                 // the poll result cannot overwrite it (P0-8).
                 view.apply_poll(refresh);
-                view.apply_kill_switch(kill_switch_active);
+                view.apply_kill_switch(KillSwitchProbe {
+                    active: kill_switch_active,
+                    generation: probe_generation,
+                });
                 match result {
                     Ok(outcome) => {
                         // The service's tagged decision JSON crossed the core
@@ -245,11 +295,11 @@ impl ApprovalsView {
                         let kill_switch_blocked =
                             matches!(&outcome, DecisionOutcome::KillSwitchBlocked);
                         if kill_switch_blocked {
-                            // The 409 body is authoritative: latch it before
-                            // any later probe observation so no transient
-                            // failure can drop the pin (I54-A).
-                            view.kill_switch_blocked = true;
-                            view.apply_kill_switch(true);
+                            // The 409 body is authoritative: latch it last so
+                            // no probe started earlier can drop the pin, and
+                            // advance the generation so only later probes may
+                            // release it (I54-A / I56-B).
+                            view.latch_kill_switch_blocked();
                         }
                         let halt_pinned = match outcome.decision() {
                             Some(decision) => halt_was_pinned(decision, view.kill_switch_active),
@@ -565,9 +615,9 @@ fn is_expired(request: &ApprovalRequest, now: chrono::DateTime<chrono::Utc>) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalsView, CoreApprovalDecision, UiDecision, decision_target, format_args, is_expired,
-        operator_decision, status_for_decision, status_for_decision_with_kill_switch,
-        status_for_outcome,
+        ApprovalsView, CoreApprovalDecision, KillSwitchProbe, UiDecision, decision_target,
+        format_args, is_expired, operator_decision, status_for_decision,
+        status_for_decision_with_kill_switch, status_for_outcome,
     };
     use crate::policy_client::{ApprovalRequest, DecisionOutcome, PolicyClient, request_to_core};
     use serde_json::json;
@@ -606,7 +656,16 @@ mod tests {
             action_status,
             kill_switch_active: false,
             kill_switch_blocked: false,
+            kill_switch_latch_generation: 0,
             halted_decision_status: false,
+        }
+    }
+
+    /// A probe observation stamped with the view's current latch generation.
+    fn probe(view: &ApprovalsView, active: bool) -> KillSwitchProbe {
+        KillSwitchProbe {
+            active,
+            generation: view.kill_switch_latch_generation,
         }
     }
 
@@ -810,19 +869,19 @@ mod tests {
     fn kill_switch_decision_status_survives_polls_and_releases() {
         let mut view = view_with("承認済み・実行は非常停止中", None, true);
         view.halted_decision_status = true;
-        view.apply_kill_switch(true);
+        view.apply_kill_switch(probe(&view, true));
         let pending = vec![request_with_expiry("a", None)];
 
         for _ in 0..3 {
             view.apply_poll(Ok(pending.clone()));
-            view.apply_kill_switch(true);
+            view.apply_kill_switch(probe(&view, true));
             assert_eq!(view.status.to_string(), "承認済み・実行は非常停止中");
             assert_eq!(view.pending.len(), 1);
         }
 
         // Switch lifts: the pin is released while action_status is still set,
         // so the queue count returns after the usual one-poll deferral.
-        view.apply_kill_switch(false);
+        view.apply_kill_switch(probe(&view, false));
         assert!(!view.halted_decision_status);
         view.apply_poll(Ok(pending.clone()));
         assert_eq!(view.status.to_string(), "承認済み・実行は非常停止中");
@@ -879,13 +938,13 @@ mod tests {
         assert_eq!(status_for_outcome(&outcome, false), status);
     }
 
-    /// Drive one poller iteration. `probe` is the fail-closed value returned by
+    /// Drive one poller iteration. `active` is the fail-closed value returned by
     /// `PolicyClient::kill_switch_active` (I54-A): a timeout/error arrives as
     /// `true`, an explicit healthy /health answer as `false`. No manual pin
     /// re-application — the pin must hold on its own.
-    fn poll_with_probe(view: &mut ApprovalsView, pending: &[ApprovalRequest], probe: bool) {
+    fn poll_with_probe(view: &mut ApprovalsView, pending: &[ApprovalRequest], active: bool) {
         view.apply_poll(Ok(pending.to_vec()));
-        view.apply_kill_switch(probe);
+        view.apply_kill_switch(probe(view, active));
     }
 
     /// I54-A / I52-A (a): once a kill-switch 409 latches the halt, the pin
@@ -897,9 +956,8 @@ mod tests {
     fn kill_switch_blocked_status_survives_polls_until_switch_lifts() {
         let mut view = view_with("非常停止中：承認・却下は実行されません", None, true);
         // Mirror `decide`: the fixed 409 body latches the halt on its own.
-        view.kill_switch_blocked = true;
         view.halted_decision_status = true;
-        view.apply_kill_switch(true);
+        view.latch_kill_switch_blocked();
         let pending = vec![request_with_expiry("a", None)];
 
         // Probe timeout / transient error is fail-closed, so it arrives as an
@@ -919,7 +977,7 @@ mod tests {
 
         // /health explicitly ok: the latch clears and the pin is released
         // (I54-A release contract, unchanged from I50-C (a)).
-        view.apply_kill_switch(false);
+        view.apply_kill_switch(probe(&view, false));
         assert!(!view.kill_switch_blocked);
         assert!(!view.kill_switch_active);
         assert!(!view.halted_decision_status);
@@ -939,16 +997,49 @@ mod tests {
     fn kill_switch_409_body_latch_outranks_racing_healthy_probe() {
         let mut view = view_with("非常停止中：承認・却下は実行されません", None, true);
         // The poller's probe ran first and reported a definitive ok.
-        view.apply_kill_switch(false);
+        view.apply_kill_switch(probe(&view, false));
         // Then the authoritative 409 body is folded in, as `decide` does.
-        view.kill_switch_blocked = true;
-        view.apply_kill_switch(true);
+        view.latch_kill_switch_blocked();
         view.halted_decision_status = true;
 
         assert!(view.kill_switch_active, "409 body must win over the probe");
         assert!(view.kill_switch_blocked);
 
-        view.apply_kill_switch(false);
+        view.apply_kill_switch(probe(&view, false));
+        assert!(!view.kill_switch_blocked);
+        assert!(!view.kill_switch_active);
+        assert!(!view.halted_decision_status);
+    }
+
+    /// I56-B: reverse-order regression. The poller's /health 200 is obtained
+    /// before a decide's 409 latches the halt, but its result is applied only
+    /// afterwards (the two run on independent background tasks). Without a
+    /// generation stamp the stale "ok" silently clears the latch and drops the
+    /// pin. Only a probe started after the latch may release it.
+    #[test]
+    fn stale_healthy_probe_applied_after_409_latch_cannot_clear_it() {
+        let mut view = view_with("非常停止中：承認・却下は実行されません", None, true);
+        // The probe starts while no latch exists and observes an explicit ok.
+        let stale_ok = probe(&view, false);
+
+        // A kill-switch 409 is then confirmed (the generation advances).
+        view.halted_decision_status = true;
+        view.latch_kill_switch_blocked();
+        assert!(view.kill_switch_blocked);
+        assert!(view.kill_switch_active);
+
+        // The stale observation is folded in only now, after the latch.
+        view.apply_kill_switch(stale_ok);
+        assert!(
+            view.kill_switch_blocked,
+            "a probe started before the 409 must not clear its latch"
+        );
+        assert!(view.kill_switch_active, "the halt pin must stay up");
+        assert!(view.halted_decision_status);
+
+        // A probe started after the latch can still release the stop, so the
+        // I54-A release contract (explicit healthy /health only) is preserved.
+        view.apply_kill_switch(probe(&view, false));
         assert!(!view.kill_switch_blocked);
         assert!(!view.kill_switch_active);
         assert!(!view.halted_decision_status);
