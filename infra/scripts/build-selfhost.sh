@@ -89,6 +89,25 @@ if [[ -n "${untracked_in_migrations}" ]]; then
   exit 1
 fi
 
+# I41-C: the --exclude-standard check above deliberately ignores files matched
+# by .gitignore, but the glob at the top of this file does NOT: an `*.sql` that
+# is both ignored and untracked is still globbed into MIGRATION_SQL_FILES and
+# would be installed under BUILD_COMMIT while being absent from HEAD (checksum
+# mismatch / unaudited DDL). Adopted policy: positively assert that EVERY
+# globbed payload file is tracked in the index, instead of relying on an
+# untracked-file listing. Together with the clean-tree gates above (index ==
+# HEAD and worktree == index), an index match means the globbed file's content
+# is exactly HEAD's content, so the payload set and the reconciliation set are
+# the same set. This closes the ignored-file gap without a repo-wide untracked
+# gate. --error-unmatch fails closed; both streams are discarded so no file
+# name or diff content is printed on refusal.
+for sql_file in "${MIGRATION_SQL_FILES[@]}"; do
+  if ! git -C "${MIGRATIONS_SRC}" ls-files --error-unmatch -- "${sql_file##*/}" >/dev/null 2>&1; then
+    echo "migration SQL in the payload is not tracked in ${REPO_DIR}; refusing to deploy an uncommitted SQL pair" >&2
+    exit 1
+  fi
+done
+
 cd "${REPO_DIR}/rust"
 cargo build --release --workspace
 
