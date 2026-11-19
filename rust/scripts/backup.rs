@@ -13,7 +13,13 @@
 /// dirs = "5.0"
 /// ```
 
-/// JARVIS Backup Script - Rust version
+/// JARVIS Backup Script - Rust version（レガシー・非推奨）
+///
+/// OCI Object Storage / rclone / `op inject` を前提とした旧方式のバックアップツールです。
+/// ADR-0004（OCI 不使用）に従いレガシーとして保持しています。
+/// 現行のバックアップには `infra/scripts/backup-local.sh` を使用してください。
+///
+/// 以下は参照用に残す既存コードであり、挙動・テストは変更しないでください。
 /// Run with: `rust-script backup.rs` or compile with `cargo build --release --bin backup`
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -34,7 +40,8 @@ const QDRANT_TIMEOUT_ENV: &str = "JARVIS_QDRANT_TIMEOUT_SECS";
 #[derive(Parser, Debug)]
 #[command(
     name = "jarvis-backup",
-    about = "JARVIS daily backup to OCI Object Storage"
+    about = "JARVIS backup (legacy/deprecated: OCI Object Storage / rclone / op inject) - use infra/scripts/backup-local.sh",
+    long_about = "レガシー・非推奨の JARVIS バックアップツール。\n\nOCI Object Storage / rclone / `op inject` を前提とした旧方式です（ADR-0004: OCI 不使用）。\n現行のバックアップには `infra/scripts/backup-local.sh` を使用してください。\nこのスクリプトは参照用に保持しており、挙動・テストは変更されません。"
 )]
 struct Args {
     /// Rclone remote name

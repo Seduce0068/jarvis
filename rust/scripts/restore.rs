@@ -21,7 +21,13 @@
 // 実行経路は既に塞がれています（infra/scripts/restore.sh は fail-closed ガード）。
 // 以下は参照用に残す既存コードであり、挙動・テストは変更しないでください。
 
-/// JARVIS Restore Script - Rust version
+/// JARVIS Restore Script - Rust version（レガシー・非推奨）
+///
+/// OCI Object Storage / rclone / `op inject` を前提とした旧方式の復元ツールです。
+/// ADR-0004（OCI 不使用）に従いレガシーとして保持しています。
+/// 現行の復元には `infra/scripts/restore-local.sh` を使用してください。
+///
+/// 参照用に残す既存コードであり、挙動・テストは変更しないでください。
 /// Run with: `rust-script restore.rs <date|latest>` or compile with `cargo build --release --bin restore`
 use anyhow::{Context, Result};
 use chrono::Local;
@@ -35,7 +41,8 @@ use tracing::info;
 #[derive(Parser, Debug)]
 #[command(
     name = "jarvis-restore",
-    about = "JARVIS restore from OCI Object Storage"
+    about = "JARVIS restore (legacy/deprecated: OCI Object Storage / rclone / op inject) - use infra/scripts/restore-local.sh",
+    long_about = "レガシー・非推奨の JARVIS 復元ツール。\n\nOCI Object Storage / rclone / `op inject` を前提とした旧方式です（ADR-0004: OCI 不使用）。\n現行の復元には `infra/scripts/restore-local.sh` を使用してください。\nこのスクリプトは参照用に保持しており、挙動・テストは変更されません。"
 )]
 struct Args {
     /// Backup date (YYYYMMDD-HHMMSS) or "latest"
