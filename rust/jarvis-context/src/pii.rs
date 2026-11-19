@@ -135,6 +135,28 @@ impl PiiFilter {
         out
     }
 
+    /// Return `base` unchanged when `map` does not contain it yet; otherwise
+    /// append `#1`, `#2`, ... until an unused key is found. Redaction can
+    /// collapse several distinct keys (e.g. two e-mail addresses) onto the
+    /// same string, and a redacted key can also collide with an ordinary key
+    /// that already equals the replacement. A plain `insert` would then let
+    /// the last value overwrite earlier ones and silently drop data. Every
+    /// collision gets a numeric suffix so all original values survive, while
+    /// the emitted keys never contain the PII that produced them.
+    fn unique_key(map: &Map<String, Value>, base: String) -> String {
+        if !map.contains_key(&base) {
+            return base;
+        }
+        let mut suffix = 1usize;
+        loop {
+            let candidate = format!("{}#{}", base, suffix);
+            if !map.contains_key(&candidate) {
+                return candidate;
+            }
+            suffix += 1;
+        }
+    }
+
     fn filter_value(&self, value: &mut Value, depth: usize) {
         if depth > MAX_DEPTH {
             return;
@@ -149,16 +171,20 @@ impl PiiFilter {
             Value::Object(obj) => {
                 // Keys cannot be renamed in place, so rebuild the map. A key
                 // matching a PII pattern is redacted with the same rules as a
-                // value; ordinary keys are copied through unchanged.
+                // value; ordinary keys are copied through unchanged. Because
+                // redaction may make several keys identical, uniquify each
+                // key against what has already been inserted before writing,
+                // so no value is lost to a last-write-wins collision.
                 let mut rebuilt = Map::new();
                 for (key, mut v) in std::mem::take(obj) {
-                    let new_key = if self.is_pii(&key) {
+                    let base_key = if self.is_pii(&key) {
                         self.redact_string(&key)
                     } else {
                         key
                     };
                     self.filter_value(&mut v, depth + 1);
-                    rebuilt.insert(new_key, v);
+                    let unique_key = Self::unique_key(&rebuilt, base_key);
+                    rebuilt.insert(unique_key, v);
                 }
                 *obj = rebuilt;
             }
@@ -385,5 +411,107 @@ mod tests {
 
         assert_eq!(out["email"], "[REDACTED]");
         assert!(out["deep"].is_object());
+    }
+
+    /// I26-C regression: two distinct PII keys collapse to the same
+    /// "[REDACTED]" string. Both values must survive under unique keys and no
+    /// raw PII may leak into any emitted key.
+    #[test]
+    fn colliding_pii_keys_preserve_all_values() {
+        let value = json!({
+            "alice@example.com": "alice-payload",
+            "bob@example.com": "bob-payload"
+        });
+        let out = filter(true).filter(value).expect("filter runs");
+        let obj = out.as_object().expect("object");
+
+        assert_eq!(obj.len(), 2, "no value was dropped by the key collision");
+        assert!(obj.contains_key("[REDACTED]"));
+        assert!(obj.contains_key("[REDACTED]#1"));
+        for key in obj.keys() {
+            assert!(!key.contains("alice@example.com"), "no PII in key: {key}");
+            assert!(!key.contains("bob@example.com"), "no PII in key: {key}");
+        }
+        let mut values: Vec<&str> = obj
+            .values()
+            .map(|v| v.as_str().expect("string value"))
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec!["alice-payload", "bob-payload"]);
+    }
+
+    /// I26-C regression: three colliding PII keys must receive incrementing
+    /// suffixes (#1, #2) instead of overwriting one another.
+    #[test]
+    fn three_colliding_pii_keys_get_incrementing_suffixes() {
+        let value = json!({
+            "a@example.com": "value-a",
+            "b@example.com": "value-b",
+            "c@example.com": "value-c"
+        });
+        let out = filter(true).filter(value).expect("filter runs");
+        let obj = out.as_object().expect("object");
+
+        assert_eq!(obj.len(), 3);
+        assert!(obj.contains_key("[REDACTED]"));
+        assert!(obj.contains_key("[REDACTED]#1"));
+        assert!(obj.contains_key("[REDACTED]#2"));
+        let mut values: Vec<&str> = obj
+            .values()
+            .map(|v| v.as_str().expect("string value"))
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec!["value-a", "value-b", "value-c"]);
+    }
+
+    /// I26-C regression: a redacted PII key colliding with an ordinary key
+    /// that already equals the replacement string must not clobber it. Both
+    /// the ordinary value and the redacted value survive.
+    #[test]
+    fn redacted_key_colliding_with_ordinary_key_preserves_both() {
+        let value = json!({
+            "[REDACTED]": "ordinary-value",
+            "alice@example.com": "hidden-value"
+        });
+        let out = filter(true).filter(value).expect("filter runs");
+        let obj = out.as_object().expect("object");
+
+        assert_eq!(obj.len(), 2, "ordinary and redacted keys coexist");
+        for key in obj.keys() {
+            assert!(!key.contains("alice@example.com"), "no PII in key: {key}");
+        }
+        let mut values: Vec<&str> = obj
+            .values()
+            .map(|v| v.as_str().expect("string value"))
+            .collect();
+        values.sort_unstable();
+        assert_eq!(values, vec!["hidden-value", "ordinary-value"]);
+    }
+
+    /// I26-C regression: an ordinary key that already occupies a suffix slot
+    /// is respected, so uniquification skips it rather than overwriting it.
+    #[test]
+    fn suffix_slot_occupied_by_ordinary_key_is_skipped() {
+        let value = json!({
+            "[REDACTED]#1": "reserved-value",
+            "alice@example.com": "alice-payload",
+            "bob@example.com": "bob-payload"
+        });
+        let out = filter(true).filter(value).expect("filter runs");
+        let obj = out.as_object().expect("object");
+
+        assert_eq!(obj.len(), 3);
+        assert_eq!(out["[REDACTED]#1"], "reserved-value");
+        assert!(obj.contains_key("[REDACTED]"));
+        assert!(obj.contains_key("[REDACTED]#2"), "skipped occupied #1 slot");
+        let mut values: Vec<&str> = obj
+            .values()
+            .map(|v| v.as_str().expect("string value"))
+            .collect();
+        values.sort_unstable();
+        assert_eq!(
+            values,
+            vec!["alice-payload", "bob-payload", "reserved-value"]
+        );
     }
 }
