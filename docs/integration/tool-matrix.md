@@ -102,6 +102,9 @@ generated:
 
 ### 修正（2026-11-15 デプロイ適用済み）
 
+> 注: 以下は 2026-11-15 時点の対応記録（履歴）。現行は承認必須ツールも `tools/list` に
+> 表示され、呼び出し時に人間承認を待つ（上記「実装状況」の注記を参照）。
+
 - `infra/systemd/jarvis-mcp-gw.service`
   - `ProtectHome=yes` → `ProtectHome=read-only`（`/home` を読み取り専用で参照可能に）
   - `JARVIS_MCP_GW_BASE_DIR` を明示（読み取り境界を unit 上で明確化）。
@@ -110,10 +113,13 @@ generated:
      （`infra/systemd/jarvis-mcp-gw.service` の `Environment=` 行、実機は上書き値を優先）。
   - デプロイ実態に合わせて `User`/`Group` を `koppe` に同期
 - `infra/config/mcp_allowlist.toml`
-  - ネイティブ未実装の `web.search` / `homeassistant.get_state` / `android.get_device_info` を `requires_approval = true` に変更（`tools/list` から非表示）
+  - ネイティブ未実装の `web.search` / `homeassistant.get_state` / `android.get_device_info`
+    を `requires_approval = true` に変更
+    （**当時は `tools/list` から非表示**。現行は表示＋呼び出し時承認）
 - `infra/scripts/smoke-mcp-gw.sh`
   - `tools/call`（filesystem.list / git.status）の成功を検証
   - 承認待ち・未実装ツールが `tools/list` に出ないことを検証
+    （**当時のスモークテスト条件**。現行は表示＋呼び出し時承認を検証）
 - `infra/scripts/check-deploy-drift.sh`
   - systemd unit の配備差分を検出
   - 稼働中サービスへの実 `tools/call` を実行し、hardening 起因の実行時失敗を検出

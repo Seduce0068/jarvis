@@ -13,6 +13,7 @@ JARVIS のテスト仕様の索引です。
 - [test-context.md](test-context.md)
   — jarvis-context PII フィルタ・検索順序 テスト仕様。
   再帰的 redact / enabled=false / 不正パターン / reorder_by_ids。
+  スコア保持（REQ-12/13: attach_scores / スコア0 とランク外の区別）。
 - [test-backup.md](test-backup.md)
   — ローカルバックアップ テスト仕様。
   backup-local.sh / verify-backup.sh / install-backup-timer.sh。
@@ -21,6 +22,7 @@ JARVIS のテスト仕様の索引です。
 - [test-ui.md](test-ui.md)
   — 承認コンソール UI テスト仕様。エラー保持 / 期限切れ強調 /
   トークンリダイレクト防止 / キーボード a11y / full args / タイムアウト。
+  scope 別トークン（REQ-19/20: 未設定時はヘッダなし / admin→API フォールバック）。
 
 ## 関連
 

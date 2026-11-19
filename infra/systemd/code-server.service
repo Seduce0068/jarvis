@@ -30,7 +30,8 @@ ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 
 # Environment
-Environment=PASSWORD_FILE=/etc/jarvis/code-server-password
+# PASSWORD_FILE は code-server の config.yaml（~/.config/code-server/config.yaml, 0600）へ集約する方針。
+# build-selfhost.sh が生成 unit から Environment=PASSWORD_FILE= 行を sed で削除するため、テンプレートでも宣言しない。
 Environment=SHELL=/bin/bash
 
 # Resource limits

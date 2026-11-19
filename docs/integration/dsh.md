@@ -88,6 +88,9 @@ bash infra/scripts/check-deploy-drift.sh                            # 事後確�
 
 ## 2026-11-15 現状確認: systemd 配下での実行不能と修正
 
+> 注: 以下は 2026-11-15 時点の履歴記録。承認必須ツールの `tools/list` 非表示は
+> 当時の挙動であり、現行は表示＋呼び出し時承認（後述「承認フロー」節を参照）。
+
 DSH からの接続自体は成立している（jarvis-mcp-gw のログに `dsh-mcp-client` の
 initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の実サービスでは
 `tools/list` に出る全ツールが実行不能だった。
@@ -96,7 +99,8 @@ initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の�
   `web.search` / `homeassistant.get_state` は firejail フォールバック失敗。
 - 原因: unit の `ProtectHome=yes` と基準ディレクトリ既定値 `/home/koppe` の不整合。
 - 修正: unit を `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=/home/koppe` に変更し、
-  未実装ツールを承認必須化（`tools/list` 非表示）。**2026-11-15 11:36 にデプロイ適用済み。**
+  未実装ツールを承認必須化（**当時は `tools/list` 非表示**。現行は表示＋呼び出し時承認）。
+  **2026-11-15 11:36 にデプロイ適用済み。**
 - デプロイ: `sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply`
   （事後E2Eが OK になるまでを合格条件とし、失敗時は自動ロールバック）。
 
@@ -105,6 +109,8 @@ initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の�
 - `tools/list` = 4ツール（filesystem.list/read, git.diff/status）
 - 上記4ツールの `tools/call` が成功する（`entries` / `stdout` を確認）
 - `web.fetch` 等の承認必須ツールは非表示、呼ぶと承認必須エラー
+  （**2026-11-15 11:36 時点の記録**。現行は `tools/list` に表示され、
+  呼び出し時に jarvis-policy の承認を要求）
 - `check-deploy-drift.sh` → `RESULT: OK`
 - 注意: ゲートウェイ再起動で MCP セッションは失効するため、クライアントは
   再接続（再 initialize）が必要。
