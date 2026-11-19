@@ -3,7 +3,7 @@
   "timestamp": "2026-11-19T22:26:46+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
-    "runtime": "GNU make + bash (make test-verify-backup + make safety-test)",
+    "runtime": "GNU make + bash (make test-verify-backup)",
     "versions": {
       "bash": "5.3.9",
       "make": "4.4.1"
@@ -166,5 +166,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "現行の make test-verify-backup は 23 checks、make safety-test は 22 checks（legacy guards）。仕様の件数表記を実測へ同期。カバレッジ・ミューテーションは未測定。 REQ-18/TC-B5（--retain-days の欠落・非整数・0以下の exit 2 拒否）を追加。実測 23 checks pass。"
+  "notes": "現行の make test-verify-backup は 23 checks。make safety-test（legacy guards）は本エビデンスの集計対象外とし、runtime 宣言を実集計コマンド（make test-verify-backup）へ限定する方針を採用（results にゲート内訳を追加する方式は採らない）。仕様の件数表記を実測へ同期。カバレッジ・ミューテーションは未測定。REQ-18/TC-B5（--retain-days の欠落・非整数・0以下の exit 2 拒否）を追加。実測 23 passed。"
 }
