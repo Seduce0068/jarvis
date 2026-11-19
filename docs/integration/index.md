@@ -22,6 +22,8 @@ JARVIS の連携・残タスク・バックアップに関する文書の索引�
     `make verify-backup` の扱い方針、clippy 表記の統一。
 - [evidence-regeneration.md](evidence-regeneration.md)
   — テスト仕様変更時のエビデンス再生成手順（7ステップ・ハッシュのみ書き換え禁止）。
+- [local-restore-design.md](local-restore-design.md)
+  — ローカルバックアップ復元の安全な経路（ADR-0004 準拠）。整合性検証を必須ゲートとし、dry-run 既定・サービス安全停止を備えた復元設計。
 
 ## 関連
 
