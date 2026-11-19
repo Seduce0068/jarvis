@@ -111,6 +111,36 @@ tamper_evidence() { # src dst mode [index_dst]
   python3 - "$1" "$2" "$3" "${4:-}" <<'PY'
 import json, os, re, sys
 
+def rewrite_index_passed(index_dst, src_name, short):
+    """Keep the cited entry's passed count in sync with a tampered JSON.
+
+    Without this the index-vs-results gate would also fire and mask the
+    Scenario-count regression that these tamper modes are meant to isolate.
+    """
+    with open(index_dst, encoding='utf-8') as fh:
+        idx = fh.read()
+    label_match = re.search(
+        r'^\[([^\]]+)\]:\s*' + re.escape(src_name) + r'\s*$', idx, re.MULTILINE)
+    if not label_match:
+        raise SystemExit('index REF_DEF not found for ' + src_name)
+    label = label_match.group(1)
+    starts = [m.start() for m in re.finditer(r'^[ \t]*-[ \t]+\[', idx, re.MULTILINE)]
+    for i, start in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else len(idx)
+        block = idx[start:end]
+        if '][' + label + ']' not in block:
+            continue
+        new_block, n = re.subn(
+            r'\d+([ \t]+passed)', lambda m: str(short) + m.group(1), block, count=1)
+        if n != 1:
+            raise SystemExit('passed count not found in index entry for ' + label)
+        idx = idx[:start] + new_block + idx[end:]
+        break
+    else:
+        raise SystemExit('index entry not found for ' + label)
+    with open(index_dst, 'w', encoding='utf-8') as fh:
+        fh.write(idx)
+
 src, dst, mode = sys.argv[1:4]
 index_dst = sys.argv[4] or None
 with open(src, encoding='utf-8') as fh:
@@ -158,44 +188,29 @@ elif mode == 'req_removed':
     if not isinstance(reqs, list) or len(reqs) < 2:
         raise SystemExit('requirements array too short for tamper')
     reqs.pop()
-elif mode == 'scenario_shortfall':
+elif mode in ('scenario_shortfall', 'skipped_inflated'):
     # Report fewer executions than the spec declares while keeping results,
     # notes and the index entry mutually consistent. Only the Scenario gate
-    # can reject this copy, so disabling it makes the tamper accepted.
+    # can reject these copies, so disabling it makes the tamper accepted.
+    # skipped_inflated additionally hides the shortfall behind a large skipped
+    # count explicitly justified with "ignored" in notes: a gate that still
+    # sums skipped into executed would wrongly accept it.
     spec_rel = data['test_basis_ref']['spec_path']
     spec_abs = os.path.join(os.path.dirname(os.path.dirname(src)), spec_rel)
     with open(spec_abs, encoding='utf-8') as fh:
         spec_text = fh.read()
     scenario_total = len(re.findall(r'^[ \t]*Scenario[ \t]*:', spec_text, re.MULTILINE))
     short = max(1, scenario_total - 1)
+    skipped = scenario_total + 100 if mode == 'skipped_inflated' else 0
     data['results']['passed'] = short
     data['results']['failed'] = 0
-    data['results']['skipped'] = 0
-    data['notes'] = '実測結果 ' + str(short) + ' 件。'
+    data['results']['skipped'] = skipped
+    data['notes'] = ('実測結果 ' + str(short) + ' 件。' + str(skipped) + ' ignored。'
+                     if mode == 'skipped_inflated'
+                     else '実測結果 ' + str(short) + ' 件。')
     if not index_dst:
-        raise SystemExit('scenario_shortfall needs index_dst')
-    json_name = os.path.basename(src)
-    with open(index_dst, encoding='utf-8') as fh:
-        idx = fh.read()
-    label_match = re.search(
-        r'^\[([^\]]+)\]:\s*' + re.escape(json_name) + r'\s*$', idx, re.MULTILINE)
-    if not label_match:
-        raise SystemExit('index REF_DEF not found for ' + json_name)
-    label = label_match.group(1)
-    starts = [m.start() for m in re.finditer(r'^[ \t]*-[ \t]+\[', idx, re.MULTILINE)]
-    for i, start in enumerate(starts):
-        end = starts[i + 1] if i + 1 < len(starts) else len(idx)
-        block = idx[start:end]
-        if '][' + label + ']' not in block:
-            continue
-        new_block, n = re.subn(
-            r'\d+([ \t]+passed)', lambda m: str(short) + m.group(1), block, count=1)
-        if n != 1:
-            raise SystemExit('passed count not found in index entry for ' + label)
-        idx = idx[:start] + new_block + idx[end:]
-        break
-    with open(index_dst, 'w', encoding='utf-8') as fh:
-        fh.write(idx)
+        raise SystemExit(mode + ' needs index_dst')
+    rewrite_index_passed(index_dst, os.path.basename(src), short)
 else:
     raise SystemExit('unknown tamper mode: ' + mode)
 with open(dst, 'w', encoding='utf-8') as fh:
@@ -328,7 +343,7 @@ else
   type_copy="$gate_tmp/evidence/$(basename "$type_source")"
   # Each mode starts from a pristine JSON and index; scenario_shortfall also
   # rewrites the index count, so restore both before every iteration.
-  for mode in bad_notes_type bad_results_type scenario_shortfall; do
+  for mode in bad_notes_type bad_results_type scenario_shortfall skipped_inflated; do
     cp "$repo/evidence/index.md" "$gate_tmp/evidence/index.md"
     cp "$type_source" "$type_copy"
     if ! tamper_evidence "$type_source" "$type_copy" "$mode" \
@@ -342,6 +357,7 @@ else
       bad_notes_type) pattern='BAD_NOTES_TYPE' ;;
       bad_results_type) pattern='BAD_RESULTS_TYPE' ;;
       scenario_shortfall) pattern='SCENARIO_COUNT_MISMATCH' ;;
+      skipped_inflated) pattern='SCENARIO_COUNT_MISMATCH' ;;
     esac
     if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
       echo "  PASS: check-evidence.sh rejects tampered $mode"
@@ -382,6 +398,71 @@ PY
   else
     echo "  FAIL: could not prepare tampered index passed count"
     fail=$((fail+1))
+  fi
+fi
+
+# I59-A: two evidence files citing the same spec must BOTH have their
+# requirements checked. The old dict keyed by spec kept only the last entry,
+# so tampering the earlier (lexicographically first) copy went unnoticed. The
+# duplicate sorts before every real test-run-20* file because of its 00000000
+# date, and it is indexed so only the REQ gate can reject it.
+req_dup_tmp="$tmp/req_dup_negative"
+mkdir -p "$req_dup_tmp/ci/scripts" "$req_dup_tmp/evidence" "$req_dup_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$req_dup_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/specs/index.md" "$req_dup_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$req_dup_tmp/evidence/index.md"
+cp "$repo/todo.md" "$req_dup_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$req_dup_tmp/evidence/"
+for spec in "${spec_files[@]}"; do
+  ln -s "$spec" "$req_dup_tmp/specs/$(basename "$spec")"
+done
+req_dup_src="${evidence_files[0]}"
+req_dup_suffix="${req_dup_src##*-}"
+req_dup_name="test-run-00000000-$req_dup_suffix"
+req_dup_copy="$req_dup_tmp/evidence/$req_dup_name"
+if ! tamper_evidence "$req_dup_src" "$req_dup_copy" req_removed; then
+  echo "  FAIL: could not prepare duplicate-evidence requirements tamper"
+  fail=$((fail+1))
+else
+  python3 - "$req_dup_tmp/evidence/index.md" "$req_dup_name" "$req_dup_src" <<'PY'
+import json, os, sys
+
+index_path, dup_name, src_name = sys.argv[1:4]
+base = os.path.dirname(index_path)
+with open(os.path.join(base, src_name), encoding='utf-8') as fh:
+    data = json.load(fh)
+res = data['results']
+spec_name = os.path.basename(data['test_basis_ref']['spec_path'])
+with open(index_path, encoding='utf-8') as fh:
+    text = fh.read()
+marker = '\n## 関連\n'
+if marker not in text:
+    raise SystemExit('related section marker not found')
+bullet = (
+    '- [duplicate evidence][run-dup]\n'
+    '  — [' + spec_name + '](../specs/' + spec_name + ') の実測結果。\n'
+    '  ' + str(res['passed']) + ' passed / ' + str(res['failed']) + ' failed。\n'
+)
+text = text.replace(marker, '\n' + bullet + marker, 1)
+text = text.rstrip() + '\n[run-dup]: ' + dup_name + '\n'
+with open(index_path, 'w', encoding='utf-8') as fh:
+    fh.write(text)
+PY
+  # Heredoc exit status must be checked here.
+  # shellcheck disable=SC2181
+  if [ $? -ne 0 ]; then
+    echo "  FAIL: could not index the duplicate evidence copy"
+    fail=$((fail+1))
+  else
+    out=$(bash "$req_dup_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+    if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'REQ_SET_MISMATCH'; then
+      echo "  PASS: check-evidence.sh rejects tampered requirements in one of two evidence files for the same spec"
+      ok=$((ok+1))
+    else
+      echo "  FAIL: check-evidence.sh accepted a tampered duplicate-evidence requirements set (exit $code)"
+      printf '%s\n' "$out" | head -3 >&2
+      fail=$((fail+1))
+    fi
   fi
 fi
 

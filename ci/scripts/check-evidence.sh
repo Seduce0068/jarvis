@@ -16,10 +16,12 @@
 # results.passed/failed/skipped, so a multi-gate claim cannot drift away from
 # the single aggregated total. The evidence requirements, the spec's REQ
 # definitions and the Traceability Req column must be the same set, so adding
-# or removing a requirement or citing an undefined Req fails closed. The
-# executed total must also cover every
-# `Scenario:` declared by the referenced spec, so a run that executes
-# only part of a specification cannot pass. Index entry counts
+# or removing a requirement or citing an undefined Req fails closed. Every
+# evidence declaration for a spec is checked, so a second evidence file cannot
+# hide behind a first one with the correct requirements. The executed total
+# (passed + failed only; skipped does not count) must cover every
+# `Scenario:` declared by the referenced spec, so a near-total skip or a run
+# that executes only part of a specification cannot pass. Index entry counts
 # ("N passed / N failed / N skipped") are resolved through reference-style link
 # definitions and must agree with the referenced JSON results, so tampering a
 # headline count cannot hide a failure. Values are withheld from error output;
@@ -44,7 +46,9 @@ from urllib.parse import unquote
 evidence_files = sys.argv[1:]
 errors = []
 covered = set()
-evi_reqs_by_spec = {}
+# Keep one entry per evidence file. A dict keyed by spec would let a later
+# evidence overwrite an earlier one, hiding a tampered requirements array.
+evi_reqs_entries = []  # (evidence_file, spec_path, requirements)
 ok = 0
 
 # A timezone is mandatory: naive ISO strings are not RFC 3339. Fractional
@@ -156,10 +160,13 @@ for f in evidence_files:
     if not isinstance(ref, dict) or not ref.get("spec_path"):
         errors.append(f"{f}: NO_SPEC_PATH"); continue
     spec_path = ref["spec_path"]
-    # Remember the declared requirements per spec. The set comparison happens
-    # in the spec loop below, independent of the hash/result checks above, so a
-    # tampered spec still reaches the REQ gate instead of short-circuiting.
-    evi_reqs_by_spec[os.path.normpath(spec_path)] = ref.get("requirements")
+    # Remember the declared requirements of EVERY evidence. The set comparison
+    # happens in the spec loop below, independent of the hash/result checks
+    # above, so a tampered spec still reaches the REQ gate instead of
+    # short-circuiting. A list (not a dict) keeps two evidence files that cite
+    # the same spec from overwriting each other's requirements.
+    evi_reqs_entries.append((f, os.path.normpath(spec_path),
+                             ref.get("requirements")))
     if not os.path.isfile(spec_path):
         errors.append(f"{f}: SPEC_PATH_NOT_FOUND:{spec_path}"); continue
     actual = digest(spec_path)
@@ -169,19 +176,21 @@ for f in evidence_files:
     if nested is not None and nested != top:
         errors.append(f"{f}: NESTED_HASH_MISMATCH"); continue
     # A spec declares the complete scenario set. One scenario may expand to
-    # several test functions, so the executed total (passed + failed + skipped)
-    # must cover at least every declared `Scenario:` line; reporting fewer
-    # means part of the specification was never run. A spec with no declared
-    # scenarios is unverifiable and fails as well. bool values are excluded
-    # from the sum so True cannot be counted as 1. Only the error code is
-    # emitted; the counts themselves are never printed.
+    # several test functions, so the executed total must cover at least every
+    # declared `Scenario:` line. Only passed + failed count as executed:
+    # skipped tests did not run, so a near-total skip (even one justified with
+    # "ignored" in notes) cannot satisfy this gate. This matches the
+    # SKIPPED_TESTS rationale above. A spec with no declared scenarios is
+    # unverifiable and fails as well. bool values are excluded from the sum
+    # so True cannot be counted as 1. Only the error code is emitted; the
+    # counts themselves are never printed.
     try:
         with open(spec_path, encoding="utf-8") as sf:
             spec_text = sf.read()
     except OSError:
         errors.append(f"{f}: SPEC_UNREADABLE"); continue
     scenario_count = len(re.findall(r'^[ \t]*Scenario[ \t]*:', spec_text, re.MULTILINE))
-    executed = sum(value for value in (r.get(k, 0) for k in ("passed", "failed", "skipped"))
+    executed = sum(value for value in (r.get(k, 0) for k in ("passed", "failed"))
                    if type(value) is int)
     if scenario_count <= 0 or executed < scenario_count:
         errors.append(f"{f}: SCENARIO_COUNT_MISMATCH"); continue
@@ -255,18 +264,24 @@ for spec in spec_files:
             errors.append(f"MISSING_SECTION:{spec}:{section}")
     if not TRACEABILITY_HEADER.search(spec_text):
         errors.append(f"MISSING_TRACEABILITY:{spec}")
-    # The evidence requirement set, the REQ ids defined by the spec and the
-    # Req column of the Traceability table must all be the same set. A removed
-    # or added requirement, or a Req reference that is not defined by the spec,
-    # fails closed. No REQ value is emitted -- only the value-less code.
-    evi_reqs = evi_reqs_by_spec.get(os.path.normpath(spec))
+    # The requirement set of EVERY evidence referencing this spec, the REQ ids
+    # defined by the spec and the Req column of the Traceability table must all
+    # be the same set. A removed or added requirement, or a Req reference that
+    # is not defined by the spec, fails closed. Checking every entry (instead
+    # of keeping only the last one in a dict) catches tampering in any of two
+    # evidence files that cite the same spec. No REQ value is emitted -- only
+    # the value-less code and the file paths involved.
+    entries = [entry for entry in evi_reqs_entries if entry[1] == os.path.normpath(spec)]
     def_reqs = defined_reqs(spec_text)
     trc_reqs = traceability_reqs(spec_text)
-    if not (isinstance(evi_reqs, list)
-            and all(isinstance(x, str) for x in evi_reqs)
-            and def_reqs and trc_reqs
-            and set(evi_reqs) == def_reqs == trc_reqs):
+    if not entries:
         errors.append(f"REQ_SET_MISMATCH:{spec}")
+    for evi_file, _spec_path, evi_reqs in entries:
+        if not (isinstance(evi_reqs, list)
+                and all(isinstance(x, str) for x in evi_reqs)
+                and def_reqs and trc_reqs
+                and set(evi_reqs) == def_reqs == trc_reqs):
+            errors.append(f"REQ_SET_MISMATCH:{spec}:{evi_file}")
     doc_map = section_body(spec_text, "Document map")
     for item in INFO_ITEMS:
         if item not in doc_map:

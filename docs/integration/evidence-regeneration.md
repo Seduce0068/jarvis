@@ -55,7 +55,9 @@ sha256sum specs/test-<name>.md
 
 `test_basis_ref.requirements` は spec の `REQ-\d+` 定義集合と
 Traceability の Req 列集合の両方と一致させる。要件の追加・削除や
-未定義 Req の参照は `REQ_SET_MISMATCH` で拒否される。
+未定義 Req の参照は `REQ_SET_MISMATCH` で拒否される。同一 spec を
+参照する証跡が複数ある場合は**すべて**の `requirements` が照合され、
+片方だけを改ざんした場合も拒否される。
 
 ### 4. results / timestamp / notes を実測へ更新する
 
@@ -66,6 +68,8 @@ Traceability の Req 列集合の両方と一致させる。要件の追加・�
   秘密情報や実機固有の値は書かない。件数表記（`N passed` 等）は `results` と
   一致させ、スキップがある場合は `ignored` と明記する。
 - `results.skipped`: 正の値にする場合は `notes` へ `ignored` の明記が必要。
+  ただしスキップは実行済みに数えず、Scenario カバレッジの分子には入らない
+  （mcp-gw の `skipped=1` は `passed=124` でカバレッジを満たす）。
 - `document_type`: 設定する場合は `test-execution-log` / `test-result` /
   `test-summary-report` のいずれか。
 - `environment.runtime`: 実行コマンドが変わった場合のみ更新する。
@@ -117,11 +121,11 @@ make check-evidence
 | ファイル名末尾 | ハッシュ接頭詞（12文字）が `spec_hash` と一致（不一致は `HASH_FILENAME_MISMATCH`） |
 | `test_basis_ref.spec_path` | 実在する仕様ファイル（未指定は `NO_SPEC_PATH`、欠落は `SPEC_PATH_NOT_FOUND`） |
 | `test_basis_ref.spec_hash` | トップレベルと一致（nested hash、不一致は `NESTED_HASH_MISMATCH`） |
-| `requirements` | evidence の要件集合＝spec の `REQ-\d+` 定義集合＝Traceability の Req 列集合（不一致は `REQ_SET_MISMATCH`） |
+| `requirements` | 同一 spec を参照する**全証跡**の要件集合＝spec の `REQ-\d+` 定義集合＝Traceability の Req 列集合（不一致は `REQ_SET_MISMATCH`。エラーには対象証跡のパスを示すが要件値は出力しない） |
 | `results` | `failed=0` / `passed>0` / 厳密な非負整数型（型不正は `BAD_RESULTS_TYPE`） |
 | `results.skipped` | 正の値は `notes` に `ignored` の明記が必要（`SKIPPED_TESTS`） |
 | `notes` | 文字列型（`BAD_NOTES_TYPE`）。`passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致（`NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH`） |
-| `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed + skipped）がその数以上（`SCENARIO_COUNT_MISMATCH`） |
+| `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed のみ、skipped は除外）がその数以上（`SCENARIO_COUNT_MISMATCH`）。`ignored` 明記済みのスキップでもカバレッジは満たせない |
 | index | 両 index が全成果物をリンクし、リンク切れなし。見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
 | `timestamp` / `signature` | RFC 3339 の実在日時（`BAD_TIMESTAMP`）/ `self-attested`（`BAD_SIGNATURE`） |
 | `document_type` | 設定時は `test-execution-log` / `test-result` / `test-summary-report` のいずれか（`BAD_DOCUMENT_TYPE`） |
