@@ -184,7 +184,18 @@ impl KillSwitch {
     /// Hash the presented token and compare it with the stored digest using
     /// the crate-wide constant-time helper. A plain `!=` here leaked the match
     /// position through timing and diverged from the other token gates.
+    ///
+    /// Blank presented tokens are rejected before hashing. Without this, a
+    /// switch configured with an empty/unset token would accept an empty
+    /// header from any caller and let it arm or disarm the emergency stop.
+    /// This is defense in depth for the startup validation in
+    /// `config::PolicyConfig::validate_kill_switch_admin_token`; blank tokens
+    /// are never legitimate credentials, so the early return cannot reject a
+    /// valid caller.
     fn hash_matches(&self, token: &str) -> bool {
+        if token.trim().is_empty() {
+            return false;
+        }
         constant_time_eq(&Self::hash_token(token), &self.admin_token_hash)
     }
 
@@ -830,5 +841,56 @@ mod tests {
             view.activated_by.as_deref(),
             Some(status_vocabulary::ACTOR_SYSTEM)
         );
+    }
+
+    /// An unset/blank admin token must never authorize a kill-switch gate.
+    /// Previously `KillSwitch::new("", None)` made `verify_admin_token("")`
+    /// succeed, so any caller sending an empty header could stop the system.
+    #[test]
+    fn blank_admin_token_cannot_authorize_any_gate() {
+        let switch = KillSwitch::new("", None);
+        assert!(!switch.verify_admin_token(""), "empty header is rejected");
+        assert!(
+            !switch.verify_admin_token("   "),
+            "blank header is rejected"
+        );
+
+        assert!(
+            switch
+                .activate_with_token("must-not-arm".into(), "")
+                .is_err(),
+            "a blank token must not activate the switch"
+        );
+
+        // The unauthenticated internal path still works; only token gates
+        // must refuse the blank credential.
+        switch.activate("internal-caller".into());
+        assert!(switch.is_activated());
+        assert!(
+            switch.deactivate("").is_err(),
+            "a blank token must not deactivate the switch"
+        );
+        assert!(
+            switch.is_activated(),
+            "the switch stays armed (fail-closed)"
+        );
+    }
+
+    /// The blank-token guard must not weaken the valid-token paths that the
+    /// existing activation/deactivation tests depend on.
+    #[test]
+    fn blank_token_guard_keeps_valid_token_gates_working() {
+        let switch = KillSwitch::new("admin-token", None);
+        assert!(switch.verify_admin_token("admin-token"));
+
+        switch
+            .activate_with_token("maintenance".into(), "admin-token")
+            .expect("valid token activates");
+        assert!(switch.is_activated());
+
+        switch
+            .deactivate("admin-token")
+            .expect("valid token deactivates");
+        assert!(!switch.is_activated());
     }
 }

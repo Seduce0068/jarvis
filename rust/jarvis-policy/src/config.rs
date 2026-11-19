@@ -8,7 +8,9 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 /// Placeholder kill-switch admin token used until a real secret is injected.
-/// The opt-in strict guard rejects this value at startup.
+/// The opt-in strict guard rejects this value at startup; an unset/blank token
+/// is rejected unconditionally (see
+/// [`PolicyConfig::validate_kill_switch_admin_token`]).
 pub const PLACEHOLDER_KILL_SWITCH_TOKEN: &str = "changeme";
 
 /// Absolute default location of the policy TOML. The former CWD-relative
@@ -119,6 +121,7 @@ impl PolicyConfig {
         // aborts before any service starts when a durable state path is
         // required but missing.
         config.validate_kill_switch_state_path()?;
+        config.validate_kill_switch_admin_token()?;
         if config
             .kill_switch_state_path
             .as_deref()
@@ -159,6 +162,44 @@ impl Default for PolicyConfig {
 impl PolicyConfig {
     pub fn kill_switch_admin_token(&self) -> &str {
         &self.kill_switch_admin_token
+    }
+
+    /// Fail-closed startup validation of the kill-switch admin token.
+    ///
+    /// A blank (unset or whitespace-only) token is rejected unconditionally:
+    /// an empty admin token would make `KillSwitch::verify_admin_token("")`
+    /// succeed, so any caller able to send an empty header could arm or
+    /// disarm the emergency stop. This closes the gap that the existing
+    /// placeholder-only guard does not cover.
+    ///
+    /// The known [`PLACEHOLDER_KILL_SWITCH_TOKEN`] stays guard-gated: it is
+    /// rejected only when `require_kill_switch_admin_token` is enabled. That
+    /// preserves the documented staged-rollout compatibility (todo.md P0-10:
+    /// enabling the guard in production is a separate operator decision).
+    /// The `lib.rs` startup guard keeps enforcing the same placeholder rule
+    /// for programmatically built configs; this method makes the file-based
+    /// startup path (`load()` -> `load_from_path`) consistent with it.
+    ///
+    /// No token value is interpolated into either error: secrets must never
+    /// reach logs, and the message text already distinguishes the two cases.
+    pub fn validate_kill_switch_admin_token(&self) -> Result<()> {
+        if self.kill_switch_admin_token.trim().is_empty() {
+            anyhow::bail!(
+                "kill_switch_admin_token is unset or blank; set \
+                 JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN to a non-empty secret \
+                 before starting the policy service"
+            );
+        }
+        if self.require_kill_switch_admin_token
+            && self.kill_switch_admin_token == PLACEHOLDER_KILL_SWITCH_TOKEN
+        {
+            anyhow::bail!(
+                "kill switch admin token is still the known placeholder value \
+                 but require_kill_switch_admin_token = true; set \
+                 JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN to a real secret"
+            );
+        }
+        Ok(())
     }
 
     /// Fail-closed startup validation for the I8-E guard.
@@ -673,5 +714,105 @@ default_deny = true
             .expect("override variable uses the policy env prefix")
             .to_ascii_lowercase();
         assert_eq!(field, "config_path");
+    }
+
+    /// Run the same two startup validations that `load_from_path` invokes, so
+    /// tests can assert on their combined error without touching the process
+    /// environment or the filesystem.
+    fn validate_startup(config: &PolicyConfig) -> Result<()> {
+        config.validate_kill_switch_state_path()?;
+        config.validate_kill_switch_admin_token()
+    }
+
+    /// An unset/blank admin token must abort startup regardless of the opt-in
+    /// flag: with an empty token the kill-switch gates would accept an empty
+    /// presented token and let any caller stop the system.
+    #[test]
+    fn blank_admin_token_fails_closed_without_the_guard() {
+        for token in ["", "   ", "\t\n"] {
+            let config = PolicyConfig {
+                kill_switch_admin_token: token.into(),
+                require_kill_switch_admin_token: false,
+                ..Default::default()
+            };
+            let error = config
+                .validate_kill_switch_admin_token()
+                .expect_err("blank token must fail closed");
+            let message = error.to_string();
+            assert!(
+                message.contains("unset or blank"),
+                "error explains the blank token: {message}"
+            );
+            assert!(
+                message.contains("JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN"),
+                "error names the env override: {message}"
+            );
+        }
+    }
+
+    /// The known placeholder stays guard-gated for compatibility: warn-only
+    /// when the flag is off (the documented default), fail-closed when on.
+    #[test]
+    fn placeholder_admin_token_is_guard_gated() {
+        let legacy = PolicyConfig {
+            kill_switch_admin_token: PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
+            require_kill_switch_admin_token: false,
+            ..Default::default()
+        };
+        legacy
+            .validate_kill_switch_admin_token()
+            .expect("guard off keeps the legacy warn-only behavior");
+
+        let strict = PolicyConfig {
+            require_kill_switch_admin_token: true,
+            ..legacy
+        };
+        let error = strict
+            .validate_kill_switch_admin_token()
+            .expect_err("guard on rejects the placeholder");
+        assert!(
+            error
+                .to_string()
+                .contains("require_kill_switch_admin_token"),
+            "error names the opt-in flag"
+        );
+    }
+
+    /// A real secret satisfies the guard, and startup errors must never echo
+    /// the configured token value (a sentinel stands in for a real secret).
+    #[test]
+    fn real_admin_token_passes_and_errors_never_echo_it() {
+        const SENTINEL: &str = "SENTINEL-DO-NOT-LOG-9f3a4b";
+        let config = PolicyConfig {
+            kill_switch_admin_token: SENTINEL.into(),
+            require_kill_switch_admin_token: true,
+            ..Default::default()
+        };
+        config
+            .validate_kill_switch_admin_token()
+            .expect("a real token satisfies the guard");
+
+        let missing_path = PolicyConfig {
+            require_kill_switch_state_path: true,
+            kill_switch_state_path: None,
+            ..config
+        };
+        let error = validate_startup(&missing_path).expect_err("state path guard fails closed");
+        assert!(
+            !error.to_string().contains(SENTINEL),
+            "startup error must not contain the token value"
+        );
+    }
+
+    /// The figment extraction used by `load()` must still parse a blank token
+    /// so the new validation is the component that fails closed, not serde.
+    #[test]
+    fn blank_token_from_config_provider_is_rejected_by_validation() {
+        let toml = base_toml().replace(PLACEHOLDER_KILL_SWITCH_TOKEN, "");
+        let config: PolicyConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("blank token parses as an empty string");
+        assert_eq!(config.kill_switch_admin_token(), "");
+        assert!(config.validate_kill_switch_admin_token().is_err());
     }
 }
