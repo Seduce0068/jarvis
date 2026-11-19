@@ -30,6 +30,19 @@ pub const JARVIS_CONTEXT_TOKEN_HEADER: &str = "x-jarvis-context-token";
 /// in both consumers.
 pub const KILL_SWITCH_409_BODY: &str = "approval decisions are blocked by the kill switch";
 
+/// Fixed HTTP 409 body emitted by `jarvis-policy` when a competing operator has
+/// already decided an approval request.
+///
+/// This is the *only* 409 body the approval UI treats as a benign winner: a
+/// trimmed exact match authorizes the status-endpoint readback. The kill-switch
+/// literal and every other body (empty, unreadable, or rewritten by an older
+/// peer or a relay) pin the halt display instead (I58-B). Keeping one definition
+/// here lets a one-sided wording change be caught by the contract pins in both
+/// consumers instead of silently turning a real emergency stop into a false
+/// "already decided" display. The wire text is stable: changing it requires
+/// updating the contract pins in both consumers.
+pub const ALREADY_DECIDED_409_BODY: &str = "approval request already decided";
+
 /// Unified event type used across JARVIS services
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UnifiedEvent {
@@ -173,6 +186,16 @@ mod tests {
             KILL_SWITCH_409_BODY,
             "approval decisions are blocked by the kill switch"
         );
+    }
+
+    /// Single canonical pin of the already-decided 409 wire body. Policy emits
+    /// [`ALREADY_DECIDED_409_BODY`] and the UI accepts only that literal before
+    /// reading the winner; the UI also keeps an independent external fixture so
+    /// a change here is observable as a failing UI contract test (I58-B).
+    #[test]
+    fn already_decided_409_body_pins_the_wire_contract() {
+        assert_eq!(ALREADY_DECIDED_409_BODY, "approval request already decided");
+        assert_ne!(ALREADY_DECIDED_409_BODY, KILL_SWITCH_409_BODY);
     }
 
     fn all_sources() -> [EventSource; 7] {

@@ -652,13 +652,15 @@ async fn list_approvals(State(engine): State<Arc<PolicyEngine>>) -> Json<serde_j
 /// `Persistence` share HTTP 503 but carry different fixed messages, so a
 /// retrying client can tell queue exhaustion from a persistence outage.
 ///
-/// The kill-switch 409 body is sourced from `jarvis-core` (I54-C): this module
-/// does not own that literal, so the approval UI can classify the exact same
-/// wire body without keeping a local copy that could silently drift.
+/// Both 409 bodies are sourced from `jarvis-core` (I54-C, I58-B): this module
+/// owns neither literal, so the approval UI can classify the exact same wire
+/// body without keeping a local copy that could silently drift. Only the
+/// already-decided body may resolve to a winner; every other 409 must pin the
+/// halt in the UI.
 pub(crate) mod approval_error_reasons {
     pub const BAD_REQUEST: &str = "invalid approval request";
     pub const NOT_FOUND: &str = "approval request not found";
-    pub const ALREADY_DECIDED: &str = "approval request already decided";
+    pub const ALREADY_DECIDED: &str = jarvis_core::ALREADY_DECIDED_409_BODY;
     pub const KILL_SWITCH: &str = jarvis_core::KILL_SWITCH_409_BODY;
     pub const QUEUE_FULL: &str = "approval queue is full; retry later";
     pub const PERSISTENCE: &str = "approval persistence is unavailable; retry later";
@@ -2435,6 +2437,13 @@ mod tests {
             approval_error_reasons::KILL_SWITCH,
             jarvis_core::KILL_SWITCH_409_BODY,
             "policy must emit the shared kill-switch 409 body"
+        );
+        // I58-B: the benign winner body is shared too, so a one-sided wording
+        // change is caught here and by the UI's external contract fixture.
+        assert_eq!(
+            approval_error_reasons::ALREADY_DECIDED,
+            jarvis_core::ALREADY_DECIDED_409_BODY,
+            "policy must emit the shared already-decided 409 body"
         );
     }
 
