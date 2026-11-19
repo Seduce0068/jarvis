@@ -169,10 +169,14 @@ PY
 if systemctl is-active --quiet jarvis-mcp-gw 2>/dev/null; then
   if runtime_check; then say "runtime tools/call" "OK (tools/call + tools/list)"; else say "runtime tools/call" "DANGER: systemd 配下で実行失敗"; danger=1; fi
 else
-  say "runtime tools/call" "SKIP (service inactive)"
+  # サービス停止で実行時 E2E が不能な場合も SKIP+OK とせず DANGER（fail-closed）。
+  # 以前は SKIP のまま exit 0 となり deploy-mcp-gw-safe.sh の事後確認が
+  # 「実行時 E2E 未実施」を合格と誤判定していた（I25-E / Round 19 B4）。
+  say "runtime tools/call" "DANGER: サービス停止（実行時 E2E 不能・SKIP ではない）"
+  danger=1
 fi
 if [ "$danger" -eq 1 ]; then
-  echo "== RESULT: DANGER（実行時機能不全または危険な設定。上記を解消してからデプロイ） =="
+  echo "== RESULT: DANGER（実行時機能不全・サービス停止によるE2E不能・危険な設定。SKIP は OK として扱わない。上記を解消してからデプロイ） =="
   exit 2
 elif [ "$drift" -eq 1 ]; then
   echo "== RESULT: PENDING（デプロイ差分あり） =="

@@ -8,6 +8,15 @@ set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo" || exit 1
 
+# Derive scratch files from a private mktemp -d instead of a predictable /tmp
+# path: a pre-created symlink at /tmp/check-shell.err (or -sc.out) by another
+# user could otherwise redirect or pollute our output (I25-E). The EXIT trap
+# removes the whole directory on success, failure, or early exit.
+tmpdir="$(mktemp -d)" || { echo "FAIL: mktemp -d failed" >&2; exit 1; }
+trap 'rm -rf "$tmpdir"' EXIT
+err_file="$tmpdir/check-shell.err"
+sc_file="$tmpdir/check-shell-sc.out"
+
 # Resolve the target list once so a failing `git ls-files` or an empty target
 # set fails the gate (fail-closed) instead of silently passing.
 if ! script_list="$(git ls-files '*.sh')"; then
@@ -22,9 +31,9 @@ fi
 ok=0; fail=0
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  if ! bash -n "$f" 2>/tmp/check-shell.err; then
+  if ! bash -n "$f" 2>"$err_file"; then
     echo "FAIL bash -n: $f"
-    head -3 /tmp/check-shell.err >&2
+    head -3 "$err_file" >&2
     fail=$((fail+1))
   else
     ok=$((ok+1))
@@ -36,11 +45,11 @@ if ! command -v shellcheck >/dev/null 2>&1; then
   fail=$((fail+1))
 else
   mapfile -t scripts <<< "$script_list"
-  if shellcheck "${scripts[@]}" >/tmp/check-shell-sc.out 2>&1; then
+  if shellcheck "${scripts[@]}" >"$sc_file" 2>&1; then
     echo "shellcheck: OK"
   else
     echo "FAIL: shellcheck found issues"
-    head -20 /tmp/check-shell-sc.out >&2
+    head -20 "$sc_file" >&2
     fail=$((fail+1))
   fi
 fi
