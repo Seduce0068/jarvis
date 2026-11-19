@@ -52,6 +52,7 @@ status: draft
 | REQ-15 | 導入後検査 (timer active / 次回時刻 / 手動実行) を行う |
 | REQ-16 | 旧 backup/restore/deploy は fail-closed (exit 2) を維持する |
 | REQ-17 | drift 検査は欠落 allowlist と古い Cedar schema を検出する |
+| REQ-18 | `--retain-days` の値欠落・非整数・0 以下は exit 2 で拒否する |
 
 ## Risk & tier
 
@@ -140,6 +141,20 @@ Scenario: TC-B4 retention の opt-in
   Then 古い世代は削除されない
   When --retain-days を指定する
   Then created_at を優先して古い世代のみ削除する
+```
+
+### backup-local.sh 引数検証 (REQ-18)
+
+```gherkin
+Scenario: TC-B5 --retain-days の引数拒否
+  Given 引数解析は --apply の前段で行われる
+  When --retain-days の値を省略する
+  Then requires a value のエラーを stderr に出し exit 2 を返す
+  When --retain-days に空文字または非整数を渡す
+  Then must be a positive integer のエラーを stderr に出し exit 2 を返す
+  When --retain-days に 0 を渡す
+  Then must be greater than zero のエラーを stderr に出し exit 2 を返す
+  Then いずれも後続処理へ進まずバックアップ set を作らない
 ```
 
 ### verify-backup.sh (REQ-8〜REQ-12)
@@ -232,6 +247,7 @@ Scenario: TC-L2 drift 検出
 | TC-B2 | REQ-4 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-7 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-B3 | REQ-6 | v5.0.0-V13.3.2 | SP800-53r5.2/AC-6 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-B4 | REQ-7 | v5.0.0-V14.2.7 | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.3 | T3 |
+| TC-B5 | REQ-18 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.6 | T3 |
 | TC-V1 | REQ-8 | v5.0.0-V14.2.4 | SP800-53r5.2/SI-7 | ATE_COV.2 | 5.2.1 | T1 |
 | TC-V1 | REQ-9 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-7 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-V3 | REQ-10 | - | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.1 | T2 |

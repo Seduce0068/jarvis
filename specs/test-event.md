@@ -50,6 +50,8 @@ status: draft
 | REQ-13 | policy が到達不能なら auto_respond を許可しない (fail-closed) |
 | REQ-14 | /v1/events の source 未知値は Manual、correlation 未指定は UUID |
 | REQ-15 | HA WebSocket の state_changed を解析し、非 event は無視する |
+| REQ-16 | `/v1/events` はキュー満杯時に WARN を出し 503 を返す |
+| REQ-17 | gRPC `EmitEvent` はキュー満杯時に WARN を出し RESOURCE_EXHAUSTED を返す |
 
 ## Risk & tier
 
@@ -169,6 +171,26 @@ Scenario: TC-B4 クローズ済み channel
   Then panic せず debug ログのみで終了する
 ```
 
+### 満杯時の API 拒否契約 (REQ-16〜REQ-17)
+
+```gherkin
+Scenario: TC-B5 HTTP の満杯時 503
+  Given /v1/events の channel が満杯である
+  When emit リクエストを送る
+  Then WARN ログが出る
+  Then SERVICE_UNAVAILABLE (503) を返す
+  Then ハンドラはブロックせず後続リクエストを処理できる
+```
+
+```gherkin
+Scenario: TC-B6 gRPC の満杯時 RESOURCE_EXHAUSTED
+  Given EmitEvent の channel が満杯である
+  When EmitEvent RPC を送る
+  Then WARN ログが出る
+  Then RESOURCE_EXHAUSTED を返す
+  Then ハンドラはブロックせず後続 RPC を処理できる
+```
+
 ### 異常系・入口 (REQ-13〜REQ-15)
 
 ```gherkin
@@ -195,9 +217,12 @@ Scenario: TC-E1（policy 到達不可 fail-closed）と TC-E2
 | TC-B2 | REQ-10 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.3 | T1 |
 | TC-B3 | REQ-11 | - | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-B4 | REQ-12 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.4.1 | T2 |
+| TC-B5 | REQ-16 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.3 | T1 |
+| TC-B6 | REQ-17 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.3 | T1 |
 | TC-E1 | REQ-13 | v5.0.0-V8.3.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-E2 | REQ-14 | v5.0.0-V16.2.4 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T3 |
 | TC-E3 | REQ-15 | - | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.9 | T2 |
 
 ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではない)。
 REQ-1〜REQ-15 と TC-W1〜W4 / TC-B1〜B4 / TC-E1〜E3 を網羅する。
+REQ-16 / REQ-17 と TC-B5 / TC-B6 は満杯時の API 拒否契約を網羅する。

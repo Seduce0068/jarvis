@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:a4b7089f41f3f459d994243cfade609667d7d9c98046253b0513208181dd5805",
-  "timestamp": "2026-11-18T04:10:35+09:00",
+  "spec_hash": "sha256:05a367291f7318224dd612850886f5ebbbf3a01e81bd1a8f973aff4de893236d",
+  "timestamp": "2026-11-19T22:26:46+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-event --lib --offline",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 24,
+    "passed": 70,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 10,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-event.md",
-    "spec_hash": "sha256:a4b7089f41f3f459d994243cfade609667d7d9c98046253b0513208181dd5805",
+    "spec_hash": "sha256:05a367291f7318224dd612850886f5ebbbf3a01e81bd1a8f973aff4de893236d",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -38,7 +38,9 @@
       "REQ-12",
       "REQ-13",
       "REQ-14",
-      "REQ-15"
+      "REQ-15",
+      "REQ-16",
+      "REQ-17"
     ]
   },
   "techniques": [
@@ -153,6 +155,17 @@
       "controls": [
         "SP800-53r5.2/AU-3"
       ]
+    },
+    {
+      "id": "R-9",
+      "tier": "T1",
+      "description": "キュー満杯時の失敗レスポンス欠落",
+      "asvs": [
+        "v5.0.0-V16.2.4"
+      ],
+      "controls": [
+        "SP800-53r5.2/SC-5"
+      ]
     }
   ],
   "assurance": {
@@ -163,5 +176,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-event の 24 テスト再実行結果。Traceability 表追加後の仕様ハッシュに同期。TC-E1/E2 の回帰テスト 4 件を含む。実機 policy サービス結合試験は対象外。カバレッジ・ミューテーションは未測定。"
+  "notes": "jarvis-event の 70 テスト再実行結果。REQ-16/17（キュー満杯時 503 / RESOURCE_EXHAUSTED）を追加。flaky なスパン捕捉アサーションを削除し非漏洩検証のみ維持。実機 policy サービス結合試験は対象外。カバレッジ・ミューテーションは未測定。"
 }
