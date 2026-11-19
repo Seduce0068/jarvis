@@ -1,7 +1,7 @@
 //! Context building core
 
-use anyhow::Result;
-use chrono::Utc;
+use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use jarvis_core::{MemoryEntry, UnifiedEvent};
 use qdrant_client::Qdrant;
 use serde_json::Value;
@@ -16,6 +16,42 @@ fn reorder_by_ids(entries: Vec<MemoryEntry>, ids: &[Uuid]) -> Vec<MemoryEntry> {
     let mut by_id: std::collections::HashMap<Uuid, MemoryEntry> =
         entries.into_iter().map(|entry| (entry.id, entry)).collect();
     ids.iter().filter_map(|id| by_id.remove(id)).collect()
+}
+
+/// A memory is expired once `expires_at <= now` (UTC). The boundary is
+/// inclusive: an entry expiring exactly at `now` is already expired. `None`
+/// means the entry never expires.
+fn is_expired(expires_at: Option<DateTime<Utc>>, now: DateTime<Utc>) -> bool {
+    expires_at.is_some_and(|expires_at| expires_at <= now)
+}
+
+/// Keep only memories still valid at `now`, preserving the input order.
+fn retain_unexpired(entries: Vec<MemoryEntry>, now: DateTime<Utc>) -> Vec<MemoryEntry> {
+    entries
+        .into_iter()
+        .filter(|entry| !is_expired(entry.expires_at, now))
+        .collect()
+}
+
+/// Classify the outcome of producing a query embedding.
+///
+/// `None` means the endpoint is intentionally unconfigured: vector search is
+/// skipped by design and PostgreSQL-backed recent memories still work.
+/// `Some(Err(..))` is a genuine `embed()` failure and is propagated with
+/// context, so no caller can mistake a failed embedding for a search that
+/// simply found no results.
+fn query_embedding_outcome(
+    embed_result: Option<anyhow::Result<Vec<f32>>>,
+) -> anyhow::Result<Option<Vec<f32>>> {
+    match embed_result {
+        None => {
+            warn!("memory vector search skipped: embedding endpoint not configured");
+            Ok(None)
+        }
+        Some(result) => result
+            .context("producing query embedding for memory vector search")
+            .map(Some),
+    }
 }
 
 pub struct Builder {
@@ -55,12 +91,16 @@ impl Builder {
 
     #[instrument(skip(self, event))]
     pub async fn build_context(&self, event: &UnifiedEvent) -> Result<Value> {
+        // One UTC snapshot keeps the expiry boundary and the context timestamp
+        // consistent across both memory paths.
+        let now = Utc::now();
+
         // 1. Search relevant memories
         let query = format!("{} {}", event.event_type, event.payload);
-        let memories = self.search_memory(&query, 10).await?;
+        let memories = self.search_memory_at(&query, 10, now).await?;
 
         // 2. Get recent conversation history
-        let recent = self.get_recent_memories(20).await?;
+        let recent = self.get_recent_memories_at(20, now).await?;
 
         // 3. Build context object
         let context = serde_json::json!({
@@ -74,7 +114,7 @@ impl Builder {
             },
             "memories": memories,
             "recent": recent,
-            "timestamp": Utc::now(),
+            "timestamp": now,
         });
 
         // 4/5. Redact PII, then truncate to the token budget.
@@ -110,14 +150,27 @@ impl Builder {
     }
 
     pub async fn search_memory(&self, query: &str, limit: usize) -> Result<Vec<MemoryEntry>> {
-        // Generate an embedding for the query; without a configured embedding
-        // endpoint the vector search is skipped (recent memories still work).
-        let embedding = match self.embedding.embed(query).await {
-            Ok(embedding) => embedding,
-            Err(error) => {
-                warn!("memory vector search skipped: {error:#}");
-                return Ok(Vec::new());
-            }
+        self.search_memory_at(query, limit, Utc::now()).await
+    }
+
+    /// Same as [`Builder::search_memory`] with an injectable UTC `now`, so the
+    /// expiry boundary is deterministic in tests.
+    async fn search_memory_at(
+        &self,
+        query: &str,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<MemoryEntry>> {
+        // Only an unconfigured endpoint is an intentional skip. A real
+        // embed() failure is propagated, never disguised as an empty result.
+        let embed_result = if self.embedding.is_enabled() {
+            Some(self.embedding.embed(query).await)
+        } else {
+            None
+        };
+        let embedding = match query_embedding_outcome(embed_result)? {
+            Some(embedding) => embedding,
+            None => return Ok(Vec::new()),
         };
 
         // Search Qdrant
@@ -130,12 +183,13 @@ impl Builder {
         .await?;
 
         // Fetch full entries from PostgreSQL, then reassemble in Qdrant's
-        // relevance order (P1-1).
+        // relevance order (P1-1). Expired rows are excluded by SQL and filtered
+        // again in Rust so the same UTC `<=` boundary holds on both sides.
         let ids: Vec<Uuid> = results.iter().map(|r| r.id).collect();
         let client = self.pg_pool.get().await?;
         let rows = client.query(
-            "SELECT id, content, metadata, source, created_at, updated_at, expires_at FROM memories WHERE id = ANY($1)",
-            &[&ids],
+            "SELECT id, content, metadata, source, created_at, updated_at, expires_at FROM memories WHERE id = ANY($1) AND (expires_at IS NULL OR expires_at > $2)",
+            &[&ids, &now],
         ).await?;
 
         let fetched: Vec<MemoryEntry> = rows
@@ -151,20 +205,28 @@ impl Builder {
                 expires_at: row.get(6),
             })
             .collect();
-        Ok(reorder_by_ids(fetched, &ids))
+        Ok(reorder_by_ids(retain_unexpired(fetched, now), &ids))
     }
 
-    async fn get_recent_memories(&self, limit: usize) -> Result<Vec<MemoryEntry>> {
+    /// Recent memories with an injectable UTC `now`; expired entries
+    /// (`expires_at <= now`) never reach the assembled context.
+    async fn get_recent_memories_at(
+        &self,
+        limit: usize,
+        now: DateTime<Utc>,
+    ) -> Result<Vec<MemoryEntry>> {
         let client = self.pg_pool.get().await?;
         let rows = client
             .query(
                 "SELECT id, content, metadata, source, created_at, updated_at, expires_at
-             FROM memories ORDER BY created_at DESC LIMIT $1",
-                &[&(limit as i64)],
+             FROM memories
+             WHERE expires_at IS NULL OR expires_at > $1
+             ORDER BY created_at DESC LIMIT $2",
+                &[&now, &(limit as i64)],
             )
             .await?;
 
-        Ok(rows
+        let entries: Vec<MemoryEntry> = rows
             .into_iter()
             .map(|row| MemoryEntry {
                 id: row.get(0),
@@ -176,7 +238,8 @@ impl Builder {
                 updated_at: row.get(5),
                 expires_at: row.get(6),
             })
-            .collect())
+            .collect();
+        Ok(retain_unexpired(entries, now))
     }
 }
 
@@ -406,6 +469,83 @@ mod tests {
         assert_eq!(output["memories"], json!([]));
         assert_eq!(output["recent"], json!([]));
         assert_eq!(output["event"]["payload"]["from"], "[REDACTED]");
+    }
+
+    fn entry_with_expiry(expires_at: Option<DateTime<Utc>>) -> MemoryEntry {
+        MemoryEntry {
+            id: Uuid::new_v4(),
+            content: "entry".into(),
+            embedding: vec![],
+            metadata: json!({}),
+            source: "test".into(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            expires_at,
+        }
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-11-19T00:00:00Z")
+            .expect("valid RFC 3339 timestamp")
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn tc_e_expiry_boundary_is_inclusive() {
+        let now = fixed_now();
+        assert!(is_expired(Some(now), now), "expires_at == now is expired");
+        assert!(is_expired(Some(now - chrono::Duration::seconds(1)), now));
+        assert!(!is_expired(Some(now + chrono::Duration::seconds(1)), now));
+        assert!(!is_expired(None, now), "absent expiry never expires");
+    }
+
+    #[test]
+    fn tc_e_expired_memories_are_filtered_in_original_order() {
+        let now = fixed_now();
+        let future = entry_with_expiry(Some(now + chrono::Duration::seconds(30)));
+        let boundary = entry_with_expiry(Some(now));
+        let never = entry_with_expiry(None);
+        let past = entry_with_expiry(Some(now - chrono::Duration::seconds(1)));
+        let future2 = entry_with_expiry(Some(now + chrono::Duration::seconds(1)));
+
+        let kept = retain_unexpired(
+            vec![
+                future.clone(),
+                boundary,
+                never.clone(),
+                past,
+                future2.clone(),
+            ],
+            now,
+        );
+        assert_eq!(
+            kept.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![future.id, never.id, future2.id]
+        );
+    }
+
+    #[test]
+    fn tc_e_embed_failure_is_not_silently_reported_as_empty_success() {
+        let failed = Err(anyhow::anyhow!("embedding endpoint returned HTTP 500"));
+        let err = query_embedding_outcome(Some(failed))
+            .expect_err("a configured endpoint that fails must produce an error");
+        let message = format!("{err:#}");
+        assert!(message.contains("query embedding"), "{message}");
+        assert!(message.contains("HTTP 500"), "{message}");
+    }
+
+    #[test]
+    fn tc_e_disabled_embedding_is_an_explicit_skip() {
+        let outcome =
+            query_embedding_outcome(None).expect("disabled endpoint is a documented skip");
+        assert_eq!(outcome, None);
+    }
+
+    #[test]
+    fn tc_e_successful_embedding_is_passed_through() {
+        let vector = vec![0.1_f32, 0.2, 0.3];
+        let outcome = query_embedding_outcome(Some(Ok(vector.clone()))).expect("embed succeeds");
+        assert_eq!(outcome, Some(vector));
     }
 }
 
