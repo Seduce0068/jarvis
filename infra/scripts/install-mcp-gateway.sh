@@ -25,7 +25,8 @@ if [ "$apply" -eq 1 ]; then
   [ -f "$dst" ] && cp -a "$dst" "$dst.prev-$ts"
   install -o root -g root -m 0755 "$src" "$dst"
   echo "== 3. サービス再起動 =="
-  if systemctl restart jarvis-mcp-gw && sleep 2 && curl -q -s -o /dev/null -w '' http://127.0.0.1:8082/health; then
+  health_code=""
+  if systemctl restart jarvis-mcp-gw && sleep 2 && health_code="$(curl -fsS -o /dev/null -w '%{http_code}' http://127.0.0.1:8082/health || true)" && [ "$health_code" = "200" ]; then
     echo "  再起動OK: $(systemctl is-active jarvis-mcp-gw)"
   else
     echo "  再起動失敗: ロールバックします"
