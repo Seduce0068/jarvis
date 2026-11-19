@@ -457,12 +457,12 @@ generated:
 - [x] 設定ファイルが CWD 相対の `config/*.toml` — 2026-11-19 対応済み: 既定を `/etc/jarvis/{policy,mcp_gateway}.toml` へ変更し `JARVIS_{POLICY,MCP_GW}_CONFIG_PATH` で上書き可能。smoke スクリプトも env 追随。実機は Env provider で設定供给のため既定ファイル不在でも起動可 / `policy/src/config.rs:51-58`, `mcp-gw/src/config.rs:38-46` / R1-CF01 / confirmed
 - [x] 同名ツールの upstream 選択が HashMap 反復順依存 — 2026-11-19 対応済み: 登録時に他サーバのツール名衝突を検出して拒否（最初の登録が優先）。check と insert を単一 write ガード内で実施し競合も防止。回帰テスト3件 / `mcp-gw/src/gateway.rs:79-89,143-156` / R1-AR01 / confirmed
 - [x] PII フィルタが JSON キー名を対象外のまま — 2026-11-19 対応済み: PII パターンに一致する object キーも `[REDACTED]` に置換（通常キーは保持、部分一致対応、深度 128 ガード）。回帰テスト5件追加、既存 fixture を非 PII キーへ更新 / `context/src/pii.rs:204` / R1-ST2 / likely（既存 P2-1 と別観点）
-- [ ] `embedding_model` は設定可能だが Qdrant 次元が 384 固定 — `context/src/builder.rs:253-255` / R1-CF11,R1-AR2 / confirmed
+- [x] `embedding_model` は設定可能だが Qdrant 次元が 384 固定 — 2026-11-19 対応済み: `embedding_dim`（既定 384、`JARVIS_CONTEXT_EMBEDDING_DIM`）を追加しコレクション生成に使用。既存コレクションは起動時に実次元を読み取り不一致なら明確なエラー。回帰テスト8件追加、context 53 tests pass / `context/src/builder.rs:253-255` / R1-CF11,R1-AR2 / confirmed
 - [x] PostgreSQL 既定 URL に固定パスワード — 2026-11-19 対応済み: 既定値を `postgres://localhost:5432/jarvis` へ変更し認証を libpq へ委譲。LEGACY_TOML もパスワードレス化、回帰テスト3件追加 / `context/src/config.rs:54` / R1-CF11 / confirmed
 - [ ] `CheckResponse` が `allowed` 真偽値のみで拒否理由を返さない — `policy/proto/policy.proto:19-21` / R1-AP01 / confirmed
 - [ ] MCP `tools/list` が upstream inputSchema を破棄し cursor も無視 — `mcp-gw/src/mcp_server.rs:59-99,120-126` / R1-AP01,R5-DC1 / confirmed
-- [ ] otelcol 設定の配布経路がビルドスクリプトから欠落 — `infra/scripts/build-selfhost.sh:26-28` / R1-AR3 / confirmed（既存 P0-6 と関連）
-- [ ] Grafana の job セレクタ / service ラベルが scrape 設定と不一致 — `infra/config/otelcol-config.yaml:25-45`, `dashboards/jarvis-overview.json:46` / R1-AR3,R5-VU3 / confirmed
+- [x] otelcol 設定の配布経路がビルドスクリプトから欠落 — 2026-11-19 対応済み: `otelcol-config.yaml` を `.bak-<ts>` 退避付きで `install -o root -g root -m 0644 /etc/jarvis/` へ配置。bash -n OK / `infra/scripts/build-selfhost.sh:26-28` / R1-AR3 / confirmed（既存 P0-6 と関連）
+- [x] Grafana の job セレクタ / service ラベルが scrape 設定と不一致 — 2026-11-19 対応済み: ダッシュボード側を実在 job 名（`jarvis-*` / `qdrant` 等）へ統一し `service` ラベルと `jarvis/` 接頭辞を除去。otelcol 側の job_name は時系列継続のため未変更。JSON 有効・旧セレクタ残存0 / `dashboards/jarvis-overview.json:46` / R1-AR3,R5-VU3 / confirmed
 - [ ] filelog レシーバの入力が空（`/var/log/jarvis/*.log` を誰も書かない）— `otelcol-config.yaml:52` / R5-VU3 / confirmed
 - [ ] `check-shell` が shellcheck 未インストール時に SKIP して成功扱い — `ci/scripts/check-shell.sh:22-33` / R5-VU4 / confirmed
 - [ ] `check-evidence.sh` が skipped 数・仕様シナリオ数を照合せず合格 — `ci/scripts/check-evidence.sh:82-85` / R3-TQ4 / confirmed
@@ -473,10 +473,10 @@ generated:
 - [ ] `/health` が固定 `"OK"` を返し劣化を検知できない — `policy/src/http.rs:187-189` / R4-DR1 / confirmed
 - [ ] シグナル処理・ドレインが無くデプロイ時停止で保留作業が失われる — `policy/src/main.rs:59` / R4-DR1 / confirmed
 - [ ] axum 0.7 と 0.8 が workspace 内で二重解決 — `rust/Cargo.toml:51` / R4-DP1 / confirmed
-- [ ] 配線済み review-gate が PR ではなく既定ブランチを検証 — `.github/workflows/review-gate.yml:33-36` / R1-AR4 / confirmed（未配線の参照実装は既存 P2-2 の判断を維持）
+- [x] 配線済み review-gate が PR ではなく既定ブランチを検証 — 2026-11-19 対応済み: 未配線の参照実装 `ci/review-gate.yml` の3ステージ checkout に `refs/pull/<number>/head` を追加（workflow_dispatch は `pr_number` 入力）。auto-merge・権限・認証情報の方針は据え置き、YAML 有効 / R1-AR4 / confirmed（未配線の参照実装は既存 P2-2 の判断を維持）
 - [ ] レビューゲートのシグナル解析が `grep ... || true` で fail-open — `ci/review-gate.yml:145-148` / R2-ER4 / likely（未配線）
 - [ ] cloud-init が NOPASSWD root + docker グループ / 固定 DB パスワード — `infra/opentofu/cloud-init.yaml:41-43,133` / R3-AU3 / confirmed（ADR-0004 で未使用のレガシー、削除判断は既存 P3-5 に委譲）
-- [ ] デプロイスクリプトが全 unit を単一ユーザーへ書き換え — `infra/scripts/build-selfhost.sh:40-42` / R3-AU3 / confirmed
+- [x] デプロイスクリプトが全 unit を単一ユーザーへ書き換え — 2026-11-19 対応済み: policy/mcp-gw/event/context の4サービスは User/Group をテンプレート宣言どおり保持し、その他5ユニットのみ従来の置換を適用（認可境界の権限分離を維持） / `infra/scripts/build-selfhost.sh:40-42` / R3-AU3 / confirmed
 - [x] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — 2026-11-19 対応済み: allowlist と同じ枠組みで `MISSING (deployed)` / `MISSING (repo)` と danger=1 を設定。既存回帰22 tests pass / `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
 - [ ] `install-mcp-gateway.sh` のヘルス確認が HTTP ステータスを検証せずロールバックしない — `infra/scripts/install-mcp-gateway.sh:28` / R4-DR3 / confirmed
 - [ ] 放棄された承認が pending のまま残りキュー枠を枯渇 — `policy/src/approval.rs:148-162` / R5-VU1 / likely
@@ -732,3 +732,11 @@ generated:
 - [x] **bootstrap の `config/mobile.env` も保護** — `write_private_if_absent`
   へ統一し既存ファイルは警告のみでスキップ。無条件上書きの `write_private`
   定義を削除。`rustfmt --check` / `--help` pass。
+
+## 完了記録（2026-11-19 Round 9）
+
+- [x] **Qdrant スナップショットの取得元を生成レスポンスへ統一** —
+  `backup-local.sh` が POST レスポンスを破棄して一覧の `.result[0].name`
+  を無条件に使っていた問題を修正。POST 応答の `.result.name`
+  （旧形式の文字列も可）のみを根拠とし、名前が無ければ明示エラーで中止。
+  dry-run の書き込みゼロを確認、bash -n OK。
