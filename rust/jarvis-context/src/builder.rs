@@ -114,8 +114,14 @@ impl Builder {
         qdrant_client: Arc<Qdrant>,
         pii_filter: Arc<crate::pii::PiiFilter>,
     ) -> Result<Self> {
-        // Ensure collection exists
-        memory::ensure_collection(&qdrant_client, &config.collection_name).await?;
+        // Ensure the collection exists with the configured vector size; a
+        // model change alone must not silently leave a 384-dim collection.
+        memory::ensure_collection(
+            &qdrant_client,
+            &config.collection_name,
+            config.embedding_dim,
+        )
+        .await?;
 
         let embedding = crate::embedding::EmbeddingClient::from_config(&config)?;
         if !embedding.is_enabled() {
@@ -350,21 +356,103 @@ pub mod memory {
             .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?)
     }
 
-    pub async fn ensure_collection(client: &Qdrant, name: &str) -> Result<()> {
+    /// Reject a nonsensical configured dimension before touching Qdrant.
+    /// `0` can never be a valid vector size and usually means an invalid
+    /// `JARVIS_CONTEXT_EMBEDDING_DIM` value.
+    pub(super) fn validate_embedding_dim(name: &str, embedding_dim: usize) -> Result<()> {
+        if embedding_dim == 0 {
+            anyhow::bail!(
+                "JARVIS_CONTEXT_EMBEDDING_DIM must be greater than zero \
+                 (got {embedding_dim}); cannot use it for collection '{name}'"
+            );
+        }
+        Ok(())
+    }
+
+    /// Compare an existing collection's real vector size with the configured
+    /// value. Qdrant cannot resize an existing collection, so a mismatch fails
+    /// fast with an actionable message instead of surfacing later as an opaque
+    /// upsert/search error. An unreadable dimension only warns: keep starting
+    /// rather than blocking deployments against older servers.
+    pub(super) fn check_existing_dimension(
+        name: &str,
+        expected: usize,
+        actual: Option<u64>,
+    ) -> Result<()> {
+        match actual {
+            Some(actual) if actual != expected as u64 => anyhow::bail!(
+                "Qdrant collection '{name}' has vector dimension {actual}, but \
+                 JARVIS_CONTEXT_EMBEDDING_DIM is {expected}. Set the env var to \
+                 {actual} to match the collection, or recreate the collection \
+                 for the new embedding model."
+            ),
+            Some(_) => Ok(()),
+            None => {
+                warn!(
+                    "could not determine vector dimension of Qdrant collection '{name}'; \
+                     assuming configured embedding_dim={expected}"
+                );
+                Ok(())
+            }
+        }
+    }
+
+    /// Extract the dense vector size from a collection-info response.
+    /// `None` when the server omitted the config or the collection uses
+    /// multiple named vectors (no single dimension to compare against).
+    pub(super) fn configured_vector_size(
+        info: &qdrant_client::qdrant::CollectionInfo,
+    ) -> Option<u64> {
+        use qdrant_client::qdrant::vectors_config::Config;
+        let vectors = info
+            .config
+            .as_ref()?
+            .params
+            .as_ref()?
+            .vectors_config
+            .as_ref()?;
+        match vectors.config.as_ref()? {
+            Config::Params(params) => Some(params.size),
+            Config::ParamsMap(params_map) => {
+                let mut sizes = params_map.map.values().map(|params| params.size);
+                let first = sizes.next()?;
+                sizes.next().is_none().then_some(first)
+            }
+        }
+    }
+
+    pub async fn ensure_collection(
+        client: &Qdrant,
+        name: &str,
+        embedding_dim: usize,
+    ) -> Result<()> {
+        validate_embedding_dim(name, embedding_dim)?;
+
         let collections = client
             .list_collections()
             .await
             .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
         if !collections.collections.iter().any(|c| c.name == name) {
+            let vectors = VectorParamsBuilder::new(embedding_dim as u64, Distance::Cosine);
             client
-                .create_collection(
-                    CreateCollectionBuilder::new(name)
-                        .vectors_config(VectorParamsBuilder::new(384, Distance::Cosine)),
-                )
+                .create_collection(CreateCollectionBuilder::new(name).vectors_config(vectors))
                 .await
                 .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
+            return Ok(());
         }
-        Ok(())
+
+        // Existing collection: measure its vector size and fail fast on a
+        // mismatch rather than letting upsert/search fail with an opaque error.
+        match client.collection_info(name).await {
+            Ok(info) => {
+                let actual = info.result.as_ref().and_then(configured_vector_size);
+                check_existing_dimension(name, embedding_dim, actual)
+            }
+            Err(error) => {
+                warn!("could not inspect Qdrant collection '{name}' dimension: {error}");
+                Ok(())
+            }
+        }
     }
 
     pub async fn upsert_vector(
@@ -628,6 +716,79 @@ mod tests {
             (Some("42".to_string()), HashMap::new()),
         ];
         assert!(entries_from_raw_points(points).is_empty());
+    }
+
+    #[test]
+    fn configured_embedding_dim_defaults_to_384() {
+        assert_eq!(crate::config::ContextConfig::default().embedding_dim, 384);
+    }
+
+    #[test]
+    fn zero_embedding_dim_is_rejected_before_qdrant_access() {
+        let err = memory::validate_embedding_dim("jarvis_memories", 0)
+            .expect_err("a zero dimension can never create a valid collection");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("JARVIS_CONTEXT_EMBEDDING_DIM"),
+            "{message}"
+        );
+        assert!(message.contains("jarvis_memories"), "{message}");
+    }
+
+    #[test]
+    fn existing_collection_dimension_mismatch_is_an_actionable_error() {
+        assert!(
+            memory::check_existing_dimension("jarvis_memories", 768, Some(768)).is_ok(),
+            "a matching dimension is accepted"
+        );
+
+        let err = memory::check_existing_dimension("jarvis_memories", 768, Some(384))
+            .expect_err("a 384-dim collection cannot serve a 768-dim model");
+        let message = format!("{err:#}");
+        assert!(message.contains("jarvis_memories"), "{message}");
+        assert!(message.contains("384"), "{message}");
+        assert!(message.contains("768"), "{message}");
+        assert!(
+            message.contains("JARVIS_CONTEXT_EMBEDDING_DIM"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn unknown_existing_dimension_only_warns() {
+        assert!(
+            memory::check_existing_dimension("jarvis_memories", 384, None).is_ok(),
+            "older servers may omit the config; warn and keep starting"
+        );
+    }
+
+    #[test]
+    fn configured_vector_size_reads_dense_collection_config() {
+        use qdrant_client::qdrant::vectors_config::Config;
+        use qdrant_client::qdrant::{
+            CollectionConfig, CollectionInfo, CollectionParams, VectorParams, VectorsConfig,
+        };
+
+        let info = CollectionInfo {
+            config: Some(CollectionConfig {
+                params: Some(CollectionParams {
+                    vectors_config: Some(VectorsConfig {
+                        config: Some(Config::Params(VectorParams {
+                            size: 768,
+                            ..Default::default()
+                        })),
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(memory::configured_vector_size(&info), Some(768));
+        assert_eq!(
+            memory::configured_vector_size(&CollectionInfo::default()),
+            None
+        );
     }
 }
 

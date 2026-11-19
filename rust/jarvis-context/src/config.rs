@@ -7,6 +7,17 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+/// Compiled default for [`ContextConfig::embedding_dim`].
+///
+/// A bare `#[serde(default)]` would resolve to `usize::default() == 0` for
+/// legacy TOML files that omit the key, which would create a zero-sized Qdrant
+/// collection. A named serde default keeps legacy deployments on 384
+/// (`sentence-transformers/all-MiniLM-L6-v2`) until they explicitly set
+/// `JARVIS_CONTEXT_EMBEDDING_DIM`.
+fn default_embedding_dim() -> usize {
+    384
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextConfig {
     pub grpc_addr: String,
@@ -16,6 +27,11 @@ pub struct ContextConfig {
     pub qdrant_api_key: Option<String>,
     pub collection_name: String,
     pub embedding_model: String,
+    /// Vector size of the Qdrant collection. Must match the output dimension
+    /// of `embedding_model`; changing only the model leaves a mismatched
+    /// collection that fails on upsert/search.
+    #[serde(default = "default_embedding_dim")]
+    pub embedding_dim: usize,
     pub embedding_url: Option<String>,
     pub pii_patterns_path: String,
     pub max_context_tokens: usize,
@@ -75,6 +91,7 @@ impl Default for ContextConfig {
             qdrant_api_key: None,
             collection_name: "jarvis_memories".into(),
             embedding_model: "sentence-transformers/all-MiniLM-L6-v2".into(),
+            embedding_dim: default_embedding_dim(),
             embedding_url: None,
             pii_patterns_path: "/etc/jarvis/pii_patterns.toml".into(),
             max_context_tokens: 8000,
@@ -202,5 +219,48 @@ max_context_tokens = 8000
             .extract()
             .expect("explicit pg_url parses");
         assert_eq!(config.pg_url(), "postgres://db.internal:5432/custom_db");
+    }
+
+    /// A legacy config (no `embedding_dim` key) must still land on 384 rather
+    /// than `usize::default() == 0`, otherwise the collection would be created
+    /// with a zero-sized vector.
+    #[test]
+    fn legacy_config_without_embedding_dim_defaults_to_384() {
+        let config: ContextConfig = Figment::from(Toml::string(LEGACY_TOML))
+            .extract()
+            .expect("legacy config parses");
+        assert_eq!(config.embedding_dim, 384);
+        assert_eq!(ContextConfig::default().embedding_dim, 384);
+    }
+
+    #[test]
+    fn embedding_dim_from_toml_is_preserved() {
+        let toml = format!("{LEGACY_TOML}\nembedding_dim = 768\n");
+        let config: ContextConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("explicit embedding_dim parses");
+        assert_eq!(config.embedding_dim, 768);
+    }
+
+    /// `JARVIS_CONTEXT_EMBEDDING_DIM` reaches the field through the same
+    /// `Env::prefixed("JARVIS_CONTEXT_")` chain as `load()`. Figment's Env
+    /// parses an unsigned-integer string into a numeric value, so a numeric
+    /// figment value models the env override without mutating the OS env.
+    #[test]
+    fn embedding_dim_env_key_maps_to_field() {
+        const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
+        const ENV_KEY: &str = "JARVIS_CONTEXT_EMBEDDING_DIM";
+
+        let field = ENV_KEY
+            .strip_prefix(ENV_PREFIX)
+            .expect("key uses the context env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "embedding_dim");
+
+        let config: ContextConfig = Figment::from(Toml::string(LEGACY_TOML))
+            .merge(Serialized::default(field.as_str(), 768u64))
+            .extract()
+            .expect("env-style key merges into embedding_dim");
+        assert_eq!(config.embedding_dim, 768);
     }
 }
