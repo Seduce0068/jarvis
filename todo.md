@@ -561,7 +561,7 @@ generated:
   `rust/scripts/restore.rs:194-216` / R4-DR2 / 重大度 high / confirmed。
 - [ ] **`store_memory` が呼び出し側指定 id で既存メモリを無条件上書き** — 根拠
   `rust/jarvis-context/src/http.rs:133-136` / R3-AU2 / 重大度 high / confirmed。
-- [ ] **承認 UI の approve/deny POST 成功経路とトークン送出が無テスト** — 根拠
+- [x] **承認 UI の approve/deny POST 成功経路とトークン送出が無テスト**（2026-11-19 対応済み: `approve_2xx_is_ok_and_sends_token` / `deny_2xx_is_ok_and_sends_token` を追加し 2xx → Ok と `X-Jarvis-Approval-Token` 送出を検証。`make ui-test` 16 tests pass、反復実行でも安定） — 根拠
   `ui/src/policy_client.rs:131-146` / R3-TQ4 / 重大度 high / confirmed。
 - [x] **承認トークンの SECURITY NOTE が実在しない環境変数名を記載**（2026-11-19 対応済み: コメントを `JARVIS_POLICY_APPROVAL_API_TOKEN` へ修正。`config.rs:57` の `Env::prefixed("JARVIS_POLICY_")` とフィールド `approval_api_token` から実名を確認。`ci-local` exit 0） — 根拠
   `rust/jarvis-policy/src/http.rs:73-79` / R5-DC1 / 重大度 high / confirmed。
@@ -571,30 +571,30 @@ generated:
   `rust/jarvis-policy/src/approval.rs:109-113` / R5-VU1 / 重大度 high / confirmed。
 - [x] **kill switch の非常停止ログが永続化失敗後の実状態と矛盾**（2026-11-19 対応済み: `persist()` を `Result<()>` 化し全失敗経路で fail-closed の `arm()` を維持した上で Err を返す。`activate()` は未永続化時に「NOT PERSISTED」warn を出し、成功時のみ従来ログ。新規回帰テスト追加、kill_switch 関連 12 tests pass） — 根拠
   `rust/jarvis-policy/src/kill_switch.rs:61-65` / R5-VU1 / 重大度 high / confirmed。
-- [ ] **現行ローカルバックアップが Git リポジトリを含まない** — 根拠
+- [x] **現行ローカルバックアップが Git リポジトリを含まない**（2026-11-19 対応済み: `backup-local.sh` が既定で `git archive HEAD` を生成し manifest に name/size/sha256 を記録、`--skip-git` で opt-out。tracked HEAD のみで `.env` / `*.key` / `.git/config` は非包含を fail-closed 検証。隔離ディレクトリでの実バックアップ成功。**ただし timer unit が `--repo-dir` を渡さないため実機 timer 実行時は WARN スキップ — 下記「補足発見」を参照**） — 根拠
   `infra/README.md:274-279` / R5-VU3 / 重大度 high / confirmed。
 - [ ] **`web.fetch` の宛先ドメイン制限（egress allowlist）が未実装** — 根拠
   `docs/integration/tool-matrix.md:162` / R1-ST4 / 重大度 high / confirmed。
 - [ ] **`review-run.sh` のランナー契約が OpenCode CLI 形で固定され ADR-0002 と矛盾** — 根拠
   `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed。
-- [ ] **埋め込み失敗を空検索結果に変換して成功を返す** — 根拠
+- [x] **埋め込み失敗を空検索結果に変換して成功を返す**（2026-11-19 対応済み: `query_embedding_outcome()` を新設し endpoint 未設定は明示 skip、設定済み embed() 失敗は `anyhow::Context` 付きで Err 伝播。公開シグネチャ不変、回帰テスト5件追加。full tests / clippy / ci-local exit 0） — 根拠
   `rust/jarvis-context/src/builder.rs:115-121` / R2-ER2 / 重大度 high / confirmed。
-- [ ] **`expires_at` 付きメモリが失効後も検索・直近コンテキストに混入** — 根拠
+- [x] **`expires_at` 付きメモリが失効後も検索・直近コンテキストに混入**（2026-11-19 対応済み: `is_expired` / `retain_unexpired` を追加し `expires_at <= now`（UTC・境界包含）を失効と判定。SQL と Rust の両方でフィルタ、Qdrant 関連度順は維持。UTC 境界・順序保持の回帰テスト追加、full tests pass） — 根拠
   `rust/jarvis-context/proto/context.proto:28` / R2-FG2 / 重大度 high / confirmed。
 - [ ] **バックアップ/リストアが Qdrant コレクション名をハードコード** — 根拠
   `rust/jarvis-context/src/config.rs:17` / R2-FG2 / 重大度 high / confirmed。
-- [ ] **`kill_switch::arm()` が `SystemTime::duration_since` を unwrap し非常停止経路が abort** — 根拠
+- [x] **`kill_switch::arm()` が `SystemTime::duration_since` を unwrap し非常停止経路が abort**（2026-11-19 対応済み: unwrap を match に置換し、時計失敗時は `activated_at=0` センチネルと CLOCK_FAILURE_REASON を記録して fail-closed を維持。正常時は既存挙動不変、kill_switch 関連12 tests pass） — 根拠
   `rust/jarvis-policy/src/kill_switch.rs:126-129` / R2-ER1 / 重大度 high / likely。
-- [ ] **PII パターン設定の読み込み・解析失敗が黙ってデフォルトへフォールバック** — 根拠
+- [x] **PII パターン設定の読み込み・解析失敗が黙ってデフォルトへフォールバック**（2026-11-19 対応済み: I/O 失敗・解析失敗を構造化 `warn!`（path + error）へ変更し、既定の fail-closed デフォルトパターン適用は維持。既存 PII テスト5件 pass） — 根拠
   `rust/jarvis-context/src/pii.rs:25-27` / R1-AR2 / 重大度 high / confirmed。
-- [ ] **`secret_scan.py` が追跡ファイルの読み取り失敗を黙ってスキップ** — 根拠
+- [x] **`secret_scan.py` が追跡ファイルの読み取り失敗を黙ってスキップ**（2026-11-19 対応済み: `errors` リストに記録し末尾でゲート失敗。出力はパスと例外クラス名のみで値は非開示。実機で壊れた symlink を投入し exit 1 を確認、`make secret-scan` / `test-legacy-guards` pass） — 根拠
   `ci/scripts/secret_scan.py:61-64` / R2-ER2 / 重大度 high / likely。
 - [ ] **OpenCode の秘密ファイル read deny が bash allow で実質無効化** — 根拠
   `infra/config/opencode/opencode.jsonc:17-19` / R1-AR3 / 重大度 high / confirmed。
 
 ### 優先度 中
 
-- [ ] gRPC Check が不正 JSON コンテキストを空 Object にフォールバック — `policy/src/grpc.rs:27` / R1-AR1 / confirmed（既存 P2-1 と別経路）
+- [x] gRPC Check が不正 JSON コンテキストを空 Object にフォールバック — 2026-11-19 対応済み: `Status::invalid_argument` へ変換し回帰テスト2件追加（不正 JSON 拒否・正常系受理）。`policy/src/grpc.rs:27` / R1-AR1 / confirmed（既存 P2-1 と別経路）
 - [ ] kill switch の永続化失敗が unauthenticated として返される — `kill_switch.rs:147-150` / R2-ER1 / confirmed
 - [ ] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
 - [ ] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — `policy/src/policy.rs:101-107` / R2-ER1 / likely
@@ -604,7 +604,7 @@ generated:
 - [ ] バックアップの旧ファイル削除が失敗を無視して件数を成功報告 — `backup.rs:331` / R2-ER2 / confirmed
 - [ ] deploy がビナリ・スクリプト欠落を警告スキップして完了報告 — `deploy.rs:308-311` / R2-ER2 / confirmed
 - [ ] gRPC EmitEvent が不正入力をデフォルト値に置換して success を返す — `event/src/grpc.rs:27-32` / R2-ER2 / confirmed
-- [ ] WS 受信エラーに生メッセージ本文を埋め込みログへ流出 — `event/src/sources.rs:248-249` / R2-ER2 / likely
+- [x] WS 受信エラーに生メッセージ本文を埋め込みログへ流出 — 2026-11-19 対応済み: `decode_ha_message()` ヘルパでエラーを再構成し source/bytes/エラー分類のみを記録。回帰テストで本文・トークン様文字列の非漏洩を検証（テスト文字列は secret scanner に VALUE-LIKE と誤検出されない値へ調整） / `event/src/sources.rs:248-249` / R2-ER2 / likely
 - [ ] `restore.rs` の `restart_services` が systemctl start のみで再起動していない — `restore.rs:408` / R2-FG2 / confirmed
 - [ ] `deploy.rs --dry-run` がヘルスチェック未実行なのに healthy と報告 — `deploy.rs:164` / R2-FG2 / confirmed
 - [ ] Cedar 認可コンテキストが生のツール引数で呼び出し元が ABAC 属性を捏造可能 — `mcp-gw/src/lib.rs:86-89` / R3-AU1 / likely
@@ -660,3 +660,14 @@ generated:
     改善したが、**実バックアップセットは依然として見つからない**。
   - 復元演習の前に、`restore.rs` をローカルバックアップ体系へ接続する
     （またはレガシー rclone 経路を明示的に廃止する）必要がある。
+
+- [ ] **timer unit が `--repo-dir` を渡さず Git バックアップがスキップされる** — 根拠
+  `infra/systemd/jarvis-backup.service:11`, `infra/scripts/backup-local.sh:112-127` /
+  R4 レビュー（イテレーション4） / 重大度 high / confirmed。
+  - `backup-local.sh` は既定で `git archive HEAD` を生成するが、
+    実機 unit は `/opt/jarvis/scripts/backup-local.sh` を実行するため
+    近傍に git repo が無く、auto-detect が失敗して WARN を出し
+    Git のみスキップする。
+  - 実機 timer で Git を必ず含めるには `ExecStart` に
+    `--repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis` を追加し、
+    root で unit を再適用する必要がある（ユーザー実行が必要）。
