@@ -1839,3 +1839,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、I64-A pristine 一時ツリーへの evidence/index.md
   コピー漏れ（safety-test fail）、event ログキャプチャのフレーキ再実行。
+
+### Round 63（R4 で修正済み）
+
+- [x] migration 005 の死信保持に振る舞いテストが無い（confirmed high）→
+  永続化ミラーのモックで「行が残り list が除外」を検証、既存の削除期待を
+  保持期待へ更新、Pg UPDATE SQL の静的ガード追加。
+- [x] dead-letter カウンタが永続化前に increment（medium）→ 成功後に移動、
+  失敗専用カウンタを分離。
+- [x] attempts 上限到達行がサイレント除外（medium）→ `vector_state='exhausted'`
+  永続化、ゲージを pending/exhausted に分割、backfill 追加。
+- [x] シナリオ step カバレッジ（`SCENARIO_STEP_UNCOVERED`）と migration unit
+  コメント through 005 を追加。
+
+### Round 63 の残り指摘（未対応）
+
+- [ ] Round 61 の4証跡の notes に BareJson／415／413／no-leak キーワードが
+  未同期（medium）— 現在 `BASELINE_CONTRACT_STEPS` で grandfather 中。
+  notes へ実測キーワードを追記し baseline を削除して strict 化する。
+- [ ] 4サービスの `status_label` が 413/415 を "other" に丸め（medium）—
+  Round 62 の 400/413 分離がメトリクスで観測不能。ラベル追加＋cross-crate
+  回帰。
+- [ ] UnknownBodyError→400 が4仕様・証跡に未反映（low）— 3種→4種へ修正。
+- [ ] /health の `.trim()` が「完全バイト一致」契約と矛盾（low）— trim を
+  外すか doc／仕様を trim 許容へ揃える。
+
+- 親が対応: fmt 差分、clippy `collapsible_if`（let-chain 化）、shellcheck
+  SC2016（SQL プレースホルダのリテラル一致）。
