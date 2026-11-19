@@ -10,9 +10,9 @@
 # seven-column Traceability header, the six 29119-3 information items in
 # Document map, and a tailored conformance statement (test-spec skill).
 # Evidence timestamps must be RFC 3339, signatures self-attested, and
-# document_type (when present) one of the declared kinds. Notes counts must
-# agree with results.passed/failed/skipped, so a multi-gate claim cannot drift
-# away from the single aggregated total. The executed total must also cover
+# document_type (when present) one of the declared kinds. Every notes count
+# must agree with results.passed/failed/skipped, so a multi-gate claim cannot
+# drift away from the single aggregated total. The executed total must also cover
 # every `Scenario:` declared by the referenced spec, so a run that executes
 # only part of a specification cannot pass. Values are withheld from error
 # output; no secret values are read.
@@ -97,12 +97,12 @@ for f in evidence_files:
         notes = d.get("notes", "")
         if not isinstance(notes, str) or "ignored" not in notes.lower():
             errors.append(f"{f}: SKIPPED_TESTS"); continue
-    # Notes/results consistency. An explicit "N passed", "N failed" or
-    # "N ignored|skipped" phrase, plus the headline count ("N 件", "N checks",
-    # "N テスト"), must agree with results. This catches evidence whose notes
-    # report two different gate totals while results aggregates only one.
-    # Notes are optional; only value-less error codes are emitted, so no count
-    # is ever printed.
+    # Notes/results consistency. EVERY explicit "N passed", "N failed" or
+    # "N ignored|skipped" phrase, plus EVERY headline count ("N 件", "N checks",
+    # "N テスト"), must agree with results. finditer enumerates all matches: a
+    # second, contradictory count must not hide behind the first one (e.g.
+    # "23 checks ... 22 checks ... 23 passed"). Notes are optional; only
+    # value-less error codes are emitted, so no count is ever printed.
     notes = d.get("notes", "")
     if isinstance(notes, str):
         for label, key, fallback in (
@@ -111,18 +111,24 @@ for f in evidence_files:
             ("ignored", "skipped", 0),
             ("skipped", "skipped", 0),
         ):
-            m = re.search(r'(\d+)\s*' + label, notes, re.IGNORECASE)
-            if m:
-                expected = r.get(key, fallback)
+            expected = r.get(key, fallback)
+            mismatch = False
+            for m in re.finditer(r'(\d+)\s*' + label, notes, re.IGNORECASE):
                 if type(expected) is not int or int(m.group(1)) != expected:
-                    errors.append(f"{f}: NOTES_{label.upper()}_MISMATCH")
+                    mismatch = True
                     break
+            if mismatch:
+                errors.append(f"{f}: NOTES_{label.upper()}_MISMATCH")
+                break
         else:
-            m = re.search(r'(\d+)\s*(?:件|checks?|テスト)', notes)
-            if m:
-                expected = r.get("passed")
+            expected = r.get("passed")
+            mismatch = False
+            for m in re.finditer(r'(\d+)\s*(?:件|checks?|テスト)', notes):
                 if type(expected) is not int or int(m.group(1)) != expected:
-                    errors.append(f"{f}: NOTES_COUNT_MISMATCH")
+                    mismatch = True
+                    break
+            if mismatch:
+                errors.append(f"{f}: NOTES_COUNT_MISMATCH")
     ref = d.get("test_basis_ref")
     if not isinstance(ref, dict) or not ref.get("spec_path"):
         errors.append(f"{f}: NO_SPEC_PATH"); continue

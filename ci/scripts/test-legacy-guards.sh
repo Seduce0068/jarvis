@@ -129,6 +129,15 @@ elif mode == 'failed_bool':
     data['results']['failed'] = False
 elif mode == 'passed_bool':
     data['results']['passed'] = True
+elif mode in ('notes_count_conflict', 'notes_passed_conflict'):
+    # Keep the original (correct) count, then append a contradictory second
+    # one. A gate using re.search would see only the first count and pass;
+    # the fixed gate uses re.finditer and must reject both variants.
+    conflict = int(data['results']['passed']) + 1
+    suffix = 'checks' if mode == 'notes_count_conflict' else 'passed'
+    notes = data.get('notes', '')
+    data['notes'] = (notes + ' ' + str(conflict) + ' ' + suffix + '.') \
+        if isinstance(notes, str) else (str(conflict) + ' ' + suffix + '.')
 else:
     raise SystemExit('unknown tamper mode: ' + mode)
 with open(dst, 'w', encoding='utf-8') as fh:
@@ -156,7 +165,10 @@ else
     fail=$((fail+1))
   fi
 
-  for mode in hash failed empty_passed timestamp calendar failed_bool passed_bool; do
+  # notes_* modes add a second, conflicting count to otherwise valid notes:
+  # they verify that the gate validates every count match, not only the first.
+  for mode in hash failed empty_passed timestamp calendar failed_bool passed_bool \
+              notes_count_conflict notes_passed_conflict; do
     if ! tamper_evidence "$source_json" "$evidence_copy" "$mode"; then
       echo "  FAIL: could not prepare tampered evidence ($mode)"
       fail=$((fail+1))
@@ -173,6 +185,8 @@ else
       calendar) pattern='BAD_TIMESTAMP' ;;
       failed_bool) pattern='FAILED_TESTS' ;;
       passed_bool) pattern='NO_PASSING_TESTS' ;;
+      notes_count_conflict) pattern='NOTES_COUNT_MISMATCH' ;;
+      notes_passed_conflict) pattern='NOTES_PASSED_MISMATCH' ;;
     esac
     if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
       echo "  PASS: check-evidence.sh rejects tampered $mode"
