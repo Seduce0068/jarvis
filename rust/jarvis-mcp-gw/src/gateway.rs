@@ -27,14 +27,14 @@ use crate::error::McpGatewayError;
 use anyhow::{Context, Result};
 use rmcp::model::CallToolRequestParam;
 use rmcp::service::RunningService;
-use rmcp::transport::{IntoTransport, TokioChildProcess};
+use rmcp::transport::IntoTransport;
 use rmcp::{RoleClient, ServiceExt};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::process::{Child, Command};
+use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
 /// Upper bound for the MCP `initialize` handshake plus `tools/list`
@@ -48,13 +48,106 @@ fn client_error(message: impl Into<String>) -> anyhow::Error {
     McpGatewayError::ClientError(message.into()).into()
 }
 
+/// Owner of the OS process backing a registered MCP server.
+///
+/// `rmcp`'s `TokioChildProcess` consumes the `Command` and does not expose a
+/// `try_wait()` handle, so the gateway spawns the child itself and keeps it
+/// here. Dropping the handle kills the child, preserving the "a failed or
+/// replaced registration never leaves an orphan" property that
+/// `TokioChildProcess` used to provide via its own drop cleanup.
+struct ChildHandle {
+    child: Mutex<Child>,
+}
+
+impl ChildHandle {
+    fn new(child: Child) -> Self {
+        Self {
+            child: Mutex::new(child),
+        }
+    }
+
+    /// `true` means the process exited **or** its status could not be read.
+    /// Both outcomes are treated as dead so callers fail closed.
+    async fn is_dead(&self) -> bool {
+        let mut child = self.child.lock().await;
+        match child.try_wait() {
+            Ok(None) => false,
+            Ok(Some(_)) | Err(_) => true,
+        }
+    }
+
+    /// Best-effort synchronous kill for the drop/replacement paths, where an
+    /// async lock cannot be awaited. If the lock is briefly contended, the
+    /// final `Drop` still performs the kill once the probe releases it.
+    fn kill(&self) {
+        if let Ok(mut child) = self.child.try_lock() {
+            let _ = child.start_kill();
+        }
+    }
+}
+
+impl Drop for ChildHandle {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// How liveness is determined for a registered server.
+// `NoChild` is used by the transport-only registration helper below, which
+// is exercised by tests; keep it available without triggering dead_code.
+#[allow(dead_code)]
+enum ProcessLiveness {
+    /// Transport-only registration (e.g. the in-memory duplex used by tests).
+    /// There is no OS process, so nothing can die out from under us.
+    NoChild,
+    /// A real child process; checked with `try_wait()` before tool execution.
+    Child(Box<ChildHandle>),
+    /// Test-only probe. Holds a state code so the regression tests can
+    /// simulate both "exited" and "status unknown" without spawning a real
+    /// subprocess.
+    #[cfg(test)]
+    Mock(Arc<std::sync::atomic::AtomicU8>),
+}
+
+#[cfg(test)]
+const MOCK_LIVENESS_RUNNING: u8 = 0;
+#[cfg(test)]
+const MOCK_LIVENESS_EXITED: u8 = 1;
+#[cfg(test)]
+const MOCK_LIVENESS_ERROR: u8 = 2;
+
+impl ProcessLiveness {
+    async fn is_dead(&self) -> bool {
+        match self {
+            Self::NoChild => false,
+            Self::Child(handle) => handle.is_dead().await,
+            #[cfg(test)]
+            Self::Mock(state) => match state.load(std::sync::atomic::Ordering::SeqCst) {
+                MOCK_LIVENESS_RUNNING => false,
+                MOCK_LIVENESS_EXITED | MOCK_LIVENESS_ERROR => true,
+                // Unknown probe values also fail closed.
+                _ => true,
+            },
+        }
+    }
+
+    fn kill(&self) {
+        if let Self::Child(handle) = self {
+            handle.kill();
+        }
+    }
+}
+
 /// An upstream MCP server registered with the gateway.
 struct RegisteredServer {
     /// Live rmcp client. Dropping it cancels the background task, which
-    /// drops the transport and kills the child process.
+    /// drops the transport and closes its side of the child's stdio.
     client: RunningService<RoleClient, ()>,
     /// Tool names advertised by the server at registration time.
     tools: HashSet<String>,
+    /// Liveness probe for the backing process (if the server was spawned as
+    /// a child). Consulted before every tool call.
+    liveness: ProcessLiveness,
 }
 
 #[allow(dead_code)]
@@ -97,7 +190,29 @@ impl Gateway {
             .ok_or_else(|| anyhow::anyhow!("Tool config not found: {}", tool))?;
 
         let server = {
-            let servers = self.servers.read().await;
+            let mut servers = self.servers.write().await;
+
+            // Check liveness before routing. A registration whose backing
+            // process has exited must be removed, otherwise its tools keep
+            // being advertised and routed to a dead server forever. A
+            // `try_wait()` error is handled the same way (fail closed).
+            let mut dead: Vec<(String, Arc<RegisteredServer>)> = Vec::new();
+            for (name, server) in servers.iter() {
+                if server.liveness.is_dead().await {
+                    dead.push((name.clone(), Arc::clone(server)));
+                }
+            }
+            for (name, _) in &dead {
+                servers.remove(name);
+            }
+
+            if let Some((name, _)) = dead.iter().find(|(_, server)| server.tools.contains(tool)) {
+                return Err(client_error(format!(
+                    "MCP server '{name}' backing tool '{tool}' is no longer running; \
+                     its registration was removed"
+                )));
+            }
+
             servers
                 .values()
                 .find(|server| server.tools.contains(tool))
@@ -139,10 +254,31 @@ impl Gateway {
         // BWS_ACCESS_TOKEN from `bws run`) to an upstream MCP child. Keep
         // only the variables required to locate/run a normal subprocess.
         crate::subprocess::apply_minimal_env(&mut cmd);
-        let transport = TokioChildProcess::new(cmd)
+
+        // Spawn the child ourselves so we retain a `Child` for `try_wait()`
+        // liveness checks. `rmcp` does not expose the child held by its
+        // `TokioChildProcess`, so the transport is built from the child's
+        // stdio instead. `ChildHandle::drop` kills the child if registration
+        // fails before it is stored.
+        let mut child = cmd
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
             .with_context(|| format!("Failed to spawn MCP server '{name}' ({program})"))?;
 
-        self.register_transport(name, transport).await
+        let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
+            (Some(stdin), Some(stdout)) => (stdin, stdout),
+            _ => {
+                let _ = child.start_kill();
+                return Err(anyhow::anyhow!(
+                    "MCP server '{name}' ({program}) did not expose stdio pipes"
+                ));
+            }
+        };
+
+        let liveness = ProcessLiveness::Child(Box::new(ChildHandle::new(child)));
+        self.register_transport_inner(name, (stdout, stdin), liveness)
+            .await
     }
 
     /// Connect an already-built transport as the server `name`.
@@ -152,7 +288,26 @@ impl Gateway {
     /// process. Both paths therefore share the duplicate-tool-name check
     /// below: a name advertised by another registered server is rejected
     /// instead of silently making `execute` routing order-dependent.
+    #[allow(dead_code)] // transport-only registration is used by tests
     pub(crate) async fn register_transport<T, E, A>(&self, name: &str, transport: T) -> Result<()>
+    where
+        T: IntoTransport<RoleClient, E, A>,
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        // In-memory transports have no OS process to monitor; tests that need
+        // to exercise liveness call `register_transport_inner` directly.
+        self.register_transport_inner(name, transport, ProcessLiveness::NoChild)
+            .await
+    }
+
+    /// Connect `transport` as `name`, attaching `liveness` as the probe used
+    /// by [`Self::execute`] to detect a dead backing process.
+    async fn register_transport_inner<T, E, A>(
+        &self,
+        name: &str,
+        transport: T,
+        liveness: ProcessLiveness,
+    ) -> Result<()>
     where
         T: IntoTransport<RoleClient, E, A>,
         E: std::error::Error + Send + Sync + 'static,
@@ -206,12 +361,14 @@ impl Gateway {
             Arc::new(RegisteredServer {
                 client,
                 tools: tool_names,
+                liveness,
             }),
         );
 
         if let Some(previous) = previous {
-            // Replace semantics: dropping the old client cancels its
-            // background task and kills the child process.
+            // Replace semantics: kill the old child (if any) and drop the old
+            // client to cancel its background task before it can be routed to.
+            previous.liveness.kill();
             drop(previous);
             info!(server = name, "Replaced existing MCP server registration");
         }
@@ -319,6 +476,24 @@ requires_approval = false
         Gateway::new(config, allowlist, sandbox).await.unwrap()
     }
 
+    /// Register `name` with a mock liveness probe instead of a real child
+    /// process. The mock duplex keeps its lifetime inside this helper's
+    /// caller: the server task owns `server_side`, while the rmcp client kept
+    /// in `RegisteredServer` owns `client_side` through `register_transport_inner`.
+    async fn register_with_mock_liveness(
+        gateway: &Gateway,
+        name: &str,
+    ) -> Arc<std::sync::atomic::AtomicU8> {
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_mock_mcp_server(server_side, "echo", false));
+        let state = Arc::new(std::sync::atomic::AtomicU8::new(MOCK_LIVENESS_RUNNING));
+        gateway
+            .register_transport_inner(name, client_side, ProcessLiveness::Mock(Arc::clone(&state)))
+            .await
+            .expect("registration succeeds");
+        state
+    }
+
     #[tokio::test]
     async fn registered_server_tools_are_routed_to_the_mcp_client() {
         let gateway = test_gateway("routes").await;
@@ -368,6 +543,64 @@ requires_approval = false
             .await
             .expect("tool call succeeds after replacement");
         assert_eq!(result["content"][0]["text"], "pong");
+    }
+
+    /// Regression: once the process backing a registration is gone, the
+    /// registration must disappear and the orphan tool must return a clear
+    /// error instead of being routed to the dead server forever. The probe
+    /// reports the same outcome a real `try_wait()` would; no subprocess is
+    /// spawned in this test.
+    #[tokio::test]
+    async fn exited_child_process_registration_is_removed_and_reports_an_error() {
+        let gateway = test_gateway("dead-child").await;
+        let state = register_with_mock_liveness(&gateway, "mock").await;
+
+        assert!(gateway.servers.read().await.contains_key("mock"));
+
+        state.store(MOCK_LIVENESS_EXITED, std::sync::atomic::Ordering::SeqCst);
+
+        let error = gateway
+            .execute("echo", json!({ "message": "hi" }))
+            .await
+            .expect_err("a tool backed by a dead server fails");
+        let message = error.to_string();
+        assert!(message.contains("mock"), "names the server: {message}");
+        assert!(
+            message.contains("no longer running"),
+            "explains the cause: {message}"
+        );
+        assert!(
+            message.contains("registration was removed"),
+            "states the cleanup: {message}"
+        );
+        assert!(
+            !gateway.servers.read().await.contains_key("mock"),
+            "orphan registration removed"
+        );
+    }
+
+    /// A failed liveness probe (the `try_wait()` `Err` case) must also fail
+    /// closed: treat the process as dead, drop the registration and error out
+    /// rather than call a server whose state is unknown.
+    #[tokio::test]
+    async fn liveness_probe_error_removes_the_registration() {
+        let gateway = test_gateway("liveness-error").await;
+        let state = register_with_mock_liveness(&gateway, "mock").await;
+
+        state.store(MOCK_LIVENESS_ERROR, std::sync::atomic::Ordering::SeqCst);
+
+        let error = gateway
+            .execute("echo", json!({}))
+            .await
+            .expect_err("an unknown process state is rejected");
+        assert!(
+            error.to_string().contains("no longer running"),
+            "error: {error}"
+        );
+        assert!(
+            !gateway.servers.read().await.contains_key("mock"),
+            "registration removed on probe error"
+        );
     }
 
     #[tokio::test]
