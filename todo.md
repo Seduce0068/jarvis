@@ -1338,3 +1338,33 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   dsh.md / tool-matrix.md の tools/list 非表示記述。
 
 - 親が対応: fmt 差分、構造ガードの誤った切断位置（`#[cfg(test)]` → テストモジュール）。
+
+### Round 46（R4 で修正済み）
+
+- [x] **systemd `Environment=` の `${VAR:-default}` が展開されない**（confirmed high、
+  Runtime Proof 付き）→ `jarvis-mcp-gw.service` の BASE_DIR / EGRESS_ALLOWLIST を
+  リテラル既定値へ変更、EnvironmentFile を唯一の上書き経路と明記。
+  `check-deploy-drift.sh` に未展開 `${` の fail-closed ガード追加。
+- [x] kill switch 本体の `warn!` が自由入力 reason と `{error}` を OTLP へ送出
+  （medium）→ `reason_kind()` 共通分類で固定語彙化、PROBE 回帰2件。
+- [x] `decide()` の publish が既存決定を無条件上書き（medium）→ timeout / prune
+  と同じ勝者温存ルールを適用、Noop 競合回帰2件。
+- [x] commit_gate 1回化の新契約を spec TC-K5 / UI 状態表示へ反映（UI 46 tests）。
+
+### Round 46 の残り指摘（未対応）
+
+- [ ] OTLP 固定語彙化が policy のみ（medium）— event / context / mcp-gw の
+  `main.rs` は `.build()?` のまま。失敗時に ExporterBuildError が stderr/journal
+  へ流出。4サービスで契約統一（固定 warn＋継続、または全サービス起動失敗）。
+- [ ] Qdrant の生エラー `e.to_string()` が collection_info 以外の5経路に残存
+  （medium）— `ContextError::Qdrant(String)` を固定語彙化し、型レベルで排除。
+- [ ] `configured_vector_size` の複数 `?` が「応答未解析」を「多ベクトル」
+  と誤分類して fail-closed を迂回（medium）— Ok(None) を2意味へ分離。
+- [ ] 新規コレクション作成時に実次元を読み戻さず `Ok(())`（low）—
+  create_collection 後も collection_info で検証。
+- [ ] persistence の構造ガードが `tracing::` 文字列計数（low）— AST ベース
+  または型境界での強制へ変更。
+
+- 親が対応: ureq 3 の `Error::StatusCode`（ボディ破棄）に対応するため
+  プローブ専用 agent（`http_status_as_error(false)`）を追加。仕様変更に伴い
+  evidence を実測再生成（policy 193件）。
