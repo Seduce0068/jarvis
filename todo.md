@@ -769,3 +769,50 @@ generated:
   - read/edit のパスが cwd 外絶対パスの場合も正規化失敗で wildcard に落ちる。
   - 設定の wildcard allow を維持する以上 JSONC だけでは完全遮断不可。
     OS サンドボックス（ProtectHome 等）または実行前フックでの補完を検討。
+
+## バックログ補充（2026-11-19 Round 19 / review + discovery）
+
+8体（敵対的レビュー4・発掘4）の並列実行から得た指摘を、重複排除と
+Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照。
+
+### 優先度 高
+
+- [ ] **jarvis-context の gRPC が `admin_token` を完全にバイパス** — `rust/jarvis-context/src/grpc.rs:112-119` / B3 / 高 / confirmed。親が grep で認証コード不存在を確認。HTTP 側のみゲートしておりポート 50054 経由でメモリ読書きが無認証。
+- [ ] **Webhook・memory API・upstream エラーが tracing へ生本文を流出** — `event/normalizer.rs:236-269`, `context/http.rs:41,136,267,280`, `event/opencode.rs:90-107` / B3 / 高 / confirmed。`#[instrument(skip(payload))]` 化と `safe_error_summary()` 相当の要約が必要。
+- [x] **otelcol が journald を読めず JARVIS ログが空** — `infra/systemd/otelcol.service:9-10`, `otelcol-config.yaml:51-52` / B4 / 高 / confirmed。親が `id koppe` で systemd-journal 非所属を確認し、unit に `SupplementaryGroups=systemd-journal` を追加（systemd-analyze verify exit 0）。**実機への unit 再適用は root 必須・ユーザー実行が残る**。
+- [ ] **deploy ロールバックが退避ファイル欠落時に新規 unit/allowlist/バイナリを残す** — `infra/scripts/deploy-mcp-gw-safe.sh:28-46` / B4 / 高 / confirmed。退避コピー失敗時は die し、欠落時は install 先を削除する else 分支が必要。
+- [ ] **HTTP 型ベースエラー分類の取りこぼし（入力エラーが 500 に後退）** — `mcp-gw/src/sandbox.rs:166,178,183,227,545` / B1 / 高 / confirmed。残る bare `bail!` / `with_context` を `client_error` 系へ型化。
+- [ ] **egress allowlist が TOML 設定を黙って無視し空値で fail-open** — `mcp-gw/src/sandbox.rs:378-397,120` / B1 / 高 / confirmed。正式 config フィールドへ昇格し空値・解析不能値は fail-closed。
+- [ ] **P1-1 ベクトル検索スコアの保持** — `context/src/builder.rs:15,228` / B5 / 高。`ScoredPoint.score` を捨てている。後方互換の `score` 付与＋テスト。
+- [ ] **P1-2 PG/Qdrant 二段書き込みの補償** — `context/src/builder.rs:198` / B5 / 高。outbox＋起動時再埋め込み。
+- [ ] **P1-3 マイグレーションのバージョン管理移行** — `context/src/builder.rs:396` / B5 / 高。sqlx migrate + baseline 記録。
+- [ ] **Grafana Cloud アラート／失敗通知が未整備** — `docs/integration/remaining-tasks.md:667` / B7 / 高 / needs_user。kill switch 発動・承認タイムアウト・バックアップ失敗の通知先を確定。
+- [ ] **bws.env の復元・再配置経路が未定義** — `docs/integration/backup-restore-runbook.md:70-72,186` / B7 / 高 / needs_user。ディスク故障後にサービスが起動できない。
+- [ ] **pprof/zpages が常時有効でネットワーク制限も未判断** — `otelcol-config.yaml:144`, `otelcol.service:27-32` / B7 / 高 / needs_user。
+
+### 優先度 中
+
+- [ ] gRPC ハンドラが `ErrorKind` を無視し全エラーを `Status::internal` に変換 — `mcp-gw/src/grpc.rs:64-85` / B1 / 中。
+- [ ] tools/list の inputSchema 優先順位が実際のルーティングと逆転 — `mcp_server.rs:51-59`, `gateway.rs:223-234` / B1 / 中。
+- [ ] 承認 gauge / 一覧が期限切れ放棄エントリを prune せず過大報告 — `policy/approval.rs:155,249-256` / B2 / 中。
+- [ ] kill switch status API が無認証で自由文字列 reason / actor を開示 — `policy/http.rs:241,647-651`, `grpc.rs:50-60` / B2 / 中。
+- [ ] kill switch admin token 比較が非定数時間 — `kill_switch.rs:135,217` / B2 / 中。
+- [ ] 失効フィルタが Qdrant top-K 選択後に適用され recall が低下 — `context/builder.rs:228-259` / B3 / 中。
+- [ ] PII キー redact がキー衝突で別フィールドを上書き — `context/pii.rs:124-164` / B3 / 中。
+- [ ] check-deploy-drift がサービス停止時の E2E SKIP を OK と報告 — `check-deploy-drift.sh:169-182` / B4 / 中。
+- [ ] 日次バックアップが verify-backup を通さない（導入時のみ検証） — `install-backup-timer.sh:102-115`, `jarvis-backup.service:12` / B4 / 中。
+- [ ] check-shell が予測可能 `/tmp` パスを使用 — `check-shell.sh:25,27,39,43` / B4 / 中。
+- [x] jarvis-backup.service に `Wants=postgresql.service qdrant.service` が欠落 — 2026-11-19 対応済み: repo unit へ追加し systemd-analyze verify exit 0。**実機への unit 再適用は root 必須・ユーザー実行が残る** / `jarvis-backup.service:4` / B7 / 中 / confirmed。
+- [ ] S9 のうち隔離先統合テストのみ自動化可能 — `docs/integration/local-restore-design.md:253-255` / B5 / 中。
+- [ ] AGENTS.md の adr/ 一覧が ADR-0002/0003/0005 を欠落 — `AGENTS.md:37-39` / B8 / 中。
+- [ ] ADR-0005 の「ui-build/ui-run 追加」が実装済みなのに未完了 — `adr/0005:104` / B8 / 中。
+- [ ] ADR-0003 の web.fetch `requires_approval=false` 記述が古い — `adr/0003:35-40` / B8 / 中。
+- [ ] infra/README のバックアップ節が自己矛盾（未導入記述と導入済み記述が併存） — `infra/README.md:268-293` / B8 / 中。
+- [ ] mcp_allowlist.toml の「承認必須ツールは tools/list から非表示」コメントが旧挙動 — `infra/config/mcp_allowlist.toml:81,98,115` / B8 / 中。
+
+### メモ（要判断・却下）
+
+- **却下（既知判断）**: ADR-0002 の `store_memory` 生保存は意図的な設計判断（B5 の P0-11 提起は既存 ADR の記録どおり）。再評価はユーザー判断待ち。
+- **stale**: P0-3 は `/mcp` の server-side principal guard で対応済み（B5 / confirmed）。opt-in ガードの本番有効化は残る。
+- **speculative**: NAT64 prefix (64:ff9b::/96) と予約 IPv4 レンジの SSRF すり抜け — `sandbox.rs:484-508` / B1 / speculative。通常環境では NAT64 無く未検証。
+- **実機確認済み**: P0-6 は実機 4317/4318/8888 すべて `127.0.0.1`（B5 / confirmed）。repo テンプレートの全6リスナー版を実機へ適用するかは方針判断。
