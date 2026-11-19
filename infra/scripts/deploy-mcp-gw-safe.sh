@@ -18,6 +18,10 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 bin="$repo/rust/target/release/jarvis-mcp-gw"
 allowlist="/etc/jarvis/mcp_allowlist.toml"
 repo_allowlist="$repo/infra/config/mcp_allowlist.toml"
+# I50-A: unit が読む host override env。repo テンプレートをそのまま配置元にする
+# （テンプレート名はリネームしない）。
+env_target="/etc/jarvis/jarvis-mcp-gw.env"
+repo_env="$repo/infra/config/mcp_gateway.env"
 unit="/etc/systemd/system/jarvis-mcp-gw.service"
 repo_unit="$repo/infra/systemd/jarvis-mcp-gw.service"
 ts="$(date +%Y%m%d-%H%M%S)"
@@ -31,6 +35,16 @@ rollback() {
     install -o root -g root -m 0755 "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" /opt/jarvis/bin/jarvis-mcp-gw
   else
     rm -f /opt/jarvis/bin/jarvis-mcp-gw || true
+  fi
+  # I50-A: host override env を復元する。退避が無い場合は今回配置した先を削除し、
+  # unit のリテラル既定値へ戻す（例: egress=example.com の fail-open は戻すが、
+  # ロールバック後も check-deploy-drift.sh が DANGER を返して可視化する）。
+  if [ "${env_changed:-0}" -eq 1 ]; then
+    if [ -f "$env_target.bak-$ts" ]; then
+      cp -a "$env_target.bak-$ts" "$env_target" || true
+    else
+      rm -f "$env_target" || true
+    fi
   fi
   # /etc allowlist は step2(承認必須化パッチ) -> step3(repo版 install) の順に更新する。
   # よって復元は逆順(step3 -> step2)が必須。step2 のバックアップが元の内容を保持する。
@@ -147,7 +161,14 @@ id -u koppe >/dev/null 2>&1 || die "ユーザー koppe が存在しません（u
 python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$repo_allowlist" \
   || die "allowlist の TOML が不正です: $repo_allowlist"
 systemd-analyze verify "$repo_unit" >/dev/null 2>&1 || die "unit ファイルの検証に失敗: $repo_unit"
-echo "  user/base-dir/allowlist/unit: OK"
+[ -f "$repo_env" ] || die "env テンプレートがありません: $repo_env"
+# 必須キーが無いテンプレートを配置すると事後 check-deploy-drift.sh が必ず
+# DANGER になりロールバックするため、配置前に fail-closed で拒否する。
+grep -Eq '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$repo_env" \
+  || die "env テンプレートに JARVIS_MCP_GW_BASE_DIR がありません: $repo_env"
+grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$repo_env" \
+  || die "env テンプレートに JARVIS_MCP_GW_EGRESS_ALLOWLIST がありません: $repo_env"
+echo "  user/base-dir/allowlist/unit/env-template: OK"
 
 echo "== 1. ドリフト確認（事前・情報表示のみ） =="
 bash "$repo/infra/scripts/check-deploy-drift.sh" || true
@@ -192,8 +213,8 @@ else
   echo "== 2. web.fetch承認: 既に必須（スキップ） =="
 fi
 
-echo "== 3. unit / allowlist 同期 =="
-unit_changed=0; allowlist_changed=0
+echo "== 3. unit / allowlist / env 同期 =="
+unit_changed=0; allowlist_changed=0; env_changed=0
 if [ -f "$unit" ] && cmp -s "$unit" "$repo_unit"; then
   echo "  unit: 既に一致（スキップ）"
 else
@@ -212,6 +233,18 @@ else
     cp -a "$allowlist" "$allowlist.bak-step3-$ts" || die "退避コピー失敗: $allowlist.bak-step3-$ts"
   fi
 fi
+# I50-A: unit が読む /etc/jarvis/jarvis-mcp-gw.env を repo テンプレートから配置。
+# 既存の unit/allowlist と同じ段階別バックアップ・ドリフト判定の枠組みを使う
+# （env のみ .bak-$ts を退避名とし、ロールバックは env_changed で制御）。
+if [ -f "$env_target" ] && cmp -s "$env_target" "$repo_env"; then
+  echo "  env: 既に一致（スキップ）"
+else
+  env_changed=1
+  echo "  env: 差分あり -> $env_target を $repo_env で更新"
+  if [ "$apply" -eq 1 ] && [ -f "$env_target" ]; then
+    cp -a "$env_target" "$env_target.bak-$ts" || die "退避コピー失敗: $env_target.bak-$ts"
+  fi
+fi
 if [ "$apply" -eq 1 ]; then
   if [ "$unit_changed" -eq 1 ]; then
     install -o root -g root -m 0644 "$repo_unit" "$unit"
@@ -220,9 +253,23 @@ if [ "$apply" -eq 1 ]; then
   if [ "$allowlist_changed" -eq 1 ]; then
     install -o root -g root -m 0644 "$repo_allowlist" "$allowlist"
   fi
+  if [ "$env_changed" -eq 1 ]; then
+    # 同一ディレクトリの一時ファイルへ書いて mv で原子的に置換する。
+    # secret を含みうるため root:root 0600（systemd が root で読み込む）。
+    tmp_env="$(mktemp "$env_target.tmp.XXXXXX")" \
+      || { echo "env 一時ファイル作成失敗: $env_target" >&2; rollback; }
+    if ! install -o root -g root -m 0600 "$repo_env" "$tmp_env"; then
+      rm -f "$tmp_env" || true
+      echo "env 一時配置失敗: $repo_env -> $tmp_env" >&2
+      rollback
+    fi
+    mv -f "$tmp_env" "$env_target" \
+      || { echo "env の原子的配置失敗: $env_target" >&2; rollback; }
+  fi
 else
   [ "$unit_changed" -eq 1 ] && echo "  DRY: would install $repo_unit -> $unit and daemon-reload"
   [ "$allowlist_changed" -eq 1 ] && echo "  DRY: would install $repo_allowlist -> $allowlist"
+  [ "$env_changed" -eq 1 ] && echo "  DRY: would install $repo_env -> $env_target (root:root 0600, backup $env_target.bak-$ts)"
 fi
 
 echo "== 4. スモークテスト（systemd 外・別ポート） =="

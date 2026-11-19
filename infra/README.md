@@ -54,7 +54,7 @@ infra/
 │   │   └── opencode.jsonc
 │   ├── otelcol-config.yaml     # OpenTelemetry Collector
 │   ├── policy.env              # Policy Engine env (1Password)
-│   ├── mcp_gateway.env         # MCP Gateway env (1Password)
+│   ├── mcp_gateway.env         # MCP GW env テンプレート (op:// refs) -> /etc/jarvis/jarvis-mcp-gw.env
 │   ├── event.env               # Event Normalizer env (1Password)
 │   ├── context.env             # Context Builder env (1Password)
 │   ├── otel.env                # OTel Collector env (legacy template, op://)
@@ -213,6 +213,31 @@ policy-checked and must have an entry in `/etc/jarvis/mcp_allowlist.toml`
 #   localhost:50052 jarvis.mcp.gateway.v1.McpGatewayService/RegisterMcpServer
 ```
 
+### MCP Gateway の環境ファイル（I50-A）
+
+`jarvis-mcp-gw.service` はホスト固有の上書きを
+`EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env` から読みます。unit の
+`Environment=` 値はリテラル既定値であり、この EnvironmentFile の値が優先されます。
+repo 側の配置元は `infra/config/mcp_gateway.env` の 1 ファイルで、
+[scripts/deploy-mcp-gw-safe.sh](scripts/deploy-mcp-gw-safe.sh) が
+`root:root` / `0600`・`.bak-$ts` 退避付きで原子的に上記パスへ配置します。
+テンプレートはリネームしないでください。
+
+配置先の env には次の 2 キーが必須です。
+
+- `JARVIS_MCP_GW_BASE_DIR`: 読み取り系ハンドラ（`filesystem.*` / `git.*`）の
+  workspace root であり、パスエスケープ境界。
+- `JARVIS_MCP_GW_EGRESS_ALLOWLIST`: `web.fetch` の egress 許可ホスト。
+  空値は genuine deny-all（fail-closed）。
+
+[scripts/check-deploy-drift.sh](scripts/check-deploy-drift.sh) が存在と必須キーを
+fail-closed で検査します（値は出力しません）。env は root:root / 0600 で配置される
+ため、単独で drift チェックを実行する場合は root（または読み取り権限）が必要で、
+読めない場合は `E_ENV_UNREADABLE` として DANGER になります（deploy スクリプトの
+事後確認は root で実行されるため問題ありません）。未配置だと unit のリテラル既定値
+（開発用 BASE_DIR と `egress=example.com`）が実効になり、`filesystem.*` の失敗と
+「deny-all のつもりが example.com 許可」の fail-open を招きます。
+
 ### Kill Switch
 
 `jarvis-policy` owns the kill switch and persists it to
@@ -260,10 +285,14 @@ The repo `otelcol.service` now matches the installed unit and runs
 `otelcol-contrib` directly (no `op run`, SEC-1 2026-11-16). The Grafana
 credential supply path remains unidentified; do not assume `otel.env` is used.
 
-`infra/config/*.env` files remain a reference for which environment
-variables each service expects. 旧デプロイ資産（`deploy.rs`）は
-`/etc/jarvis/` への配送を想定する記述/実装があるが、現行ローカル運用での
-適用可否・実際の配置は host/deploy 手順により異なるため確認が必要。
+`infra/config/*.env` files remain reference templates that retain legacy
+`op://` references; real secrets are injected by `bws run` (see above), not by
+these files. 例外は `infra/config/mcp_gateway.env` で、現行の
+[scripts/deploy-mcp-gw-safe.sh](scripts/deploy-mcp-gw-safe.sh) が
+`/etc/jarvis/jarvis-mcp-gw.env` へ配置する配置元です（詳細は
+「MCP Gateway の環境ファイル（I50-A）」を参照）。
+旧デプロイ資産（`deploy.rs`）は `/etc/jarvis/` への配送を想定する記述/実装があるが、
+現行ローカル運用での適用可否・実際の配置は host/deploy 手順により異なるため確認が必要。
 
 ### Backup & DR（ADR-0004 準拠・ローカル完結）
 

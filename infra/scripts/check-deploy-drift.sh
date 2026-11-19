@@ -8,6 +8,8 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 deployed_allowlist="${JARVIS_DRIFT_ALLOWLIST:-/etc/jarvis/mcp_allowlist.toml}"
 deployed_policy_dir="${JARVIS_DRIFT_POLICY_DIR:-/etc/jarvis/policy}"
 deployed_pii="${JARVIS_DRIFT_PII:-/etc/jarvis/pii_patterns.toml}"
+# I50-A: unit が EnvironmentFile=- で読む host override env。
+deployed_env="${JARVIS_DRIFT_ENV:-/etc/jarvis/jarvis-mcp-gw.env}"
 drift=0; danger=0
 say() { printf '%-32s %s\n' "$1" "$2"; }
 echo "== deploy drift =="
@@ -96,6 +98,24 @@ elif grep -Eq '^[[:space:]]*Environment=.*[$][{]' "$unit_sys"; then
   danger=1
 else
   say "systemd env expansion" "OK (no unexpanded variable in Environment=)"
+fi
+# 5c) I50-A: host override env の存在と必須キーを fail-closed で検証する。
+# これが欠けると unit のリテラル既定値（開発用 BASE_DIR と egress=example.com）
+# が実効になり、filesystem.* 全失敗＋「deny-all のつもりが example.com 許可」
+# の fail-open が起きる。値は一切出力せず、エラーコードのみを出す（secret を含む
+# 可能性があるため）。コメント行（先頭 #）はキー存在とみなさない。
+# 空値は正当（egress の genuine deny-all）なのでキーの有無のみを検査する。
+if [ ! -r "$deployed_env" ]; then
+  say "mcp-gw env" "DANGER: E_ENV_UNREADABLE (code only)"
+  danger=1
+elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env"; then
+  say "mcp-gw env" "DANGER: E_ENV_MISSING_BASE_DIR (code only)"
+  danger=1
+elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$deployed_env"; then
+  say "mcp-gw env" "DANGER: E_ENV_MISSING_EGRESS_ALLOWLIST (code only)"
+  danger=1
+else
+  say "mcp-gw env" "OK (present, required keys)"
 fi
 # 6) 実行時E2E: systemd 配下の実サービスに読み取り系 tools/call を行う。
 #    ProtectHome の取り違えのように「設定一致でも実行不能」な乖離を検出する。
