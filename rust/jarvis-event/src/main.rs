@@ -2,7 +2,59 @@
 
 use anyhow::Result;
 use jarvis_event::EventNormalizer;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use tracing::info;
+
+/// Fixed category for a tracer-provider shutdown failure (I51-B).
+///
+/// The raw SDK error can embed configuration details, so only this constant is
+/// ever rendered into the warning — never the error value itself.
+const TRACER_SHUTDOWN_ERROR_CATEGORY: &str =
+    "opentelemetry_sdk::trace::SdkTracerProvider::shutdown_failed";
+
+/// Emit the non-fatal tracer-shutdown warning using fixed fields only.
+///
+/// `_err` is intentionally unused: its `Display` text can carry endpoint or
+/// other configuration details, and this warning is exported through JSON logs
+/// to the central OTLP/Grafana pipeline. Passing it in keeps the regression
+/// test on the same call site as production code.
+fn warn_tracer_shutdown_failure(_err: &dyn std::fmt::Display) {
+    tracing::warn!(
+        error_category = TRACER_SHUTDOWN_ERROR_CATEGORY,
+        "tracer provider shutdown failed; queued spans may be dropped"
+    );
+}
+
+/// Keeps the [`SdkTracerProvider`] alive for the lifetime of `main` and makes
+/// sure the batch exporter is shut down on every exit path.
+///
+/// The provider is cloned into the tracer held by the global tracing layer, so
+/// it is not the last `Arc` reference once `init_tracing` returns. Dropping the
+/// local handle there would never trigger shutdown, and spans queued at process
+/// exit would be lost. Holding this guard in `main` and calling `shutdown`
+/// explicitly flushes them; [`Drop`] is the safety net for early `?` returns.
+struct TracerGuard {
+    provider: SdkTracerProvider,
+}
+
+impl TracerGuard {
+    /// Flush queued spans. A failure is intentionally non-fatal and is reported
+    /// with a fixed error category only, never with the raw SDK error text.
+    fn shutdown(&self) {
+        if let Err(err) = self.provider.shutdown() {
+            warn_tracer_shutdown_failure(&err);
+        }
+    }
+}
+
+impl Drop for TracerGuard {
+    fn drop(&mut self) {
+        // Safety net for error paths that return early via `?`. A repeated
+        // shutdown is a harmless `AlreadyShutdown` error and is ignored here so
+        // the normal path, where `main` already called `shutdown()`, stays quiet.
+        let _ = self.provider.shutdown();
+    }
+}
 
 /// Collector endpoint used when `OTEL_EXPORTER_OTLP_ENDPOINT` is unset.
 const OTLP_DEFAULT_ENDPOINT: &str = "http://127.0.0.1:4317";
@@ -34,10 +86,10 @@ fn warn_otlp_exporter_failure(endpoint_configured: bool, _endpoint: &str) {
 /// defaults to the local collector. An invalid endpoint (or any other
 /// exporter build failure) is downgraded to a warning: the service still
 /// starts with JSON logging and metrics intact, only trace export is lost.
-fn init_tracing(service: &'static str) -> Result<()> {
+/// The provider is returned so its lifetime can be tied to `main`.
+fn init_tracing(service: &'static str) -> Result<TracerGuard> {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry_otlp::WithExportConfig;
-    use opentelemetry_sdk::trace::SdkTracerProvider;
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
@@ -55,16 +107,18 @@ fn init_tracing(service: &'static str) -> Result<()> {
     // I49-A: keep the build Result and degrade to a warning instead of
     // propagating `ExporterBuildError` through `?` into stderr/journal. The raw
     // error may embed the endpoint, so it is discarded rather than logged.
-    let (telemetry, exporter_failed) = match exporter {
+    // Keep a provider on every path so `TracerGuard::shutdown` stays
+    // meaningful. Without an exporter it simply has no span processors.
+    let (provider, telemetry, exporter_failed) = match exporter {
         Ok(exporter) => {
             let provider = SdkTracerProvider::builder()
                 .with_batch_exporter(exporter)
                 .build();
             let tracer = provider.tracer(service);
             let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
-            (Some(telemetry), false)
+            (provider, Some(telemetry), false)
         }
-        Err(_) => (None, true),
+        Err(_) => (SdkTracerProvider::builder().build(), None, true),
     };
 
     // The global default subscriber is installed exactly once, as before.
@@ -80,12 +134,12 @@ fn init_tracing(service: &'static str) -> Result<()> {
         warn_otlp_exporter_failure(endpoint_configured, &endpoint);
     }
 
-    Ok(())
+    Ok(TracerGuard { provider })
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_tracing("jarvis-event")?;
+    let tracer = init_tracing("jarvis-event")?;
     jarvis_event::http::install_metrics()?;
 
     let config = jarvis_event::config::EventConfig::load()?;
@@ -105,12 +159,20 @@ async fn main() -> Result<()> {
         normalizer.start_webhook_server(),
     )?;
 
+    // Explicit shutdown on the normal exit path; `TracerGuard::drop` remains
+    // the safety net for the early `?` returns above.
+    tracer.shutdown();
+
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::warn_otlp_exporter_failure;
+    use super::{
+        TRACER_SHUTDOWN_ERROR_CATEGORY, TracerGuard, warn_otlp_exporter_failure,
+        warn_tracer_shutdown_failure,
+    };
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
     use tracing_subscriber::layer::SubscriberExt;
@@ -181,6 +243,68 @@ mod tests {
         );
         assert!(
             log.contains(super::OTLP_EXPORTER_ERROR_CATEGORY),
+            "fixed error category missing: {log}"
+        );
+    }
+
+    /// Render the real tracer-shutdown warning through a JSON fmt layer.
+    fn capture_shutdown_warning(raw_err: &str) -> String {
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry().with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(buffer.clone()),
+            );
+            tracing::subscriber::with_default(subscriber, || {
+                warn_tracer_shutdown_failure(&raw_err);
+            });
+        }
+        String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8")
+    }
+
+    /// I51-B regression: `init_tracing` returns a guard that owns the provider,
+    /// and dropping that guard shuts the provider down so queued spans flush on
+    /// every early-return path.
+    #[test]
+    fn tracer_guard_holds_provider_and_drop_shuts_it_down() {
+        let provider = SdkTracerProvider::builder().build();
+        // `SdkTracerProvider` is a clonable handle to the same provider state.
+        // Keeping a clone lets us observe that the guard's `Drop` called
+        // `shutdown` (the second call then reports `AlreadyShutdown`).
+        let observer = provider.clone();
+
+        {
+            let _guard = TracerGuard { provider };
+        }
+
+        assert!(
+            observer.shutdown().is_err(),
+            "TracerGuard::drop did not shut down the retained provider"
+        );
+    }
+
+    /// I51-B regression: a shutdown error must never leak its raw `Display`
+    /// text (which may embed endpoint/config details) into the JSON warning.
+    #[test]
+    fn tracer_shutdown_warning_uses_fixed_vocabulary_only() {
+        const PROBE: &str = "PROBE-I51B-2f8d6b31";
+        let raw_err =
+            format!("sdk shutdown failed at https://u:{PROBE}@h.example:4317/v1/traces?t={PROBE}");
+
+        let log = capture_shutdown_warning(&raw_err);
+
+        assert!(
+            !log.contains(PROBE),
+            "raw shutdown error leaked into warning: {log}"
+        );
+        assert!(
+            !log.contains("h.example"),
+            "endpoint host leaked into warning: {log}"
+        );
+        assert!(
+            log.contains(TRACER_SHUTDOWN_ERROR_CATEGORY),
             "fixed error category missing: {log}"
         );
     }
