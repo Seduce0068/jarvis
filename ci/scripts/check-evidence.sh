@@ -33,9 +33,12 @@
 # steps) do not change the Scenario count, so an unchanged executed total could
 # still be reported as sufficient. Pinned contract keywords are therefore
 # counted per spec in strict mode: EVERY keyword found in a spec's contract
-# steps must appear in the matching evidence notes, otherwise
-# SCENARIO_STEP_UNCOVERED fails closed. No baseline/grandfather exception
-# remains. No keyword value is emitted; no secret values are read.
+# steps must appear in the matching evidence notes at least as many times as
+# it was detected in the steps, otherwise SCENARIO_STEP_UNCOVERED fails closed.
+# A single note mention cannot cover a keyword duplicated in the spec. Notes
+# are prose and may repeat a keyword, so extra mentions are harmless. No
+# baseline/grandfather exception remains. No keyword value is emitted; no
+# secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -74,8 +77,10 @@ DOCUMENT_TYPES = ("test-execution-log", "test-result", "test-summary-report")
 # "contract step" is a gherkin step line (or the I61-A marker comment inside a
 # gherkin block) that carries one of these pinned keywords. The four evidence
 # notes have since been synchronised with a real test run, so EVERY detected
-# keyword must be present in the matching notes; a missing or duplicated
-# occurrence fails closed with SCENARIO_STEP_UNCOVERED. No baseline exception.
+# keyword must be present in the matching notes at least as many times as it
+# was detected in the steps; a missing note mention or a spec-side duplicate
+# fails closed with SCENARIO_STEP_UNCOVERED. Notes are prose, so extra prose
+# mentions never lower the required count. No baseline exception.
 CONTRACT_KEYWORDS = {
     "BareJson": r'\bBareJson\b',
     "415": r'\b415\b',
@@ -136,6 +141,21 @@ def contract_keywords(spec_text):
             for name, pattern in CONTRACT_KEYWORDS.items():
                 found.extend([name] * len(re.findall(pattern, line, re.IGNORECASE)))
     return Counter(found)
+
+def contract_note_keyword_counts(notes):
+    """Count pinned contract keywords in the evidence notes.
+
+    Notes are prose: a keyword may be repeated in one sentence (e.g. the
+    mcp-gw note mentions 400 three times) and alternative spellings can both
+    appear ("no-leak" and "rejection 文", or "非漏洩" in the event note). Use
+    the permissive note patterns and count every match; only a SHORTFALL
+    against the spec's step count is a coverage gap, so extra prose mentions
+    are harmless. Only counts are used; no keyword value is emitted.
+    """
+    counts = Counter()
+    for name, pattern in CONTRACT_NOTE_PATTERNS.items():
+        counts[name] = len(re.findall(pattern, notes, re.IGNORECASE))
+    return counts
 
 def digest(path):
     return "sha256:" + hashlib.sha256(open(path, "rb").read()).hexdigest()
@@ -265,19 +285,18 @@ for f in evidence_files:
         errors.append(f"{f}: SPEC_UNREADABLE"); continue
     # I65-C: a contract step appended to an existing Scenario keeps the
     # Scenario count unchanged, so the executed total alone cannot detect a
-    # spec-only edit. In strict mode EVERY detected keyword needs a matching
-    # note; the Round 61 baseline/grandfather list has been removed. A Counter
-    # (not a set) is used so a duplicated step also counts as uncovered. No
-    # keyword is emitted.
+    # spec-only edit. In strict mode EVERY detected keyword needs at least as
+    # many note mentions as there are spec steps; the Round 61
+    # baseline/grandfather list has been removed. Both sides are Counters:
+    # iterating keys alone discarded the spec count, so a duplicated step
+    # (detected=2) hidden behind one note mention previously passed. Compare
+    # the counts and fail closed on any shortfall. No keyword is emitted.
     detected_steps = contract_keywords(spec_text)
-    uncovered_steps = detected_steps
-    if uncovered_steps:
-        missing_steps = [name for name in uncovered_steps
-                         if not re.search(CONTRACT_NOTE_PATTERNS[name], notes,
-                                          re.IGNORECASE)]
-        if missing_steps:
-            errors.append(f"{f}: SCENARIO_STEP_UNCOVERED")
-            continue
+    noted_steps = contract_note_keyword_counts(notes)
+    if any(noted_steps[name] < count
+           for name, count in detected_steps.items()):
+        errors.append(f"{f}: SCENARIO_STEP_UNCOVERED")
+        continue
     actual = digest(spec_path)
     if actual != top:
         errors.append(f"{f}: SPEC_HASH_MISMATCH:{spec_path}"); continue

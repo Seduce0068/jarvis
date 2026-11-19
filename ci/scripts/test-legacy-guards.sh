@@ -805,7 +805,8 @@ PY
 done
 
 # I65-C: in strict mode a contract keyword present in a spec but absent from
-# the matching notes must fail with SCENARIO_STEP_UNCOVERED. Use COPIED specs
+# the matching notes, or outnumbered by duplicated spec steps, must fail with
+# SCENARIO_STEP_UNCOVERED. Use COPIED specs
 # and evidence so the real files are untouched; the gate evaluates contract
 # coverage before the hash gate, so the drifted sha256 cannot mask the
 # targeted code.
@@ -818,10 +819,10 @@ cp "$repo/todo.md" "$step_tmp/todo.md"
 cp "$repo"/evidence/test-run-*.json "$step_tmp/evidence/"
 cp "$repo"/specs/test-*.md "$step_tmp/specs/"
 # Duplicate the existing 415 contract step in TC-C and strip 415 from the
-# COPIED evidence notes. The notes were synced for strict mode, so a spec-only
-# duplication would still be covered; removing the keyword reproduces an
-# out-of-sync (notes 未同期) run. The Scenario count is unchanged, so only the
-# contract-coverage gate can reject this copy.
+# COPIED evidence notes, reproducing an out-of-sync (notes 未同期) run. A
+# spec-only duplication is now rejected too (next case) because note matches
+# are counted against the spec count. The Scenario count is unchanged here, so
+# only the contract-coverage gate can reject this copy.
 step_evidence="$step_tmp/evidence/test-run-20261120-f1e67b2a5e2c.json"
 if python3 - "$step_tmp/specs/test-context.md" "$step_evidence" <<'PY'
 import json, sys
@@ -856,6 +857,53 @@ then
   fi
 else
   echo "  FAIL: could not prepare contract-step tamper"
+  fail=$((fail+1))
+fi
+
+# I68-A: duplicating a contract step in the SPEC while the notes still claim
+# the keyword once must fail closed. The old gate iterated Counter keys and
+# discarded the count, so detected=415:2 with one note mention passed. Use a
+# fresh copy so the "notes keyword removed" case above stays intact.
+count_tmp="$tmp/scenario_step_count"
+mkdir -p "$count_tmp/ci/scripts" "$count_tmp/evidence" "$count_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$count_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/specs/index.md" "$count_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$count_tmp/evidence/index.md"
+cp "$repo/todo.md" "$count_tmp/todo.md"
+cp "$repo"/evidence/test-run-*.json "$count_tmp/evidence/"
+cp "$repo"/specs/test-*.md "$count_tmp/specs/"
+count_evidence="$count_tmp/evidence/test-run-20261120-f1e67b2a5e2c.json"
+if python3 - "$count_tmp/specs/test-context.md" "$count_evidence" <<'PY'
+import json, sys
+
+spec_path, evidence_path = sys.argv[1:3]
+with open(spec_path, encoding='utf-8') as fh:
+    text = fh.read()
+needle = '  Then 空本文の 415 を返す（ヘッダ付与を促す）\n'
+if text.count(needle) != 1:
+    raise SystemExit('415 contract step anchor not unique')
+with open(spec_path, 'w', encoding='utf-8') as fh:
+    fh.write(text.replace(needle, needle + needle, 1))
+# Notes are left untouched on purpose: assert the precondition that the
+# copied evidence claims 415 exactly once, so two spec steps outrank it.
+with open(evidence_path, encoding='utf-8') as fh:
+    data = json.load(fh)
+notes = data.get('notes', '')
+if not isinstance(notes, str) or notes.count('415') != 1:
+    raise SystemExit('expected exactly one 415 mention in copied evidence notes')
+PY
+then
+  out=$(bash "$count_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+  if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'SCENARIO_STEP_UNCOVERED'; then
+    echo "  PASS: check-evidence.sh rejects a duplicated contract step with one note mention"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: check-evidence.sh accepted a duplicated contract step (exit $code)"
+    printf '%s\n' "$out" | head -3 >&2
+    fail=$((fail+1))
+  fi
+else
+  echo "  FAIL: could not prepare contract-step count tamper"
   fail=$((fail+1))
 fi
 
