@@ -27,6 +27,7 @@ jobs:
         protobuf-compiler
         gcc-aarch64-linux-gnu
         pkg-config
+        shellcheck # required by ci/scripts/check-shell.sh extra_gate
       working_directory: rust
       # Global policy: unsafe blocks/functions are forbidden unless explicitly
       # justified with a documented SAFETY comment.
