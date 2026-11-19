@@ -11,21 +11,25 @@ apply=0
 service_src="$repo/infra/systemd/jarvis-backup.service"
 timer_src="$repo/infra/systemd/jarvis-backup.timer"
 script_src="$repo/infra/scripts/backup-local.sh"
+verify_src="$repo/infra/scripts/verify-backup.sh"
 service_dst="/etc/systemd/system/jarvis-backup.service"
 timer_dst="/etc/systemd/system/jarvis-backup.timer"
 script_dst="/opt/jarvis/scripts/backup-local.sh"
+verify_dst="/opt/jarvis/scripts/verify-backup.sh"
 backup_dir="/var/lib/postgresql/jarvis-backups"
 ts="$(date +%Y%m%d-%H%M%S)"
 
 echo "== backup timer install (apply=$apply) =="
 if [ "$apply" -ne 1 ]; then
   echo "  DRY: install $script_src -> $script_dst (root:root 0755)"
+  echo "  DRY: install $verify_src -> $verify_dst (root:root 0755)"
   echo "  DRY: install $service_src -> $service_dst (root:root 0644)"
   echo "  DRY: install $timer_src   -> $timer_dst   (root:root 0644)"
   echo "  DRY: mkdir -p $backup_dir (owner postgres:postgres, mode 0700)"
   echo "  DRY: systemctl daemon-reload; systemctl enable --now jarvis-backup.timer"
   echo "  DRY: verify timer active + next elapse"
   echo "  DRY: run service once and verify backup integrity (read-only)"
+  echo "  DRY: service ExecStartPost verifies the latest set on every nightly run"
   exit 0
 fi
 
@@ -104,14 +108,15 @@ echo "  manual run: OK"
 # backup was verified. Fail loudly (rollback + exit) instead of silently
 # skipping verification and still printing the "verified" DONE message.
 command -v jq >/dev/null 2>&1 || fail "jq is required for backup integrity verification"
-if [ -f "$repo/infra/scripts/verify-backup.sh" ]; then
-  verify_src="$repo/infra/scripts/verify-backup.sh"
-  verify_dst="/opt/jarvis/scripts/verify-backup.sh"
-  install -o root -g root -m 0755 "$verify_src" "$verify_dst"
-  echo "  verifying backup integrity ..."
-  if ! sudo -u postgres bash "$verify_dst" --backup-dir "$backup_dir" | tail -20; then
-    fail "backup integrity verification failed"
-  fi
+# jarvis-backup.service now runs this same working copy via ExecStartPost after
+# every nightly backup. Fail closed here as well: an enabled timer whose daily
+# verifier is missing would leave failed units while this installer still
+# printed the "verified" DONE message. Same framework as the jq check above.
+[ -f "$verify_src" ] || fail "verify-backup.sh working copy is required for daily verification: $verify_src"
+install -o root -g root -m 0755 "$verify_src" "$verify_dst"
+echo "  verifying backup integrity ..."
+if ! sudo -u postgres bash "$verify_dst" --backup-dir "$backup_dir" | tail -20; then
+  fail "backup integrity verification failed"
 fi
 
 trap - ERR
