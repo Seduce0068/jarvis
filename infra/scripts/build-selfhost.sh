@@ -117,7 +117,16 @@ cargo build --release --workspace
 # so a mismatch exited 1 while leaving new binaries paired with old migration
 # sources -- exactly the "half-updated pair" its comment claimed to prevent.
 STAGE_DIR="$(mktemp -d)"
-trap 'rm -rf "${STAGE_DIR}"' EXIT
+# I42-B(a): the deploy window masks jarvis-migrations.service. Always unmask
+# on exit so an aborted deploy never leaves a silently masked unit behind;
+# the flag is only set when *we* applied the mask (never unmask an admin mask).
+cleanup_selfhost() {
+  rm -rf "${STAGE_DIR}"
+  if [[ "${mig_unit_masked:-0}" -eq 1 ]]; then
+    sudo systemctl unmask "${MIGRATIONS_UNIT:-jarvis-migrations.service}" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_selfhost EXIT
 STAGE_BIN="${STAGE_DIR}/bin"
 STAGE_MIG="${STAGE_DIR}/migrations"
 mkdir -p "${STAGE_BIN}" "${STAGE_MIG}"
@@ -136,10 +145,27 @@ install -m 0644 "${MIGRATION_SQL_FILES[@]}" "${STAGE_MIG}/"
 # install. Both markers are derived from the single HEAD resolved above; that
 # single-checkout provenance, plus the fail-closed rev-parse and the clean-tree
 # gate above, is what makes the binary/migration pair a one-commit pair.
+# I42-B(b): the binary marker is a 2-part record -- line 1 is the commit,
+# following lines are "<sha256>  <binary-name>" in sha256sum format. It is
+# published next to the built binaries in rust/target/release/ as well, so
+# deploy-mcp-gw-safe.sh (which deploys that exact file) can verify provenance
+# with no best-effort fallback. target/ is gitignored, so this write does not
+# dirty the tracked tree checked by the gates above.
 bin_commit_file="${STAGE_BIN}/.jarvis-build-commit"
 mig_commit_file="${STAGE_MIG}/.jarvis-source-commit"
-printf '%s\n' "${BUILD_COMMIT}" > "${bin_commit_file}"
+{
+  printf '%s\n' "${BUILD_COMMIT}"
+  for bin in "${BINARIES[@]}"; do
+    bin_sha="$(sha256sum "target/release/${bin}" | cut -d' ' -f1)"
+    if [[ -z "${bin_sha}" ]]; then
+      echo "sha256sum produced no digest for target/release/${bin}" >&2
+      exit 1
+    fi
+    printf '%s  %s\n' "${bin_sha}" "${bin}"
+  done
+} > "${bin_commit_file}"
 printf '%s\n' "${BUILD_COMMIT}" > "${mig_commit_file}"
+install -m 0644 "${bin_commit_file}" "target/release/.jarvis-build-commit"
 
 # Reconciliation boundary: verify the staged payloads and both markers. A
 # mismatch, a missing/empty marker or an unusable commit exits here with zero
@@ -149,9 +175,17 @@ for marker in "${bin_commit_file}" "${mig_commit_file}"; do
     echo "build marker missing or empty at ${marker}" >&2
     exit 1
   fi
-  staged_commit="$(<"${marker}")"
+  # Only line 1 is the commit; the binary marker may carry extra sha256 lines.
+  IFS= read -r staged_commit < "${marker}" || true
   if [[ "${staged_commit}" != "${BUILD_COMMIT}" ]]; then
     echo "staged commit ${staged_commit} in ${marker} != ${BUILD_COMMIT}; refusing to deploy a mixed pair" >&2
+    exit 1
+  fi
+done
+# The sha256 records that deploy-mcp-gw-safe.sh relies on must all be present.
+for bin in "${BINARIES[@]}"; do
+  if ! grep -Eq "^[0-9a-f]{64}  ${bin}$" "${bin_commit_file}"; then
+    echo "missing sha256 record for ${bin} in ${bin_commit_file}" >&2
     exit 1
   fi
 done
@@ -163,38 +197,32 @@ if (( ${#STAGED_SQL_FILES[@]} != ${#MIGRATION_SQL_FILES[@]} )); then
   exit 1
 fi
 
-MIGRATIONS_DST="/opt/jarvis/rust/migrations"
+MIGRATIONS_ROOT="/opt/jarvis/rust"
+MIGRATIONS_DST="${MIGRATIONS_ROOT}/migrations"
+# I42-B(a): adopted policy -- complete, immutable version trees plus an atomic
+# symlink swap at the fixed --source path. jarvis-migrations.service keeps
+# reading `--source /opt/jarvis/rust/migrations`; that path becomes a symlink
+# to a version directory, so any reader that opens it observes either the
+# complete old tree or the complete new tree, never a partial one. Unlike the
+# former stop/rm/install/start window this does not depend on the reader being
+# stopped. In addition the unit is masked for the whole write boundary so a
+# policy/context Wants= (or Restart=on-failure) cannot spawn a reader at all.
+# Alternative considered and NOT adopted: exchanging two real directories.
+# `mv migrations migrations.old && mv staging migrations` has a gap where the
+# --source path does not exist, and a true exchange needs
+# renameat2(RENAME_EXCHANGE), which this shell cannot call. Versioned trees +
+# one `mv -T` on the symlink keep the path contract and give a single atomic
+# rename(2) on the stable path.
+MIGRATIONS_VERSIONS="${MIGRATIONS_ROOT}/migrations.d"
+MIGRATION_TS="$(date +%Y%m%d%H%M%S)"
+MIGRATION_VERSION_DIR="${MIGRATIONS_VERSIONS}/${BUILD_COMMIT}-${MIGRATION_TS}-$$"
+MIGRATION_LINK_TMP="${MIGRATIONS_ROOT}/.migrations.next-${MIGRATION_TS}-$$"
 
-# I38-B: reconcile the destination *.sql filename set against this checkout's
-# staging set before installing the new payload. `sudo install` only adds or
-# overwrites; it never removes a migration that was deleted from the source.
-# Such a stale file would still be applied by jarvis-migrations.service's
-# pre-flight (`--source ${MIGRATIONS_DST}`) while being absent from the
-# context binary's build-time `sqlx::migrate!()` set, producing a checksum /
-# unknown-version mismatch and a startup failure. Compute the stale set with
-# a read-only listing here (before any /opt write), fail closed on an
-# unexpected directory, and delete the extras explicitly in the deploy step
-# below -- before the new SQL and the markers are installed.
-STALE_SQL_FILES=()
-shopt -s nullglob
-for dst_sql in "${MIGRATIONS_DST}"/*.sql; do
-  dst_name="${dst_sql##*/}"
-  keep=0
-  for staged_sql in "${STAGED_SQL_FILES[@]}"; do
-    if [[ "${staged_sql##*/}" == "${dst_name}" ]]; then
-      keep=1
-      break
-    fi
-  done
-  if (( keep == 0 )); then
-    if [[ -d "${dst_sql}" && ! -L "${dst_sql}" ]]; then
-      echo "stale migration path is a directory, refusing to delete: ${dst_sql}" >&2
-      exit 1
-    fi
-    STALE_SQL_FILES+=("${dst_sql}")
-  fi
-done
-shopt -u nullglob
+# The I38-B stale-SQL property is preserved structurally: every version tree
+# is created fresh from the verified STAGED_SQL_FILES set, so an SQL file
+# deleted from the checkout cannot survive the swap. The former in-place
+# stale-SQL scan/rm is no longer needed -- and would only mutate the old,
+# still-live tree.
 
 # All checks passed; deploy from the validated staging set. Payload files go
 # in first and the commit markers go in LAST, so the markers act as the seal
@@ -203,32 +231,23 @@ shopt -u nullglob
 # no longer describe the mixed on-disk payload. The next successful run
 # re-installs the whole set and is idempotent.
 #
-# I40-C: close the stale-SQL `sudo rm -f` -> new-SQL `sudo install` race.
-# jarvis-migrations.service is a oneshot pre-flight whose ExecStart reads SQL
-# directly from ${MIGRATIONS_DST} (`--source /opt/jarvis/rust/migrations`).
-# During the rm+install window below that directory is incomplete, and any
-# (re)start of the unit in that window would read a partial tree; marker-only
-# post-hoc detection cannot prevent that. Adopted approach: STOP the unit for
-# the whole /opt write boundary, do the rm+install, write the markers LAST, and
-# restore the unit afterwards. If any write fails, set -e aborts before the
-# restore, so the unit stays stopped and the next run re-installs the complete
-# set -- no reader can ever observe a partial tree. Old SQL is deliberately NOT
-# restored on failure (a restore would add its own failure window); the whole
-# deploy is already idempotent, so leaving the unit stopped and delegating to
-# the next run is the safe failure policy.
-# Alternative considered and NOT adopted: staging a complete tree in a sibling
-# directory and switching it in with rename. `mv migrations migrations.old &&
-# mv staging migrations` is two renames with a gap where `--source` does not
-# exist (not truly atomic); a real exchange needs renameat2(RENAME_EXCHANGE),
-# which this shell cannot call, and pointing --source at a versioned path or a
-# symlink would break the unit's path contract. Stopping the reader also avoids
-# the sync/durability concerns a directory swap introduces. The --source path
-# is left unchanged either way.
+# I40-C / I42-B(a): the old in-place rm+install exposed a partial SQL tree.
+# We now build a complete version directory, seal it with the marker, and
+# publish it with a single atomic symlink rename; a reader can never see a
+# partial tree even without stopping it. The unit is additionally masked for
+# the write boundary so Wants= / Restart=on-failure cannot start a reader.
+# If any write fails, set -e aborts BEFORE the symlink swap, so the live
+# --source path still points at the previous complete tree.
 MIGRATIONS_UNIT="jarvis-migrations.service"
 mig_unit_was_active=0
-if sudo systemctl is-active --quiet "${MIGRATIONS_UNIT}"; then
+if sudo systemctl is-active --quiet "${MIGRATIONS_UNIT}" 2>/dev/null; then
   mig_unit_was_active=1
 fi
+mig_unit_was_masked=0
+if [[ "$(sudo systemctl is-enabled "${MIGRATIONS_UNIT}" 2>/dev/null || true)" == "masked" ]]; then
+  mig_unit_was_masked=1
+fi
+mig_unit_masked=0
 # Only stop a unit systemd actually knows about. On a first install this script
 # generates and loads the unit later (unit loop + daemon-reload below), so a
 # `stop` here would fail with "Unit not found" and abort before any write. A
@@ -236,30 +255,61 @@ fi
 if sudo systemctl cat "${MIGRATIONS_UNIT}" >/dev/null 2>&1; then
   sudo systemctl stop "${MIGRATIONS_UNIT}"
 fi
+# Mask right after the stop: without this, policy/context (Restart=on-failure)
+# pulling in jarvis-migrations.service via Wants= could restart a pre-flight
+# reader during the window. An admin-applied mask is never undone by us.
+if (( mig_unit_was_masked == 0 )); then
+  sudo systemctl mask "${MIGRATIONS_UNIT}" >/dev/null
+  mig_unit_masked=1
+fi
 
 for bin in "${BINARIES[@]}"; do
   install -m 755 "${STAGE_BIN}/${bin}" "/opt/jarvis/bin/${bin}"
 done
-sudo install -d -o root -g root -m 0755 "${MIGRATIONS_DST}"
-# I38-B: explicitly remove migrations that are not in this checkout, then
-# install the current set and finally the markers. Keeping the delete inside
-# this write boundary means a failure aborts before the markers can seal a
-# mixed new/old migration tree.
-if (( ${#STALE_SQL_FILES[@]} > 0 )); then
-  echo "removing stale migration SQL not present in this checkout from ${MIGRATIONS_DST}:" >&2
-  printf '  %s\n' "${STALE_SQL_FILES[@]}" >&2
-  sudo rm -f -- "${STALE_SQL_FILES[@]}"
-fi
-sudo install -o root -g root -m 0644 "${STAGED_SQL_FILES[@]}" "${MIGRATIONS_DST}/"
-sudo install -o root -g root -m 0644 "${bin_commit_file}" /opt/jarvis/bin/.jarvis-build-commit
-sudo install -o root -g root -m 0644 "${mig_commit_file}" "${MIGRATIONS_DST}/.jarvis-source-commit"
+# Build the complete new SQL tree in a version directory (staging -> deploy).
+sudo install -d -o root -g root -m 0755 "${MIGRATIONS_VERSIONS}"
+sudo install -d -o root -g root -m 0755 "${MIGRATION_VERSION_DIR}"
+sudo install -o root -g root -m 0644 "${STAGED_SQL_FILES[@]}" "${MIGRATION_VERSION_DIR}/"
+# Marker LAST inside this version tree: it is sealed only once the source
+# marker exists, before the tree is published.
+sudo install -o root -g root -m 0644 "${mig_commit_file}" "${MIGRATION_VERSION_DIR}/.jarvis-source-commit"
 
-# I40-C: the write boundary is sealed (SQL filename set complete, both markers
-# written), so restore the pre-flight unit to its prior active state and let it
-# apply the new SQL. On a fresh install the unit was unknown/inactive above, so
-# it stays stopped and is started by the normal `systemctl enable --now ...`
-# flow at the end of this script -- this script still never starts services on
-# its own beyond restoring a previously active unit.
+# Publish with one atomic rename(2). `ln -s` + `mv -T` replaces the symlink at
+# the stable --source path atomically, so readers see a complete tree either
+# way. A legacy real directory is moved aside once (the mask makes that one
+# non-atomic step safe); subsequent runs always hit the symlink branch.
+sudo ln -sfn "${MIGRATION_VERSION_DIR}" "${MIGRATION_LINK_TMP}"
+if [[ -d "${MIGRATIONS_DST}" && ! -L "${MIGRATIONS_DST}" ]]; then
+  sudo mv "${MIGRATIONS_DST}" "${MIGRATIONS_ROOT}/migrations.legacy-${MIGRATION_TS}"
+fi
+sudo mv -Tf "${MIGRATION_LINK_TMP}" "${MIGRATIONS_DST}"
+# Deploy marker LAST (after the payload is published), preserving the original
+# staging -> verify -> deploy -> marker -> unit-restore order.
+sudo install -o root -g root -m 0644 "${bin_commit_file}" /opt/jarvis/bin/.jarvis-build-commit
+
+# Keep the 3 newest version trees as immutable snapshots for manual rollback.
+mapfile -t old_versions < <(
+  sudo find "${MIGRATIONS_VERSIONS}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | head -n -3
+)
+if (( ${#old_versions[@]} > 0 )); then
+  for old_version in "${old_versions[@]}"; do
+    sudo rm -rf -- "${MIGRATIONS_VERSIONS}/${old_version}"
+  done
+fi
+
+# Unmask BEFORE the unit-generation loop rewrites the unit file below: a
+# lingering mask symlink at /etc/systemd/system/${name} would make `tee`
+# follow it to /dev/null and silently discard the generated unit.
+if (( mig_unit_masked )); then
+  sudo systemctl unmask "${MIGRATIONS_UNIT}" >/dev/null
+  mig_unit_masked=0
+fi
+# The write boundary is sealed, so restore the pre-flight unit to its prior
+# active state and let it apply the new SQL. On a fresh install the unit was
+# unknown/inactive above, so it stays stopped and is started by the normal
+# `systemctl enable --now ...` flow at the end of this script -- this script
+# still never starts services on its own beyond restoring a previously active
+# unit.
 if (( mig_unit_was_active )); then
   sudo systemctl start "${MIGRATIONS_UNIT}"
 fi

@@ -104,22 +104,41 @@ if [ "$apply" -eq 1 ]; then
   fi
   echo "  HEAD=$deploy_head / tracked tree clean: OK"
 
-  # 配置対象バイナリに .jarvis-build-commit が添付されていれば HEAD と照合する。
-  # build-selfhost.sh のマーカーと同じ形式（1行のコミット値）を読み取り、
-  # 存在する場合のみ fail-closed で検証。現行ビルド経路はマーカーを
-  # rust/target/release/ へ置かないため、未添付は best-effort として許容する。
+  # I42-B(b): 配置対象と同じディレクトリの provenance マーカーを必須化。
+  # 旧コードはマーカー欠落を best-effort として許容するため、
+  # build-selfhost.sh が /opt/jarvis/bin/ にしかマーカーを置かない現行経路では
+  # 古いバイナリが clean-tree ゲートを通って配置できた。欠落・空・HEAD 不一致
+  # ・SHA-256 不一致はすべて fail-closed で拒否する（dry-run 既定・--apply 時
+  # のみのゲート配置・ロールバック・段階別バックアップ名は不変）。
+  # build-selfhost.sh が clean-tree gate 後に rust/target/release/ へ書く形式:
+  #   1行目: ビルドコミット
+  #   2行目以降: "<sha256>  <binary-name>"（sha256sum 形式）
   bin_marker="${bin%/*}/.jarvis-build-commit"
-  if [ -e "$bin_marker" ]; then
-    [ -s "$bin_marker" ] || die "ビルドマーカーが空です: $bin_marker（配置拒否）"
-    marker_head="$(tr -d '[:space:]' < "$bin_marker")"
-    if [ -z "$marker_head" ] || [ "$marker_head" = "unknown" ]; then
-      die "ビルドマーカーが不正です: $bin_marker（配置拒否）"
-    fi
-    if [ "$marker_head" != "$deploy_head" ]; then
-      die "ビルドマーカー $marker_head が HEAD $deploy_head と不一致（配置拒否）"
-    fi
-    echo "  build marker: OK ($marker_head)"
+  [ -f "$bin_marker" ] || die "ビルドマーカーがありません: $bin_marker（配置拒否）"
+  [ -s "$bin_marker" ] || die "ビルドマーカーが空です: $bin_marker（配置拒否）"
+  IFS= read -r marker_head < "$bin_marker" || true
+  marker_head="$(printf '%s' "$marker_head" | tr -d '[:space:]')"
+  if [ -z "$marker_head" ] || [ "$marker_head" = "unknown" ]; then
+    die "ビルドマーカーのコミットが不正です: $bin_marker（配置拒否）"
   fi
+  if [ "$marker_head" != "$deploy_head" ]; then
+    die "ビルドマーカー $marker_head が HEAD $deploy_head と不一致（配置拒否）"
+  fi
+  echo "  build marker commit: OK ($marker_head)"
+
+  # バイナリ SHA-256 の照合。マーカー 2行目以降の jarvis-mcp-gw レコードを
+  # 必須とし、欠落・不正値・配置対象バイナリとの不一致は配置拒否とする。
+  expected_sha="$(awk '$2 == "jarvis-mcp-gw" { print $1; exit }' "$bin_marker")"
+  [ -n "$expected_sha" ] || die "ビルドマーカーに jarvis-mcp-gw の SHA-256 がありません: $bin_marker（配置拒否）"
+  if ! printf '%s\n' "$expected_sha" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+    die "ビルドマーカーの SHA-256 が不正です: $bin_marker（配置拒否）"
+  fi
+  actual_sha="$(sha256sum "$bin" | cut -d' ' -f1)"
+  [ -n "$actual_sha" ] || die "配置対象の SHA-256 を計算できません: $bin（配置拒否）"
+  if [ "$expected_sha" != "$actual_sha" ]; then
+    die "バイナリ SHA-256 不一致: marker=$expected_sha actual=$actual_sha（配置拒否）"
+  fi
+  echo "  build marker sha256: OK ($actual_sha)"
 fi
 
 echo "== 0. 前提確認 =="
