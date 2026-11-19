@@ -162,10 +162,13 @@ python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$repo_a
   || die "allowlist の TOML が不正です: $repo_allowlist"
 systemd-analyze verify "$repo_unit" >/dev/null 2>&1 || die "unit ファイルの検証に失敗: $repo_unit"
 [ -f "$repo_env" ] || die "env テンプレートがありません: $repo_env"
-# 必須キーが無いテンプレートを配置すると事後 check-deploy-drift.sh が必ず
-# DANGER になりロールバックするため、配置前に fail-closed で拒否する。
-grep -Eq '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$repo_env" \
-  || die "env テンプレートに JARVIS_MCP_GW_BASE_DIR がありません: $repo_env"
+# 必須キーが無い/不正なテンプレートを配置すると事後 check-deploy-drift.sh が
+# 必ず DANGER になりロールバックするため、配置前に fail-closed で拒否する。
+# I52-B: BASE_DIR はパスエスケープ境界。空値や相対パスはキー欠落と同じく境界が
+# 消えるため、非空かつ絶対パス（先頭 /）を必須とする。
+grep -Eq "^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=[[:space:]]*[\"']?/" "$repo_env" \
+  || die "env テンプレートの JARVIS_MCP_GW_BASE_DIR が空または絶対パスではありません: $repo_env"
+# egress allowlist の空値は正当（genuine deny-all）。キーの有無のみ検査する。
 grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$repo_env" \
   || die "env テンプレートに JARVIS_MCP_GW_EGRESS_ALLOWLIST がありません: $repo_env"
 echo "  user/base-dir/allowlist/unit/env-template: OK"

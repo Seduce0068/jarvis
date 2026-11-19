@@ -104,18 +104,26 @@ fi
 # が実効になり、filesystem.* 全失敗＋「deny-all のつもりが example.com 許可」
 # の fail-open が起きる。値は一切出力せず、エラーコードのみを出す（secret を含む
 # 可能性があるため）。コメント行（先頭 #）はキー存在とみなさない。
-# 空値は正当（egress の genuine deny-all）なのでキーの有無のみを検査する。
+# I52-B: BASE_DIR は filesystem.* / git.* のパスエスケープ境界であり、非空かつ
+# 絶対パスでなければならない。空値・相対パスは境界が消えるためキー存在チェック
+# とは別に拒否する（実在チェックは root が読めないディレクトリを誤判定しうる
+# ため、ここでは先頭 / の形式までを検査する）。
+# egress の空値は正当（genuine deny-all）なのでキーの有無のみを検査する。
+# 値は一切出力せず、エラーコードのみを出す。
 if [ ! -r "$deployed_env" ]; then
   say "mcp-gw env" "DANGER: E_ENV_UNREADABLE (code only)"
   danger=1
 elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=' "$deployed_env"; then
   say "mcp-gw env" "DANGER: E_ENV_MISSING_BASE_DIR (code only)"
   danger=1
+elif ! grep -Eq "^[[:space:]]*JARVIS_MCP_GW_BASE_DIR=[[:space:]]*[\"']?/" "$deployed_env"; then
+  say "mcp-gw env" "DANGER: E_ENV_INVALID_BASE_DIR (code only; empty or relative)"
+  danger=1
 elif ! grep -Eq '^[[:space:]]*JARVIS_MCP_GW_EGRESS_ALLOWLIST=' "$deployed_env"; then
   say "mcp-gw env" "DANGER: E_ENV_MISSING_EGRESS_ALLOWLIST (code only)"
   danger=1
 else
-  say "mcp-gw env" "OK (present, required keys)"
+  say "mcp-gw env" "OK (present, required keys; BASE_DIR absolute)"
 fi
 # 6) 実行時E2E: systemd 配下の実サービスに読み取り系 tools/call を行う。
 #    ProtectHome の取り違えのように「設定一致でも実行不能」な乖離を検出する。

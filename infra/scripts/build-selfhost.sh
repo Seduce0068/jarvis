@@ -535,6 +535,22 @@ if [[ -e "${OTEL_DST}" || -L "${OTEL_DST}" ]]; then
 fi
 sudo install -o root -g root -m 0644 "${OTEL_SRC}" "${OTEL_DST}"
 
+# I52-B: jarvis-mcp-gw.service は EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env を
+# optional で読む。この配布経路が無いと unit のリテラル既定値
+# （egress=example.com / 開発用 BASE_DIR）が実効化し、deny-all のつもりが
+# example.com 許可になる fail-open を起こす。repo テンプレートを root:root
+# 0600 で配置する（secret を含みうるため 0644 にしない）。既存ファイルは
+# otelcol と同じく .bak-<ts> へ退避してから配置し、配置順序・エラー処理も
+# 既存ブロックに合わせる（set -e により install 失敗はそのまま中止）。
+MCP_GW_ENV_SRC="${REPO_DIR}/infra/config/mcp_gateway.env"
+MCP_GW_ENV_DST="/etc/jarvis/jarvis-mcp-gw.env"
+if [[ -e "${MCP_GW_ENV_DST}" || -L "${MCP_GW_ENV_DST}" ]]; then
+  mcp_gw_env_backup="${MCP_GW_ENV_DST}.bak-$(date +%Y%m%d%H%M%S)"
+  sudo mv "${MCP_GW_ENV_DST}" "${mcp_gw_env_backup}"
+  echo "backed up existing mcp-gw env to ${mcp_gw_env_backup}"
+fi
+sudo install -o root -g root -m 0600 "${MCP_GW_ENV_SRC}" "${MCP_GW_ENV_DST}"
+
 # R3-AU3: policy / mcp-gw / event / context は認可境界を担う正当なサービス。
 # 各 unit テンプレートが宣言する User=/Group=（専用ユーザー）を正とし、単一の
 # JARVIS_USER へ一括置換しない。一括置換すると policy / event / context が
