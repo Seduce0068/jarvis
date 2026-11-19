@@ -44,30 +44,43 @@ pub(crate) mod status_vocabulary {
     pub const ACTOR_OPERATOR: &str = "operator";
 }
 
-/// Compare two tokens without an early exit on the first mismatch.
+/// Compute the fixed-size SHA-256 digest used as the comparison target by
+/// every token gate. Reducing both operands to `[u8; 32]` absorbs their
+/// lengths into the digest, so the comparison itself always covers exactly 32
+/// bytes regardless of how long the presented token is.
 ///
-/// This is the crate-wide helper for every token gate: the HTTP approval token
-/// middleware, kill-switch activation/deactivation, and both read-only status
-/// surfaces all call this function. The loop always covers the longer input and
-/// pads the shorter one, so neither a content mismatch nor a length mismatch
-/// short-circuits. No `unsafe` code and no extra dependency are involved.
+/// This is public because `jarvis-mcp-gw` already depends on this crate but
+/// does not declare `sha2` as a direct dependency: sharing this primitive
+/// keeps both crates' gates on the same digest without a new dependency or a
+/// shared crate. No `unsafe` code is involved and no token value is logged.
+pub fn sha256_digest(token: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let output = hasher.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(output.as_ref());
+    digest
+}
+
+/// Fixed-size digest comparison for every token gate in this crate.
+///
+/// Both inputs are converted to `[u8; 32]` SHA-256 digests and all 32 bytes
+/// are XOR-folded into one accumulator with no early exit on content or
+/// length. Unlike the previous length-inclusive padded XOR loop, the loop
+/// count is a constant 32: input length is absorbed by the digest instead of
+/// driving the iteration. No `unsafe` code and no extra dependency are
+/// involved.
 ///
 /// Kept `pub(crate)` here (rather than in a new top-level module) because only
 /// the four policy transport/state files are in scope for this change; the
 /// module placement does not affect visibility across the crate.
 pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    let max = a.len().max(b.len());
-    let mut diff = a.len() ^ b.len();
-    for (x, y) in a
-        .iter()
-        .map(Some)
-        .chain(std::iter::repeat(None))
-        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
-        .take(max)
-    {
-        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
+    let a: [u8; 32] = sha256_digest(a);
+    let b: [u8; 32] = sha256_digest(b);
+    // Both operands are `[u8; 32]`, so `zip` visits exactly 32 bytes.
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= *x ^ *y;
     }
     diff == 0
 }
@@ -181,9 +194,10 @@ impl KillSwitch {
         switch
     }
 
-    /// Hash the presented token and compare it with the stored digest using
-    /// the crate-wide constant-time helper. A plain `!=` here leaked the match
-    /// position through timing and diverged from the other token gates.
+    /// Hash the presented token and compare it with the stored SHA-256 digest
+    /// using the crate-wide fixed-size digest comparison helper. A plain `!=`
+    /// here leaked the match position through timing and diverged from the
+    /// other token gates.
     ///
     /// Blank presented tokens are rejected before hashing. Without this, a
     /// switch configured with an empty/unset token would accept an empty
@@ -752,8 +766,9 @@ mod tests {
         std::fs::remove_file(parent).expect("clean blocker file");
     }
 
-    /// The shared helper must reject both a content mismatch and a length
-    /// mismatch, and must accept an empty token only when both sides are empty.
+    /// The shared fixed-size digest helper must reject both a content mismatch
+    /// and a length mismatch, and must accept an empty token only when both
+    /// sides are empty (blank credentials are rejected by the gates themselves).
     #[test]
     fn shared_constant_time_eq_helper_covers_content_and_length() {
         assert!(constant_time_eq("admin-token", "admin-token"));
@@ -761,6 +776,13 @@ mod tests {
         assert!(!constant_time_eq("admin-token", "admin-token-extra"));
         assert!(!constant_time_eq("", "non-empty"));
         assert!(constant_time_eq("", ""));
+
+        // Length is absorbed by the digest: long inputs with a differing tail
+        // are still rejected, and identical long inputs still match.
+        let long = "t".repeat(4096);
+        assert!(constant_time_eq(&long, &long));
+        let longer = format!("{long}!");
+        assert!(!constant_time_eq(&longer, &long));
     }
 
     /// Every token gate must go through the shared helper. The observable part

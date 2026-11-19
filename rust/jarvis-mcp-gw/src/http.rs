@@ -48,10 +48,11 @@ const ADMIN_TOKEN_HEADER: &str = "x-jarvis-admin-token";
 /// `mcp_server::INTERNAL_ERROR_MESSAGE`.
 const INTERNAL_ERROR_MESSAGE: &str = "internal gateway error";
 
-/// Fixed wording for authorization denials. Tool/principal names are omitted
+/// Fixed wording for authorization denials, shared with the gRPC adapter so
+/// both transports return the same phrase. Tool/principal names are omitted
 /// as well: the caller already knows them, and interpolating backend text
 /// would reopen the disclosure channel this phrase is meant to close.
-const POLICY_DENIED_MESSAGE: &str = "request denied by policy";
+pub(crate) const POLICY_DENIED_MESSAGE: &str = "request denied by policy";
 
 pub fn router(gateway: Arc<McpGateway>) -> Router {
     // OpenCode connects to this endpoint as a remote MCP server
@@ -86,6 +87,26 @@ pub fn router(gateway: Arc<McpGateway>) -> Router {
         .layer(axum::middleware::from_fn(track_metrics))
 }
 
+/// Fixed-size digest comparison for the HTTP admin-token gate.
+///
+/// Both operands become `[u8; 32]` SHA-256 digests, so length is absorbed into
+/// the digest and the XOR fold always visits exactly 32 bytes with no early
+/// exit on content or length. This replaces the previous length-inclusive
+/// padded XOR loop, whose iteration count depended on the input length, and
+/// is equivalent to `jarvis_policy::kill_switch::constant_time_eq` and the
+/// gRPC gate. The digest primitive is reused from `jarvis-policy` because
+/// this crate has no direct `sha2` dependency. No `unsafe` code is involved
+/// and neither token value is logged.
+fn fixed_size_digest_eq(a: &str, b: &str) -> bool {
+    let a: [u8; 32] = jarvis_policy::kill_switch::sha256_digest(a);
+    let b: [u8; 32] = jarvis_policy::kill_switch::sha256_digest(b);
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= *x ^ *y;
+    }
+    diff == 0
+}
+
 /// Optional admin-token gate for the data-plane HTTP endpoints
 /// (`/v1/execute` and `/mcp`).
 ///
@@ -117,24 +138,16 @@ async fn require_admin_token(
         .headers()
         .get(ADMIN_TOKEN_HEADER)
         .and_then(|v| v.to_str().ok());
-    // Length-inclusive comparison with no short-circuit on content or length,
-    // mirroring the gRPC gate and kill_switch::constant_time_eq. It is NOT
-    // constant-time: the loop runs `max` bytes, so the iteration count still
-    // depends on the input length (a fixed-length hash would be needed for
-    // that).
+    // Fixed-size digest comparison, mirroring the gRPC gate and
+    // kill_switch::constant_time_eq: both operands are `[u8; 32]` SHA-256
+    // digests and the XOR fold always visits 32 bytes.
     let authorized = provided.is_some_and(|p| {
         // A blank header must not authenticate an empty expected value
-        // through the padded XOR loop (R4-FIX a).
+        // through the digest comparison (R4-FIX a).
         if p.trim().is_empty() {
             return false;
         }
-        let a = p.as_bytes();
-        let b = expected.as_bytes();
-        let mut diff = a.len() ^ b.len();
-        for i in 0..a.len().max(b.len()) {
-            diff |= (a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0)) as usize;
-        }
-        diff == 0
+        fixed_size_digest_eq(p, expected)
     });
     if !authorized {
         return Err(axum::http::StatusCode::UNAUTHORIZED);
@@ -195,12 +208,13 @@ async fn execute_tool(
     Ok(Json(ExecuteToolResponse { result }))
 }
 
-/// Reduce a caller-input failure to the same fixed vocabulary used by
-/// `mcp_server::safe_client_error_text` (kept in sync there; that helper is
-/// private, so this adapter carries a mirror). Several `client_error()`
-/// messages interpolate absolute sandbox paths, git stderr or raw URLs, so
-/// only known-static messages pass through verbatim.
-fn safe_client_error_text(message: &str) -> &'static str {
+/// Reduce a caller-input failure to a fixed vocabulary of safe, static
+/// phrases. Several `client_error()` messages interpolate absolute sandbox
+/// paths, git stderr, egress hosts or raw URLs, so only known-static messages
+/// pass through verbatim. This is the single shared helper for the HTTP and
+/// gRPC adapters (and mirrors the private one in `mcp_server`); both callers
+/// must use it instead of echoing `error.to_string()` into a response.
+pub(crate) fn safe_client_error_text(message: &str) -> &'static str {
     match message {
         "missing 'url' argument" => "missing 'url' argument",
         "url has no host" => "url has no host",
@@ -704,6 +718,23 @@ requires_approval = true
             assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{args}");
             assert!(body.0["error"].is_string());
         }
+    }
+
+    /// The fixed-size digest comparison rejects content and length mismatches
+    /// and keeps working for long inputs; blank values are rejected by the
+    /// gate before this helper is called.
+    #[test]
+    fn fixed_size_digest_eq_rejects_content_and_length_mismatches() {
+        assert!(fixed_size_digest_eq("secret-admin", "secret-admin"));
+        assert!(!fixed_size_digest_eq("secret-admiN", "secret-admin"));
+        assert!(!fixed_size_digest_eq("secret", "secret-admin"));
+        assert!(!fixed_size_digest_eq("secret-admin-extra", "secret-admin"));
+        assert!(!fixed_size_digest_eq("secret-ad", "secret-admin"));
+
+        let long = "h".repeat(4096);
+        assert!(fixed_size_digest_eq(long.as_str(), long.as_str()));
+        let longer = format!("{long}x");
+        assert!(!fixed_size_digest_eq(longer.as_str(), long.as_str()));
     }
 
     /// When an admin token is configured, `/v1/execute` requires it in

@@ -28,10 +28,14 @@ fn sanitized_internal_status(detail: impl std::fmt::Display) -> Status {
 
 /// Map a gateway error to a gRPC status by its concrete type.
 ///
-/// This mirrors `http::http_status_for`: the status is derived from
-/// `McpGatewayError::kind()`, never from the human-readable message. Unknown
-/// error types fall back to `Internal` and are sanitized like any other
-/// gateway-side failure.
+/// This mirrors `http::http_status_for`: the status code is derived from
+/// `McpGatewayError::kind()`, never from the human-readable message. The
+/// caller-visible message likewise uses the same fixed vocabulary as the HTTP
+/// adapter (`http::safe_client_error_text` for client errors and
+/// `http::POLICY_DENIED_MESSAGE` for denials); echoing `error.to_string()`
+/// leaked absolute sandbox paths, egress hosts and upstream names into a
+/// status observable by any caller. Unknown error types fall back to
+/// `Internal` and are sanitized like any other gateway-side failure.
 fn grpc_status_for(error: &anyhow::Error) -> Status {
     use crate::error::ErrorKind;
 
@@ -40,8 +44,11 @@ fn grpc_status_for(error: &anyhow::Error) -> Status {
         .map(crate::error::McpGatewayError::kind)
         .unwrap_or(ErrorKind::Internal);
     match kind {
-        ErrorKind::ClientError => Status::invalid_argument(error.to_string()),
-        ErrorKind::Forbidden => Status::permission_denied(error.to_string()),
+        ErrorKind::ClientError => {
+            let text = crate::http::safe_client_error_text(&error.to_string());
+            Status::invalid_argument(text)
+        }
+        ErrorKind::Forbidden => Status::permission_denied(crate::http::POLICY_DENIED_MESSAGE),
         ErrorKind::Internal => sanitized_internal_status(error),
     }
 }
@@ -51,19 +58,20 @@ pub struct GrpcMcpGatewayService {
     admin_token: Option<String>,
 }
 
-/// Length-inclusive token comparison with no short-circuit on content or
-/// length — but **not** constant-time: the loop runs `max(a.len(), b.len())`
-/// iterations, so the iteration count still depends on the input length. Only
-/// the early length-equality exit was removed. A truly fixed-work comparison
-/// would need a fixed-length hash (a larger change); the property guaranteed
-/// here is that neither a content mismatch nor a length mismatch exits early.
-/// Mirrors `jarvis_policy::kill_switch::constant_time_eq`, with the same
-/// iteration-count caveat. No `unsafe` code or extra dependency is involved.
+/// Fixed-size digest comparison for the gRPC token gate.
+///
+/// Both the presented and configured tokens are converted to `[u8; 32]`
+/// SHA-256 digests and all 32 bytes are XOR-folded with no early exit. The
+/// digest absorbs input length, so the loop is always exactly 32 iterations —
+/// unlike the previous length-inclusive padded XOR loop, whose iteration count
+/// depended on the input length. Mirrors
+/// `jarvis_policy::kill_switch::constant_time_eq`; the digest primitive is
+/// reused from that crate because this one has no direct `sha2` dependency.
+/// No `unsafe` code is involved and neither token value is ever logged.
 ///
 /// A missing or blank presented token is rejected without comparison. A blank
 /// configured value is rejected too: startup validation forbids it, and this
-/// is the request-time backstop for programmatically built configs. Neither
-/// token value is ever logged.
+/// is the request-time backstop for programmatically built configs.
 fn token_matches(provided: Option<&str>, expected: &str) -> bool {
     // Blank expected values are never credentials (defense in depth).
     if expected.trim().is_empty() {
@@ -71,25 +79,26 @@ fn token_matches(provided: Option<&str>, expected: &str) -> bool {
     }
     provided.is_some_and(|p| {
         // A blank header/metadata value must not authenticate an empty
-        // configured token through the padded XOR loop (R4-FIX a).
+        // configured token through the digest comparison (R4-FIX a).
         if p.trim().is_empty() {
             return false;
         }
-        let a = p.as_bytes();
-        let b = expected.as_bytes();
-        let max = a.len().max(b.len());
-        let mut diff = a.len() ^ b.len();
-        for (x, y) in a
-            .iter()
-            .map(Some)
-            .chain(std::iter::repeat(None))
-            .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
-            .take(max)
-        {
-            diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
-        }
-        diff == 0
+        fixed_size_digest_eq(p, expected)
     })
+}
+
+/// Compare two tokens via fixed-size SHA-256 digests.
+///
+/// Both operands are `[u8; 32]`, so the XOR fold visits exactly 32 bytes and
+/// never branches on a mismatch or on the original token lengths.
+fn fixed_size_digest_eq(a: &str, b: &str) -> bool {
+    let a: [u8; 32] = jarvis_policy::kill_switch::sha256_digest(a);
+    let b: [u8; 32] = jarvis_policy::kill_switch::sha256_digest(b);
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= *x ^ *y;
+    }
+    diff == 0
 }
 
 /// Authorize a gRPC call before any handler work runs.
@@ -260,9 +269,9 @@ requires_approval = false
         assert_eq!(status.code(), Code::Unauthenticated);
     }
 
-    /// `token_matches` folds a length difference into the accumulator instead
-    /// of short-circuiting, mirroring `kill_switch::constant_time_eq` (both
-    /// still iterate `max` bytes, so neither is truly constant-time). A
+    /// `token_matches` now uses a fixed-size digest comparison that mirrors
+    /// `kill_switch::constant_time_eq`: both operands become `[u8; 32]` and the
+    /// XOR fold always visits 32 bytes, independent of token length. A
     /// shorter, a longer, and a same-length wrong token must all be rejected,
     /// as must blank values. An exact non-blank match still passes.
     #[test]
@@ -279,16 +288,23 @@ requires_approval = false
         // Same-length content mismatch.
         assert!(!token_matches(Some("Correct-token"), expected));
 
-        // Length mismatches in both directions; these were rejected before as
-        // well, but via a timing-observable `p.len() == expected.len()` exit.
+        // Length mismatches in both directions: length is now absorbed by the
+        // digest, and the fixed-size XOR fold rejects them all the same.
         assert!(!token_matches(Some("correct"), expected));
         assert!(!token_matches(Some("correct-token-extra"), expected));
 
-        // A prefix-only match must not be accepted by the padded XOR loop.
+        // A prefix-only match must not be accepted by the digest comparison.
         assert!(!token_matches(Some("correct-to"), expected));
 
         // Missing token stays rejected (unchanged fail-closed contract).
         assert!(!token_matches(None, expected));
+
+        // Long inputs: an exact match passes, while a one-byte extension that
+        // changes only the tail is still rejected by the 32-byte digest fold.
+        let long = "l".repeat(4096);
+        assert!(token_matches(Some(long.as_str()), long.as_str()));
+        let longer = format!("{long}x");
+        assert!(!token_matches(Some(longer.as_str()), long.as_str()));
     }
 
     /// The call site rejects a length-mismatched header token with the same
@@ -352,9 +368,11 @@ requires_approval = false
             .await
             .expect_err("empty command is still rejected by the gateway");
         // An empty command is a typed `ClientError` (gateway.rs `client_error`),
-        // so the shared contract maps it to InvalidArgument, not Internal.
+        // so the shared contract maps it to InvalidArgument, not Internal. Its
+        // text is already in the fixed vocabulary, so it passes through the
+        // shared `safe_client_error_text` helper verbatim.
         assert_eq!(status.code(), Code::InvalidArgument);
-        assert!(status.message().contains("must not be empty"));
+        assert_eq!(status.message(), "MCP server command must not be empty");
     }
 
     /// Malformed `args` must be reported as `INVALID_ARGUMENT` instead of
@@ -375,13 +393,16 @@ requires_approval = false
         assert_eq!(status.code(), Code::InvalidArgument);
     }
 
-    /// Every `ErrorKind` must map to its agreed gRPC code, and internal
-    /// failures must never echo their detail into the caller-visible status.
+    /// Every `ErrorKind` must map to its agreed gRPC code, and the caller-
+    /// visible message must come from the fixed vocabulary shared with HTTP —
+    /// never from the raw error text. Absolute sandbox paths, egress hosts and
+    /// upstream server names are logged server-side only (Internal) or reduced
+    /// to a static phrase by `http::safe_client_error_text` (ClientError).
     #[test]
     fn grpc_status_for_maps_error_kinds_and_hides_internal_detail() {
         use crate::error::{ErrorKind, McpGatewayError};
 
-        let cases: [(anyhow::Error, ErrorKind, Code); 9] = [
+        let cases: [(anyhow::Error, ErrorKind, Code, &str); 12] = [
             (
                 McpGatewayError::ArgsTooLarge {
                     tool: "echo".into(),
@@ -391,16 +412,46 @@ requires_approval = false
                 .into(),
                 ErrorKind::ClientError,
                 Code::InvalidArgument,
+                "invalid tool arguments",
             ),
             (
                 McpGatewayError::ClientError("missing url".into()).into(),
                 ErrorKind::ClientError,
                 Code::InvalidArgument,
+                "invalid tool arguments",
+            ),
+            (
+                McpGatewayError::ClientError(
+                    "read /home/koppe/secret-project/token.txt: permission denied".into(),
+                )
+                .into(),
+                ErrorKind::ClientError,
+                Code::InvalidArgument,
+                "invalid tool arguments",
+            ),
+            (
+                McpGatewayError::ClientError(
+                    "host 'attacker.example' is not in the egress allowlist".into(),
+                )
+                .into(),
+                ErrorKind::ClientError,
+                Code::InvalidArgument,
+                "host is not allowed by the egress policy",
+            ),
+            (
+                McpGatewayError::ClientError(
+                    "MCP server 'upstream.internal.example:8443' is unreachable".into(),
+                )
+                .into(),
+                ErrorKind::ClientError,
+                Code::InvalidArgument,
+                "upstream MCP server is unavailable",
             ),
             (
                 McpGatewayError::NotAllowed("echo".into()).into(),
                 ErrorKind::Forbidden,
                 Code::PermissionDenied,
+                crate::http::POLICY_DENIED_MESSAGE,
             ),
             (
                 McpGatewayError::PolicyDenied {
@@ -410,6 +461,7 @@ requires_approval = false
                 .into(),
                 ErrorKind::Forbidden,
                 Code::PermissionDenied,
+                crate::http::POLICY_DENIED_MESSAGE,
             ),
             (
                 McpGatewayError::PrincipalNotAllowed {
@@ -419,6 +471,7 @@ requires_approval = false
                 .into(),
                 ErrorKind::Forbidden,
                 Code::PermissionDenied,
+                crate::http::POLICY_DENIED_MESSAGE,
             ),
             (
                 McpGatewayError::ApprovalRequired {
@@ -427,6 +480,7 @@ requires_approval = false
                 .into(),
                 ErrorKind::Forbidden,
                 Code::PermissionDenied,
+                crate::http::POLICY_DENIED_MESSAGE,
             ),
             (
                 McpGatewayError::ApprovalDenied {
@@ -436,11 +490,13 @@ requires_approval = false
                 .into(),
                 ErrorKind::Forbidden,
                 Code::PermissionDenied,
+                crate::http::POLICY_DENIED_MESSAGE,
             ),
             (
                 McpGatewayError::Sandbox("secret path /tmp/x".into()).into(),
                 ErrorKind::Internal,
                 Code::Internal,
+                INTERNAL_ERROR_MESSAGE,
             ),
             // Untyped errors (including bare `anyhow!` values) fall back to
             // Internal, exactly as they do on the HTTP adapter.
@@ -448,10 +504,11 @@ requires_approval = false
                 anyhow::anyhow!("untyped secret detail"),
                 ErrorKind::Internal,
                 Code::Internal,
+                INTERNAL_ERROR_MESSAGE,
             ),
         ];
 
-        for (error, expected_kind, expected_code) in cases {
+        for (error, expected_kind, expected_code, expected_message) in cases {
             let actual_kind = error
                 .downcast_ref::<McpGatewayError>()
                 .map(McpGatewayError::kind)
@@ -460,11 +517,21 @@ requires_approval = false
 
             let status = grpc_status_for(&error);
             assert_eq!(status.code(), expected_code, "{error}");
-            if expected_code == Code::Internal {
-                assert_eq!(status.message(), INTERNAL_ERROR_MESSAGE);
-                assert!(!status.message().contains("secret"));
-            } else {
-                assert!(status.message().contains(error.to_string().as_str()));
+            assert_eq!(status.message(), expected_message, "{error}");
+
+            // Fixed vocabulary only: paths, hosts, upstream names and the raw
+            // detail must never reach the caller-visible status message.
+            let message = status.message();
+            for leaked in [
+                "/tmp",
+                "/home/koppe",
+                "secret",
+                "attacker.example",
+                "upstream.internal.example",
+                "'echo'",
+                "'test'",
+            ] {
+                assert!(!message.contains(leaked), "leaked '{leaked}' in {message}");
             }
         }
     }
@@ -565,7 +632,8 @@ requires_approval = false
             .expect_err("oversized args rejected by grpc");
         assert_eq!(http_status, reqwest::StatusCode::BAD_REQUEST);
         assert_eq!(grpc_status.code(), Code::InvalidArgument);
-        assert!(grpc_status.message().contains("exceed"));
+        assert_eq!(grpc_status.message(), "invalid tool arguments");
+        assert!(!grpc_status.message().contains("exceed"));
 
         // Forbidden: principal denied by policy -> 403 / PermissionDenied.
         let http_status = http
@@ -589,7 +657,10 @@ requires_approval = false
             .expect_err("policy-denied principal rejected by grpc");
         assert_eq!(http_status, reqwest::StatusCode::FORBIDDEN);
         assert_eq!(grpc_status.code(), Code::PermissionDenied);
-        assert!(grpc_status.message().contains("Policy denied"));
+        assert_eq!(grpc_status.message(), crate::http::POLICY_DENIED_MESSAGE);
+        assert!(!grpc_status.message().contains("Policy denied"));
+        assert!(!grpc_status.message().contains("filesystem.read"));
+        assert!(!grpc_status.message().contains("'test'"));
 
         // Internal: upstream MCP error result -> 500 / Internal, with the
         // detailed cause logged server-side and replaced by a fixed message.
