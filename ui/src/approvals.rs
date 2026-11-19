@@ -573,16 +573,30 @@ fn halt_was_pinned(decision: &CoreApprovalDecision, kill_switch_active: bool) ->
 /// kill-switch 409 is not a decision at all, so it pins the emergency-stop
 /// display instead of claiming a durable outcome. Only fixed status strings
 /// are used — no reason body, token or operator input is shown.
+///
+/// I60-B adopted policy: the backend separates expiry (HTTP 410) from a real
+/// winner (HTTP 409 with the shared already-decided body), and this display is
+/// the second line of defence. If an older peer still returns the benign 409
+/// for a post-deadline decide, its winner readback can only be `Pending` or
+/// `Expired` — no decision was ever stamped. Those two statuses are shown as
+/// "保留中" / "期限切れ", never as "既に決定済み: ...". The 409 classification,
+/// ApiOrAdmin winner scope, sticky halt latch and RAII generation guard are
+/// otherwise unchanged.
 fn status_for_outcome(outcome: &DecisionOutcome, kill_switch_active: bool) -> String {
     match outcome {
         DecisionOutcome::KillSwitchBlocked => "非常停止中：承認・却下は実行されません".to_string(),
         DecisionOutcome::Decided(decision) => {
             status_for_decision_with_kill_switch(decision, kill_switch_active).to_string()
         }
-        DecisionOutcome::AlreadyDecided(decision) => format!(
-            "既に決定済み: {}",
-            status_for_decision_with_kill_switch(decision, kill_switch_active)
-        ),
+        DecisionOutcome::AlreadyDecided(decision) => match decision {
+            CoreApprovalDecision::Pending | CoreApprovalDecision::Expired => {
+                status_for_decision(decision).to_string()
+            }
+            _ => format!(
+                "既に決定済み: {}",
+                status_for_decision_with_kill_switch(decision, kill_switch_active)
+            ),
+        },
     }
 }
 
@@ -921,6 +935,37 @@ mod tests {
             status_for_outcome(&DecisionOutcome::Decided(approved), true),
             "承認済み・実行は非常停止中"
         );
+    }
+
+    /// I60-B regression: an already-decided 409 whose winner readback is still
+    /// `Pending` or `Expired` is not a durable decision — the store rejected a
+    /// late decide without stamping one. Show the real state instead of the
+    /// misleading "既に決定済み: 保留中". Genuine winners keep their wording.
+    #[test]
+    fn already_decided_winner_pending_or_expired_shows_real_state() {
+        for (winner, expected) in [
+            (CoreApprovalDecision::Pending, "保留中"),
+            (CoreApprovalDecision::Expired, "期限切れ"),
+        ] {
+            let status = status_for_outcome(&DecisionOutcome::AlreadyDecided(winner), false);
+            assert_eq!(status, expected);
+            assert!(
+                !status.contains("既に決定済み"),
+                "a non-terminal winner must not be reported as decided: {status}"
+            );
+        }
+
+        // The 410 path projects the canonical Expired decision directly.
+        let expired = DecisionOutcome::Decided(CoreApprovalDecision::Expired);
+        assert_eq!(status_for_outcome(&expired, false), "期限切れ");
+
+        // A real winner still uses the established text and remains redacted.
+        let denied = CoreApprovalDecision::Denied {
+            reason: "do not display".into(),
+        };
+        let status = status_for_outcome(&DecisionOutcome::AlreadyDecided(denied), false);
+        assert_eq!(status, "既に決定済み: 却下しました");
+        assert!(!status.contains("do not display"));
     }
 
     /// I52-A (a): a kill-switch 409 is neither a decision nor "already

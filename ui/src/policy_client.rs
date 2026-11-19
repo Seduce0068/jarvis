@@ -288,6 +288,9 @@ pub fn decision_from_json(value: &serde_json::Value) -> Result<Decision> {
 /// Outcome of an approve/deny POST.
 ///
 /// A `2xx` body crosses the canonical decision boundary and yields [`Self::Decided`].
+/// An HTTP 410 (I60-B) is likewise reported as [`Self::Decided`] carrying the
+/// canonical `Expired` decision: the store stamped nothing, but expiry is a
+/// real terminal decision with no winner to read back.
 /// An HTTP 409 is classified by its fixed body (I52-A, I58-B): only the
 /// already-decided literal means the row was settled by a competing winner, so
 /// the authoritative decision is read back and reported as [`Self::AlreadyDecided`]
@@ -389,9 +392,10 @@ pub struct PolicyClient {
     decide_agent: ureq::Agent,
     /// Display-only health probe agent. Shares the main agent's deadlines
     /// (`timeout_global` / `timeout_connect`, I50-C (c)) so an unresponsive
-    /// policy service cannot hang the poller, but disables status-as-error so
-    /// the fixed `503` degraded body stays readable (I48-D). No token is ever
-    /// attached to this agent.
+    /// policy service cannot hang the poller, disables status-as-error so the
+    /// fixed `503` degraded body stays readable (I48-D), and disables redirects
+    /// so a proxied `302 -> 200` cannot be mistaken for a healthy answer
+    /// (I60-A). No token is ever attached to this agent.
     probe_agent: ureq::Agent,
 }
 
@@ -491,6 +495,11 @@ impl PolicyClient {
             // The probe reads the fixed 503 body, which the main agent's
             // status-as-error default would otherwise discard.
             .http_status_as_error(false)
+            // Never follow a redirect: a reverse proxy answering 302 -> 200
+            // must not be read as an explicit "switch lifted" answer. With 0
+            // the 3xx arrives as-is and `kill_switch_probe` fails closed
+            // (I60-A), matching the main and decide agents' guard.
+            .max_redirects(0)
             .build();
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
@@ -537,18 +546,24 @@ impl PolicyClient {
     }
 
     /// Read-only, unauthenticated probe of the policy service's emergency-stop
-    /// state (I48-D). `GET /health` answers `503` with the fixed body
+    /// state (I48-D, I60-A). `GET /health` answers `503` with the fixed body
     /// `{"status":"degraded","reason":"kill_switch"}` while the kill switch is
-    /// active, and `200 {"status":"ok"}` otherwise. This is a *display* signal
-    /// only: the decision POST still returns `200 Approved` when a stop lands
-    /// mid-commit, while `jarvis-mcp-gw` re-checks the kill switch before the
-    /// tool runs. A definitive answer that is not `reason=kill_switch` (a
-    /// `200`, another degraded reason such as `no_policy`, or a non-JSON `200`
-    /// body) reports `false`; an *incomplete* probe — timeout, connection
-    /// error, or an unreadable `503` body — **fails closed** and reports `true`
-    /// (I54-A). Otherwise a transient failure right after a kill-switch 409
-    /// would masquerade as "switch lifted" and drop the halt pin. No reason
-    /// text, token, or request data is surfaced.
+    /// active, `503` with another reason such as `no_policy` when degraded for
+    /// another reason, and `200 {"status":"ok"}` otherwise. This is a *display*
+    /// signal only: the decision POST still returns `200 Approved` when a stop
+    /// lands mid-commit, while `jarvis-mcp-gw` re-checks the kill switch before
+    /// the tool runs.
+    ///
+    /// Only two definitive answers exist: a `503 reason=kill_switch` reports
+    /// `true`; a `200 status=ok` and any other `503` reason are an explicit
+    /// release and report `false`. Everything else is an *incomplete* probe and
+    /// **fails closed**: a timeout, a connection error, an unreadable or
+    /// unexpected body, a redirect, or any status other than `200`/`503`
+    /// (including a proxy `500`/`502`/`504`) returns `Err`, which this method
+    /// projects to `true` through `unwrap_or(true)` (I54-A, I60-A). Otherwise a
+    /// transient failure right after a kill-switch 409 would masquerade as
+    /// "switch lifted" and drop the halt pin. No reason text, token, or request
+    /// data is surfaced.
     pub fn kill_switch_active(&self) -> bool {
         self.kill_switch_probe().unwrap_or(true)
     }
@@ -560,21 +575,38 @@ impl PolicyClient {
     fn kill_switch_probe(&self) -> Result<bool> {
         let url = format!("{}/health", self.base_url);
         // The probe-only agent was built in `with_tokens` with the same
-        // `timeout_global` / `timeout_connect` as the main agent (I50-C (c)) and
-        // with status-as-error disabled so the fixed degraded body can be read.
+        // `timeout_global` / `timeout_connect` as the main agent (I50-C (c)),
+        // with status-as-error disabled so the fixed degraded body can be read,
+        // and with redirects disabled so a 3xx is never followed (I60-A).
         // It carries no token and never touches the main approval agent.
         let mut response = self
             .probe_agent
             .get(&url)
             .call()
             .with_context(|| format!("GET {url} failed"))?;
-        if response.status().as_u16() != 503 {
-            return Ok(false);
+        let status = response.status().as_u16();
+        // Only the two documented /health states are definitive. A 3xx cannot
+        // reach here as a followed 200 because the probe agent has
+        // `max_redirects(0)`. A 4xx/5xx from a reverse proxy is an incomplete
+        // probe, not a "switch lifted" answer (I60-A).
+        if status != 200 && status != 503 {
+            bail!("GET {url} returned unexpected HTTP {status}");
         }
         let value = response
             .body_mut()
             .read_json::<serde_json::Value>()
             .with_context(|| format!("invalid health JSON from GET {url}"))?;
+        if status == 200 {
+            // The healthy body is exactly `{"status":"ok"}` with no reason.
+            // A 200 carrying any other status is not an explicit release and
+            // must not clear a halt pin (I60-A).
+            if value.get("status").and_then(|s| s.as_str()) == Some("ok") {
+                return Ok(false);
+            }
+            bail!("unexpected health body from GET {url}");
+        }
+        // 503 is degraded: only the fixed kill-switch reason means "stopped";
+        // every other reason (e.g. `no_policy`) is an explicit release.
         Ok(value.get("reason").and_then(|reason| reason.as_str()) == Some("kill_switch"))
     }
 
@@ -653,6 +685,14 @@ impl PolicyClient {
                 return Ok(DecisionOutcome::KillSwitchBlocked);
             }
             return Ok(DecisionOutcome::AlreadyDecided(self.winner_decision(id)?));
+        }
+        // I60-B: the policy service maps a post-deadline approve/deny to 410
+        // Gone with its own fixed body. No decision was committed and no winner
+        // exists, so surface the canonical `Expired` decision directly. This
+        // keeps expiry out of the 409 winner branch that used to render
+        // "既に決定済み: 保留中" and never touches the shared 409 bodies.
+        if status.as_u16() == 410 {
+            return Ok(DecisionOutcome::Decided(Decision::Expired));
         }
         // A 401/500/3xx must not be reported to the operator as a successful
         // approve/deny. The fixed error body is never surfaced.
@@ -1677,17 +1717,18 @@ mod tests {
         server.join().expect("server thread");
     }
 
-    /// I48-D: `200 ok`, a different degraded reason, and a malformed body all
-    /// report `false`, keeping the approval status truthful.
+    /// I48-D: `200 status=ok` and a different degraded reason are definitive
+    /// releases and report `false`, keeping the approval status truthful. An
+    /// unexpected 200 body is no longer a release; see the I60-A regression
+    /// `health_probe_unexpected_200_body_fails_closed` below.
     #[test]
-    fn kill_switch_active_is_false_for_ok_other_reasons_and_malformed_body() {
+    fn kill_switch_active_is_false_for_ok_and_other_reasons() {
         let mut responses = [
             ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
             (
                 "HTTP/1.1 503 Service Unavailable",
                 r#"{"status":"degraded","reason":"no_policy"}"#,
             ),
-            ("HTTP/1.1 200 OK", "not-json"),
         ]
         .into_iter();
         let (addr, server) = spawn_test_server(
@@ -1695,10 +1736,10 @@ mod tests {
                 let (status, body) = responses.next().expect("queued response");
                 respond_json(stream, status, body);
             },
-            3,
+            2,
         );
         let client = PolicyClient::new(format!("http://{addr}"));
-        for _ in 0..3 {
+        for _ in 0..2 {
             assert!(!client.kill_switch_active());
         }
         server.join().expect("server thread");
@@ -1762,6 +1803,155 @@ mod tests {
             "an explicit 200 ok must still release the confirmed stop"
         );
         server.join().expect("server thread");
+    }
+
+    // --- I60-A: probe status/body classification regressions ----------------
+
+    /// Observe both halves of the incomplete-probe contract on one client: the
+    /// raw probe must return `Err`, and the public bool must fail closed.
+    fn assert_health_status_fails_closed(status_line: &str, body: &str) {
+        let status_line = status_line.to_string();
+        let body = body.to_string();
+        let label = status_line.clone();
+        let (addr, server) = spawn_test_server(
+            move |stream, _request| respond_json(stream, status_line.as_str(), body.as_str()),
+            2,
+        );
+        let client = PolicyClient::new(format!("http://{addr}"));
+        assert!(
+            client.kill_switch_probe().is_err(),
+            "raw probe must return Err for {label}"
+        );
+        assert!(
+            client.kill_switch_active(),
+            "public probe must fail closed for {label}"
+        );
+        server.join().expect("server thread");
+    }
+
+    /// I60-A: a reverse proxy's 500/502/504 used to be classified as "not
+    /// stopped" and released the halt pin. They are incomplete probes now.
+    #[test]
+    fn health_probe_proxy_errors_fail_closed() {
+        for status in [
+            "HTTP/1.1 500 Internal Server Error",
+            "HTTP/1.1 502 Bad Gateway",
+            "HTTP/1.1 504 Gateway Timeout",
+        ] {
+            assert_health_status_fails_closed(status, r#"{"status":"ok"}"#);
+        }
+    }
+
+    /// I60-A: a 3xx is not a definitive health answer either; it must fail
+    /// closed even when its body looks healthy.
+    #[test]
+    fn health_probe_3xx_status_fails_closed() {
+        for status in [
+            "HTTP/1.1 301 Moved Permanently",
+            "HTTP/1.1 302 Found",
+            "HTTP/1.1 307 Temporary Redirect",
+        ] {
+            assert_health_status_fails_closed(status, r#"{"status":"ok"}"#);
+        }
+    }
+
+    /// I60-A: a 200 is only a release when its body carries `status=ok`. Any
+    /// other body is unexpected and must fail closed instead of lifting the
+    /// halt.
+    #[test]
+    fn health_probe_unexpected_200_body_fails_closed() {
+        for body in [
+            "not-json",
+            r#"{"status":"degraded"}"#,
+            r#"{"status":"degraded","reason":"kill_switch"}"#,
+            r#"{}"#,
+            "",
+        ] {
+            let body = body.to_string();
+            let label = body.clone();
+            let (addr, server) = spawn_test_server(
+                move |stream, _request| respond_json(stream, "HTTP/1.1 200 OK", body.as_str()),
+                2,
+            );
+            let client = PolicyClient::new(format!("http://{addr}"));
+            assert!(
+                client.kill_switch_probe().is_err(),
+                "raw probe must reject an unexpected 200 body: {label}"
+            );
+            assert!(
+                client.kill_switch_active(),
+                "an unexpected 200 body must fail closed: {label}"
+            );
+            server.join().expect("server thread");
+        }
+    }
+
+    /// I60-A: the exact bypass from the review finding. With `max_redirects(0)`
+    /// a proxy 302 is returned as-is rather than followed to a 200
+    /// `{"status":"ok"}` release. The target must see no follow-up request.
+    #[test]
+    fn health_probe_does_not_follow_redirect() {
+        use std::sync::mpsc;
+        use std::time::Instant;
+
+        let target = TcpListener::bind("127.0.0.1:0").expect("bind redirect target");
+        let target_addr = target.local_addr().expect("target addr");
+        let (seen_tx, seen_rx) = mpsc::channel();
+        let target_thread = std::thread::spawn(move || {
+            target
+                .set_nonblocking(true)
+                .expect("set nonblocking on target");
+            let deadline = Instant::now() + Duration::from_millis(300);
+            while Instant::now() < deadline {
+                match target.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 1024];
+                        let _ = stream.read(&mut buf);
+                        // A followed redirect would otherwise answer with an
+                        // explicit healthy release and drop the halt pin.
+                        let body = r#"{"status":"ok"}"#;
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                        let _ = seen_tx.send(true);
+                        return;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return,
+                }
+            }
+            let _ = seen_tx.send(false);
+        });
+
+        let (addr, server) = spawn_test_server(
+            move |stream, _request| {
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{target_addr}/health\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                respond(stream, &response);
+            },
+            2,
+        );
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        assert!(
+            client.kill_switch_probe().is_err(),
+            "an unfollowed 302 must be an incomplete probe"
+        );
+        assert!(
+            client.kill_switch_active(),
+            "an unfollowed 302 must not lift the halt"
+        );
+        server.join().expect("server thread");
+        let followed = seen_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("redirect target probe result");
+        target_thread.join().expect("redirect target thread");
+        assert!(!followed, "the 302 must not be followed to the target");
     }
 
     // --- I50-C: winner preservation (409) and probe deadlines ---------------
@@ -2216,6 +2406,45 @@ mod tests {
         assert_eq!(
             approval_token(&requests[1]).as_deref(),
             Some("tc-admin-token")
+        );
+    }
+
+    /// I60-B regression: a 410 from approve/deny is a terminal expiry with no
+    /// winner. It must not surface as a generic transport error and must never
+    /// issue a status GET — the old already-decided 409 path is what rendered
+    /// "既に決定済み: 保留中" for an expired request.
+    #[test]
+    fn expired_410_reports_expired_without_winner_fetch() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = seen.clone();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                seen_for_thread.lock().expect("lock").push(request);
+                respond_json(stream, "HTTP/1.1 410 Gone", "approval request expired");
+            },
+            2,
+        );
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let approved = client.approve_outcome("req-1", "koppe");
+        let denied = client.deny_outcome("req-2", "because");
+        handle.join().expect("server thread");
+
+        assert_eq!(
+            approved.expect("410 is a classified outcome"),
+            DecisionOutcome::Decided(Decision::Expired)
+        );
+        assert_eq!(
+            denied.expect("410 is a classified outcome"),
+            DecisionOutcome::Decided(Decision::Expired)
+        );
+        let requests = seen.lock().expect("lock");
+        assert_eq!(requests.len(), 2, "no winner GET may follow a 410");
+        assert!(
+            requests.iter().all(|r| r.starts_with("POST /v1/approval/")),
+            "only decision POSTs may be sent: {requests:?}"
         );
     }
 }
