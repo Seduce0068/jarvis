@@ -79,8 +79,13 @@
     "pre-commit": [
       {
         "matcher": "*",
+        "command": "shell make secret-scan",
+        "description": "コミット前シークレットスキャン（値は出力しない ci/scripts/secret_scan.py。|| true を付けず失敗時にコミットをブロック。CI の extra_gates でも make secret-scan を最終ゲートとして併設 = pre-commit 主軸 / CI 最終ゲートの二段構成。git hook の実インストールは行わず設定ファイルのみ）"
+      },
+      {
+        "matcher": "*",
         "command": "shell git diff --cached --name-only | xargs -r npx markdownlint 2>/dev/null || true",
-        "description": "コミット前Markdownチェック"
+        "description": "コミット前Markdownチェック（方針: docs/ に MD013 等の baseline が残存するため（todo.md P3-4、456 issues）現状は || true で警告扱いとしコミットをブロックしない。baseline 解消後に || true を外す。シークレット検出の fail-closed は上記 secret-scan が担う）"
       }
     ]
   }

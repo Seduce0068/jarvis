@@ -30,8 +30,15 @@ jobs:
         shellcheck # required by ci/scripts/check-shell.sh extra_gate
       working_directory: rust
       # Global policy: unsafe blocks/functions are forbidden unless explicitly
-      # justified with a documented SAFETY comment.
-      clippy_args: -D clippy::undocumented_unsafe_blocks
+      # justified with a documented SAFETY comment (common AGENTS.md §15).
+      # I68-B: add -D warnings so CI clippy treats all warnings as errors,
+      # matching `make ci-local` (Makefile:44) and the documented lint command.
+      clippy_args: -D warnings -D clippy::undocumented_unsafe_blocks
+      # I68-B: check/test `--locked` is decided inside the shared
+      # rust-gates.yml@v1 workflow; its input API is not confirmed here
+      # (todo.md「外部事実のため未確認」). No caller-side flag is set to avoid
+      # guessing an unsupported input. Locally `make ci-local` already pins
+      # `--locked` for cargo check/test (Makefile:42-43). Recorded as-is.
       # aarch64 cross-build (matches rust/scripts/deploy.rs) and the
       # Docker-backed testcontainers integration test.
       extra_gates: |
