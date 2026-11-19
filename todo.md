@@ -424,7 +424,7 @@ generated:
   `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
   `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
   event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
-- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1-3 対応済み: `reconcile_pending()` を `PolicyEngine::new()` から呼び、未決定行を待機者なしで再登録、期限切れ行を Expired 決着＋audit（Noop では no-op）。R4 で `record_request` 失敗を fail-closed 化（メモリ登録取消し＋QueueFull/503）、`mark_expired` 失敗を warn 可視化。残るスライス: opt-in ロールアウト／再接続ロジック／専用 Persistence エラー型** — **スライス1-2: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
+- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1-3＋強化対応済み: 再接続（接続世代の破棄＋上限3回リトライ、URL 非ログ）、専用 `ApprovalError::Persistence`（HTTP 503・固定本文、QueueFull と区別可能）。残るスライス: opt-in ロールアウトのみ** — **スライス1-3: `reconcile_pending()` を `PolicyEngine::new()` から呼び、未決定行を待機者なしで再登録、期限切れ行を Expired 決着＋audit（Noop では no-op）。R4 で `record_request` 失敗を fail-closed 化（メモリ登録取消し＋QueueFull/503）、`mark_expired` 失敗を warn 可視化。残るスライス: opt-in ロールアウト／再接続ロジック／専用 Persistence エラー型** — **スライス1-2: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
   重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
 - [x] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる**（2026-11-19 対応済み: id と requested_at はサーバ生成、expires_at は server timeout でクランプし生成値をレスポンスで返却。不正値は 400 で拒否。回帰テスト6件追加、policy 73 tests pass） — 根拠
@@ -916,17 +916,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   Forbidden は固定ポリシー文言へ。漏洩を期待していたテストを更新。
 - [x] Pg `record_request` 失敗の握り潰し（confirmed high）— メモリ登録取消し＋
   `QueueFull`(503) で fail-closed、`mark_expired` は warn 可視化。DB 失敗注入2件追加。
-- [ ] **migration が jarvis-context に独占され policy が先起動すると 003 未適用**
+- [x] **migration が jarvis-context に独占され policy が先起動すると 003 未適用** — 2026-11-19 対応済み: `jarvis-migrations.service`（Type=oneshot / RemainAfterExit、bws 経由で URL 注入、秘密情報なし）を新設し policy / context 双方が `After=` + `Wants=` で依存。既存 policy→context 順序は維持、`systemd-analyze verify` 3 unit で循環なし。install-backup-timer.sh の配置枠組みにも組み込み。
   （confirmed high）— `jarvis-policy.service` に `After=jarvis-context.service`
   を追加すると**循環依存**になる（context が policy に After を持つため、
   `systemd-analyze verify` で検出）ので repo 側ではコメントで注意喚起に留めた。
   真の解決は migration 用 oneshot unit の分離、または policy 起動時 migration
   実行／必須テーブル CHECK。初回導入時は context を先に起動するか
   `cargo sqlx migrate run` を手動実行する必要がある。
-- [ ] **PgApprovalPersistence が単一接続で再接続しない**（likely medium）—
+- [x] **PgApprovalPersistence が単一接続で再接続しない**（likely medium）— 2026-11-19 対応済み: 接続世代（client + driver）を Mutex で保持し、失敗時に旧 driver を abort して再接続。初期1回＋再接続2回の上限付きリトライ、上限到達時は `ApprovalError::Persistence`。再試行判定の pure テスト追加 —
   PostgreSQL 再起動後に永続化が恒久停止する。接続死活監視＋再生成、
   または明示的な Persistence エラー通知が必要。
-- [ ] **ドキュメントドリフト5件**（i31-todo-discovery / 中〜低）—
+- [x] **ドキュメントドリフト5件**（i31-todo-discovery / 中〜低）— 2026-11-19 対応済み: 旧トークン名を「UI 側エイリアス」と明記、specs/test-policy-approval.md に REQ-12/13/14＋R-9＋TC-A3/A4/A5 追加、ui/README と ADR-0005 の固定テスト件数を削除、smoke コメントを現行挙動へ、require_server_side_principal を「実装済み opt-in」へ更新。spec 変更に伴い evidence JSON を実測（144 tests）再生成し index も同期 —
   policy.env / ui/README / remaining-tasks.md の旧トークン名、
   specs/test-policy-approval.md の2トークン分離未反映、
   ui/README と ADR-0005 のテスト件数（実測27→36）、
@@ -934,3 +934,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   remaining-tasks.md の `require_server_side_principal`「未実装」記述。
 - 親が子の出力で3点を修正: UI テストの lifetime 明示、`or_else`→`or`、
   systemd 循環依存の回避（コメント化）。
+
+### Round 29 のレビュー結果（未対応）
+
+- [ ] **起動時リコンサイルした保留承認に実行中のタイムアウト決着経路が無い**
+  （confirmed high）— 復活した live 行の期限が切れても DB は undecided のまま、
+  次の `try_request` の prune でメモリから消える。operator は decide できず
+  監査も次回再起動まで欠落。`prune` と `mark_expired` を単一決着経路へ集約し、
+  コミット成功後にのみメモリから除去する必要がある。
+- [ ] **`decide` とタイムアウトの順序反転で永続化・メモリ・応答が不一致**
+  （likely high）— DB コミット後〜再ロック前にタイムアウトがメモリを Expired に
+  すると、DB は approved なのに待機側は Expired。期限切れ後の decide を明示拒否し、
+  決着を単一 CAS 結果から導出する。
+- [ ] **reconcile が `approval_max_pending` を無視**（confirmed medium）—
+  DB に上限超過の undecided 行があると再起動時に全行がメモリへ載り、
+  新規承認が期限切れまで QueueFull で連続拒否される。
+- [ ] **認証ヘッダ／失敗ログのテストが定数・ソース文字列の自己確認に形骸化**
+  （confirmed medium）— クライアント／サーバ／HTTP でヘッダ定数が別定義なのに
+  各テストは自側の定数とリテラルを比べるだけ。共有定数化または横断契約テスト、
+  および tracing subscriber での構造化ログ検証が必要。
+- [ ] **mcp-gw `/v1/execute` が `#[instrument(skip(gateway))]` でreq 全体をログへ**
+  （confirmed high）— ツール引数（書き込み内容・URL 等）がスパン属性として
+  OTLP/Grafana へ送出され得る。`skip(gateway, req)` 化と、tool 名・principal
+  のみの固定フィールド記録が必要。
+
+- 親が対応: spec 変更に伴う evidence を実測再生成（144 tests / hash
+  `90ef3ba0db8f…` / ファイル名・index 同期）。flaky な
+  `webhook_spans_do_not_record_raw_payloads` は再実行で pass（無理な反復は停止）。
