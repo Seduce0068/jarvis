@@ -420,6 +420,17 @@ trait PendingStore: Send + Sync {
     async fn mark_exhausted(&self, _id: Uuid) -> Result<()> {
         Ok(())
     }
+    /// Re-aggregate `OUTBOX_STATE_COUNTS_SQL` and publish both gauges once
+    /// after a batch of terminal outbox transitions (I69-D).
+    ///
+    /// `record`/`list` already refresh on their own, but a successful
+    /// `dead_letter` / `mark_exhausted` / `remove` used to leave the gauges at
+    /// their pre-transition values (an inflated recoverable backlog). Only the
+    /// two bare COUNTs are ever read; no id, payload or vector value crosses
+    /// this seam. The default no-op keeps the pre-existing in-memory test
+    /// stores unchanged; `PgPendingStore` runs the aggregate and mock stores
+    /// override it so the refresh ordering is testable without a database.
+    async fn observe_state_counts(&self) {}
 }
 
 struct QdrantVectorSink {
@@ -584,6 +595,22 @@ impl PendingStore for PgPendingStore {
             .await?;
         Ok(())
     }
+
+    async fn observe_state_counts(&self) {
+        // Best-effort by construction (I63-A / I65-B / I69-D): an aggregate
+        // failure must never turn an already-durable terminal write into a
+        // reported store failure. Only the two bare COUNTs reach the metrics
+        // layer; no row value is ever read.
+        let Ok(client) = self.pool.get().await else {
+            return;
+        };
+        if let Ok(row) = client.query_one(OUTBOX_STATE_COUNTS_SQL, &[]).await {
+            let pending: i64 = row.get(0);
+            let exhausted: i64 = row.get(1);
+            crate::http::observe_pending_embeddings(pending);
+            crate::http::observe_exhausted_embeddings(exhausted);
+        }
+    }
 }
 
 /// Attempt the vector upsert after the PostgreSQL write has succeeded (P1-2).
@@ -605,6 +632,11 @@ async fn store_memory_with_sinks(
                     "vector upsert succeeded but a stale pending_embeddings row could not be removed"
                 );
             }
+            // I69-D: a confirmed delete changes the outbox state counts, so
+            // refresh once here as well. This path is outside
+            // `reconcile_pending`; without this call a stale row removed after
+            // a successful upsert would keep the pending gauge inflated.
+            outbox.observe_state_counts().await;
             Ok(())
         }
         Err(error) => {
@@ -928,6 +960,14 @@ async fn reconcile_pending(
             }
         }
     }
+
+    // I69-D: every terminal transition in this batch (dead-letter, exhausted
+    // or removed) changes the pending/exhausted counts. Re-aggregate ONCE after
+    // the loop rather than issuing a COUNT per row, so the gauges describe the
+    // final state of the outbox. The seam is overridden by mock stores, which
+    // makes the "mutations first, single refresh last" ordering verifiable
+    // without a live PostgreSQL connection.
+    outbox.observe_state_counts().await;
 }
 
 pub struct Builder {
@@ -3911,6 +3951,125 @@ mod log_safety_tests {
         );
         assert!(logs.contains(&id.to_string()), "fixed id label: {logs}");
         assert!(!logs.contains(PROBE), "raw error text leaked: {logs}");
+    }
+
+    // --- I69-D: outbox gauge freshness after terminal transitions ---
+    // Mock store + pure event order: no PostgreSQL, Qdrant or Prometheus
+    // recorder is installed, so the refresh policy is asserted deterministically.
+
+    /// Records every terminal outbox write and every gauge refresh as an event
+    /// so the "mutations first, one refresh last" ordering is observable.
+    struct GaugeRefreshOutbox {
+        events: Events,
+        rows: Mutex<Vec<PendingEmbedding>>,
+    }
+
+    impl GaugeRefreshOutbox {
+        fn new(rows: Vec<PendingEmbedding>) -> Self {
+            Self {
+                events: Events::default(),
+                rows: Mutex::new(rows),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PendingStore for GaugeRefreshOutbox {
+        async fn record(&self, _memory: &MemoryEntry, _embedding: &[f32]) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list(&self, _limit: usize) -> Result<Vec<PendingEmbedding>> {
+            Ok(self.rows.lock().expect("rows lock").clone())
+        }
+
+        async fn remove(&self, _id: Uuid) -> Result<()> {
+            self.events.push("remove");
+            Ok(())
+        }
+
+        async fn mark_failed(
+            &self,
+            _id: Uuid,
+            _attempts: i32,
+            _next_retry_at: DateTime<Utc>,
+        ) -> Result<()> {
+            self.events.push("mark_failed");
+            Ok(())
+        }
+
+        async fn dead_letter(&self, _id: Uuid, _at: DateTime<Utc>) -> Result<()> {
+            self.events.push("dead_letter");
+            Ok(())
+        }
+
+        async fn mark_exhausted(&self, _id: Uuid) -> Result<()> {
+            self.events.push("mark_exhausted");
+            Ok(())
+        }
+
+        async fn observe_state_counts(&self) {
+            self.events.push("observe");
+        }
+    }
+
+    /// A successful reconcile deletes the row and refreshes the gauges exactly
+    /// once, after the write — not once per row.
+    #[tokio::test]
+    async fn reconcile_refreshes_outbox_gauges_once_after_remove() {
+        let outbox = GaugeRefreshOutbox::new(vec![pending()]);
+        reconcile_pending(&outbox, &OkSink, None, 384).await;
+        assert_eq!(
+            outbox.events.snapshot(),
+            vec!["remove", "observe"],
+            "the refresh must follow the successful delete and run once"
+        );
+    }
+
+    /// A terminal dead-letter also refreshes after the durable decision, so a
+    /// retired row no longer inflates the recoverable pending gauge.
+    #[tokio::test]
+    async fn reconcile_refreshes_outbox_gauges_after_dead_letter() {
+        let mut poison = pending();
+        poison.embedding[0] = f32::NAN;
+        let outbox = GaugeRefreshOutbox::new(vec![poison]);
+        reconcile_pending(&outbox, &OkSink, None, 384).await;
+        assert_eq!(
+            outbox.events.snapshot(),
+            vec!["dead_letter", "observe"],
+            "dead-letter must be followed by exactly one gauge refresh"
+        );
+    }
+
+    /// Exhausting the retry budget writes the terminal `exhausted` state; the
+    /// single end-of-loop refresh then publishes the new state split.
+    #[tokio::test]
+    async fn reconcile_refreshes_outbox_gauges_after_exhausted_transition() {
+        let mut stale = pending();
+        stale.embedding.clear();
+        stale.attempts = MAX_RECONCILE_ATTEMPTS - 1;
+        let outbox = GaugeRefreshOutbox::new(vec![stale]);
+        reconcile_pending(&outbox, &OkSink, None, 384).await;
+        assert_eq!(
+            outbox.events.snapshot(),
+            vec!["mark_failed", "mark_exhausted", "observe"],
+            "the exhausted write must precede the single gauge refresh"
+        );
+    }
+
+    /// The store path lies outside `reconcile_pending`; a confirmed stale-row
+    /// remove there must refresh the gauges too.
+    #[tokio::test]
+    async fn store_path_refreshes_outbox_gauges_after_remove() {
+        let outbox = GaugeRefreshOutbox::new(Vec::new());
+        store_memory_with_sinks(&memory(), &OkSink, &outbox)
+            .await
+            .expect("upsert succeeds");
+        assert_eq!(
+            outbox.events.snapshot(),
+            vec!["remove", "observe"],
+            "a stale-row delete must be followed by exactly one refresh"
+        );
     }
 
     /// I49-B / I51-D: all five Qdrant call sites (build, list, create, upsert,

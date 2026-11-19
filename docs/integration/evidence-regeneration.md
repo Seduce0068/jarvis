@@ -23,6 +23,13 @@ generated:
 ハッシュは仕様変更の結果であってテスト結果の証拠ではない。必ず手順2で
 対応テストを再実行し、その実測値を記録する。
 
+**真正性の限界（I69-D (a)）**: `check-evidence.sh` は仕様ハッシュ、
+notes / index の件数整合、Scenario 数の下限など**内部整合**のみを検証する。
+`results.passed` は手入力であり、notes と index を同じ値に揃えれば
+実際のテスト結果と無関係な数値でもゲートを通過する。生成器はこの
+「手入力リスク」を補助的に減らすもので、ゲートの真正性保証ではない。
+実測コマンドと JSON の対応は「実測と JSON の対応（検算手順）」を参照。
+
 ## 再生成手順（7ステップ）
 
 ### 1. 仕様のハッシュを取得する
@@ -45,6 +52,10 @@ sha256sum specs/test-<name>.md
 - `test-ui.md`: `cd ui && cargo test`
 - `test-backup.md`: `make test-verify-backup` と `make test-backup-args`（`make safety-test` は集計対象外）
 
+Cargo 系のターゲットは `ci/scripts/generate-evidence.sh` でテスト数を機械導出
+できる。導出値はあくまで「一覧上の件数」であり、実行結果の成否は必ず
+上記コマンドの実測で確認する（後述の検算手順）。
+
 ### 3. evidence JSON の spec_hash を更新する
 
 - トップレベルの `spec_hash`
@@ -61,8 +72,10 @@ Traceability の Req 列集合の両方と一致させる。要件の追加・�
 
 ### 4. results / timestamp / notes を実測へ更新する
 
-- `results.passed` / `results.failed`: 手順2の実測値。厳密な整数型であり、
-  `failed` が 0 でない場合はゲートが拒否する。
+- `results.passed` / `results.failed`: 手順2の実測値。Cargo 系は
+  generator の機械導出値と照合し、差分がある場合は実行コマンドの範囲
+  （`--lib` の有無等）を見直す。厳密な整数型であり、`failed` が 0 でない
+  場合はゲートが拒否する。
 - `timestamp`: RFC 3339（タイムゾーン付き、例 `2026-11-18T06:20:42+09:00`）。
 - `notes`: 検証した内容と未測定項目（カバレッジ等）を簡潔に記載する。
   秘密情報や実機固有の値は書かない。件数表記（`N passed` 等）は `results` と
@@ -205,6 +218,82 @@ cd rust && cargo test --workspace
 ```
 
 ハッシュだけの書き換えは禁止する。
+
+## 証跡 results の機械導出（I69-D (a)）
+
+`ci/scripts/generate-evidence.sh` は `cargo test -- --list` と
+`--list --ignored` の件数から `results` を機械導出する。対象は
+`policy` / `mcp` / `context` / `event` / `ui` / `core` の 6 ターゲット。
+
+```bash
+# Kubuntu / jarvis リポジトリルートで実行
+echo "== 機械導出 (context) =="
+bash ci/scripts/generate-evidence.sh context
+```
+
+標準出力には `results` 断片と、それと整合する `notes` の件数表記のみを出す。
+テスト名・環境変数・秘密情報・ホスト固有パスは読まない。失敗時は
+値を持たないコード（`CargoListFailed` 等）のみを stderr に出す。
+
+### 自動書き込みを行わない理由
+
+意図的に**読み取り専用**としている。次に理由を記録する。
+
+1. `--list` はテストを列挙するだけで実行はしない。したがって
+   `passed` の「実行に成功した」という意味は実測実行でのみ確認できる。
+   generator の値をそのまま書き込むと、未実行を「成功」と偽る危険がある。
+2. `check-evidence.sh` はファイル名のハッシュ接頭詞、仕様ハッシュ、
+   notes / index の件数、Scenario 数、契約 step キーワードも検証する。
+   `results` だけを自動書き込みすると内部整合が崩れ、他項目まで
+   自動同期させれば「ゲートを通るための改ざん」と外見上区別できない。
+3. 件数は実行範囲（`--lib` か workspace か、ignored の扱い）で変わる。
+   ターゲット名と実測コマンドの対応を運用側で明示する必要がある。
+
+このため generator は `results` の**元になる数値**を与えるだけとし、
+既存 6 証跡や `check-evidence.sh` を壊さない（ファイルを一切書かない）。
+`make check-evidence` の動作は従来どおりである。
+
+## 実測と JSON の対応（検算手順）
+
+1. generator で機械導出値を得る（上記コマンド）。
+2. 手順2の実測コマンドを実行し、`test result: ok. N passed;
+   0 failed; M ignored` を確認する。ここでの成否が真正性の根拠。
+3. 導出値と実測が一致したら `results` と `notes` へ反映し、
+   `--check` で既存証跡との差分を確認する。
+
+```bash
+# Kubuntu / jarvis リポジトリルートで実行
+echo "== 1. 機械導出 =="
+bash ci/scripts/generate-evidence.sh context
+echo "== 2. 実測実行 =="
+(cd rust && cargo test -p jarvis-context --lib)
+echo "== 3. 既存証跡との照合（値は出力しない） =="
+bash ci/scripts/generate-evidence.sh context --check \
+  evidence/test-run-20261120-f1e67b2a5e2c.json
+```
+
+`CHECK: MISMATCH` は証跡側が古い（例: テスト追加で件数が増えた）ことを示す。
+この場合だけ手順3〜6で証跡を再生成し、再度 `--check` で `MATCH` を確認する。
+
+| generator target | 実測コマンド | 対応する証跡 |
+| --- | --- | --- |
+| `policy` | `cd rust && cargo test -p jarvis-policy --lib` | policy-approval |
+| `mcp` | `cd rust && cargo test -p jarvis-mcp-gw --lib` | mcp-gateway |
+| `context` | `cd rust && cargo test -p jarvis-context --lib` | context |
+| `event` | `cd rust && cargo test -p jarvis-event --lib` | event |
+| `ui` | `cd ui && cargo test` | ui |
+| `core` | `cd rust && cargo test -p jarvis-core --features http --lib` | （予備） |
+
+| JSON フィールド | 導出元 | 意味 |
+| --- | --- | --- |
+| `results.passed` | `--list` の総数 − ignored | 列挙された実行対象数（成功は実測で確認） |
+| `results.failed` | 実測実行の失敗数 | ゲートは 0 を要求 |
+| `results.skipped` | `--list --ignored` の件数 | `notes` の `N ignored` と一致させる |
+
+`test-backup.md` は `make` ベースのシェル回帰であり `--list` に対応しない。
+手順2の実測出力と `results` を目視で照合する（generator 対象外）。
+Scenario 数・契約 step キーワード・index の件数は generator の対象外のため、
+従来どおり手順4〜6で同期する。
 
 ## 関連
 
