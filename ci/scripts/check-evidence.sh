@@ -10,7 +10,9 @@
 # seven-column Traceability header, the six 29119-3 information items in
 # Document map, and a tailored conformance statement (test-spec skill).
 # Evidence timestamps must be RFC 3339, signatures self-attested, and
-# document_type (when present) one of the declared kinds. Values are withheld
+# document_type (when present) one of the declared kinds. The executed total
+# must also cover every `Scenario:` declared by the referenced spec, so a run
+# that executes only part of a specification cannot pass. Values are withheld
 # from error output; no secret values are read.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -105,6 +107,23 @@ for f in evidence_files:
     nested = ref.get("spec_hash")
     if nested is not None and nested != top:
         errors.append(f"{f}: NESTED_HASH_MISMATCH"); continue
+    # A spec declares the complete scenario set. One scenario may expand to
+    # several test functions, so the executed total (passed + failed + skipped)
+    # must cover at least every declared `Scenario:` line; reporting fewer
+    # means part of the specification was never run. A spec with no declared
+    # scenarios is unverifiable and fails as well. bool values are excluded
+    # from the sum so True cannot be counted as 1. Only the error code is
+    # emitted; the counts themselves are never printed.
+    try:
+        with open(spec_path, encoding="utf-8") as sf:
+            spec_text = sf.read()
+    except OSError:
+        errors.append(f"{f}: SPEC_UNREADABLE"); continue
+    scenario_count = len(re.findall(r'^[ \t]*Scenario[ \t]*:', spec_text, re.MULTILINE))
+    executed = sum(value for value in (r.get(k, 0) for k in ("passed", "failed", "skipped"))
+                   if type(value) is int)
+    if scenario_count <= 0 or executed < scenario_count:
+        errors.append(f"{f}: SCENARIO_COUNT_MISMATCH"); continue
     covered.add(os.path.normpath(spec_path))
     ok += 1
 
