@@ -646,7 +646,7 @@ generated:
 
 ## 補足発見（2026-11-19 イテレーション3 / R4 レビュー）
 
-- [ ] **restore.rs のバックアップ命名体系が現行 `backup-local.sh` の出力と不一致（実バックアップから復元不能）** — 根拠
+- [x] **restore.rs のバックアップ命名体系が現行 `backup-local.sh` の出力と不一致（実バックアップから復元不能）**（2026-11-19 対応済み: 新規 `restore-local` と4モジュールを追加。現行セットの manifest/COMPLETE を直接入力とし、検証ゲート・dry-run 既定・`--apply --confirm`・コンポーネント別スキップ・Qdrant 非停止を実装。`bash -n` / shellcheck 0、dry-run 書き込みゼロ、モック検証4件 pass、`ci-local` exit 0。**隔離統合テスト S9 と実機復元演習は残る**） — 根拠
   `rust/scripts/restore.rs:133-135`, `infra/scripts/backup-local.sh:35` /
   R4 レビュー / 重大度 high / confirmed。
   - `restore.rs` は rclone リモート上のフラットな日付命名
@@ -671,3 +671,15 @@ generated:
   - 実機 timer で Git を必ず含めるには `ExecStart` に
     `--repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis` を追加し、
     root で unit を再適用する必要がある（ユーザー実行が必要）。
+
+## 残タスク（restore-local S8 / S9）
+
+- [ ] **S8: ドキュメントとレガシー整理** — 根拠
+  `docs/integration/local-restore-design.md:250-252` / 優先度 中。
+  `docs/integration/index.md` への追記、`backup-restore-runbook.md`
+  からの相互リンク、`restore.rs` への非推奨ヘッダ、
+  `infra/README.md` のレガシー記述更新。
+- [ ] **S9: 隔離先での全コンポーネント統合テストと実機復元演習** — 根拠
+  `docs/integration/local-restore-design.md:253-255` / 優先度 高。
+  使い捨て DB / Qdrant コレクション / ディレクトリで全コンポーネントを
+  復元し Runtime Proof を記録する。本番適用はユーザー承認後に実施。
