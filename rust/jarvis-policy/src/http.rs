@@ -281,9 +281,13 @@ async fn require_approval_token(
         .headers()
         .get("x-jarvis-approval-token")
         .and_then(|v| v.to_str().ok());
-    // A missing (or non-UTF-8) header is never a valid token, even when the
-    // configured value happens to be empty.
-    if !provided.is_some_and(|p| constant_time_eq(p, expected)) {
+    // A missing, non-UTF-8, or blank (empty/whitespace-only) header is never a
+    // valid token. In particular an empty presented value must not match a
+    // configured empty value through `constant_time_eq`: that would let any
+    // caller decide approvals when `JARVIS_POLICY_APPROVAL_*_TOKEN=""`. The
+    // config startup guard rejects that setting; this is the request-time
+    // backstop for engines built programmatically without it.
+    if !provided.is_some_and(|p| !p.trim().is_empty() && constant_time_eq(p, expected)) {
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
@@ -1828,6 +1832,138 @@ mod tests {
             .expect("deny request")
             .status();
         assert_eq!(deny_without_token, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    // ---- R4-A: blank approval token regressions ---------------------------
+
+    /// A blank presented header never authenticates, on either scope, even
+    /// when a real token is configured.
+    #[tokio::test]
+    async fn blank_approval_header_is_always_unauthorized() {
+        let (engine, _dir) = test_engine_with_full_approval_config(
+            "http-blank-presented-token",
+            10,
+            Some("api-token".into()),
+            Some("admin-secret".into()),
+            false,
+        )
+        .await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        for blank in ["", "   "] {
+            let list = client
+                .get(format!("{base}/v1/approvals"))
+                .header("x-jarvis-approval-token", blank)
+                .send()
+                .await
+                .expect("list request")
+                .status();
+            assert_eq!(list, reqwest::StatusCode::UNAUTHORIZED, "header {blank:?}");
+
+            let decision = client
+                .post(format!(
+                    "{base}/v1/approval/{}/approve",
+                    uuid::Uuid::new_v4()
+                ))
+                .header("x-jarvis-approval-token", blank)
+                .json(&json!({ "approved_by": "attacker" }))
+                .send()
+                .await
+                .expect("approve request")
+                .status();
+            assert_eq!(
+                decision,
+                reqwest::StatusCode::UNAUTHORIZED,
+                "header {blank:?}"
+            );
+        }
+    }
+
+    /// The reported bypass: an engine built programmatically (skipping
+    /// `validate_approval_tokens`) with a blank admin token must still reject
+    /// an empty header — `constant_time_eq("", "")` must not count as auth.
+    #[tokio::test]
+    async fn blank_configured_admin_token_cannot_be_bypassed_with_empty_header() {
+        let (engine, _dir) = test_engine_with_full_approval_config(
+            "http-blank-configured-admin-token",
+            10,
+            Some("api-token".into()),
+            Some(String::new()),
+            false,
+        )
+        .await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+        let id = uuid::Uuid::new_v4();
+
+        for action in ["approve", "deny"] {
+            let payload = if action == "approve" {
+                json!({ "approved_by": "attacker" })
+            } else {
+                json!({ "reason": "attacker" })
+            };
+            let rejected = client
+                .post(format!("{base}/v1/approval/{id}/{action}"))
+                .header("x-jarvis-approval-token", "")
+                .json(&payload)
+                .send()
+                .await
+                .expect("decision request")
+                .status();
+            assert_eq!(rejected, reqwest::StatusCode::UNAUTHORIZED, "{action}");
+        }
+    }
+
+    /// Same request-time backstop on the API scope.
+    #[tokio::test]
+    async fn blank_configured_api_token_cannot_be_bypassed_with_empty_header() {
+        let (engine, _dir) = test_engine_with_approval_config(
+            "http-blank-configured-api-token",
+            10,
+            Some(String::new()),
+            false,
+        )
+        .await;
+        let base = start_server(engine).await;
+        let rejected = reqwest::Client::new()
+            .get(format!("{base}/v1/approvals"))
+            .header("x-jarvis-approval-token", "")
+            .send()
+            .await
+            .expect("list request")
+            .status();
+        assert_eq!(rejected, reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    /// Unset tokens keep the legacy behavior: an unauthenticated caller
+    /// reaches the handler (404 for an unknown id), not the token gate (401).
+    #[tokio::test]
+    async fn unset_approval_tokens_keep_legacy_open_behavior() {
+        let (engine, _dir) =
+            test_engine_with_full_approval_config("http-unset-tokens", 10, None, None, false).await;
+        let base = start_server(engine).await;
+        let client = reqwest::Client::new();
+
+        let list = client
+            .get(format!("{base}/v1/approvals"))
+            .send()
+            .await
+            .expect("list request")
+            .status();
+        assert_eq!(list, reqwest::StatusCode::OK);
+
+        let decision = client
+            .post(format!(
+                "{base}/v1/approval/{}/approve",
+                uuid::Uuid::new_v4()
+            ))
+            .json(&json!({ "approved_by": "legacy" }))
+            .send()
+            .await
+            .expect("approve request")
+            .status();
+        assert_eq!(decision, reqwest::StatusCode::NOT_FOUND);
     }
 
     /// I9-A: a caller-supplied id / requested_at are never adopted. The server
