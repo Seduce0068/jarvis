@@ -17,8 +17,11 @@ description = "JARVIS desktop console (GPUI): human approval queue for policy-ga
 [dependencies]
 # Canonical approval domain (P1-7, 案A). This is a path dependency because the
 # UI is a standalone workspace and cannot use rust/Cargo.toml's
-# workspace.dependencies. jarvis-core is pure Rust (serde/chrono/uuid only), so
-# it does not affect the GPUI cross-compile boundary.
+# workspace.dependencies. jarvis-core gates its axum/tracing `BareJson`
+# extractor behind the opt-in `http` feature, which this default-feature
+# dependency does not enable: the UI therefore pulls only
+# anyhow/serde/serde_json/chrono/uuid from it and stays clear of the axum 0.7
+# HTTP server stack (and the GPUI cross-compile boundary).
 jarvis-core = { path = "../rust/jarvis-core" }
 # GPUI is not published under its own name on crates.io; `gpui-pre` is the
 # maintained snapshot (`zed@d2a4fb6`) published by the Zed authors.
