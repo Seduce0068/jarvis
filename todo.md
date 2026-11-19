@@ -1398,3 +1398,32 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   の tools/list 非表示記述。
 
 - 親が対応: fmt 差分のみ。
+
+### Round 48（R4 で修正済み）
+
+- [x] EnvironmentFile パス不一致（confirmed high）→ repo テンプレート
+  `mcp_gateway.env` を配置元とし unit が読む `/etc/jarvis/jarvis-mcp-gw.env`
+  へ deploy が原子的配置。drift 検査に存在／必須キーの fail-closed ガード。
+- [x] kill_switch restore() / persist() のパス・生エラー残存（medium）→
+  activation と同じ固定語彙化、PROBE 回帰4件追加。
+- [x] UI の非常停止表示が2ポールで消える／409 を「失敗」と表示／probe
+  タイムアウト無し（medium 3件）→ 独立ピンフラグ、409→winner 取得、
+  probe agent へ timeout 設定。UI 52 tests pass。
+- [x] 未使用 dev-deps（mockall / proptest）削除、code-server PASSWORD_FILE
+  テンプレート整理、仕様索引／旧 tools/list 記述の同期。
+
+### Round 48 の残り指摘（未対応）
+
+- [ ] **jarvis-context HTTP 境界が anyhow チェーン全体を OTLP ログへ送出**
+  （confirmed high）— `http.rs:277-285` の `log_internal_error` が
+  `format!("{err:#}")` を error フィールドへ。gRPC の固定語彙化と不整合。
+- [ ] 3サービスの SdkTracerProvider 未 shutdown（medium）— Round 47 で
+  失敗 warn は統一したがライフサイクルは policy のみ TracerGuard 保有。
+- [ ] 多ベクトル collection の Ok(None) 警告継続が fail-open（medium）—
+  実データは名前なしベクトル固定のため全 upsert/search が失敗しうる。
+- [ ] Qdrant バリアントが公開 String（medium）— 型レベル排除ではなく
+  `pub(crate)` コンストラクタ＋Newtype／QdrantErrorKind への変更が必要。
+- [ ] 新規コレクション作成直後の読み戻しが一時障害で起動拒否（low）。
+
+- 親が対応: fmt 差分、テスト専用 API（approve / deny / into_decision）へ
+  `#[cfg(test)]` 付与。
