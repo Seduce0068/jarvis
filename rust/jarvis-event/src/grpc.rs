@@ -1,5 +1,6 @@
 //! gRPC service for Event Normalizer
 
+use crate::config::{EVENT_TOKEN_HEADER, ingress_admin_token};
 use crate::normalizer::Normalizer;
 use jarvis_core::{EventSource, UnifiedEvent};
 use std::sync::Arc;
@@ -43,8 +44,45 @@ fn submit_event(sender: &mpsc::Sender<UnifiedEvent>, event: UnifiedEvent) -> Res
     }
 }
 
+/// Authorize a gRPC call before any handler work runs.
+///
+/// A configured token must be supplied in the `x-jarvis-event-token` metadata;
+/// when none is configured the legacy loopback path stays open. No token value
+/// is ever logged.
+///
+/// Authentication establishes transport ingress only. The authorization
+/// principal stays the fixed `"jarvis"` value used by `Normalizer::process_event`:
+/// it is a runtime-independent policy contract, so caller-controlled metadata
+/// must never be allowed to select the principal or the decision resource.
+fn authorize<T>(request: &Request<T>, expected: Option<&str>) -> Result<(), Status> {
+    let provided = request
+        .metadata()
+        .get(EVENT_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    if crate::config::token_matches(expected, provided) {
+        Ok(())
+    } else {
+        tracing::warn!(
+            "gRPC EmitEvent: missing or invalid admin token; rejecting with UNAUTHENTICATED"
+        );
+        Err(Status::unauthenticated(
+            "missing or invalid event admin token",
+        ))
+    }
+}
+
 pub struct GrpcEventService {
     normalizer: Arc<Normalizer>,
+    admin_token: Option<String>,
+}
+
+impl GrpcEventService {
+    fn new(normalizer: Arc<Normalizer>) -> Self {
+        Self {
+            normalizer,
+            admin_token: ingress_admin_token(),
+        }
+    }
 }
 
 #[tonic::async_trait]
@@ -53,6 +91,7 @@ impl EventService for GrpcEventService {
         &self,
         request: Request<EmitEventRequest>,
     ) -> Result<Response<EmitEventResponse>, Status> {
+        authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
         let event = UnifiedEvent {
             id: uuid::Uuid::parse_str(&req.id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
@@ -69,7 +108,7 @@ impl EventService for GrpcEventService {
 }
 
 pub async fn serve(normalizer: Arc<Normalizer>, addr: std::net::SocketAddr) -> anyhow::Result<()> {
-    let service = GrpcEventService { normalizer };
+    let service = GrpcEventService::new(normalizer);
     tonic::transport::Server::builder()
         .add_service(EventServiceServer::new(service))
         .serve(addr)
@@ -115,5 +154,37 @@ mod tests {
         let queued = rx.try_recv().expect("event accepted");
         assert_eq!(queued.id, event.id);
         assert_eq!(queued.event_type, "accepted");
+    }
+
+    fn request_with_token(token: Option<&str>) -> Request<()> {
+        let mut request = Request::new(());
+        if let Some(token) = token {
+            request.metadata_mut().insert(
+                EVENT_TOKEN_HEADER,
+                token.parse().expect("valid metadata token"),
+            );
+        }
+        request
+    }
+
+    #[test]
+    fn authorize_enforces_configured_token() {
+        let request = request_with_token(Some("event-secret"));
+        assert!(authorize(&request, Some("event-secret")).is_ok());
+
+        for provided in [None, Some("wrong-secret")] {
+            let request = request_with_token(provided);
+            let status = authorize(&request, Some("event-secret"))
+                .expect_err("missing or invalid token must be rejected");
+            assert_eq!(status.code(), tonic::Code::Unauthenticated);
+        }
+    }
+
+    #[test]
+    fn authorize_keeps_legacy_loopback_open_without_token() {
+        let request = request_with_token(None);
+        assert!(authorize(&request, None).is_ok());
+        let with_token = request_with_token(Some("anything"));
+        assert!(authorize(&with_token, None).is_ok());
     }
 }

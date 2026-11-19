@@ -1,5 +1,6 @@
 //! HTTP/REST for Event Normalizer
 
+use crate::config::{EVENT_TOKEN_HEADER, ingress_admin_token};
 use crate::normalizer::Normalizer;
 use axum::{
     Json, Router,
@@ -112,11 +113,79 @@ fn submit_event(
     }
 }
 
+/// Middleware state for the optional `/v1/events` token gate.
+///
+/// Deliberately not `Debug`: the configured token must never appear in a log
+/// or trace record.
+#[derive(Clone)]
+struct AuthState {
+    token: Option<String>,
+}
+
+impl AuthState {
+    fn new(token: Option<&str>) -> Self {
+        Self {
+            token: token
+                .map(str::trim)
+                .filter(|token| !token.is_empty())
+                .map(str::to_owned),
+        }
+    }
+}
+
+/// Extract and verify the presented token for an ingress request.
+fn header_token_allowed<T>(auth: &AuthState, request: &axum::http::Request<T>) -> bool {
+    let provided = request
+        .headers()
+        .get(EVENT_TOKEN_HEADER)
+        .and_then(|value| value.to_str().ok());
+    crate::config::token_matches(auth.token.as_deref(), provided)
+}
+
+/// Optional gate for the event-ingress endpoint.
+///
+/// When no token is configured, the listener keeps its historical
+/// unauthenticated behavior so existing loopback clients keep working. When a
+/// token is configured, the exact value must be sent in `x-jarvis-event-token`.
+/// Neither the expected nor the supplied value is ever logged.
+///
+/// Authentication establishes transport ingress only. The authorization
+/// principal stays the fixed `"jarvis"` value owned by
+/// `Normalizer::process_event`: that policy contract is runtime-independent,
+/// so a caller must never be able to steer the principal or the decision
+/// resource through this header.
+async fn require_admin_token(
+    State(auth): State<AuthState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    if auth.token.is_some() && !header_token_allowed(&auth, &request) {
+        tracing::warn!(
+            method = %request.method(),
+            path = %request.uri().path(),
+            "event ingress: missing or invalid admin token; rejecting with 401"
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(next.run(request).await)
+}
+
 pub fn router(normalizer: Arc<Normalizer>) -> Router {
+    router_with_admin_token(normalizer, ingress_admin_token())
+}
+
+/// Router with an explicit token so tests can exercise the gate without
+/// depending on process-wide configuration.
+fn router_with_admin_token(normalizer: Arc<Normalizer>, token: Option<String>) -> Router {
+    let protected = Router::new().route("/v1/events", post(emit_event)).layer(
+        axum::middleware::from_fn_with_state(AuthState::new(token.as_deref()), require_admin_token),
+    );
+    // `/health` and `/metrics` stay public: probes and Prometheus scraping
+    // must keep working without credentials.
     Router::new()
         .route("/health", get(health))
         .route("/metrics", get(metrics))
-        .route("/v1/events", post(emit_event))
+        .merge(protected)
         .with_state(normalizer)
         .layer(axum::middleware::from_fn(track_metrics))
 }
@@ -314,5 +383,52 @@ mod tests {
         // result skips opencode.dispatch, so an unreachable policy service is
         // fail-closed without any event-side fallback.
         assert!(!allowed, "unreachable policy must deny auto_respond");
+    }
+
+    fn request_with_token(token: Option<&str>) -> axum::http::Request<()> {
+        let mut request = axum::http::Request::builder()
+            .uri("/v1/events")
+            .body(())
+            .expect("valid request");
+        if let Some(token) = token {
+            request.headers_mut().insert(
+                EVENT_TOKEN_HEADER,
+                axum::http::HeaderValue::from_str(token).expect("valid header value"),
+            );
+        }
+        request
+    }
+
+    #[test]
+    fn tc_e2_event_token_header_gate_enforces_configured_token() {
+        let auth = AuthState::new(Some("event-secret"));
+        assert!(header_token_allowed(
+            &auth,
+            &request_with_token(Some("event-secret"))
+        ));
+        assert!(!header_token_allowed(&auth, &request_with_token(None)));
+        assert!(!header_token_allowed(
+            &auth,
+            &request_with_token(Some("wrong-secret"))
+        ));
+    }
+
+    #[test]
+    fn tc_e2_event_token_header_gate_is_open_without_configured_token() {
+        let auth = AuthState::new(None);
+        assert!(header_token_allowed(&auth, &request_with_token(None)));
+        assert!(header_token_allowed(
+            &auth,
+            &request_with_token(Some("ignored"))
+        ));
+    }
+
+    #[test]
+    fn tc_e2_blank_configured_token_is_treated_as_unset() {
+        assert!(AuthState::new(Some("   ")).token.is_none());
+        assert_eq!(
+            AuthState::new(Some(" secret ")).token.as_deref(),
+            Some("secret")
+        );
     }
 }
