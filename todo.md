@@ -1460,3 +1460,36 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 親が対応: fmt 差分、tracer shutdown の `&raw_err`（3箇所）、
   `CollectionInfo` 完全修飾、http.rs の旧 Qdrant String API（2箇所）、
   `anyhow::Error::from` 明示。
+
+### Round 50（R4 で修正済み）
+
+- [x] **kill switch 発動の HTTP 409 を UI が AlreadyDecided と誤認**（high）→
+  409 を維持したまま固定本文で分岐、UI は KillSwitchBlocked として非常停止を
+  ピン留め（winner GET を呼ばない）。
+- [x] 409 winner 取得が API トークン固定（medium）→ status エンドポイントを
+  ApiOrAdmin スコープ化（list は API 専用を維持）、UI も admin フォールバック。
+- [x] probe timeout 回帰が vacuous（medium）→ 5秒応答＋`ureq::Error::Timeout`
+  直接観測へ変更。UI 58 tests pass。
+- [x] build-selfhost.sh が mcp_gateway.env を配置せず新規導入で fail-open
+  （high）→ config 配置ブロックへ root:root 0600 で追加。BASE_DIR 検査を
+  非空・絶対パス必須化（egress 空値は deny-all として正当）。
+- [x] 3サービスのシグナル停止でスパン未フラッシュ（low）→ policy 同等の
+  shutdown_signal（ctrl_c + SIGTERM）と select! によるリスナー停止、回帰3件。
+
+### Round 50 の残り指摘（未対応）
+
+- [ ] 単一 named vector collection が fail-open（medium）— `named >= 1` を
+  拒否すべき（`Config::ParamsMap` は要素数に関わらず named モード）。
+  既存テスト `single_vector_collections_are_not_rejected_by_multi_vector_guard`
+  が fail-open を期待値として固定している。
+- [ ] HTTP の store_memory / search_memory が log_internal_error を通らず
+  内部エラーを無ログで破棄（medium）— 全6 RPC を同じヘルパへ。
+- [ ] context の不正 JSON / UUID が `unwrap_or_default` でサイレントに成功
+  （medium）— HTTP 400 / gRPC InvalidArgument へ変更。
+- [ ] TracerGuard の Drop が shutdown 失敗を握り潰す（low）。
+- [ ] HTTP/gRPC 語彙パリティテストが gRPC 側を検証していない（low）。
+- [ ] 発掘: local-restore-design.md / remaining-tasks.md の古い記述、
+  jarvis-core の未参照共有型、backup.service の開発用絶対パス、
+  docs/architecture の Structure ツリー。
+
+- 親が対応: fmt 差分、ReturnConv `atomic.store(true, Ordering)`（3箇所）。
