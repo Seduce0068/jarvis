@@ -196,26 +196,12 @@ fn create_layout(args: &Args, root: &Path, source_root: &Path, server: bool) -> 
             "scripts/utils/phone-status-json.rs",
             &root.join("bin/phone-status-json.rs"),
         )?;
-        write_private(&root.join("config/mobile.env"), MOBILE_ENV)?;
+        write_private_if_absent(&root.join("config/mobile.env"), MOBILE_ENV)?;
         println!(
             "Run phone status with: rust-script {}/bin/phone-status-json.rs",
             root.display()
         );
     }
-    Ok(())
-}
-
-fn write_private(path: &Path, contents: &str) -> Result<()> {
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .truncate(true)
-        .write(true)
-        .mode(0o600)
-        .open(path)
-        .with_context(|| format!("write {}", path.display()))?;
-    std::io::Write::write_all(&mut file, contents.as_bytes())?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
