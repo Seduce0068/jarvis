@@ -420,11 +420,11 @@ generated:
   R1-AR2,R2-ER2,R4-DR2,R4-DR3 / 重大度 high / confirmed。
   gunzip/psql 終了コード・Qdrant upload の HTTP ステータス・git clone 成否を
   検査せず「Restore completed」を出力。
-- [ ] **jarvis-event が jarvis-context/policy をインプロセス化しサイドカー境界を侵害** — 根拠
+- [ ] **jarvis-event が jarvis-context/policy をインプロセス化しサイドカー境界を侵害** — **2026-11-19 スライス1 対応済み: `ports.rs` に `ContextProvider` / `PolicyGate` トレイトと既定アダプタを追加、`Normalizer::new` / `process_event` をトレイト経由化（公開シグネチャ・挙動不変、fail-closed 維持）。トレイト差し替え回帰2件追加。残るスライス: context gRPC クライアント／既定 grpc 化と型依存削除／policy 型依存削除＋ADR 改訂** — 根拠
   `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
   `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
   event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
-- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1 対応済み: `ApprovalPersistence` トレイト＋`NoopPersistence` 既定実装、`ApprovalStore::with_persistence()`、config に `pg_url` / `require_approval_persistence` と fail-closed validate を追加。既存 API・挙動は不変（backward compatible seams）。回帰テスト10件追加、policy 121 tests pass。残るスライス: PgPersistence／起動リコンサイル／opt-in ロールアウト** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
+- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1-2 対応済み: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
   重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
 - [x] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる**（2026-11-19 対応済み: id と requested_at はサーバ生成、expires_at は server timeout でクランプし生成値をレスポンスで返却。不正値は 400 で拒否。回帰テスト6件追加、policy 73 tests pass） — 根拠
@@ -870,11 +870,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### 新規指摘（未対応）
 
-- [ ] Qdrant outbox reconcile の head-of-line blocking — `builder.rs` の
+- [x] Qdrant outbox reconcile の head-of-line blocking — 2026-11-19 対応済み: 004 migration で `attempts` / `next_retry_at` を additive 追加、失敗時に指数 backoff（上限1440分）で後ろへ退避、成功時のみ削除。先頭100行が恒久失敗しても後続行が再試行される純粋回帰テスト追加 / `builder.rs` の
   `RECONCILE_BATCH_LIMIT=100` が `created_at ASC` のため、先頭100行が恒久失敗すると
   101行目以降が永久に再試行されない。attempts / next_retry_at 列または
   created_at カーソルによるラウンドロビン＋dead-letter が必要（likely）。
-- [ ] UI の core 境界変換がデッドコード化 — `decision_from_json` /
+- [x] UI の core 境界変換がデッドコード化 — 2026-11-19 対応済み: `approve/deny` のレスポンス解析へ `decision_from_json` を結線、`decide()` の POST 前に `request_to_core` で UUID を確定（不正/stale id は fail-closed）。doc を実装事実へ訂正、`#[allow(dead_code)]` 削除。UI 27 tests pass / `decision_from_json` /
   `request_to_core` が `#[allow(dead_code)]` で実 RUN 経路から呼ばれず、
   doc の「legacy fallback を受ける」記述も実装（明示拒否）と矛盾（confirmed）。
 
@@ -888,3 +888,19 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - **バックアップ外部化**: 案C（USB短期＋HDD中長期の2世代）を段階導入推奨。
   まず USB ミラー、暗号化は外部コピーのみ age、署名は既存 OpenSSH
   `ssh-keygen -Y sign`。RPO/RTO・媒体の接続形態・鍵保管先はユーザー確認待ち。
+
+### R4 で修正した指摘（2026-11-19 Round 27）
+
+- [x] mcp-gw の `admin_token = ""` が gRPC / HTTP 両面で認証バイパス（critical）
+  — `validate_admin_token()` で起動時拒否、両ゲートで trim 後空の提示トークンを
+  常時拒否。空同士成功の既存テストは期待値を更新。
+- [x] `/v1/execute` が `error.to_string()` を 500 ボディへエコー（high）
+  — `ErrorKind` で分岐し Internal は固定文言＋tracing ログのみ、
+  ClientError は固定語彙、Forbidden は固定ポリシー文言へ。
+- [x] 「定数時間」コメントと実装の乖離（low）— 長さ包含型で短絡は無いが
+  反復回数は入力長依存、と実装事実へ訂正。真の定数時間化は別タスク候補。
+- 親が子の出力で4点を修正: `tokio_postgres::Client::transaction()` の
+  `&mut` 要求（Mutex 化＋残る参照3箇所）、clippy の `unused_mut` /
+  `dead_code`（`is_retry_due` を `#[cfg(test)]` 化、テスト用フィールドに
+  `#[allow(dead_code)]`）、空白トークンの `contains("")` 誤検証、
+  secret_scan 誤検出（テスト変数名を `probe_path` へ）。
