@@ -1493,3 +1493,37 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   docs/architecture の Structure ツリー。
 
 - 親が対応: fmt 差分、ReturnConv `atomic.store(true, Ordering)`（3箇所）。
+
+### Round 51（R4 で修正済み）
+
+- [x] 単一 named vector collection が fail-open（medium）→ `named >= 1` を
+  拒否（`Config::ParamsMap` は件数に関わらず named モード）、既存テスト更新
+  と fail-closed 回帰追加。
+- [x] HTTP の store/search が log_internal_error を通らず無ログ（medium）→
+  全6 RPC を固定語彙ヘルパへ統一、横断テスト追加。
+- [x] context の不正 JSON / UUID が unwrap_or_default でサイレント成功
+  （medium）→ HTTP 400 / gRPC InvalidArgument、9件の回帰追加（additive
+  field の degrade 契約は維持）。
+- [x] TracerGuard の Drop が shutdown 失敗を握り潰す／語彙パリティが
+  self-confirmation（low 2件）→ AlreadyShutdown 以外を warn、
+  include_str! で gRPC 実ソースの語彙を照合。
+
+### Round 51 の残り指摘（未対応）
+
+- [ ] **kill switch 409 の非常停止ピンが probe の fail-open で1ポール後に
+  解除される**（confirmed high）— 409 本文で KillSwitchBlocked を確定した
+  直後に /health probe が false を返すと pin が落ちる。`kill_switch_active ||
+  kill_switch_blocked` で維持するか、probe を fail-closed 化。
+- [ ] **BASE_DIR 絶対パス検査が重複キーで迂回**（confirmed high）— grep の
+  any-match セマンティクス。最後の割り当て行のみを検査し、同一キーの重複を
+  DANGER 化、`/` と `..` 成分も拒否。
+- [ ] **mcp-gw env の配置が非アトミック**（confirmed high）— mv 成功後に
+  install 失敗すると env 欠落で unit リテラル既定が実効化。一時パス install
+  ＋ mv -f、trap で .bak 復元、退避ファイルも 0600。
+- [ ] SIGTERM が in-flight の承認コミット／ツール実行をドロップ（medium）—
+  drain 待ちを実装するか「即時停止」とログ／systemd TimeoutStopSec を一致。
+- [ ] 409 固定本文が UI と policy で複製（medium）— jarvis-core の共有定数
+  または cross-crate 契約ゲートへ。
+
+- 親が対応: fmt 差分、anyhow `context()` の move（qdrant）、未使用 import、
+  SDK 自身の DEBUG ログを捕捉したテスト（自アプリ WARN 行のみへ限定）。
