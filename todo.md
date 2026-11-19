@@ -980,13 +980,46 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **起動リコンサイルの expired 決着が1件のエラーで全体中止** — 2026-11-19 対応済み: 行単位 best-effort 化（`AlreadyDecided` は成功扱い、他エラーは warn 可視化して継続）。未決着行が残った場合のみ起動失敗という fail-closed 契約を維持。回帰2件追加、I33-A の修正は不変。
   （likely medium）— 行ごとに結果を収集し AlreadyDecided は成功扱い、
   他エラーは warn＋メトリクスで可視化して残り行の決着を続行する。
-- [ ] **「単一 owner」コメントが実態と矛盾（unit と context の二重実行、**2026-11-19 一部対応: 3 unit の範囲記述を「001 以降（現在 004 まで）」へ更新。ただし migration の実行主体は unit と `jarvis-context::builder.rs:862` の `sqlx::migrate!()` の2つが残り、所有権の一本化は未実施（sqlx advisory lock で直列化されるが、配布ソースのズレで checksum mismatch のリスク）。いずれかを廃止する設計判断が必要** —
+- [x] **「単一 owner」コメントが実態と矛盾（unit と context の二重実行、**2026-11-19 対応済み: 方針を「`jarvis-context::builder.rs:862` の `migrate!()` が最終適用主体（埋め込みマイグレーションが権威）、unit は pre-flight 補助」と明文化。3 unit の「Single owner」表現を削除。build-selfhost.sh に同一コミット配布のマーカー照合ガードを追加し、配布ズレ時の checksum mismatch リスクを docs に記録。advisory lock で同時実行は直列化されるため二重適用自体は故障要因ではない** —
   範囲も 001-003 で 004 を含まない）**（confirmed medium）— 所有権を明確化し
   コメントを実ファイルと同期。
-- [ ] **発掘: 小さな残タスク5件** — **2026-11-19 うち3件対応済み: install-backup-timer rollback の migrations/verify 復元、unit コメント 001-004、ui/README の MSRV 1.100+。残る2件: specs/test-backup.md の `--retain-days` 境界値拒否シナリオ、specs/test-event.md の 503/RESOURCE_EXHAUSTED 契約（いずれも evidence 実測再生成が必要）**（当初: install-backup-timer rollback の
+- [x] **発掘: 小さな残タスク5件** — **2026-11-19 全件対応済み: rollback 完全化、unit コメント 001-004、ui/README MSRV 1.100+、specs/test-backup.md に REQ-18/TC-B5（--retain-days 境界値）、specs/test-event.md に REQ-16/17（503 / RESOURCE_EXHAUSTED）を追加。evidence 2件を実測再生成（backup 23 checks / event 70 tests）し index 同期、check-evidence ok=6 errors=0**（当初: install-backup-timer rollback の
   migrations/verify 未復元（上記と同一）、unit コメントの 001-003→001-004、
   ui/README の Rust 1.85+→1.100+、specs/test-backup.md の `--retain-days`
   境界値拒否シナリオ、specs/test-event.md の 503/RESOURCE_EXHAUSTED 契約
   （後2件は evidence 再生成が必要）。
 
 - 親が対応: clippy の collapsible_if、flaky なスパン捕捉アサーションの削除。
+
+### Round 32 のレビュー／発掘結果
+
+- [ ] **migration unit が読む SQL ソースがどの配布経路からもコピーされない**
+  （confirmed high）— `jarvis-migrations.service:35` の `--source /opt/jarvis/rust/migrations`
+  に対し、repo 全体に `rust/migrations/*.sql` を配置する処理が存在しない。
+  build-selfhost.sh のガードはマーカー欠落時に警告のみで fail-open。
+  → SQL の配置をデプロイ手順へ組み込み、欠落時 fail-fast にするか unit を廃止。
+- [ ] **build-selfhost.sh の Wants= 失敗伝播の記述が実態と逆**（confirmed medium）—
+  systemd の `Wants=` は弱い依存で unit が failed でも起動を続ける。
+  「migration 失敗ならサービスも止まる」というコメント／docs を訂正するか、
+  `Requires= + After=` または ExecStartPre の適用済みバージョン CHECK へ変更。
+- [ ] **lost-ack 対応が再接続失敗／最終試行のプローブ失敗時に機能しない**
+  （likely high）— `persistence.rs:380` の reconnect 失敗時にプローブへ到達せず、
+  DB=approved / 待機側=Expired / operator=409(503) の分裂が残る。
+- [ ] **expired reconcile の `settled_expired` が試行件数を成功件数と誤報告**
+  （confirmed low）— 実際に Ok/AlreadyDecided だった件数へ変更し、warning に
+  ApprovalError の固定語彙分類を付与。
+- [ ] **install-backup-timer の rollback が導入前から有効な timer まで停止**
+  （likely medium）— 適用前に is-active/is-enabled を記録し、この実行が新規に
+  有効化した場合のみ stop/disable する。
+- [ ] **発掘: 仕様ギャップ5件** — tool-matrix.md の egress allowlist「未実装」
+  記述、specs/test-mcp-gateway.md の egress/admin token 要件、
+  specs/test-ui.md の 2-scope トークン前提、specs/test-context.md の
+  スコア保持契約、同 TC-P3 の redact 期待値 `[X]` と既定 `[REDACTED]` の不一致。
+- **P0 ガード有効化の設計材料**（i35-guard-design）: 8段階ロールアウト
+  （kill switch token → state path → persistence → transport tokens →
+  approval API → principal → webhook → P0-11 設計）と各段階の「値を見ない
+  注入確認コマンド」を提示。実機 confirm で全ガード変数が ABSENT を確認。
+  ユーザー確認事項: bws secret の実名、RPO/RTO、職務分離の要否、
+  webhook 公開範囲と実送信者、kill switch ローテ周期、sudo 実行の可否。
+
+- 親が対応: evidence 2件を実測再生成、flaky なスパン捕捉アサーションを削除。
