@@ -479,10 +479,10 @@ generated:
 - [x] デプロイスクリプトが全 unit を単一ユーザーへ書き換え — 2026-11-19 対応済み: policy/mcp-gw/event/context の4サービスは User/Group をテンプレート宣言どおり保持し、その他5ユニットのみ従来の置換を適用（認可境界の権限分離を維持） / `infra/scripts/build-selfhost.sh:40-42` / R3-AU3 / confirmed
 - [x] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — 2026-11-19 対応済み: allowlist と同じ枠組みで `MISSING (deployed)` / `MISSING (repo)` と danger=1 を設定。既存回帰22 tests pass / `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
 - [ ] `install-mcp-gateway.sh` のヘルス確認が HTTP ステータスを検証せずロールバックしない — `infra/scripts/install-mcp-gateway.sh:28` / R4-DR3 / confirmed
-- [ ] 放棄された承認が pending のまま残りキュー枠を枯渇 — `policy/src/approval.rs:148-162` / R5-VU1 / likely
+- [x] 放棄された承認が pending のまま残りキュー枠を枯渇 — 2026-11-19 対応済み: `Entry.deadline` を保存し `prune()` が期限切れ/放棄エントリを回収して待機側へ Expired 通知。`try_request` 前段で実行。回帰テスト1件追加、policy 88 tests pass / `policy/src/approval.rs:148-162` / R5-VU1 / likely
 - [ ] web.fetch の SSRF 検証が DNS 解決の TOCTOU で迂回可能 — `mcp-gw/src/sandbox.rs:359-365` / R3-AU1 / likely
 - [x] メトリクスが HTTP ステータス別のみで kill switch / 承認の状態が観測不可 — 2026-11-19 対応済み: `jarvis_kill_switch_activated` (0/1) と `jarvis_approval_pending`（保留数）の gauge を追加。`/metrics` スクレイプ時に状態を反射、ラベルゼロで理由/principal/id は非送出 / `policy/src/http.rs:155-169` / R5-VU1 / confirmed
-- [ ] 登録済み MCP サーバの子プロセス死活を検知せず孤立登録が残る — `mcp-gw/src/gateway.rs:36-42` / R5-VU1 / likely
+- [x] 登録済み MCP サーバの子プロセス死活を検知せず孤立登録が残る — 2026-11-19 対応済み: `ProcessLiveness` で `try_wait()` を実行前検査し、死亡/状態不明の登録を削除してエラー。`Box<ChildHandle>` 化で clippy large-enum も解消。回帰テスト2件追加 / `mcp-gw/src/gateway.rs:36-42` / R5-VU1 / likely
 - [ ] Qdrant スナップショット 0 件が warn のみで成功扱い — `rust/scripts/backup.rs:198` / R1-ST2 / confirmed
 
 ### 優先度 低
@@ -595,7 +595,7 @@ generated:
 ### 優先度 中
 
 - [x] gRPC Check が不正 JSON コンテキストを空 Object にフォールバック — 2026-11-19 対応済み: `Status::invalid_argument` へ変換し回帰テスト2件追加（不正 JSON 拒否・正常系受理）。`policy/src/grpc.rs:27` / R1-AR1 / confirmed（既存 P2-1 と別経路）
-- [ ] kill switch の永続化失敗が unauthenticated として返される — `kill_switch.rs:147-150` / R2-ER1 / confirmed
+- [x] kill switch の永続化失敗が unauthenticated として返される — 2026-11-19 対応済み: `KillSwitchError::{InvalidAdminToken, Persistence}` を型で分離し、R4 で gRPC は `Internal` / HTTP は 500 へマップ（認証失敗のみ Unauthorized）。fail-closed は維持 / `kill_switch.rs:147-150` / R2-ER1 / confirmed
 - [x] web.fetch リダイレクトで Location 欠落時に通常レスポンスへフォールスルー — 2026-11-19 対応済み: 3xx 判定を単独化し Location 欠落/非 UTF-8/空/パース不能を `ClientError` で拒否。回帰テスト2件追加、mcp-gw 84 tests pass / `mcp-gw/src/sandbox.rs:118-130` / R2-ER1 / likely
 - [x] Cedar ポリシディレクトリの列挙エラーが黙って破棄 — 2026-11-19 対応済み: `metadata` probe と `read_dir` の失敗を warn で可視化（パス名と OS エラーのみ）。deny-by-default と NotFound 時の info 挙動は維持 / `policy/src/policy.rs:101-107` / R2-ER1 / likely
 - [x] kill switch の `activated_by` が常に `"system"` で監査項目が機能せず — 2026-11-19 対応済み: `activate_with_actor()` / `arm_with_actor()` を追加し既存 `activate()` は "system" の互換ラッパーに。永続化失敗時の fail-closed re-arm は従来どおり。回帰テスト3件追加 / `kill_switch.rs:133` / R2-FG1 / confirmed
@@ -612,9 +612,9 @@ generated:
 - [x] Qdrant の不正 point id が nil UUID にフォールバック — 2026-11-19 対応済み: `parse_point_id()` / `entries_from_raw_points()` を新設し、欠落・数値・不正文字列は warn 付きでスキップ。nil/random UUID の代用を除去。回帰テスト3件追加、context 38 tests pass / `builder.rs:305` / R1-ST2 / likely
 - [ ] OTLP エンドポイント書式エラーが起動を失敗させテレメトリが致命依存 — `policy/src/main.rs:22-25` / R4-DR1 / likely
 - [ ] `try_join!` による二重リスナ起動で片方のエラーがプロセス全体を終了 — `policy/src/main.rs:59` / R4-DR1 / likely
-- [ ] ワークスペースに MSRV と lint 宣言がなく CI とローカルのゲートが不一致 — `rust/Cargo.toml:11-16` / R4-DP1 / confirmed
+- [x] ワークスペースに MSRV と lint 宣言がなく CI とローカルのゲートが不一致 — 2026-11-19 対応済み: `rust-version = "1.100"`（実ツールチェーン確認）と `[workspace.lints]`（unsafe_code forbid / clippy undocumented_unsafe_blocks deny）を追加し5 crate が継承。警告0・clippy/ci-local exit 0 / `rust/Cargo.toml:11-16` / R4-DP1 / confirmed
 - [ ] Qdrant クライアントの互換性チェックが起動時に無効化 — `builder.rs:236` / R4-DP2 / confirmed
-- [ ] `deploy-mcp-gw-safe.sh` のロールバックが repo 側 allowlist 変更を戻さない — `infra/scripts/deploy-mcp-gw-safe.sh:65` / R4-DR3 / confirmed
+- [x] `deploy-mcp-gw-safe.sh` のロールバックが repo 側 allowlist 変更を戻さない — 2026-11-19 対応済み: `repo_allowlist_changed` フラグを追加し step2 で差分検出時に rollback で `cp -a` 復元。退避は既存を維持、dry-run/root チェック不変。子が指摘した /etc allowlist バックアップの上書きは別タスク候補として残る / `infra/scripts/deploy-mcp-gw-safe.sh:65` / R4-DR3 / confirmed
 - [ ] `jarvis-mcp-gw.service` のベースディレクトリが開発環境の絶対パスに固定 — `infra/systemd/jarvis-mcp-gw.service:52` / R4-DR3 / confirmed
 - [x] MCP プロトコルバージョン定数がスモークテストとドリフト検査で不一致 — 2026-11-19 対応済み: smoke の protocolVersion を `2025-11-25` へ更新し drift 検査と同期。両方を揃える旨のコメント追加、bash -n OK / `infra/scripts/smoke-mcp-gw.sh:101` / R4-DP3 / confirmed
 - [x] upstream MCP ツールのエラー本文が API 応答とログへそのまま流出 — 2026-11-19 対応済み: `safe_error_summary()` で本文を完全に除外し構造メタデータのみの分類へ。トークン/パス/URL クエリが要約に出ない回帰テスト2件追加。子のテスト用偽シークレットが secret_scan に誤検出されたため親がリネーム / `gateway.rs:200-203` / R5-VU1 / confirmed
@@ -748,3 +748,11 @@ generated:
   `JARVIS_{EVENT,CONTEXT}_CONFIG_PATH` 上書きに対応。Env provider から
   `config_path` を除外し、実機は Env 供给でファイル不在でも起動可。
   新規パス解決テスト6件追加。
+
+## follow-up（2026-11-19 Round 14 / R4 レビュー）
+
+- [ ] **`deploy-mcp-gw-safe.sh` の /etc allowlist バックアップが段階間で上書きされる**
+  — 根拠 `infra/scripts/deploy-mcp-gw-safe.sh:68,114` / R4 レビュー / 優先度 低。
+  step2 と step3 の両方が同じ `allowlist.bak-$ts` 名でコピーするため、
+  両方で変更があった場合に rollback がパッチ済み内容を復元してしまう。
+  バックアップ名を段階別にする等の修正は今回のスコープ外（repo 側復元のみ対応）。
