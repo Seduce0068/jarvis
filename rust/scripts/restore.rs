@@ -83,17 +83,23 @@ fn main() -> Result<()> {
         String::new()
     };
 
-    let date = if args.date == "latest" {
+    let (date, remote_files) = if args.date == "latest" {
         find_latest_backup(&args, &hostname, &rclone_config_flag)?
     } else {
         if !valid_backup_date(&args.date) {
             anyhow::bail!("invalid backup date; expected YYYYMMDD-HHMMSS or latest");
         }
-        args.date.clone()
+        (
+            args.date.clone(),
+            list_remote_files(&args, &hostname, &rclone_config_flag)?,
+        )
     };
     if !valid_backup_date(&date) {
         anyhow::bail!("selected backup has an invalid date: {date}");
     }
+    // Verify the whole set before any destructive work. This also runs for
+    // --dry-run, so a partial set is reported without touching the system.
+    validate_backup_set(&remote_files, &date)?;
 
     if args.dry_run {
         info!(
@@ -127,9 +133,62 @@ fn valid_backup_date(date: &str) -> bool {
             .all(|(index, byte)| index == 8 || byte.is_ascii_digit())
 }
 
+// Keep these names identical to the ones used by the restore functions below;
+// they are the naming already present in this script (pg- / configs- / qdrant-).
+fn postgres_backup_file(date: &str) -> String {
+    format!("pg-{date}.sql.gz")
+}
+
+fn qdrant_backup_file(date: &str) -> String {
+    format!("qdrant-{date}.snapshot")
+}
+
+fn configs_backup_file(date: &str) -> String {
+    format!("configs-{date}.tar.gz")
+}
+
+fn list_remote_files(args: &Args, hostname: &str, config_flag: &str) -> Result<Vec<String>> {
+    let remote_path = format!("{}:{}/{}/", args.remote, args.bucket, hostname);
+    let output = run_rclone(&["ls", &remote_path], config_flag)?;
+    Ok(output
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(1).map(str::to_string))
+        .collect())
+}
+
+/// A date is restorable only when all three components exist with that exact
+/// date. Checking this up front prevents a partial restore of a set whose
+/// PostgreSQL dump (or any other component) was selected but siblings are gone.
+fn validate_backup_set(remote_files: &[String], date: &str) -> Result<()> {
+    let required = [
+        ("PostgreSQL dump", postgres_backup_file(date)),
+        ("Qdrant snapshot", qdrant_backup_file(date)),
+        ("configs tar", configs_backup_file(date)),
+    ];
+    let missing: Vec<&str> = required
+        .iter()
+        .filter(|(_, file)| !remote_files.iter().any(|remote| remote == file))
+        .map(|(label, _)| *label)
+        .collect();
+
+    if !missing.is_empty() {
+        anyhow::bail!(
+            "backup set {date} is incomplete (missing {}); expected {}, {}, {}. Refusing to start a partial restore",
+            missing.join(", "),
+            postgres_backup_file(date),
+            qdrant_backup_file(date),
+            configs_backup_file(date)
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::valid_backup_date;
+    use super::{
+        configs_backup_file, postgres_backup_file, qdrant_backup_file, valid_backup_date,
+        validate_backup_set,
+    };
 
     #[test]
     fn accepts_timestamp_format() {
@@ -141,6 +200,40 @@ mod tests {
         assert!(!valid_backup_date("latest"));
         assert!(!valid_backup_date("20261009_120000"));
         assert!(!valid_backup_date("2026100x-120000"));
+    }
+
+    #[test]
+    fn validation_accepts_complete_set() {
+        let date = "20261009-120000";
+        let files = vec![
+            postgres_backup_file(date),
+            qdrant_backup_file(date),
+            configs_backup_file(date),
+        ];
+        assert!(validate_backup_set(&files, date).is_ok());
+    }
+
+    #[test]
+    fn validation_rejects_missing_component() {
+        let date = "20261009-120000";
+        // PostgreSQL dump + configs present, Qdrant snapshot missing.
+        let files = vec![postgres_backup_file(date), configs_backup_file(date)];
+        let error = validate_backup_set(&files, date).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("incomplete"));
+        assert!(message.contains("Qdrant snapshot"));
+    }
+
+    #[test]
+    fn validation_requires_all_components_for_the_same_date() {
+        let date = "20261009-120000";
+        let other = "20261008-120000";
+        let files = vec![
+            postgres_backup_file(date),
+            qdrant_backup_file(other),
+            configs_backup_file(other),
+        ];
+        assert!(validate_backup_set(&files, date).is_err());
     }
 }
 
@@ -191,28 +284,25 @@ fn run_rclone(args: &[&str], config_flag: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-fn find_latest_backup(args: &Args, hostname: &str, config_flag: &str) -> Result<String> {
-    let remote_path = format!("{}:{}/{}/", args.remote, args.bucket, hostname);
-    let output = run_rclone(&["ls", &remote_path], config_flag)?;
-
-    output
-        .lines()
-        .filter_map(|line| {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                Some(parts[1].to_string())
-            } else {
-                None
-            }
-        })
-        .filter(|f| f.starts_with("pg-") && f.ends_with(".sql.gz"))
-        .max()
-        .and_then(|f| {
-            f.strip_prefix("pg-")
+fn find_latest_backup(
+    args: &Args,
+    hostname: &str,
+    config_flag: &str,
+) -> Result<(String, Vec<String>)> {
+    let remote_files = list_remote_files(args, hostname, config_flag)?;
+    let newest_pg_date = remote_files
+        .iter()
+        .filter_map(|file| {
+            file.strip_prefix("pg-")
                 .and_then(|s| s.strip_suffix(".sql.gz"))
-                .map(|s| s.to_string())
         })
-        .context("No latest backup found")
+        .max()
+        .context("No latest backup found")?
+        .to_string();
+
+    // Return the listing together with the selected date so main() can verify
+    // that the same-date Qdrant snapshot and configs tar exist before restoring.
+    Ok((newest_pg_date, remote_files))
 }
 
 fn download_backup(
@@ -234,7 +324,7 @@ fn download_backup(
 }
 
 fn restore_postgres(args: &Args, hostname: &str, date: &str, config_flag: &str) -> Result<()> {
-    let backup_file = format!("pg-{}.sql.gz", date);
+    let backup_file = postgres_backup_file(date);
     let remote_path = format!("{}:{}/{}/", args.remote, args.bucket, hostname);
     let local_file = Path::new(&args.backup_dir).join(&backup_file);
 
@@ -301,7 +391,7 @@ fn restore_postgres(args: &Args, hostname: &str, date: &str, config_flag: &str) 
 }
 
 fn restore_qdrant(args: &Args, hostname: &str, date: &str, config_flag: &str) -> Result<()> {
-    let backup_file = format!("qdrant-{}.snapshot", date);
+    let backup_file = qdrant_backup_file(date);
     let remote_path = format!("{}:{}/{}/", args.remote, args.bucket, hostname);
     let local_file = Path::new(&args.backup_dir).join(&backup_file);
 
@@ -332,7 +422,7 @@ fn restore_qdrant(args: &Args, hostname: &str, date: &str, config_flag: &str) ->
 }
 
 fn restore_configs(args: &Args, hostname: &str, date: &str, config_flag: &str) -> Result<()> {
-    let backup_file = format!("configs-{}.tar.gz", date);
+    let backup_file = configs_backup_file(date);
     let remote_path = format!("{}:{}/{}/", args.remote, args.bucket, hostname);
     let local_file = Path::new(&args.backup_dir).join(&backup_file);
 
