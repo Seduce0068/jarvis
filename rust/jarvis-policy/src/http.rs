@@ -664,11 +664,19 @@ async fn list_approvals(State(engine): State<Arc<PolicyEngine>>) -> Json<serde_j
 /// body without keeping a local copy that could silently drift. Only the
 /// already-decided body may resolve to a winner; every other 409 must pin the
 /// halt in the UI.
+///
+/// I60-B: expiry is a separate 410 Gone response with its own fixed body. It
+/// deliberately does not reuse either shared 409 literal: there is no winner to
+/// read back, so an expired approve/deny must never take the UI's already-decided
+/// path. This constant is local to the policy transport; no shared boundary
+/// constant was added or changed.
 pub(crate) mod approval_error_reasons {
     pub const BAD_REQUEST: &str = "invalid approval request";
     pub const NOT_FOUND: &str = "approval request not found";
     pub const ALREADY_DECIDED: &str = jarvis_core::ALREADY_DECIDED_409_BODY;
     pub const KILL_SWITCH: &str = jarvis_core::KILL_SWITCH_409_BODY;
+    /// I60-B: fixed 410 body for a request whose decision window elapsed.
+    pub const EXPIRED: &str = "approval request expired";
     pub const QUEUE_FULL: &str = "approval queue is full; retry later";
     pub const PERSISTENCE: &str = "approval persistence is unavailable; retry later";
 }
@@ -680,6 +688,7 @@ fn approval_error_message(error: &crate::approval::ApprovalError) -> &'static st
     match error {
         ApprovalError::NotFound(_) => approval_error_reasons::NOT_FOUND,
         ApprovalError::AlreadyDecided(_) => approval_error_reasons::ALREADY_DECIDED,
+        ApprovalError::Expired(_) => approval_error_reasons::EXPIRED,
         ApprovalError::KillSwitchActivated => approval_error_reasons::KILL_SWITCH,
         ApprovalError::QueueFull => approval_error_reasons::QUEUE_FULL,
         ApprovalError::Persistence => approval_error_reasons::PERSISTENCE,
@@ -709,6 +718,10 @@ fn approval_error_status(error: crate::approval::ApprovalError) -> axum::http::S
     match error {
         crate::approval::ApprovalError::NotFound(_) => axum::http::StatusCode::NOT_FOUND,
         crate::approval::ApprovalError::AlreadyDecided(_) => axum::http::StatusCode::CONFLICT,
+        // I60-B: expiry has no winner, so it is not a 409. The dedicated 410 and
+        // fixed body keep it out of the UI's already-decided winner branch while
+        // the two shared 409 constants stay byte-for-byte unchanged.
+        crate::approval::ApprovalError::Expired(_) => axum::http::StatusCode::GONE,
         // I52-A: the emergency stop deliberately keeps HTTP 409 so the status
         // contract with existing clients is unchanged (moving it to 423 would
         // break callers that key on 409). The two cases are distinguished by
@@ -2445,7 +2458,8 @@ mod tests {
     // ---- I32-D: persistence error HTTP mapping regressions -----------------
 
     /// Every `ApprovalError` variant maps to a fixed status and a fixed body;
-    /// `Persistence` and `QueueFull` both return 503 but never share a message.
+    /// `Persistence` and `QueueFull` both return 503 but never share a message,
+    /// and I60-B `Expired` returns 410 with its own fixed body.
     #[test]
     fn approval_error_mapping_is_exhaustive_and_fixed() {
         let cases = [
@@ -2458,6 +2472,11 @@ mod tests {
                 ApprovalError::AlreadyDecided(uuid::Uuid::nil()),
                 axum::http::StatusCode::CONFLICT,
                 approval_error_reasons::ALREADY_DECIDED,
+            ),
+            (
+                ApprovalError::Expired(uuid::Uuid::nil()),
+                axum::http::StatusCode::GONE,
+                approval_error_reasons::EXPIRED,
             ),
             (
                 ApprovalError::KillSwitchActivated,
@@ -2515,6 +2534,32 @@ mod tests {
             approval_error_reasons::ALREADY_DECIDED,
             jarvis_core::ALREADY_DECIDED_409_BODY,
             "policy must emit the shared already-decided 409 body"
+        );
+    }
+
+    /// I60-B regression: an expired approve/deny maps to 410 Gone with a fixed
+    /// body that is neither shared 409 literal. The UI therefore cannot route
+    /// it through the winner readback that produced "既に決定済み: 保留中", and
+    /// the two 409 contracts stay byte-for-byte intact.
+    #[test]
+    fn expired_approval_maps_to_gone_without_reusing_409_bodies() {
+        let (status, body) = approval_error_response(ApprovalError::Expired(uuid::Uuid::nil()));
+        assert_eq!(status, axum::http::StatusCode::GONE);
+        assert_eq!(body, approval_error_reasons::EXPIRED);
+        assert_ne!(body, approval_error_reasons::ALREADY_DECIDED);
+        assert_ne!(body, approval_error_reasons::KILL_SWITCH);
+        assert!(
+            !body.contains('/'),
+            "fixed body must not contain a path or URL"
+        );
+        // The shared constants themselves must not have been rewritten.
+        assert_eq!(
+            approval_error_reasons::ALREADY_DECIDED,
+            jarvis_core::ALREADY_DECIDED_409_BODY
+        );
+        assert_eq!(
+            approval_error_reasons::KILL_SWITCH,
+            jarvis_core::KILL_SWITCH_409_BODY
         );
     }
 

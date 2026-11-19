@@ -59,6 +59,18 @@ pub enum ApprovalError {
     #[error("approval request already decided: {0}")]
     AlreadyDecided(Uuid),
 
+    /// I60-B: the decision window elapsed before any decision was committed.
+    ///
+    /// This is deliberately *not* [`Self::AlreadyDecided`]: the expired path
+    /// stamps no decision and sends no watch notification, so there is no
+    /// winner for a transport to read back. Reporting `AlreadyDecided` here
+    /// made the UI resolve the benign 409 to a still-`Pending` (or later
+    /// `Expired`) status and render the misleading "既に決定済み: 保留中".
+    /// Transports map this to HTTP 410 Gone with its own fixed body; the two
+    /// shared 409 bodies are untouched.
+    #[error("approval request expired: {0}")]
+    Expired(Uuid),
+
     #[error("kill switch is activated; approval decisions are blocked")]
     KillSwitchActivated,
 
@@ -91,6 +103,7 @@ impl ApprovalError {
         match self {
             ApprovalError::NotFound(_) => "NotFound",
             ApprovalError::AlreadyDecided(_) => "AlreadyDecided",
+            ApprovalError::Expired(_) => "Expired",
             ApprovalError::KillSwitchActivated => "KillSwitchActivated",
             ApprovalError::QueueFull => "QueueFull",
             ApprovalError::Persistence => "Persistence",
@@ -531,9 +544,12 @@ impl ApprovalStore {
 
     /// Additive constructor that also installs a synchronous commit gate.
     ///
-    /// `is_blocked` is re-read (never cached) once, immediately before the
-    /// durable write in [`Self::decide`]. `PolicyEngine` injects a gate backed
-    /// by the authoritative kill-switch flag; passing `None` reproduces
+    /// `is_blocked` is re-read (never cached) exactly once per [`Self::decide`]
+    /// call, before any terminal classification and before the durable write.
+    /// I60-B moved that single read ahead of the deadline check so an expired
+    /// request still reports the emergency stop while it is active; no second
+    /// read is introduced. `PolicyEngine` injects a gate backed by the
+    /// authoritative kill-switch flag; passing `None` reproduces
     /// [`Self::with_persistence`] exactly. The closure runs with the store's
     /// write guard held, so it must not await or re-enter the store.
     ///
@@ -1092,15 +1108,19 @@ impl ApprovalStore {
     /// keep observing `Pending` until the commit succeeds, and a rollback
     /// publishes nothing.
     ///
-    /// A request whose deadline has already passed is explicitly rejected
-    /// (expiry is a terminal decision, reported as `AlreadyDecided` with a
-    /// warning) and never reaches the persistence backend. With
-    /// [`NoopPersistence`] the commit is immediate, so memory-only behavior is
-    /// unchanged.
+    /// A request whose deadline has already passed is explicitly rejected with
+    /// [`ApprovalError::Expired`] (I60-B; HTTP 410) and never reaches the
+    /// persistence backend. No decision is stamped and no watch notification is
+    /// sent: unlike a real winner, expiry has nothing to read back. The single
+    /// commit-gate read is performed *before* this check, so a request that is
+    /// both expired and stopped reports the kill switch (shared 409 body) and
+    /// engages the operator's halt latch. With [`NoopPersistence`] the commit is
+    /// immediate, so memory-only behavior is unchanged.
     ///
     /// R5-D / I46-A: an optional synchronous commit gate
-    /// ([`Self::with_commit_gate`]) is re-read exactly once, immediately
-    /// before invoking the durable backend. A kill switch activation that
+    /// ([`Self::with_commit_gate`]) is re-read exactly once, before the
+    /// deadline/decision classification (I60-B) and before the durable backend.
+    /// A kill switch activation that
     /// lands after the transport's pre-check therefore cannot commit a
     /// decision. A stop landing during the commit no longer produces a 409
     /// over an already-committed row (which made later retries fail with
@@ -1131,24 +1151,28 @@ impl ApprovalStore {
         let claim = {
             let mut entries = self.inner.entries.write().await;
             let entry = entries.get_mut(&id).ok_or(ApprovalError::NotFound(id))?;
+            // I60-B: the emergency stop outranks expiry. Both conditions used
+            // to return a 409 with the benign already-decided body, which let
+            // the UI read back a `Pending` winner and never latched the halt.
+            // This is the single R5-D gate read — only moved above the deadline
+            // and decision checks, so the commit_gate once-per-decide contract
+            // is unchanged. No `await` in the critical section.
+            if self.commit_blocked() {
+                tracing::warn!("decision commit blocked: kill switch activated after pre-check");
+                return Err(ApprovalError::KillSwitchActivated);
+            }
             if decided_at > entry.deadline {
                 tracing::warn!(
                     request_id = %id,
                     "decide rejected: the decision window has elapsed"
                 );
-                return Err(ApprovalError::AlreadyDecided(id));
+                // I60-B: expiry is not a decided winner. Nothing is stamped and
+                // nothing is published, so report a dedicated error (410) rather
+                // than the already-decided 409 that implies a readable winner.
+                return Err(ApprovalError::Expired(id));
             }
             if entry.decision.is_some() || entry.is_deciding() {
                 return Err(ApprovalError::AlreadyDecided(id));
-            }
-            // R5-D: re-read the authoritative emergency-stop state at the
-            // commit boundary, not only in the transport pre-check. This runs
-            // with the entry claimed and no `await` in the critical section,
-            // so an activation that landed after the caller's check is
-            // rejected before the persistence backend is ever touched.
-            if self.commit_blocked() {
-                tracing::warn!("decision commit blocked: kill switch activated after pre-check");
-                return Err(ApprovalError::KillSwitchActivated);
             }
             entry.claim()
         };
@@ -1571,6 +1595,7 @@ mod tests {
         let cases: Vec<(ApprovalError, &str)> = vec![
             (ApprovalError::NotFound(id), "NotFound"),
             (ApprovalError::AlreadyDecided(id), "AlreadyDecided"),
+            (ApprovalError::Expired(id), "Expired"),
             (ApprovalError::KillSwitchActivated, "KillSwitchActivated"),
             (ApprovalError::QueueFull, "QueueFull"),
             (ApprovalError::Persistence, "Persistence"),
@@ -4452,5 +4477,125 @@ mod tests {
                 .is_err(),
             "the rejected decide must not announce a second decision"
         );
+    }
+
+    // ---- I60-B: expiry vs. already-decided, and stop precedence ------------
+
+    /// Insert a live pending entry with an explicit deadline and no waiter.
+    async fn insert_pending_entry_for_i60b(
+        store: &ApprovalStore,
+        request: ApprovalRequest,
+        deadline: DateTime<Utc>,
+    ) -> (Uuid, watch::Receiver<Option<ApprovalDecision>>) {
+        let id = request.id;
+        let (tx, rx) = watch::channel(None);
+        {
+            let mut entries = store.inner.entries.write().await;
+            entries.insert(
+                id,
+                Entry {
+                    request,
+                    decision: None,
+                    decided_at: None,
+                    deadline,
+                    deciding: new_deciding(),
+                    tx,
+                },
+            );
+        }
+        (id, rx)
+    }
+
+    /// I60-B regression: a late approve/deny on an expired request must be a
+    /// distinct `Expired` error (HTTP 410), not the already-decided 409 that
+    /// makes the UI read back a `Pending` winner. Nothing is stamped, nothing
+    /// is committed and no watch decision is published.
+    #[tokio::test]
+    async fn expired_decide_reports_expired_without_stamping_or_committing() {
+        let recorder = Arc::new(RecordingPersistence::default());
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(30),
+            DEFAULT_MAX_PENDING,
+            recorder.clone(),
+        );
+        let (id, mut rx) = insert_pending_entry_for_i60b(
+            &store,
+            make_request(),
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await;
+
+        let result = store.decide(id, approved()).await;
+        assert!(
+            matches!(result, Err(ApprovalError::Expired(expired_id)) if expired_id == id),
+            "expiry must be its own error variant, not AlreadyDecided: {result:?}"
+        );
+        assert!(
+            recorder.decisions.lock().await.is_empty(),
+            "an expired request must never reach record_decision"
+        );
+        assert!(matches!(
+            store.status(id).await.expect("status"),
+            ApprovalDecision::Pending
+        ));
+        {
+            let entries = store.inner.entries.read().await;
+            let entry = entries.get(&id).expect("expired entry stays in the map");
+            assert!(entry.decision.is_none(), "no decision may be stamped");
+            assert!(entry.decided_at.is_none(), "no commit time may be stamped");
+            assert!(!entry.is_deciding(), "the claim must still be released");
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rx.changed())
+                .await
+                .is_err(),
+            "an expired decide must not announce a decision"
+        );
+    }
+
+    /// I60-B regression: with the emergency stop active, an expired request
+    /// still reports `KillSwitchActivated` (the shared kill-switch 409 body),
+    /// so the operator's halt latch engages. The gate is read exactly once and
+    /// no durable commit or stamp happens.
+    #[tokio::test]
+    async fn kill_switch_pre_check_beats_expiry_with_single_gate_read() {
+        let recorder = Arc::new(RecordingPersistence::default());
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_for_gate = hits.clone();
+        let gate: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(move || {
+            hits_for_gate.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        let store = ApprovalStore::with_commit_gate(
+            Duration::from_secs(30),
+            DEFAULT_MAX_PENDING,
+            recorder.clone(),
+            Some(gate),
+        );
+        let (id, _rx) = insert_pending_entry_for_i60b(
+            &store,
+            make_request(),
+            Utc::now() - chrono::Duration::seconds(1),
+        )
+        .await;
+
+        let result = store.decide(id, approved()).await;
+        assert!(
+            matches!(result, Err(ApprovalError::KillSwitchActivated)),
+            "the stop outranks expiry: {result:?}"
+        );
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "the commit gate must still be read exactly once per decide"
+        );
+        assert!(
+            recorder.decisions.lock().await.is_empty(),
+            "a stopped request must never reach record_decision"
+        );
+        assert!(matches!(
+            store.status(id).await.expect("status"),
+            ApprovalDecision::Pending
+        ));
     }
 }
