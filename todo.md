@@ -115,7 +115,7 @@ generated:
     R3-DR-003）
   - manifest は平文 SHA-256 のみ、署名なし。`--retain-days` は opt-in で
     unit が渡していない。ディスク枯渇と改ざん検知不能のリスク。
-- [ ] **P1-7** 共有ドメインモデルを一本化（**2026-11-19 スライス1-3 対応済み: core の正規形＋policy re-export に加え、mcp-gw の `ApprovalOutcome` を core::ApprovalDecision へ寄せ、wire DTO→core 変換を `outcome_from_wire()` へ集約。JSON 契約 golden3件追加。残るスライス: UI の境界変換・旧 root 型の整理）（R2-ARCH-001, R2-ARCH-005,
+- [x] **P1-7** 共有ドメインモデルを一本化（2026-11-19 全スライス完了: core 正規形＋policy re-export、mcp-gw の `outcome_from_wire()` 集約、UI の `decision_from_json()` / `request_to_core()` 境界変換、旧 root 型と TryFrom の削除。UI の独立 workspace に jarvis-core path dep 追加、ui-test 22件 pass。競合で壊れた UI の legacy 2-variant テストは「明示拒否」へ更新）（R2-ARCH-001, R2-ARCH-005,
     R2-ARCH-009）
   - `jarvis-core` が policy / mcp-gw / UI から未参照で、承認型が
     4 種類（`String+i64` / `Uuid+DateTime` / …）に分裂。core を真の
@@ -334,6 +334,8 @@ generated:
     sources.rs の型変更で unbounded ブリッジも除去済み（grep 0件）。
   - （解消済み）旧状態: `normalizer.rs` の unbounded channel と send 失敗握り潰し。bounded(1024) + try_send + warn&drop を導入。
 - [ ] **P1-12** Webhook 4ルートに認証・署名検証なし（A-M3）
+  - **2026-11-19 設計調査**: 4ソースの送信実体は repo 内で未確認。案A（4ルート共通の `webhook_token`、ヘッダ `x-jarvis-event-token` 再利用、未設定なら従来どおりオープン）を最小案として推奨。Gmail/Calendar が Pub/Sub push なら OIDC JWT 検証が別途必要。ハードニング候補: レート制限・timestamp/nonce・HMAC・ボディサイズ上限・strict fail-closed・401/429 メトリクス。
+  - **ユーザー確認が必要**: 実機 8085 の公開範囲、4ルートの実際の送信者、共通/ルート別 secret の選択、admin_token からの暗黙継承の有無、HMAC 等を今すぐ入れるか、BWS secret 名とローテ方針、strict モード要否。
   - **2026-11-18 判断記録済み（未実装）**: [設計記録](docs/integration/remaining-tasks.md)
     に、loopback bind + Tailscale の信頼境界を前提に当面共有トークン /
     HMAC 署名は導入しない旨を明記。実装・設定変更は行っていない。
@@ -483,7 +485,7 @@ generated:
   - **2026-11-19 調査**: repo 内に SHA256SUMS / 署名鍵 / 公開ダイジェストは存在せず（glob/grep 0件）、Qdrant / otelcol-contrib / bws / code-server の取得元を照合できない。勝手なハードコードや外部取得は追加せず、未検証の旨と推奨対応（リリース側でバージョン固定の SHA256SUMS + 署名を公開し取得・照合）を setup-selfhost.sh のコメントに明記。情報源が用意されるまで未解決。
 - [x] `/health` が固定 `"OK"` を返し劣化を検知できない — 2026-11-19 対応済み: kill switch 発動時とポリシー来源欠落時に 503 `{"status":"degraded","reason":...}` を返す。固定語彙のみで理由文字列・パスは非開示、正常時は 200 維持。新規テスト3件追加、policy 86 tests pass / `policy/src/http.rs:187-189` / R4-DR1 / confirmed
 - [x] シグナル処理・ドレインが無くデプロイ時停止で保留作業が失われる — 2026-11-19 対応済み: Ctrl-C / SIGTERM を `tokio::select!` で join! と競わせ停止時に tracer flush 付きで終了。biased で実エラーを優先。完全なコネクションドレインは serve 側の変更が必要で別タスク / `policy/src/main.rs:59` / R4-DR1 / confirmed
-- [ ] axum 0.7 と 0.8 が workspace 内で二重解決 — `rust/Cargo.toml:51` / R4-DP1 / confirmed
+- [x] axum 0.7 と 0.8 が workspace 内で二重解決 — 2026-11-19 調査済み: 原因は tonic 0.14.6 が axum 0.8.9 を要求（tower-http 0.6.11 は axum 非依存で仮説は否定）。axum 0.8 更新は4 crate・146参照の破壊的変更、tonic downgrade は gRPC 一式の連鎖変更となるため**現状維持**と判断し、根拠とリスクを `rust/Cargo.toml` のコメントに記録 / `rust/Cargo.toml:79` / R4-DP1 / confirmed
 - [x] 配線済み review-gate が PR ではなく既定ブランチを検証 — 2026-11-19 対応済み: 未配線の参照実装 `ci/review-gate.yml` の3ステージ checkout に `refs/pull/<number>/head` を追加（workflow_dispatch は `pr_number` 入力）。auto-merge・権限・認証情報の方針は据え置き、YAML 有効 / R1-AR4 / confirmed（未配線の参照実装は既存 P2-2 の判断を維持）
 - [x] レビューゲートのシグナル解析が `grep ... || true` で fail-open — 2026-11-19 対応済み: `fail_closed()` / `count_findings()` を導入し解析エラー・信号ファイル不在で `verdict=UNKNOWN` かつジョブ失敗。merge-gate / auto-merge は APPROVE/CONDITIONAL のみ通過。未配線方針は維持 / `ci/review-gate.yml:145-148` / R2-ER4 / likely（未配線）
 - [ ] cloud-init が NOPASSWD root + docker グループ / 固定 DB パスワード — `infra/opentofu/cloud-init.yaml:41-43,133` / R3-AU3 / confirmed（ADR-0004 で未使用のレガシー、削除判断は既存 P3-5 に委譲）
@@ -807,7 +809,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] 承認 gauge / 一覧が期限切れ放棄エントリを prune せず過大報告 — 2026-11-19 対応済み: `list_pending()` の読取側で `now > deadline` をフィルタし副作用なしで実態を反映。回帰テスト追加 / `policy/approval.rs:155,249-256` / B2 / 中。
 - [x] kill switch status API が無認証で自由文字列 reason / actor を開示 — 2026-11-19 対応済み: HTTP は `x-jarvis-kill-switch-token` ヘッダ / gRPC は同名 metadata で dedicated admin token を検証。`KillSwitchStatus::redacted()` で reason/actor を固定語彙へ丸め、内部監査用 `status()` は生文字列維持 / B2 / 中。
 - [x] kill switch admin token 比較が非定数時間 — 2026-11-19 対応済み: `constant_time_eq` を kill_switch モジュールの `pub(crate)` 共通ヘルパへ集約し、HTTP 承認トークンゲートと kill switch の全比較が同じ実装を共有 / `kill_switch.rs:135,217` / B2 / 中。
-- [ ] 失効フィルタが Qdrant top-K 選択後に適用され recall が低下 — `context/builder.rs:228-259` / B3 / 中。
+- [x] 失効フィルタが Qdrant top-K 選択後に適用され recall が低下 — 2026-11-19 対応済み: Qdrant payload に expires_at が無いため `EXPIRY_OVERFETCH_FACTOR=2` で候補を広げ、SQL 权威ゲート＋Rust retain の後に `take(limit)` で trim。純粋回帰3件追加 / `context/builder.rs:228-259` / B3 / 中。
 - [x] PII キー redact がキー衝突で別フィールドを上書き — 2026-11-19 対応済み: `unique_key()` で `[REDACTED]#1` 等のサフィックスを付与し通常キーとの衝突も回避。回帰テスト4件追加 / `context/pii.rs:124-164` / B3 / 中。
 - [x] check-deploy-drift がサービス停止時の E2E SKIP を OK と報告 — 2026-11-19 対応済み: サービス停止時を `DANGER: サービス停止` + `danger=1`（exit 2）へ変更。RESULT 文言も SKIP を OK と扱わない旨を明記。deploy の厳密 gate（:191）が exit 2 を受け取るため誤合格経路も閉じた / `check-deploy-drift.sh:169-182` / B4 / 中。
 - [x] 日次バックアップが verify-backup を通さない（導入時のみ検証） — 2026-11-19 対応済み: `jarvis-backup.service` に `ExecStartPost=` で `verify-backup.sh --latest` を追加（接頭辞 '-' なしで失敗時 unit failed）。`install-backup-timer.sh` は verify 作業コピー欠落時に jq と同じ fail-closed。`systemd-analyze verify` / bash -n OK / `jarvis-backup.service:12` / B4 / 中。
