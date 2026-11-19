@@ -52,14 +52,19 @@ Environment=RUST_LOG=info
 Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 # Workspace root for the native read-only handlers. Must stay readable under
 # ProtectHome=read-only; the value is also the path-escape boundary.
-# The literal below is only a development-host fallback: デプロイ時に上書き —
-# set JARVIS_MCP_GW_BASE_DIR in /etc/jarvis/jarvis-mcp-gw.env (or the manager
-# environment) on every target host. ${VAR:-default} keeps that host value.
-Environment=JARVIS_MCP_GW_BASE_DIR=${JARVIS_MCP_GW_BASE_DIR:-/home/koppe/ドキュメント/作業用/jarvis/jarvis}
+# systemd.exec(5) performs NO variable expansion inside Environment= (the "$"
+# has no special meaning there): ${VAR:-default} would be passed as a literal
+# string. The value below is therefore a LITERAL default only.
+# The ONLY override path is the existing
+# EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env above; values read from an
+# EnvironmentFile= take precedence over Environment= values.
+Environment=JARVIS_MCP_GW_BASE_DIR=/home/koppe/ドキュメント/作業用/jarvis/jarvis
 # web.fetch egress allowlist (comma-separated host patterns). Empty/invalid
-# means deny-all (fail-closed). Override in /etc/jarvis/jarvis-mcp-gw.env on
-# each host to the minimum set the deployment actually needs.
-Environment=JARVIS_MCP_GW_EGRESS_ALLOWLIST=${JARVIS_MCP_GW_EGRESS_ALLOWLIST:-example.com}
+# means deny-all (fail-closed). This is a LITERAL default (no ${...} expansion
+# in Environment=; see systemd.exec(5)). The ONLY override path is the
+# EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env above, whose values take
+# precedence over Environment=; set the minimum host set the deployment needs.
+Environment=JARVIS_MCP_GW_EGRESS_ALLOWLIST=example.com
 
 # Resource limits
 LimitNOFILE=65536

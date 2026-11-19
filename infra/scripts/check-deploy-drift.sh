@@ -77,11 +77,25 @@ for pair in \
 done
 # 5) systemd unit（配備版と repo の一致）
 unit_repo="$repo/infra/systemd/jarvis-mcp-gw.service"
-unit_sys="/etc/systemd/system/jarvis-mcp-gw.service"
+unit_sys="${JARVIS_DRIFT_UNIT:-/etc/systemd/system/jarvis-mcp-gw.service}"
 if [ -f "$unit_sys" ] && [ -f "$unit_repo" ]; then
   if cmp -s "$unit_sys" "$unit_repo"; then say "systemd unit" "OK (same)"; else say "systemd unit" "DIFF"; drift=1; fi
 else
   say "systemd unit" "MISSING"; drift=1
+fi
+# 5b) Fail-closed guard: the DEPLOYED unit must have no leftover "${" in any
+# Environment= line. systemd.exec(5) does not expand variables in Environment=,
+# so such a value is a broken literal (invalid base dir / deny-all egress).
+# Emit an ERROR CODE ONLY — never echo the matched line or its value (secrets).
+# A missing/unreadable unit also fails closed (cannot verify => DANGER).
+if [ ! -r "$unit_sys" ]; then
+  say "systemd env expansion" "DANGER: E_UNIT_UNREADABLE (code only)"
+  danger=1
+elif grep -Eq '^[[:space:]]*Environment=.*[$][{]' "$unit_sys"; then
+  say "systemd env expansion" "DANGER: E_UNEXPANDED_ENV (code only)"
+  danger=1
+else
+  say "systemd env expansion" "OK (no unexpanded variable in Environment=)"
 fi
 # 6) 実行時E2E: systemd 配下の実サービスに読み取り系 tools/call を行う。
 #    ProtectHome の取り違えのように「設定一致でも実行不能」な乖離を検出する。
