@@ -14,16 +14,54 @@ use tracing::instrument;
 /// Handle for the process-wide Prometheus recorder.
 static METRICS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
 
+/// State gauges exported next to the existing HTTP status counter.
+///
+/// Names are fixed literals with no labels: no request-derived string (kill
+/// switch reason, principal, approval id) ever becomes a label or a metric
+/// value, so sensitive/high-cardinality data cannot reach `/metrics`.
+const METRIC_KILL_SWITCH_ACTIVATED: &str = "jarvis_kill_switch_activated";
+const METRIC_APPROVAL_PENDING: &str = "jarvis_approval_pending";
+
 /// Install the Prometheus recorder exactly once per process.
 ///
 /// Called from `main`; tests never install the global recorder so they can
-/// run in parallel with other tests in the same binary.
+/// run in parallel with other tests in the same binary. The two state gauges
+/// are registered here, once, so `/metrics` renders them (at 0) even before
+/// the first scrape; their values are refreshed in the `/metrics` handler.
 pub fn install_metrics() -> anyhow::Result<()> {
     let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
     if METRICS_HANDLE.set(handle).is_err() {
         tracing::warn!("metrics recorder already installed; keeping the first handle");
+        return Ok(());
     }
+    metrics::describe_gauge!(
+        METRIC_KILL_SWITCH_ACTIVATED,
+        "Whether the policy kill switch is activated (1) or not (0)"
+    );
+    metrics::describe_gauge!(
+        METRIC_APPROVAL_PENDING,
+        "Number of approval requests currently awaiting a decision"
+    );
+    metrics::gauge!(METRIC_KILL_SWITCH_ACTIVATED).set(0.0);
+    metrics::gauge!(METRIC_APPROVAL_PENDING).set(0.0);
     Ok(())
+}
+
+/// Refresh the state gauges just before rendering `/metrics`.
+///
+/// Refreshing at the scrape point (instead of in `/health` or in a single
+/// request handler) keeps the values correct even when the kill switch is
+/// toggled over gRPC, and keeps high-frequency health probes free of extra
+/// work. Both reads are bounded and read-only: `kill_switch_status()` loads
+/// atomics plus two short strings, `pending_approvals()` takes one read lock
+/// over the capacity-bounded pending map. Only a 0/1 flag and a count are
+/// emitted — reasons, principals and ids are never copied into the metrics.
+async fn refresh_state_gauges(engine: &PolicyEngine) {
+    let activated = engine.kill_switch_status().activated;
+    metrics::gauge!(METRIC_KILL_SWITCH_ACTIVATED).set(if activated { 1.0 } else { 0.0 });
+
+    let pending = engine.pending_approvals().await.len();
+    metrics::gauge!(METRIC_APPROVAL_PENDING).set(pending as f64);
 }
 
 #[derive(Deserialize, Debug)]
@@ -331,7 +369,11 @@ async fn health(
     }
 }
 
-async fn metrics() -> String {
+/// Prometheus scrape endpoint. State gauges are refreshed here so the
+/// exported values are current at read time (the gRPC kill-switch handlers
+/// never pass through an HTTP state-change route).
+async fn metrics(State(engine): State<Arc<PolicyEngine>>) -> String {
+    refresh_state_gauges(&engine).await;
     match METRICS_HANDLE.get() {
         Some(handle) => handle.render(),
         None => "# metrics recorder not installed\n".to_string(),
