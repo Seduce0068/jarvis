@@ -594,4 +594,104 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn emit_preserves_correlation_id_and_timestamp_through_bounded_channel() {
+        let (tx, mut rx) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
+        let normalizer = Normalizer::with_event_tx(tx);
+        let event = test_event(31, "correlation_probe");
+
+        normalizer.emit(event.clone());
+
+        let queued = rx.try_recv().expect("event accepted");
+        assert_eq!(queued.id, event.id);
+        assert_eq!(queued.correlation_id, event.correlation_id);
+        assert_eq!(queued.timestamp, event.timestamp);
+        assert_eq!(queued.payload, event.payload);
+        assert_eq!(queued.source, event.source);
+    }
+
+    #[test]
+    fn webhook_handlers_generate_distinct_ids_and_correlation_ids_per_call() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime builds");
+        runtime.block_on(async {
+            let (tx, mut rx) = mpsc::channel(8);
+            let state = || State(Arc::new(Normalizer::with_event_tx(tx.clone())));
+
+            ha_webhook(state(), Json(json!({"event_type": "state_changed"}))).await;
+            ha_webhook(state(), Json(json!({"event_type": "state_changed"}))).await;
+
+            let first = rx.try_recv().expect("first event accepted");
+            let second = rx.try_recv().expect("second event accepted");
+            assert_ne!(first.id, second.id);
+            assert_ne!(first.correlation_id, second.correlation_id);
+            assert!(!first.correlation_id.is_empty());
+            assert!(!second.correlation_id.is_empty());
+        });
+    }
+
+    #[test]
+    fn overflow_warning_records_event_metadata_without_payload() {
+        const OVERFLOW_SECRET: &str = "overflow-body-secret-4f1a";
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let (tx, _rx) = mpsc::channel::<UnifiedEvent>(1);
+            try_emit_event(&tx, test_event(21, "first"));
+
+            let mut overflow = test_event(22, "overflow");
+            overflow.payload = json!({"body": OVERFLOW_SECRET});
+            try_emit_event(&tx, overflow);
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+
+        assert!(
+            logs.contains("event channel full; dropping event"),
+            "overflow warning not captured: {logs}"
+        );
+        assert!(logs.contains("event_type=overflow"), "event_type absent");
+        assert!(logs.contains("source=manual"), "source absent");
+        assert!(logs.contains("capacity="), "capacity absent");
+        assert!(
+            !logs.contains(OVERFLOW_SECRET),
+            "dropped payload leaked: {logs}"
+        );
+    }
+
+    /// The failure branch lives inside `Normalizer::new`'s spawned task and
+    /// requires live policy/context clients, so it cannot run in a unit test.
+    /// Guard its logging contract at the source level instead: the error must
+    /// carry both correlation identifiers and never the raw event body.
+    #[test]
+    fn processing_failure_log_keeps_correlation_ids_and_drops_payload() {
+        const SRC: &str = include_str!("normalizer.rs");
+        const MSG: &str = "Event processing failed: {e}";
+
+        let at = SRC.find(MSG).expect("failure log message exists");
+        let start = SRC[..at].rfind("tracing::error!(");
+        let start = start.expect("failure log is an error event");
+        let statement = &SRC[start..at + MSG.len()];
+
+        assert!(
+            statement.contains("event_id = %event.id"),
+            "failure log missing event_id"
+        );
+        assert!(
+            statement.contains("correlation_id = %event.correlation_id"),
+            "failure log missing correlation_id"
+        );
+        assert!(!statement.contains("payload"), "failure log leaks payload");
+    }
 }
