@@ -34,6 +34,11 @@ pub struct ApprovalsView {
     /// tool execution is fail-closed at `jarvis-mcp-gw`. Kept separate from
     /// `status`/`error` so existing approval display logic is unchanged.
     kill_switch_active: bool,
+    /// Sticky confirmation from a kill-switch 409 body (I54-A). OR-ed into
+    /// every observation so the authoritative 409 body outranks a racing or
+    /// transient probe result. Cleared only by an explicit healthy /health
+    /// answer, which `kill_switch_active()` reports as `false` (fail-closed).
+    kill_switch_blocked: bool,
     /// Independent pin for the "approved, execution halted" row status
     /// (I50-C (a)). While this and `kill_switch_active` are both true, polls
     /// must not overwrite `status` with the queue count. Deliberately separate
@@ -59,6 +64,7 @@ impl ApprovalsView {
             loaded: false,
             action_status: false,
             kill_switch_active: false,
+            kill_switch_blocked: false,
             halted_decision_status: false,
         };
         view.spawn_poller(cx);
@@ -146,9 +152,19 @@ impl ApprovalsView {
     /// Fold a freshly observed kill-switch state into the view. When the switch
     /// lifts, the independent halt pin is released so the queue count can be
     /// reported again on subsequent polls (I50-C (a)).
+    ///
+    /// A kill-switch 409 latches `kill_switch_blocked` independently of the
+    /// probe (I54-A), so the fixed 409 body wins over a racing or transient
+    /// probe result. `kill_switch_active()` fails closed, therefore a `false`
+    /// here is an explicit healthy /health answer and is the only signal that
+    /// clears the latch and lifts the pin (I54-A release contract).
     fn apply_kill_switch(&mut self, active: bool) {
-        self.kill_switch_active = active;
         if !active {
+            self.kill_switch_blocked = false;
+        }
+        let effective = active || self.kill_switch_blocked;
+        self.kill_switch_active = effective;
+        if !effective {
             self.halted_decision_status = false;
         }
     }
@@ -229,6 +245,10 @@ impl ApprovalsView {
                         let kill_switch_blocked =
                             matches!(&outcome, DecisionOutcome::KillSwitchBlocked);
                         if kill_switch_blocked {
+                            // The 409 body is authoritative: latch it before
+                            // any later probe observation so no transient
+                            // failure can drop the pin (I54-A).
+                            view.kill_switch_blocked = true;
                             view.apply_kill_switch(true);
                         }
                         let halt_pinned = match outcome.decision() {
@@ -585,6 +605,7 @@ mod tests {
             loaded: true,
             action_status,
             kill_switch_active: false,
+            kill_switch_blocked: false,
             halted_decision_status: false,
         }
     }
@@ -858,32 +879,78 @@ mod tests {
         assert_eq!(status_for_outcome(&outcome, false), status);
     }
 
-    /// I52-A (a): the halt status survives polls while the stop is active and
-    /// is released once the probe confirms the switch lifted.
+    /// Drive one poller iteration. `probe` is the fail-closed value returned by
+    /// `PolicyClient::kill_switch_active` (I54-A): a timeout/error arrives as
+    /// `true`, an explicit healthy /health answer as `false`. No manual pin
+    /// re-application — the pin must hold on its own.
+    fn poll_with_probe(view: &mut ApprovalsView, pending: &[ApprovalRequest], probe: bool) {
+        view.apply_poll(Ok(pending.to_vec()));
+        view.apply_kill_switch(probe);
+    }
+
+    /// I54-A / I52-A (a): once a kill-switch 409 latches the halt, the pin
+    /// survives every subsequent poll whose probe fails closed (timeout or a
+    /// transient loopback error). The previous version re-applied
+    /// `apply_kill_switch(true)` by hand, which could not reproduce the false
+    /// "switch lifted" bug and let the next poll overwrite the halt status.
     #[test]
     fn kill_switch_blocked_status_survives_polls_until_switch_lifts() {
         let mut view = view_with("非常停止中：承認・却下は実行されません", None, true);
+        // Mirror `decide`: the fixed 409 body latches the halt on its own.
+        view.kill_switch_blocked = true;
         view.halted_decision_status = true;
         view.apply_kill_switch(true);
         let pending = vec![request_with_expiry("a", None)];
 
+        // Probe timeout / transient error is fail-closed, so it arrives as an
+        // active switch. No manual re-application: the latch must hold it.
         for _ in 0..3 {
-            view.apply_poll(Ok(pending.clone()));
-            view.apply_kill_switch(true);
+            poll_with_probe(&mut view, &pending, true);
             assert_eq!(
                 view.status.to_string(),
                 "非常停止中：承認・却下は実行されません"
             );
+            assert!(
+                view.kill_switch_active,
+                "halt pin must survive a failed probe"
+            );
+            assert!(view.halted_decision_status);
         }
 
+        // /health explicitly ok: the latch clears and the pin is released
+        // (I54-A release contract, unchanged from I50-C (a)).
         view.apply_kill_switch(false);
+        assert!(!view.kill_switch_blocked);
+        assert!(!view.kill_switch_active);
         assert!(!view.halted_decision_status);
         view.apply_poll(Ok(pending.clone()));
         assert_eq!(
             view.status.to_string(),
             "非常停止中：承認・却下は実行されません"
         );
-        view.apply_poll(Ok(pending));
+        poll_with_probe(&mut view, &pending, false);
         assert_eq!(view.status.to_string(), "保留中: 1 件");
+    }
+
+    /// I54-A: the 409 body outranks a probe that raced ahead with a healthy
+    /// answer. Latching from the body (as `decide` does) keeps the halt pinned
+    /// until a later explicit healthy /health answer releases it.
+    #[test]
+    fn kill_switch_409_body_latch_outranks_racing_healthy_probe() {
+        let mut view = view_with("非常停止中：承認・却下は実行されません", None, true);
+        // The poller's probe ran first and reported a definitive ok.
+        view.apply_kill_switch(false);
+        // Then the authoritative 409 body is folded in, as `decide` does.
+        view.kill_switch_blocked = true;
+        view.apply_kill_switch(true);
+        view.halted_decision_status = true;
+
+        assert!(view.kill_switch_active, "409 body must win over the probe");
+        assert!(view.kill_switch_blocked);
+
+        view.apply_kill_switch(false);
+        assert!(!view.kill_switch_blocked);
+        assert!(!view.kill_switch_active);
+        assert!(!view.halted_decision_status);
     }
 }

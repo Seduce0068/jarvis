@@ -54,13 +54,12 @@ impl fmt::Debug for RedactedToken {
 const TOKEN_WIRE_PREFIX: &str = "jarvis-tokens-v1:";
 
 /// Fixed 409 body emitted by `jarvis-policy` when the emergency stop blocked a
-/// decision. Mirrors `approval_error_reasons::KILL_SWITCH` in
-/// `rust/jarvis-policy/src/http.rs`; the UI crate cannot depend on the policy
-/// crate, so the literal is duplicated here and pinned by a contract test.
-/// Only an exact match takes the halt path. Any other body (including the
-/// `ALREADY_DECIDED` literal and bodies from older peers) keeps the existing
-/// winner-preservation behavior, so the status-code contract stays compatible.
-const KILL_SWITCH_409_BODY: &str = "approval decisions are blocked by the kill switch";
+/// decision. Aliased from `jarvis-core` (I54-C) so this client cannot drift from
+/// `approval_error_reasons::KILL_SWITCH`: only an exact match takes the halt
+/// path. Any other body (including the `ALREADY_DECIDED` literal and bodies from
+/// older peers) keeps the existing winner-preservation behavior, so the
+/// status-code contract stays compatible.
+const KILL_SWITCH_409_BODY: &str = jarvis_core::KILL_SWITCH_409_BODY;
 
 /// Tokens resolved for the two approval scopes.
 ///
@@ -505,12 +504,15 @@ impl PolicyClient {
     /// active, and `200 {"status":"ok"}` otherwise. This is a *display* signal
     /// only: the decision POST still returns `200 Approved` when a stop lands
     /// mid-commit, while `jarvis-mcp-gw` re-checks the kill switch before the
-    /// tool runs. Only an explicit `reason=kill_switch` counts as stopped; a
-    /// network error, a malformed body, or another degraded reason (e.g.
-    /// `no_policy`) returns `false` so the UI never claims an emergency stop
-    /// it cannot confirm. No reason text, token, or request data is surfaced.
+    /// tool runs. A definitive answer that is not `reason=kill_switch` (a
+    /// `200`, another degraded reason such as `no_policy`, or a non-JSON `200`
+    /// body) reports `false`; an *incomplete* probe — timeout, connection
+    /// error, or an unreadable `503` body — **fails closed** and reports `true`
+    /// (I54-A). Otherwise a transient failure right after a kill-switch 409
+    /// would masquerade as "switch lifted" and drop the halt pin. No reason
+    /// text, token, or request data is surfaced.
     pub fn kill_switch_active(&self) -> bool {
-        self.kill_switch_probe().unwrap_or(false)
+        self.kill_switch_probe().unwrap_or(true)
     }
 
     /// Raw probe result. Kept separate from [`Self::kill_switch_active`] so a
@@ -600,11 +602,14 @@ impl PolicyClient {
                 .limit(256)
                 .read_to_string()
                 .unwrap_or_default();
+            // I54-C: compare against the single `jarvis-core` definition that
+            // `jarvis-policy` also emits. A local duplicate used to let a policy
+            // wording change silently turn this into a false AlreadyDecided
+            // winner. Any other body still keeps the legacy winner-preservation
+            // contract, including peers that predate the fixed-vocabulary body.
             if error_body.trim() == KILL_SWITCH_409_BODY {
                 return Ok(DecisionOutcome::KillSwitchBlocked);
             }
-            // Any other body keeps the legacy winner-preservation contract,
-            // including peers that predate the fixed-vocabulary body.
             return Ok(DecisionOutcome::AlreadyDecided(self.winner_decision(id)?));
         }
         // A 401/500/3xx must not be reported to the operator as a successful
@@ -1657,6 +1662,66 @@ mod tests {
         server.join().expect("server thread");
     }
 
+    /// I54-A: a health probe that never completes must not be projected as
+    /// "switch lifted". Failing closed keeps a confirmed halt pin alive after
+    /// a kill-switch 409; the raw deadline itself is already covered by
+    /// `hung_health_probe_respects_configured_deadline`.
+    #[test]
+    fn kill_switch_active_fails_closed_on_probe_timeout() {
+        let (addr, server) = spawn_test_server(
+            |stream, _request| {
+                std::thread::sleep(Duration::from_secs(5));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            },
+            1,
+        );
+        let client = PolicyClient::with_timeouts(
+            format!("http://{addr}"),
+            None,
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+        );
+        let started = std::time::Instant::now();
+        assert!(
+            client.kill_switch_active(),
+            "probe timeout must fail closed, not lift the halt"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "deadline must fire long before the 5s server response"
+        );
+        let _ = server.join();
+    }
+
+    /// I54-A: an unreadable degraded body is also an incomplete probe and
+    /// fails closed, while a later explicit `200 ok` still lifts the stop.
+    /// This pins both halves of the release contract at the client boundary.
+    #[test]
+    fn kill_switch_active_fails_closed_on_unreadable_degraded_body_then_releases_on_ok() {
+        let mut responses = [
+            ("HTTP/1.1 503 Service Unavailable", "not-json"),
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
+        ]
+        .into_iter();
+        let (addr, server) = spawn_test_server(
+            move |stream, _request| {
+                let (status, body) = responses.next().expect("queued response");
+                respond_json(stream, status, body);
+            },
+            2,
+        );
+        let client = PolicyClient::new(format!("http://{addr}"));
+        assert!(
+            client.kill_switch_active(),
+            "unreadable 503 must fail closed, not lift the halt"
+        );
+        assert!(
+            !client.kill_switch_active(),
+            "an explicit 200 ok must still release the confirmed stop"
+        );
+        server.join().expect("server thread");
+    }
+
     // --- I50-C: winner preservation (409) and probe deadlines ---------------
 
     /// I50-C (b): an HTTP 409 on approve is not a failure. The authoritative
@@ -1809,19 +1874,39 @@ mod tests {
 
     // --- I52-A: 409 body classification and winner-token contract ----------
 
-    /// I52-A (a): a kill-switch 409 is not an already-decided winner. No
-    /// status readback is issued, no decision is fabricated, and the fixed
+    /// I52-A (a) / I54-C: a kill-switch 409 is not an already-decided winner.
+    /// No status readback is issued, no decision is fabricated, and the fixed
     /// body is never carried into the outcome.
+    ///
+    /// Contract pin (I54-C): the stub serves an independent fixture of the body
+    /// `jarvis-policy` puts on the wire, not a value derived from the
+    /// classification constant. Production compares against the shared
+    /// `jarvis-core` constant, so a policy wording change (a change to that
+    /// constant) fails the equality pin or the outcome assertion instead of
+    /// silently resolving the 409 to a false winner.
     #[test]
     fn kill_switch_409_pins_halt_without_winner_fetch() {
         use std::sync::{Arc, Mutex};
+
+        // External contract fixture, not a second production definition: this
+        // literal is what the policy service writes to the 409 response body.
+        const POLICY_KILL_SWITCH_409_WIRE_BODY: &str =
+            "approval decisions are blocked by the kill switch";
+        assert_eq!(
+            KILL_SWITCH_409_BODY, POLICY_KILL_SWITCH_409_WIRE_BODY,
+            "shared 409 body must still match the policy wire contract"
+        );
 
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_for_thread = seen.clone();
         let (addr, handle) = spawn_test_server(
             move |stream, request| {
                 seen_for_thread.lock().expect("lock").push(request);
-                respond_json(stream, "HTTP/1.1 409 Conflict", KILL_SWITCH_409_BODY);
+                respond_json(
+                    stream,
+                    "HTTP/1.1 409 Conflict",
+                    POLICY_KILL_SWITCH_409_WIRE_BODY,
+                );
             },
             1,
         );
