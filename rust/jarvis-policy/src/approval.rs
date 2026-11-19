@@ -12,7 +12,9 @@
 //! audit row rather than silently exceeding the cap. Recovered holds have no
 //! timer of their own: the lazy `prune` sweep is their timeout path, and it
 //! commits [`ApprovalPersistence::mark_expired`] before evicting
-//! an expired entry so no durable row is left undecided and unaudited.
+//! an expired entry so no durable row is left undecided and unaudited. A
+//! failed commit leaves the entry Pending so a later sweep can retry the
+//! audit write instead of silently losing it.
 //! User notification (HA/phone) will be layered on top later.
 //!
 //! Approval is intentionally HTTP-only: the gRPC surface is limited to
@@ -525,8 +527,15 @@ impl ApprovalStore {
                                             "stale decide claim cleared after repeated yields"
                                         );
                                     }
-                                    entry.decision = Some(ApprovalDecision::Expired);
-                                    entry.decided_at = Some(expired_at);
+                                    // I43-B (a): claim the entry for the expiry
+                                    // commit, but keep it Pending until that
+                                    // commit succeeds. Stamping `decision`/
+                                    // `decided_at` here would make `prune` drop
+                                    // the entry as already-expired even when the
+                                    // durable audit write failed, losing the
+                                    // retry. The `deciding` flag also keeps a
+                                    // concurrent prune from racing this commit.
+                                    entry.deciding = true;
                                     TimeoutOutcome::Expire
                                 }
                             }
@@ -544,9 +553,10 @@ impl ApprovalStore {
                         }
                         TimeoutOutcome::Expire => {
                             // `NoopPersistence` never errors, so the default
-                            // path is unchanged. A failed audit write is
-                            // retried by the next `prune` (or startup
-                            // reconciliation), so no decision/audit is lost.
+                            // path is unchanged. A failed `mark_expired` leaves
+                            // the entry Pending (no decision/decided_at stamp),
+                            // so the next `prune` (or startup reconciliation)
+                            // retries the audit write instead of losing it.
                             let mark = self.inner.persistence.mark_expired(id, expired_at).await;
                             match mark {
                                 // A concurrent settlement won the durable CAS.
@@ -690,24 +700,43 @@ impl ApprovalStore {
                                     };
 
                                     if let Some((decision, authoritative_at)) = recovered {
-                                        // Reconcile the provisional `Expired`
-                                        // with the authoritative decision so
-                                        // memory, watch, waiter and the durable
-                                        // row agree. The DB commit time wins over
-                                        // the local timeout instant (I40-A (c)).
+                                        // Reconcile the still-Pending entry with
+                                        // the authoritative decision so memory,
+                                        // watch, waiter and the durable row agree.
+                                        // The DB commit time wins over the local
+                                        // timeout instant (I40-A (c)). Since
+                                        // I43-B (a) no longer stamps a
+                                        // provisional `Expired` before the CAS,
+                                        // Pending is the expected state here;
+                                        // the old `Expired`-only check is kept
+                                        // for backends/third parties that still
+                                        // publish one.
                                         let mut entries = self.inner.entries.write().await;
-                                        if let Some(entry) = entries.get_mut(&id)
-                                            && matches!(
-                                                entry.decision.as_ref(),
-                                                Some(&ApprovalDecision::Expired)
-                                            )
-                                        {
-                                            entry.decision = Some(decision.clone());
-                                            entry.decided_at =
-                                                Some(authoritative_at.unwrap_or_else(Utc::now));
-                                            let _ = entry.tx.send(Some(decision.clone()));
+                                        if let Some(entry) = entries.get_mut(&id) {
+                                            entry.deciding = false;
+                                            if entry.decision.is_none()
+                                                || matches!(
+                                                    entry.decision.as_ref(),
+                                                    Some(&ApprovalDecision::Expired)
+                                                )
+                                            {
+                                                entry.decision = Some(decision.clone());
+                                                entry.decided_at =
+                                                    Some(authoritative_at.unwrap_or_else(Utc::now));
+                                                let _ = entry.tx.send(Some(decision.clone()));
+                                            }
                                         }
                                         return Ok(decision);
+                                    }
+                                    // No authoritative decision was visible.
+                                    // Release the expiry claim and leave the
+                                    // entry Pending so prune / startup
+                                    // reconciliation can still settle it.
+                                    {
+                                        let mut entries = self.inner.entries.write().await;
+                                        if let Some(entry) = entries.get_mut(&id) {
+                                            entry.deciding = false;
+                                        }
                                     }
                                     tracing::warn!(
                                         request_id = %id,
@@ -716,6 +745,16 @@ impl ApprovalStore {
                                     return Ok(ApprovalDecision::Expired);
                                 }
                                 Err(error) => {
+                                    // The entry stays Pending and the claim is
+                                    // released, so the next prune (or startup
+                                    // reconciliation) can retry the audit
+                                    // write. The caller still gets `Expired`.
+                                    {
+                                        let mut entries = self.inner.entries.write().await;
+                                        if let Some(entry) = entries.get_mut(&id) {
+                                            entry.deciding = false;
+                                        }
+                                    }
                                     tracing::warn!(
                                         error_category = error.category(),
                                         request_id = %id,
@@ -723,7 +762,19 @@ impl ApprovalStore {
                                     );
                                     return Ok(ApprovalDecision::Expired);
                                 }
-                                Ok(()) => return Ok(ApprovalDecision::Expired),
+                                Ok(()) => {
+                                    // Only a committed expiry may make the
+                                    // in-memory entry decided (I43-B (a)).
+                                    let mut entries = self.inner.entries.write().await;
+                                    if let Some(entry) = entries.get_mut(&id) {
+                                        entry.deciding = false;
+                                        if entry.decision.is_none() {
+                                            entry.decision = Some(ApprovalDecision::Expired);
+                                            entry.decided_at = Some(expired_at);
+                                        }
+                                    }
+                                    return Ok(ApprovalDecision::Expired);
+                                }
                             }
                         }
                     }
@@ -1033,9 +1084,44 @@ impl ApprovalStore {
                     }
                     entries.remove(&id);
                 }
+                // I43-B (b): a concurrent settlement already committed the
+                // durable decision, so this ghost entry must NOT be retained
+                // forever. Mirror the reconcile / timeout paths: treat it as
+                // success, re-read the authoritative decision (when the backend
+                // exposes it) and reflect it in memory before evicting.
+                Err(ApprovalError::AlreadyDecided(_)) => {
+                    let authoritative = match persistence.load_decision_with_time(id).await {
+                        Ok(Some(loaded)) => Some(loaded),
+                        Ok(None) => None,
+                        Err(error) => {
+                            tracing::warn!(
+                                error_category = error.category(),
+                                request_id = %id,
+                                "durable decision re-read failed after prune expiry CAS loss"
+                            );
+                            None
+                        }
+                    };
+                    if let Some(entry) = entries.get_mut(&id) {
+                        if let Some(loaded) = authoritative {
+                            entry.decision = Some(loaded.decision.clone());
+                            entry.decided_at = Some(loaded.decided_at);
+                            let _ = entry.tx.send(Some(loaded.decision));
+                        } else {
+                            // No authoritative value visible, but the CAS proved
+                            // the durable row is decided. Settle locally as
+                            // `Expired` so a still-waiting receiver is released
+                            // and the ghost is evicted like every other success.
+                            entry.decision = Some(ApprovalDecision::Expired);
+                            entry.decided_at = Some(now);
+                            let _ = entry.tx.send(Some(ApprovalDecision::Expired));
+                        }
+                    }
+                    entries.remove(&id);
+                }
                 Err(error) => {
                     tracing::warn!(
-                        error = %error,
+                        error_category = error.category(),
                         request_id = %id,
                         "failed to persist expiration during prune; keeping entry for retry"
                     );
@@ -2808,7 +2894,9 @@ mod tests {
 
         // Simulate a concurrent decider publishing slightly later. Injecting
         // directly into the watch sender avoids `decide`'s `AlreadyDecided`
-        // precondition (the timeout path has already marked the entry Expired).
+        // precondition: after a lost expiry CAS the entry stays Pending until
+        // the authoritative re-read resolves, so a real `decide` past the
+        // deadline would still be rejected.
         let decision = approved();
         {
             let mut entries = store.inner.entries.write().await;
@@ -2865,6 +2953,236 @@ mod tests {
         assert!(
             started.load(Ordering::SeqCst),
             "the parallel durable re-read must have started"
+        );
+    }
+
+    // ---- I43-B (a)/(b) durable expiry regressions (mock, no real DB) -------
+
+    /// Mock that fails the first N `mark_expired` calls with the dedicated
+    /// `ApprovalError::Persistence` (HTTP 503 class), then commits. No DB.
+    #[derive(Debug, Default)]
+    struct FlakyExpiryPersistence {
+        fail_remaining: AtomicUsize,
+        mark_calls: AtomicUsize,
+        expired: tokio::sync::Mutex<Vec<Uuid>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for FlakyExpiryPersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.mark_calls.fetch_add(1, Ordering::SeqCst);
+            if self.fail_remaining.load(Ordering::SeqCst) > 0 {
+                self.fail_remaining.fetch_sub(1, Ordering::SeqCst);
+                return Err(ApprovalError::Persistence);
+            }
+            self.expired.lock().await.push(id);
+            Ok(())
+        }
+    }
+
+    /// I43-B (a): a failed durable expiry must not stamp the in-memory entry as
+    /// decided. The waiter still gets `Expired` (legacy contract), but the entry
+    /// stays Pending so the next `prune` retries the audit write instead of
+    /// dropping the entry via the `is_expired` branch.
+    #[tokio::test]
+    async fn failed_expiry_commit_keeps_entry_pending_for_prune_retry() {
+        let persistence = Arc::new(FlakyExpiryPersistence {
+            fail_remaining: AtomicUsize::new(1),
+            ..Default::default()
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(500),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let mut request = make_request();
+        request.expires_at = Utc::now() + chrono::Duration::milliseconds(30);
+        let id = request.id;
+
+        assert!(
+            matches!(store.request(request).await, ApprovalDecision::Expired),
+            "the caller still receives Expired when the audit write fails"
+        );
+        assert_eq!(persistence.mark_calls.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(store.status(id).await, Ok(ApprovalDecision::Pending)),
+            "a failed audit write must leave the in-memory entry Pending"
+        );
+
+        // A fresh request triggers `prune` at the head of `try_request`.
+        let next = make_request();
+        let next_id = next.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(next).await });
+        decide_after_registration(&store, next_id, approved()).await;
+        assert!(matches!(
+            waiter.await.expect("waiter task"),
+            ApprovalDecision::Approved { .. }
+        ));
+
+        assert_eq!(
+            persistence.mark_calls.load(Ordering::SeqCst),
+            2,
+            "prune must retry mark_expired for the still-pending entry"
+        );
+        assert_eq!(
+            *persistence.expired.lock().await,
+            vec![id],
+            "the audit write must succeed on the retry"
+        );
+        assert!(
+            matches!(store.status(id).await, Err(ApprovalError::NotFound(_))),
+            "the entry is evicted only after the commit succeeded"
+        );
+    }
+
+    /// Ghost-entry double: `mark_expired` reports `AlreadyDecided` (a concurrent
+    /// settlement won the CAS) while `load_decision_with_time` returns the
+    /// authoritative decision. No database and no implicit watch send.
+    #[derive(Debug)]
+    struct GhostPrunePersistence {
+        committed: LoadedDecision,
+        reread_calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for GhostPrunePersistence {
+        async fn record_request(
+            &self,
+            _request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(Some(self.committed.decision.clone()))
+        }
+
+        async fn load_decision_with_time(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<LoadedDecision>, ApprovalError> {
+            self.reread_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(self.committed.clone()))
+        }
+
+        async fn mark_expired(
+            &self,
+            id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Err(ApprovalError::AlreadyDecided(id))
+        }
+    }
+
+    /// I43-B (b): `prune` must treat `AlreadyDecided` as success, reflect the
+    /// authoritative decision into memory and evict the ghost instead of
+    /// retaining it forever (aligning with reconcile and timeout).
+    #[tokio::test]
+    async fn prune_evicts_ghost_on_already_decided_and_adopts_authoritative_decision() {
+        let committed = LoadedDecision {
+            decision: approved(),
+            decided_at: Utc::now() - chrono::Duration::seconds(5),
+        };
+        let persistence = Arc::new(GhostPrunePersistence {
+            committed: committed.clone(),
+            reread_calls: AtomicUsize::new(0),
+        });
+        let store = ApprovalStore::with_persistence(
+            Duration::from_millis(500),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+
+        // Install a pending entry whose deadline has passed but whose waiter
+        // never ran the timeout path: exactly the ghost `prune` must settle.
+        let ghost = make_request();
+        let id = ghost.id;
+        let (tx, rx) = watch::channel(None);
+        {
+            let mut entries = store.inner.entries.write().await;
+            entries.insert(
+                id,
+                Entry {
+                    request: ghost,
+                    decision: None,
+                    decided_at: None,
+                    deadline: Utc::now() - chrono::Duration::seconds(1),
+                    deciding: false,
+                    tx,
+                },
+            );
+        }
+
+        // A fresh request triggers `prune`; its own waiter is decided at once.
+        let next = make_request();
+        let next_id = next.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(next).await });
+        decide_after_registration(&store, next_id, approved()).await;
+        assert!(matches!(
+            waiter.await.expect("waiter task"),
+            ApprovalDecision::Approved { .. }
+        ));
+
+        assert_eq!(persistence.reread_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            rx.borrow().as_ref(),
+            Some(&committed.decision),
+            "prune must publish the authoritative decision before evicting"
+        );
+        assert!(
+            matches!(store.status(id).await, Err(ApprovalError::NotFound(_))),
+            "the ghost entry must be evicted, not retained forever"
         );
     }
 }
