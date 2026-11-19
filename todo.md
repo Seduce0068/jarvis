@@ -1727,3 +1727,29 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （low）— feature gate または薄い crate への分離、ui/Cargo.toml コメント更新。
 
 - 親が対応: fmt 差分のみ。
+
+### Round 59（R4 で修正済み）
+
+- [x] BareJson が 413/415/422 を一律400へ丸め（medium）→ 種別別の空本文
+  status（Content-Type 欠落415／2MiB超過413／型不正400）、warn→debug で
+  ログ増幅も抑制。context も `jarvis_core::BareJson` へ一本化。
+- [x] 非有限 poison row が上限なしで永続 defer（medium）→ 即 dead-letter
+  ＋ attempts 上限10＋バッチ除外、100 poison + 1正常行の回帰追加。
+  既存 `reconcile_defers_pending_row_with_non_finite_vector` は方針反転に
+  伴い dead-letter 期待へ更新。
+- [x] jarvis-core への axum/tracing 必須依存（low）→ opt-in `http` feature
+  で optional 化、UI は既定 feature で axum 非推移、lockfile 整理。
+  4サービスは workspace 依存の `features=["http"]` で継承。
+
+### Round 59 の残り指摘（未対応）
+
+- [ ] 証跡 index の件数照合が `re.search` の最初の一致のみ（medium）—
+  `finditer` へ変更し矛盾する2つ目を拒否、REF_USAGE も finditer 化。
+- [ ] HTTP 410 が本文未検証・共有 pin なし（medium）→ 410 固定本文を
+  jarvis-core 共有定数化し、trim 後完全一致＋不一致時 Err（fail-closed）。
+- [ ] health probe の本文分類が非対称（medium）— 503 も `status=degraded`
+  かつ reason∈{kill_switch,no_policy} 完全一致、200 は reason 不在を必須化、
+  語彙を共有定数化。
+- [ ] 410／health 語彙の cross-crate pin テスト追加。
+
+- 親が対応: fmt 差分、`features=["http"]` の workspace 配線（blocker）。
