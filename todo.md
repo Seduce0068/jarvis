@@ -1072,19 +1072,48 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 35 のレビュー結果（未対応）
 
-- [ ] **check-evidence の notes 件数照合が最初の一致しか検証しない**
+- [x] **check-evidence の notes 件数照合が最初の一致しか検証しない** — 2026-11-19 対応済み: `re.finditer` ですべての件数一致を列挙し個別照合（値は非出力）。`test-legacy-guards.sh` に `notes_count_conflict` / `notes_passed_conflict` の tamper 2ケースを追加し、拒否を検証。6証跡すべて通过。
   （confirmed medium）— `check-evidence.sh:114,121` の `re.search` は1件目のみ。
   「23 checks ＋ 22 checks ＋ 23 passed」のような混在を通過させてしまう。
   `re.finditer` ですべての一致を照合し、`test-legacy-guards.sh` の tamper
   モードに「正しい件数＋矛盾する2つ目」を追加して回帰を担保。
-- [ ] **backup 証跡が REQ-18 カバレッジを主張しつつ集計ゲートがそれを実行して
-  いない**（confirmed medium）— runtime を `make test-verify-backup` に限定した
+- [x] **backup 証跡が REQ-18 カバレッジを主張しつつ集計ゲートがそれを実行して
+  いない**（confirmed medium）— 2026-11-19 対応済み: runtime を `test-verify-backup + test-backup-args` へ拡大し `results.passed` を実測29（23+6）へ更新。notes は単一件数表記へ統一し、TC-B5 の6ケースを含む旨を明記 — runtime を `make test-verify-backup` に限定した
   結果、TC-B5 の6ケース（test-backup-args.sh）が23件に含まれない。
   requirements / notes から REQ-18 を外すか、6ケースを集計へ含めて実測再生成。
-- [ ] **コミット照合が dirty ツリーチェックを欠く**（likely medium）—
+- [x] **コミット照合が dirty ツリーチェックを欠く**（likely medium）— 2026-11-19 対応済み: ビルド前に `git diff --quiet` / `git diff --cached --quiet` を必須ゲート化（dirty なら差分内容を出さず exit 1）。untracked は repo 全体では検査せず、`rust/migrations/*.sql` のみ `git ls-files --others` でペイロード化を遮断。`bash -n` / shellcheck OK —
   `build-selfhost.sh:47-54` は `git rev-parse HEAD` のみで作業ツリー差分を
   検査せず、両マーカーに同じ BUILD_COMMIT を書くため照合が常に真。
   ビルド前に `git diff --quiet && git diff --cached --quiet` を必須化し、
   dirty なら exit 1（必要なら untracked も検査）。
 
 - 親が対応: rustfmt 差分（policy / ui）の自動修正。
+
+### Round 36 のレビュー／発掘結果（未対応）
+
+- [ ] **lost-ack の ours-commit が最終試行の probe 失敗で 503 に後退**
+  （confirmed high）— `persistence.rs:331-337,474-494` の `read_back_once` は1回の
+  probe のみで、Err は Undecided→最終試行で Persistence(503)。試行予算統合の
+  回帰。最終 attempt に限り probe を1回再試行するか、probe transport error 時に
+  in-transaction read を再実行する。
+- [ ] **タイムアウト待機が 100ms grace 2回＋DB re-read で deadline 超過**
+  （confirmed medium）— `approval.rs:492-493,514-516,533`。2つの grace を統合
+  するか load_decision を grace と並列開始して先着を採用。grace 長と再読取り
+  回数を設定可能にして SLA を明示。
+- [ ] **durable re-read で復元した決定の decided_at がタイムアウト時刻で上書き**
+  （confirmed medium）— `approval.rs:559` の `entry.decided_at = Some(expired_at)`。
+  DB の権威決定時刻とメモリが不一致で prune の保持判定が誤る。load_decision が
+  decided_at も返すようにする。
+- [ ] **TC-U13 が本番起動配線（encoded bundle → new_with_token）を通っていない**
+  （likely medium）— API-only ケースが `new_with_tokens`（embedders 用）のみ。
+  `PolicyTokens::new(Some(api), None).encode()` を本番経路へ渡すテストを追加。
+- [ ] **stale SQL 削除と新 SQL 配置が非原子的**（likely medium）— `build-selfhost.sh:156-163`
+  の rm→install の窓で migration unit が pre-flight しうる。入れ替え前に unit を
+  stop するか staging ディレクトリを atomic rename で切り替える。
+- [ ] **発掘: 自動修正可能な残タスク5件** — docs/architecture/AGENTS.md の存在しない
+  資料への参照、3 unit の旧 1Password コメント（ExecStart は bws run）、
+  specs/test-backup.md の TC-V2 Traceability 欠落（evidence 再生成要）、
+  docs/integration/evidence-regeneration.md が現行ゲートと矛盾、ADR 3件＋
+  テンプレートの date が RFC 3339 違反（オフセット欠落）。
+
+- 親が対応: なし（全ゲート初回通过）。
