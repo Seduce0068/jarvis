@@ -207,11 +207,33 @@ async fn check(
     Json(CheckResponse { allowed })
 }
 
+/// HTTP 専用の承認受付。
+///
+/// `PolicyEngine::request_approval` と同じ kill-switch 判定を行った上で、
+/// キュー枯渇を `ApprovalError::QueueFull` として返す。通常のポリシー拒否は
+/// 従来どおり `ApprovalDecision::Denied` なので 200 の decision のままになる。
+/// 公開シグネチャを変えずに区別を追加するため、このヘルパーは HTTP モジュール内
+/// に置き、`request_approval` 自体は gRPC/既存クライアント互換のまま維持する。
+impl PolicyEngine {
+    async fn request_approval_http(
+        &self,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalDecision, crate::approval::ApprovalError> {
+        // PolicyEngine::request_approval の kill-switch ガードと同じ判定。
+        if self.kill_switch.is_activated() {
+            return Ok(ApprovalDecision::Denied {
+                reason: "Kill switch activated".into(),
+            });
+        }
+        self.approvals.try_request(request).await
+    }
+}
+
 #[instrument(skip(engine))]
 async fn request_approval(
     State(engine): State<Arc<PolicyEngine>>,
     Json(req): Json<ApprovalRequestHttp>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, axum::http::StatusCode> {
     let approval_req = ApprovalRequest {
         id: uuid::Uuid::parse_str(&req.id).unwrap_or_else(|_| uuid::Uuid::new_v4()),
         principal: req.principal,
@@ -221,14 +243,11 @@ async fn request_approval(
         requested_at: chrono::DateTime::from_timestamp(req.requested_at, 0).unwrap_or_default(),
         expires_at: chrono::DateTime::from_timestamp(req.expires_at, 0).unwrap_or_default(),
     };
-    let decision =
-        engine
-            .request_approval(approval_req)
-            .await
-            .unwrap_or(ApprovalDecision::Denied {
-                reason: "error".into(),
-            });
-    Json(serde_json::to_value(decision).unwrap_or_default())
+    let decision = engine
+        .request_approval_http(approval_req)
+        .await
+        .map_err(approval_error_status)?;
+    Ok(Json(serde_json::to_value(decision).unwrap_or_default()))
 }
 
 #[instrument(skip(engine))]
@@ -282,6 +301,9 @@ fn approval_error_status(error: crate::approval::ApprovalError) -> axum::http::S
         crate::approval::ApprovalError::NotFound(_) => axum::http::StatusCode::NOT_FOUND,
         crate::approval::ApprovalError::AlreadyDecided(_) => axum::http::StatusCode::CONFLICT,
         crate::approval::ApprovalError::KillSwitchActivated => axum::http::StatusCode::CONFLICT,
+        // キュー枯渇は一時的な基盤エラー。通常の deny (200 の decision) と
+        // 区別し、呼び出し側が後でリトライできるよう 503 を返す。
+        crate::approval::ApprovalError::QueueFull => axum::http::StatusCode::SERVICE_UNAVAILABLE,
     }
 }
 
@@ -591,15 +613,18 @@ mod tests {
             let client = client.clone();
             let url = format!("{base}/v1/approval");
             async move {
-                client
+                let response = client
                     .post(url)
                     .json(&pending_request(expires_at))
                     .send()
                     .await
-                    .expect("approval request runs")
+                    .expect("approval request runs");
+                let status = response.status();
+                let body = response
                     .json::<Value>()
                     .await
-                    .expect("approval response is JSON")
+                    .expect("approval response is JSON");
+                (status, body)
             }
         });
 
@@ -612,7 +637,9 @@ mod tests {
             .expect("deny request runs");
         assert_eq!(response.status(), reqwest::StatusCode::OK);
 
-        let decision = pending.await.expect("request task joins");
+        let (status, decision) = pending.await.expect("request task joins");
+        // 通常のポリシー拒否はキュー枯渇 (503) と区別し、従来どおり 200。
+        assert_eq!(status, reqwest::StatusCode::OK);
         assert_eq!(decision["decision"], "Denied");
         assert_eq!(decision["reason"], "not now");
 
@@ -660,6 +687,9 @@ mod tests {
         };
 
         // A distinct id avoids the duplicate-id guard; the cap must trigger.
+        // 期待値を更新: キュー枯渇は基盤エラーなので、従来の 200 の Denied
+        // decision ではなく 503 Service Unavailable を返す（テスト名は履歴上の
+        // ものを維持）。通常のポリシー拒否は引き続き 200 の decision を返す。
         let mut second_pending = pending_request(chrono::Utc::now().timestamp() + 60);
         second_pending["id"] = serde_json::json!(uuid::Uuid::new_v4().to_string());
         let second = client
@@ -667,12 +697,8 @@ mod tests {
             .json(&second_pending)
             .send()
             .await
-            .expect("second request")
-            .json::<serde_json::Value>()
-            .await
-            .expect("json");
-        assert_eq!(second["decision"], "Denied");
-        assert_eq!(second["reason"], "approval queue full");
+            .expect("second request");
+        assert_eq!(second.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
 
         client
             .post(format!("{base}/v1/approval/{id}/approve"))

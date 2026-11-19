@@ -29,7 +29,20 @@ pub enum ApprovalError {
 
     #[error("kill switch is activated; approval decisions are blocked")]
     KillSwitchActivated,
+
+    /// The in-memory queue is at `max_pending`. This is an infrastructure
+    /// exhaustion condition, not a policy decision: callers may retry later
+    /// instead of reporting a user/operator denial to the requester.
+    #[error("approval queue is full; the request was not enqueued")]
+    QueueFull,
 }
+
+/// Reason attached to the legacy `Denied` decision returned by
+/// [`ApprovalStore::request`] when the queue is exhausted.
+///
+/// New callers should match [`ApprovalError::QueueFull`] from
+/// [`ApprovalStore::try_request`] instead of comparing this string.
+pub const QUEUE_FULL_REASON: &str = "approval queue full";
 
 struct Entry {
     request: ApprovalRequest,
@@ -77,7 +90,35 @@ impl ApprovalStore {
     /// Returns the recorded decision, or [`ApprovalDecision::Expired`] when no
     /// decision arrives within the configured timeout (or the request's own
     /// `expires_at`, whichever comes first).
+    ///
+    /// Queue exhaustion is mapped here to a legacy
+    /// `Denied { reason: QUEUE_FULL_REASON }` decision so existing callers keep
+    /// their `ApprovalDecision` return type. Callers that must distinguish
+    /// infrastructure exhaustion from a policy deny should use
+    /// [`ApprovalStore::try_request`] instead.
     pub async fn request(&self, request: ApprovalRequest) -> ApprovalDecision {
+        match self.try_request(request).await {
+            Ok(decision) => decision,
+            Err(ApprovalError::QueueFull) => ApprovalDecision::Denied {
+                reason: QUEUE_FULL_REASON.into(),
+            },
+            // Other variants predate the queue-full split and were always
+            // reported as a denied decision by this legacy wrapper.
+            Err(error) => ApprovalDecision::Denied {
+                reason: error.to_string(),
+            },
+        }
+    }
+
+    /// Like [`ApprovalStore::request`], but reports queue exhaustion as
+    /// [`ApprovalError::QueueFull`] rather than as a `Denied` decision.
+    ///
+    /// This lets transports such as HTTP answer with 503 (retry later) while
+    /// leaving an ordinary policy `Denied` as a normal 200 decision.
+    pub async fn try_request(
+        &self,
+        request: ApprovalRequest,
+    ) -> Result<ApprovalDecision, ApprovalError> {
         let id = request.id;
         let now = Utc::now();
         let timeout = chrono::Duration::from_std(self.inner.timeout)
@@ -96,20 +137,20 @@ impl ApprovalStore {
             // request: doing so would drop the original waiter's channel and
             // let a second caller hijack the operator's decision target.
             if entries.contains_key(&id) {
-                return ApprovalDecision::Denied {
+                return Ok(ApprovalDecision::Denied {
                     reason: "duplicate approval id".into(),
-                };
+                });
             }
             // Fail closed when the queue is saturated: an attacker on
             // loopback must not be able to grow pending state without limit.
+            // An explicit error distinguishes this infrastructure condition
+            // from a policy deny (which remains a `Denied` decision).
             let pending = entries
                 .values()
                 .filter(|entry| entry.decision.is_none())
                 .count();
             if pending >= self.inner.max_pending {
-                return ApprovalDecision::Denied {
-                    reason: "approval queue full".into(),
-                };
+                return Err(ApprovalError::QueueFull);
             }
             entries.insert(
                 id,
@@ -145,21 +186,22 @@ impl ApprovalStore {
             None
         };
 
-        match decision {
+        let decision = match decision {
             Some(decision) => decision,
             None => {
                 // Re-check under the lock: a decision may have raced the timeout.
                 let mut entries = self.inner.entries.write().await;
                 if let Some(entry) = entries.get_mut(&id) {
                     if let Some(decision) = &entry.decision {
-                        return decision.clone();
+                        return Ok(decision.clone());
                     }
                     entry.decision = Some(ApprovalDecision::Expired);
                     entry.decided_at = Some(Utc::now());
                 }
                 ApprovalDecision::Expired
             }
-        }
+        };
+        Ok(decision)
     }
 
     /// Record `decision` for a pending request and wake its waiter.
@@ -347,6 +389,9 @@ mod tests {
     async fn saturated_queue_denies_new_requests() {
         // One slot only: the first request waits, the second must fail closed
         // instead of growing the in-memory queue without bound.
+        // 期待値を更新: キュー枯渇はポリシー拒否 (Denied) ではなく基盤エラー
+        // (ApprovalError::QueueFull) として返す。旧 request() の Denied 互換は
+        // queue_full_is_reported_as_denied_by_legacy_request で確認する。
         let store = ApprovalStore::with_max_pending(Duration::from_secs(5), 1);
         let first = make_request();
         let first_id = first.id;
@@ -361,9 +406,35 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
 
+        let second = store.try_request(make_request()).await;
+        assert!(
+            matches!(second, Err(ApprovalError::QueueFull)),
+            "unexpected: {second:?}"
+        );
+
+        store.decide(first_id, approved()).await.expect("decide");
+        let _ = waiter.await.expect("waiter task");
+    }
+
+    #[tokio::test]
+    async fn queue_full_is_reported_as_denied_by_legacy_request() {
+        // request() の公開シグネチャと既存クライアント互換のため、枯渇時は
+        // 従来どおり Denied { reason: QUEUE_FULL_REASON } を返す。
+        let store = ApprovalStore::with_max_pending(Duration::from_secs(5), 1);
+        let first = make_request();
+        let first_id = first.id;
+        let store_for_waiter = store.clone();
+        let waiter = tokio::spawn(async move { store_for_waiter.request(first).await });
+        loop {
+            if matches!(store.status(first_id).await, Ok(ApprovalDecision::Pending)) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
         let second = store.request(make_request()).await;
         assert!(
-            matches!(&second, ApprovalDecision::Denied { reason } if reason == "approval queue full"),
+            matches!(&second, ApprovalDecision::Denied { reason } if reason == QUEUE_FULL_REASON),
             "unexpected: {second:?}"
         );
 
