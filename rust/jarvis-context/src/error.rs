@@ -91,3 +91,89 @@ mod tests {
         assert!(!err.to_string().contains("http://"));
     }
 }
+
+/// Test-only fixture shared by the HTTP and gRPC transport tests (I55-C).
+///
+/// Keeping the seven representative errors in one place is what lets a single
+/// cross-cutting test drive all six RPCs with the *same* inputs. A transport
+/// that silently changes its mapping can no longer pass by leaving an old
+/// string literal in its source: the tests compare real return values and
+/// real log records produced by these errors.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::{ContextError, QdrantErrorKind};
+
+    /// Marker embedded in every error chain; it must never reach a status
+    /// message or a log record. Deliberately shaped to avoid the repository
+    /// secret scanner's credential-key patterns.
+    pub(crate) const SENSITIVE_PROBE: &str = "I55C-VOCAB-PROBE-DO-NOT-LOG";
+
+    /// The seven fixed categories both transports must produce.
+    pub(crate) const ERROR_KIND_TOKENS: [&str; 7] = [
+        "database",
+        "qdrant",
+        "pii",
+        "config",
+        "grpc",
+        "serialization",
+        "other",
+    ];
+
+    /// Selector for exactly one representative of each category.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(crate) enum ErrorCase {
+        Database,
+        Qdrant,
+        Pii,
+        Config,
+        Grpc,
+        Serialization,
+        Other,
+    }
+
+    impl ErrorCase {
+        pub(crate) const ALL: [Self; 7] = [
+            Self::Database,
+            Self::Qdrant,
+            Self::Pii,
+            Self::Config,
+            Self::Grpc,
+            Self::Serialization,
+            Self::Other,
+        ];
+
+        pub(crate) fn token(self) -> &'static str {
+            match self {
+                Self::Database => "database",
+                Self::Qdrant => "qdrant",
+                Self::Pii => "pii",
+                Self::Config => "config",
+                Self::Grpc => "grpc",
+                Self::Serialization => "serialization",
+                Self::Other => "other",
+            }
+        }
+
+        /// Build a real error of this category with the probe in its chain.
+        ///
+        /// The outer `context` layer proves that a typed variant is still found
+        /// by `downcast_ref` after `anyhow` wrapping (matching the existing
+        /// no-leak regressions) while the probe itself must stay unlogged.
+        pub(crate) fn into_error(self) -> anyhow::Error {
+            let err: anyhow::Error = match self {
+                Self::Database => ContextError::Database(sqlx::Error::RowNotFound).into(),
+                Self::Qdrant => ContextError::qdrant(QdrantErrorKind::FAILED).into(),
+                Self::Pii => ContextError::Pii(SENSITIVE_PROBE.to_owned()).into(),
+                Self::Config => ContextError::Config(anyhow::anyhow!("{SENSITIVE_PROBE}")).into(),
+                Self::Grpc => ContextError::Grpc(tonic::Status::internal(SENSITIVE_PROBE)).into(),
+                Self::Serialization => ContextError::Serialization(
+                    serde_json::from_str::<serde_json::Value>(SENSITIVE_PROBE)
+                        .expect_err("the probe is not JSON"),
+                )
+                .into(),
+                Self::Other => anyhow::anyhow!("{SENSITIVE_PROBE}"),
+            };
+            err.context(SENSITIVE_PROBE)
+        }
+    }
+}
