@@ -3,12 +3,13 @@
 use anyhow::{Context as AnyhowContext, Result};
 use casbin::{CoreApi, DefaultModel, Enforcer, FileAdapter, MgmtApi};
 use cedar_policy::{
-    Authorizer, Context, Decision, Entities, PolicySet, Request as CedarRequest, Schema,
-    ValidationMode, Validator,
+    Authorizer, Context, Decision, Entities, Policy, PolicyId, PolicySet, Request as CedarRequest,
+    Schema, ValidationMode, Validator,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock as StdRwLock;
 use tokio::sync::RwLock;
 use tracing::instrument;
 
@@ -92,8 +93,14 @@ pub enum ApprovalDecision {
 
 pub struct CedarEngine {
     authorizer: Authorizer,
-    policies: PolicySet,
+    /// Interior mutability lets the administrative add/remove API refresh the
+    /// in-memory snapshot without `&mut self` (the engine is shared behind
+    /// `Arc` by `PolicyEngine`).
+    policies: StdRwLock<PolicySet>,
     entities: Entities,
+    /// Configured Cedar policy source. Management operations persist here so a
+    /// restart observes the same rules; only directory sources are mutable.
+    policy_path: PathBuf,
 }
 
 impl CedarEngine {
@@ -159,8 +166,9 @@ impl CedarEngine {
 
         Ok(Self {
             authorizer: Authorizer::new(),
-            policies,
+            policies: StdRwLock::new(policies),
             entities,
+            policy_path: path.to_path_buf(),
         })
     }
 
@@ -187,10 +195,137 @@ impl CedarEngine {
             None,
         )?;
 
+        let policies = self
+            .policies
+            .read()
+            .map_err(|_| anyhow::anyhow!("Cedar policy set lock is poisoned"))?;
         let response = self
             .authorizer
-            .is_authorized(&request, &self.policies, &self.entities);
+            .is_authorized(&request, &policies, &self.entities);
         Ok(response.decision() == Decision::Allow)
+    }
+
+    /// Management ids become file names, so only a conservative ASCII charset
+    /// is accepted (no path separators, no leading dot, no traversal).
+    fn is_safe_policy_id(id: &str) -> bool {
+        !id.is_empty()
+            && !id.starts_with('.')
+            && id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    }
+
+    /// Resolve the on-disk path of a managed policy under the policy directory.
+    fn managed_policy_path(&self, id: &str) -> Result<PathBuf> {
+        if !self.policy_path.is_dir() {
+            anyhow::bail!(
+                "Cedar policy management requires a policy directory; configured path {} is not a directory",
+                self.policy_path.display()
+            );
+        }
+        if !Self::is_safe_policy_id(id) {
+            anyhow::bail!("invalid Cedar policy id '{id}': use ASCII letters, digits, '-' or '_'");
+        }
+        Ok(self.policy_path.join(format!("{id}.cedar")))
+    }
+
+    /// Apply the same strict schema gate used at startup to policies entering
+    /// through the management API. A missing schema keeps the legacy behavior
+    /// (no schema contract, deny by default).
+    fn validate_against_deployed_schema(&self, policies: &PolicySet) -> Result<()> {
+        let Some(schema_path) = schema_path_for(&self.policy_path) else {
+            return Ok(());
+        };
+        let schema_text = std::fs::read_to_string(&schema_path)
+            .with_context(|| format!("reading Cedar schema {}", schema_path.display()))?;
+        let schema = parse_schema(&schema_text, &schema_path)?;
+        validate_policies_against_schema(schema, policies)
+    }
+
+    /// Reload the in-memory snapshot through the very same [`load_from_directory`]
+    /// used at startup, so persisted management changes take effect immediately
+    /// and cannot bypass parsing or schema validation.
+    fn reload_policies(&self) -> Result<()> {
+        let (policies, _entities) = load_from_directory(&self.policy_path)?;
+        self.validate_against_deployed_schema(&policies)?;
+        let mut guard = self
+            .policies
+            .write()
+            .map_err(|_| anyhow::anyhow!("Cedar policy set lock is poisoned"))?;
+        *guard = policies;
+        Ok(())
+    }
+
+    /// Add a Cedar policy and persist it as `<id>.cedar` in the configured
+    /// policy directory. Returns `false` when that policy already exists.
+    ///
+    /// # Responsibility boundary (administrative API)
+    ///
+    /// This is a low-level management primitive: it does **not** authenticate
+    /// or authorize its caller. The transport layer exposing it (HTTP/gRPC
+    /// handler) MUST require an admin credential, e.g. the dedicated
+    /// policy/kill-switch admin token, before calling. Keep this off any
+    /// unauthenticated request path; this crate does not implement authn.
+    pub fn add_policy(&self, id: &str, policy_text: &str) -> Result<bool> {
+        let path = self.managed_policy_path(id)?;
+        if path.exists() {
+            return Ok(false);
+        }
+        let policy = Policy::parse(Some(PolicyId::new(id)), policy_text)
+            .with_context(|| format!("parsing managed Cedar policy '{id}'"))?;
+        let mut candidate = PolicySet::new();
+        candidate
+            .add(policy)
+            .with_context(|| format!("adding managed Cedar policy '{id}'"))?;
+        self.validate_against_deployed_schema(&candidate)?;
+
+        std::fs::write(&path, policy_text)
+            .with_context(|| format!("writing managed Cedar policy {}", path.display()))?;
+        if let Err(err) = self.reload_policies() {
+            // Fail-closed rollback: never leave a file on disk that the engine
+            // refused to load (e.g. a newly invalidated schema contract).
+            if let Err(cleanup) = std::fs::remove_file(&path) {
+                tracing::warn!(
+                    "Failed to roll back managed Cedar policy {} after reload failure: {}",
+                    path.display(),
+                    cleanup
+                );
+            }
+            return Err(err).context("reloading Cedar policies after add");
+        }
+        tracing::info!("Added managed Cedar policy '{id}' at {}", path.display());
+        Ok(true)
+    }
+
+    /// Remove a previously added Cedar policy and persist the removal.
+    /// Returns `false` when no managed policy with that id exists.
+    ///
+    /// # Responsibility boundary (administrative API)
+    ///
+    /// Same contract as [`CedarEngine::add_policy`]: no caller authentication
+    /// happens here. The calling transport MUST gate this behind an admin
+    /// credential; authentication is deliberately out of scope for this crate.
+    pub fn remove_policy(&self, id: &str) -> Result<bool> {
+        let path = self.managed_policy_path(id)?;
+        if !path.is_file() {
+            return Ok(false);
+        }
+        let backup = std::fs::read(&path)
+            .with_context(|| format!("reading managed Cedar policy {}", path.display()))?;
+        std::fs::remove_file(&path)
+            .with_context(|| format!("removing managed Cedar policy {}", path.display()))?;
+        if let Err(err) = self.reload_policies() {
+            if let Err(restore) = std::fs::write(&path, &backup) {
+                tracing::warn!(
+                    "Failed to restore managed Cedar policy {} after reload failure: {}",
+                    path.display(),
+                    restore
+                );
+            }
+            return Err(err).context("reloading Cedar policies after removal");
+        }
+        tracing::info!("Removed managed Cedar policy '{id}' at {}", path.display());
+        Ok(true)
     }
 }
 
@@ -313,6 +448,14 @@ impl CasbinEnforcer {
     /// Add a policy rule and persist it to the policy file.
     ///
     /// Returns `false` when the rule already exists.
+    ///
+    /// # Responsibility boundary (administrative API)
+    ///
+    /// This is the low-level management primitive behind `PolicyEngine`'s
+    /// policy administration. It performs no caller authentication or
+    /// authorization: the transport exposing it MUST require an admin
+    /// credential before invoking it. Authentication belongs to the caller,
+    /// not to this crate.
     pub async fn add_policy(&self, principal: &str, action: &str, resource: &str) -> Result<bool> {
         let mut enforcer = self.enforcer.write().await;
         if !enforcer
@@ -328,6 +471,13 @@ impl CasbinEnforcer {
     /// Remove a policy rule and persist the policy file.
     ///
     /// Returns `false` when the rule did not exist.
+    ///
+    /// # Responsibility boundary (administrative API)
+    ///
+    /// Same contract as [`CasbinEnforcer::add_policy`]: no authentication is
+    /// performed here. Callers exposing this over a transport MUST gate it
+    /// behind an admin credential; this is a pre-authorization management
+    /// operation, not a per-request authorization check.
     pub async fn remove_policy(
         &self,
         principal: &str,
@@ -343,6 +493,47 @@ impl CasbinEnforcer {
         }
         enforcer.save_policy().await?;
         Ok(true)
+    }
+}
+
+/// Administrative facade on [`crate::PolicyEngine`].
+///
+/// Kept next to the enforcer it delegates to: these methods only forward to
+/// [`CasbinEnforcer`], whose `save_policy()` call already persists every change
+/// to the configured policy CSV. Implementing the inherent impl here avoids
+/// duplicating policy-management logic in `lib.rs`.
+impl crate::PolicyEngine {
+    /// Add a Casbin RBAC rule and persist it. Returns `false` if it exists.
+    ///
+    /// # Responsibility boundary (administrative API)
+    ///
+    /// This is a low-level, pre-authorization management operation and does
+    /// **not** authenticate its caller. The transport layer exposing it (HTTP,
+    /// gRPC, CLI) MUST require an admin credential before calling. This crate
+    /// deliberately does not implement authentication.
+    pub async fn add_policy(&self, principal: &str, action: &str, resource: &str) -> Result<bool> {
+        self.casbin_enforcer
+            .add_policy(principal, action, resource)
+            .await
+    }
+
+    /// Remove a Casbin RBAC rule and persist the removal. Returns `false` if
+    /// the rule did not exist.
+    ///
+    /// # Responsibility boundary (administrative API)
+    ///
+    /// Same contract as [`crate::PolicyEngine::add_policy`]: no caller
+    /// authentication happens here, so the calling transport MUST gate this
+    /// behind an admin credential.
+    pub async fn remove_policy(
+        &self,
+        principal: &str,
+        action: &str,
+        resource: &str,
+    ) -> Result<bool> {
+        self.casbin_enforcer
+            .remove_policy(principal, action, resource)
+            .await
     }
 }
 
@@ -534,6 +725,69 @@ mod tests {
         );
     }
 
+    /// The Cedar management API must persist rules, refresh the in-memory
+    /// snapshot, and behave idempotently for duplicate add/remove.
+    #[tokio::test]
+    async fn cedar_add_and_remove_policy_round_trip() -> Result<()> {
+        let dir = temp_dir("cedar-manage");
+        let engine = CedarEngine::new(&config_for(&dir)).await?;
+        let grant = r#"permit (principal == jarvis::Principal::"jarvis_user", action, resource);"#;
+
+        assert!(!engine.is_authorized("jarvis_user", "execute", "tool:demo", &json!({}))?);
+        assert!(engine.add_policy("grant_user", grant)?);
+        assert!(engine.is_authorized("jarvis_user", "execute", "tool:demo", &json!({}))?);
+        // Adding the same managed id twice must not report success.
+        assert!(!engine.add_policy("grant_user", grant)?);
+
+        // A fresh engine proves the rule was persisted to the policy directory.
+        let reloaded = CedarEngine::new(&config_for(&dir)).await?;
+        assert!(reloaded.is_authorized("jarvis_user", "execute", "tool:demo", &json!({}))?);
+
+        assert!(reloaded.remove_policy("grant_user")?);
+        assert!(!reloaded.is_authorized("jarvis_user", "execute", "tool:demo", &json!({}))?);
+        // Removing a missing managed id must not report success.
+        assert!(!reloaded.remove_policy("grant_user")?);
+
+        let third = CedarEngine::new(&config_for(&dir)).await?;
+        assert!(!third.is_authorized("jarvis_user", "execute", "tool:demo", &json!({}))?);
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// Management adds must pass the same strict schema gate as startup, and a
+    /// rejected add must not leave a policy file behind.
+    #[tokio::test]
+    async fn cedar_add_policy_rejects_schema_violation() -> Result<()> {
+        let dir = temp_dir("cedar-manage-schema");
+        fs::write(
+            dir.join(CEDAR_SCHEMA_FILE),
+            include_str!("../../../infra/config/policy/cedar_schema.cedarschema"),
+        )?;
+        let engine = CedarEngine::new(&config_for(&dir)).await?;
+        let invalid = r#"permit (principal == jarvis::Unknown::"ghost", action, resource);"#;
+
+        assert!(engine.add_policy("bad", invalid).is_err());
+        assert!(!dir.join("bad.cedar").exists());
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// Managed ids become file names; traversal attempts must be rejected.
+    #[tokio::test]
+    async fn cedar_add_policy_rejects_unsafe_id() -> Result<()> {
+        let dir = temp_dir("cedar-manage-id");
+        let engine = CedarEngine::new(&config_for(&dir)).await?;
+        let grant = r#"permit (principal == jarvis::Principal::"jarvis_user", action, resource);"#;
+
+        assert!(engine.add_policy("../escape", grant).is_err());
+        assert_eq!(fs::read_dir(&dir)?.count(), 0);
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
     fn casbin_files(label: &str) -> (PathBuf, PathBuf) {
         let dir = temp_dir(label);
         let model = dir.join("casbin_model.conf");
@@ -581,6 +835,64 @@ mod tests {
         assert!(!third.enforce("alice", "execute", "tool:demo").await?);
 
         fs::remove_dir_all(model.parent().expect("temp dir"))?;
+        Ok(())
+    }
+
+    /// `PolicyEngine`'s public management facade must delegate to Casbin and
+    /// persist changes, without weakening the existing low-level round trip.
+    #[tokio::test]
+    async fn policy_engine_add_and_remove_policy_round_trip() -> Result<()> {
+        let (model, policy) = casbin_files("engine-manage");
+        let cedar_dir = temp_dir("engine-manage-cedar");
+        let config = crate::config::PolicyConfig {
+            cedar_policy_dir: path_string(&cedar_dir),
+            casbin_model_path: path_string(&model),
+            casbin_policy_path: path_string(&policy),
+            kill_switch_admin_token: "test-admin-token".into(),
+            ..Default::default()
+        };
+        let engine = crate::PolicyEngine::new(config.clone()).await?;
+        let context = json!({});
+
+        assert!(
+            !engine
+                .is_allowed("alice", "execute", "tool:demo", &context)
+                .await?
+        );
+        assert!(engine.add_policy("alice", "execute", "tool:demo").await?);
+        assert!(
+            engine
+                .is_allowed("alice", "execute", "tool:demo", &context)
+                .await?
+        );
+        assert!(!engine.add_policy("alice", "execute", "tool:demo").await?);
+
+        // A fresh engine reading the persisted CSV observes the same rule.
+        let reloaded = crate::PolicyEngine::new(config).await?;
+        assert!(
+            reloaded
+                .is_allowed("alice", "execute", "tool:demo", &context)
+                .await?
+        );
+
+        assert!(
+            reloaded
+                .remove_policy("alice", "execute", "tool:demo")
+                .await?
+        );
+        assert!(
+            !reloaded
+                .is_allowed("alice", "execute", "tool:demo", &context)
+                .await?
+        );
+        assert!(
+            !reloaded
+                .remove_policy("alice", "execute", "tool:demo")
+                .await?
+        );
+
+        fs::remove_dir_all(model.parent().expect("temp dir"))?;
+        fs::remove_dir_all(&cedar_dir)?;
         Ok(())
     }
 
