@@ -1280,3 +1280,31 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 親が対応: builder.rs の未定義変数 `expected`、`embedding_dim` 修正、
   tracing field 形式依存アサーション削除、secret_scan 誤検出（PROBE 定数＋
   `concat!` 分割）。
+
+### Round 44（R4 で修正済み）
+
+- [x] commit_gate のコミット後再読による「durable 済み・未公開」分裂
+  （confirmed medium）→ ゲート読みをコミット前の1回に限定し、コミット成功を
+  権威として常に publish。TOCTOU 回帰の期待値を更新（回帰名は保持）。
+- [x] DecidingGuard の共有 bool に世代／オーナーが無い競合（confirmed medium）
+  → 奇数=有効／偶数=無効の単調世代トークンへ置換し、古いガードの Drop は
+  no-op。`apply_prune` は `decided_at.is_some()` なら send/evict をスキップ。
+- [x] mcp_allowlist.toml の timeout_ms 一律15000化が他ルートの機能後退
+  （confirmed high）→ shell.execute / github.create_pr / web.search を 30000
+  へ復元、web.fetch は clamp 上限 15000 を維持。注記で範囲を明示。
+- [x] egress テンプレートの3層優先順位を明記、policy gRPC の kill switch
+  エラーログを固定語彙 `error_kind` 化（OTLP への生テキスト送出を遮断）。
+
+### Round 44 の残り指摘（未対応）
+
+- [ ] 承認永続化が生の tokio-postgres エラーを OTLP ログへ送出
+  （confirmed medium）— `persistence.rs:316,720,778,840-847,902-903` の
+  `error = %error` を固定語彙化（context 側と契約を揃える）。
+- [ ] OTLP endpoint／初期化エラーが原文でログされる（low）—
+  `policy/main.rs:133-136` の endpoint URL（userinfo/query token の可能性）を
+  固定語彙へ丸める。
+- [ ] Qdrant コレクション次元チェックの失敗がサイレント fail-open
+  （medium）— `builder.rs:1048-1056` の Err(_) => warn + Ok(()) を起動失敗
+  または初回 upsert での実次元検証へ変更。
+
+- 親が対応: fmt 差分、Rust 1.100 の deprecated `fetch_update` → `try_update`（2箇所）。
