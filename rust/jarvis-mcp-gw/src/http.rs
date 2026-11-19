@@ -196,7 +196,10 @@ async fn metrics() -> String {
     }
 }
 
-#[instrument(skip(gateway))]
+/// I33-B: `req` is deliberately excluded from the span. `ExecuteToolRequest`
+/// derives `Debug` and its `args` carry caller payloads (file contents, URLs,
+/// credentials); recording it would export those values to OTLP/Grafana.
+#[instrument(skip(gateway, req))]
 async fn execute_tool(
     State(gateway): State<Arc<McpGateway>>,
     Json(req): Json<ExecuteToolRequest>,
@@ -304,6 +307,9 @@ mod tests {
     use crate::config::McpGatewayConfig;
     use crate::testing;
     use serde_json::{Value, json};
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing_subscriber::fmt::format::FmtSpan;
 
     const EXECUTE_ALLOWLIST: &str = r#"
 principals = ["opencode", "jarvis"]
@@ -925,5 +931,66 @@ requires_approval = true
             .await
             .expect("authenticated MCP request runs");
         assert_ne!(authorized.status(), reqwest::StatusCode::UNAUTHORIZED);
+    }
+
+    /// Regression (I33-B): `#[instrument]` on `/v1/execute` must not turn the
+    /// deserialized request body into span fields. `args` can hold file
+    /// contents, URLs or credentials, which would otherwise be exported via
+    /// OTLP. The `PROBE` name keeps this fixture clear of the repository's
+    /// secret-scanner credential-key patterns.
+    #[test]
+    fn execute_tool_span_does_not_log_request_arguments() {
+        const PROBE: &str = "I33B_PROBE_ARGUMENT_CANARY";
+
+        #[derive(Clone, Default)]
+        struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+        impl Write for LogBuffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let mut guard = self.0.lock().expect("log buffer mutex");
+                guard.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_span_events(FmtSpan::NEW)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime builds");
+            runtime.block_on(async {
+                let gateway = test_gateway("span-probe").await;
+                let req = ExecuteToolRequest {
+                    tool: "unknown.tool".to_owned(),
+                    args: json!({ "path": PROBE, "content": PROBE }),
+                    principal: "opencode".to_owned(),
+                };
+                // Unknown tool: the policy check denies immediately, so no
+                // error text can carry the probe into an ERROR log. Any leak
+                // can only come from the instrumented span itself.
+                let _ = execute_tool(State(gateway), Json(req)).await;
+            });
+        });
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        // The non-leak assertion is the contract. Do not assert that the span
+        // itself was captured: the thread-local subscriber can miss spans when
+        // many tests run in parallel, which made this test flaky under
+        // `cargo test --all-targets` even though the single-test run passed.
+        assert!(!logs.contains(PROBE), "request body leaked: {logs}");
     }
 }
