@@ -416,6 +416,39 @@ impl PolicyClient {
         Ok(body.pending)
     }
 
+    /// Read-only, unauthenticated probe of the policy service's emergency-stop
+    /// state (I48-D). `GET /health` answers `503` with the fixed body
+    /// `{"status":"degraded","reason":"kill_switch"}` while the kill switch is
+    /// active, and `200 {"status":"ok"}` otherwise. This is a *display* signal
+    /// only: the decision POST still returns `200 Approved` when a stop lands
+    /// mid-commit, while `jarvis-mcp-gw` re-checks the kill switch before the
+    /// tool runs. Only an explicit `reason=kill_switch` counts as stopped; a
+    /// network error, a malformed body, or another degraded reason (e.g.
+    /// `no_policy`) returns `false` so the UI never claims an emergency stop
+    /// it cannot confirm. No reason text, token, or request data is surfaced.
+    pub fn kill_switch_active(&self) -> bool {
+        let url = format!("{}/health", self.base_url);
+        // ureq 3 turns 4xx/5xx into `Error::StatusCode` by default, which
+        // discards the body. Use a probe-only agent with that behavior disabled
+        // so the fixed degraded body can be read without touching the main
+        // approval agent (which must keep its token and redirect policy).
+        let probe_agent = ureq::Agent::new_with_config(
+            ureq::config::Config::builder()
+                .http_status_as_error(false)
+                .build(),
+        );
+        let Ok(mut response) = probe_agent.get(&url).call() else {
+            return false;
+        };
+        if response.status().as_u16() != 503 {
+            return false;
+        }
+        let Ok(value) = response.body_mut().read_json::<serde_json::Value>() else {
+            return false;
+        };
+        value.get("reason").and_then(|reason| reason.as_str()) == Some("kill_switch")
+    }
+
     /// Approve the request `id` as `approved_by`.
     ///
     /// Returns the canonical decision parsed from the response body.
@@ -1381,5 +1414,62 @@ mod tests {
                 "decisions must not send the API-scope token when it is unset"
             );
         }
+    }
+
+    // --- I48-D: post-approval execution-stop display probe -----------------
+
+    fn respond_json(stream: &mut TcpStream, status_line: &str, body: &str) {
+        let response = format!(
+            "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        respond(stream, &response);
+    }
+
+    /// I48-D: only an explicit `reason=kill_switch` on a 503 reports the
+    /// emergency stop; a healthy service must not produce a false "halted"
+    /// display.
+    #[test]
+    fn kill_switch_active_reads_degraded_health_reason() {
+        let (addr, server) = spawn_test_server(
+            |stream, _request| {
+                respond_json(
+                    stream,
+                    "HTTP/1.1 503 Service Unavailable",
+                    r#"{"status":"degraded","reason":"kill_switch"}"#,
+                )
+            },
+            1,
+        );
+        let client = PolicyClient::new(format!("http://{addr}"));
+        assert!(client.kill_switch_active());
+        server.join().expect("server thread");
+    }
+
+    /// I48-D: `200 ok`, a different degraded reason, and a malformed body all
+    /// report `false`, keeping the approval status truthful.
+    #[test]
+    fn kill_switch_active_is_false_for_ok_other_reasons_and_malformed_body() {
+        let mut responses = [
+            ("HTTP/1.1 200 OK", r#"{"status":"ok"}"#),
+            (
+                "HTTP/1.1 503 Service Unavailable",
+                r#"{"status":"degraded","reason":"no_policy"}"#,
+            ),
+            ("HTTP/1.1 200 OK", "not-json"),
+        ]
+        .into_iter();
+        let (addr, server) = spawn_test_server(
+            move |stream, _request| {
+                let (status, body) = responses.next().expect("queued response");
+                respond_json(stream, status, body);
+            },
+            3,
+        );
+        let client = PolicyClient::new(format!("http://{addr}"));
+        for _ in 0..3 {
+            assert!(!client.kill_switch_active());
+        }
+        server.join().expect("server thread");
     }
 }

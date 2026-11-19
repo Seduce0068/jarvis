@@ -29,6 +29,11 @@ pub struct ApprovalsView {
     /// True while `status` reflects an operator decision (P0-8): the next
     /// poll must not overwrite it with a queue count.
     action_status: bool,
+    /// Last observed `jarvis-policy` emergency-stop state (I48-D). A decision
+    /// published just before the stop still yields HTTP 200/Approved, but the
+    /// tool execution is fail-closed at `jarvis-mcp-gw`. Kept separate from
+    /// `status`/`error` so existing approval display logic is unchanged.
+    kill_switch_active: bool,
 }
 
 impl ApprovalsView {
@@ -47,6 +52,7 @@ impl ApprovalsView {
             error: None,
             loaded: false,
             action_status: false,
+            kill_switch_active: false,
         };
         view.spawn_poller(cx);
         view
@@ -61,16 +67,24 @@ impl ApprovalsView {
                     return;
                 };
                 let client = entity.read_with(cx, |view, _| view.client.clone());
+                // The health probe is a second, independent loopback call; a
+                // failure there must not change the queue result or its error.
+                let probe_client = client.clone();
                 // Blocking HTTP must run on the background thread pool, never
                 // on GPUI's foreground executor (it would freeze the window).
                 let result = cx
                     .background_executor()
                     .spawn(async move { client.pending() })
                     .await;
+                let kill_switch_active = cx
+                    .background_executor()
+                    .spawn(async move { probe_client.kill_switch_active() })
+                    .await;
 
                 let stopped = weak
                     .update(cx, |view, cx| {
                         view.apply_poll(result);
+                        view.kill_switch_active = kill_switch_active;
                         cx.notify();
                     })
                     .is_err();
@@ -137,6 +151,7 @@ impl ApprovalsView {
 
         cx.spawn(async move |weak, cx| {
             let decide_client = client.clone();
+            let probe_client = client.clone();
             let decide_id = canonical_id.clone();
             let result = cx
                 .background_executor()
@@ -158,17 +173,27 @@ impl ApprovalsView {
                 .background_executor()
                 .spawn(async move { client.pending() })
                 .await;
+            // A stop landing mid-commit still yields a published 200/Approved
+            // decision. Probe the service so the operator sees that the tool
+            // execution will be fail-closed at the gateway (I48-D).
+            let kill_switch_active = cx
+                .background_executor()
+                .spawn(async move { probe_client.kill_switch_active() })
+                .await;
 
             let _ = weak.update(cx, |view, cx| {
                 // Refresh the queue first; then set the decision outcome so
                 // the poll result cannot overwrite it (P0-8).
                 view.apply_poll(refresh);
+                view.kill_switch_active = kill_switch_active;
                 match result {
                     Ok(decision) => {
                         // The service's tagged decision JSON crossed the core
                         // boundary in the client; project it onto the UI view
                         // instead of echoing the pre-send intent.
-                        view.status = status_for_decision(&decision).into();
+                        let status =
+                            status_for_decision_with_kill_switch(&decision, kill_switch_active);
+                        view.status = status.into();
                         view.error = None;
                         view.action_status = true;
                     }
@@ -334,6 +359,15 @@ impl Render for ApprovalsView {
                 Some(error) => div().bg(rgb(0x4a1f1f)).p_2().text_sm().child(error.clone()),
                 None => div(),
             })
+            .child(if self.kill_switch_active {
+                div()
+                    .bg(rgb(0x5a3a10))
+                    .p_2()
+                    .text_sm()
+                    .child("非常停止中：承認済みのツール実行も mcp-gw の再判定で拒否されます")
+            } else {
+                div()
+            })
             .child(div().flex_1().child(list))
     }
 }
@@ -395,6 +429,22 @@ fn status_for_decision(decision: &CoreApprovalDecision) -> &'static str {
     }
 }
 
+/// Operator-visible status that also accounts for the emergency-stop state
+/// observed after a decision (I48-D). A commit landed mid-stop is still
+/// published as HTTP 200 + Approved; `jarvis-mcp-gw` re-checks the kill switch
+/// before executing the tool and fails closed. Report both facts instead of
+/// presenting a plain success that the operator would trust.
+fn status_for_decision_with_kill_switch(
+    decision: &CoreApprovalDecision,
+    kill_switch_active: bool,
+) -> &'static str {
+    if kill_switch_active && matches!(decision, CoreApprovalDecision::Approved { .. }) {
+        "承認済み・実行は非常停止中"
+    } else {
+        status_for_decision(decision)
+    }
+}
+
 /// Represent the operator action with the canonical core decision type.
 ///
 /// The values read from this type are exactly the ones the existing HTTP
@@ -425,7 +475,7 @@ fn is_expired(request: &ApprovalRequest, now: chrono::DateTime<chrono::Utc>) -> 
 mod tests {
     use super::{
         ApprovalsView, CoreApprovalDecision, UiDecision, decision_target, format_args, is_expired,
-        operator_decision, status_for_decision,
+        operator_decision, status_for_decision, status_for_decision_with_kill_switch,
     };
     use crate::policy_client::{ApprovalRequest, PolicyClient, request_to_core};
     use serde_json::json;
@@ -462,6 +512,7 @@ mod tests {
             error: error.map(|text| text.to_string().into()),
             loaded: true,
             action_status,
+            kill_switch_active: false,
         }
     }
 
@@ -623,5 +674,37 @@ mod tests {
             assert_eq!(UiDecision::from(&core), ui);
             assert_eq!(status_for_decision(&core), expected_status);
         }
+    }
+
+    /// I48-D: a published approval shown while the kill switch is active must
+    /// report the fail-closed execution state; other decisions and an inactive
+    /// switch keep their existing status text.
+    #[test]
+    fn approved_status_reports_halted_execution_while_kill_switch_active() {
+        let approved = CoreApprovalDecision::Approved {
+            approved_by: "koppe".into(),
+            approved_at: chrono::Utc::now(),
+        };
+        assert_eq!(status_for_decision(&approved), "承認しました");
+        assert_eq!(
+            status_for_decision_with_kill_switch(&approved, true),
+            "承認済み・実行は非常停止中"
+        );
+        assert_eq!(
+            status_for_decision_with_kill_switch(&approved, false),
+            "承認しました"
+        );
+
+        let denied = CoreApprovalDecision::Denied {
+            reason: "because".into(),
+        };
+        assert_eq!(
+            status_for_decision_with_kill_switch(&denied, true),
+            "却下しました"
+        );
+        assert_eq!(
+            status_for_decision_with_kill_switch(&CoreApprovalDecision::Pending, true),
+            "保留中"
+        );
     }
 }

@@ -9,7 +9,7 @@ tags:
   - security
 generated:
   by: spec-writer
-  at: "2026-11-18T01:13:47+09:00"
+  at: "2026-11-20T03:22:00+09:00"
 status: draft
 ---
 
@@ -37,7 +37,7 @@ status: draft
 | --- | --- |
 | REQ-1 | kill switch の発動は管理者トークン一致時のみ成功する |
 | REQ-2 | 不一致トークンでは 401 を返し、状態を変更しない |
-| REQ-3 | 発動中は check=false、承認要求は Denied、決定は 409 |
+| REQ-3 | コミット前に発動中は check=false、承認要求は Denied、決定は 409（コミット中は REQ-15） |
 | REQ-4 | 状態は再起動で復元され、破損時は発動扱い (fail-closed) |
 | REQ-5 | トークン設定時、承認ルートはヘッダ検証で 401/200 を分岐 |
 | REQ-6 | トークンは承認ルートのみ、health/check は認証対象外 |
@@ -49,6 +49,7 @@ status: draft
 | REQ-12 | 承認トークンは API scope と admin scope に分離され、approve/deny は admin トークンでのみ成功する |
 | REQ-13 | API トークンのみの呼び出しは request/list/status で成功し、approve/deny では 401 となり自己承認が拒否される |
 | REQ-14 | admin トークン未設定時は API トークンへフォールバックし、起動時に警告を出す（職務分離は無効） |
+| REQ-15 | コミット中の kill switch 発動時は 200/Approved を返すが、実行は mcp-gw 再判定で fail-closed 拒否 |
 
 ## Risk & tier
 
@@ -63,6 +64,7 @@ status: draft
 | R-7 | 決定競合で誤応答・副作用が残る | T2 | unit >= 0.80 |
 | R-8 | A-M18: poison/永続化失敗が見えず解除扱いになる | T1 | unit >= 0.90 |
 | R-9 | API トークン保持者が自分の要求を承認し職務分離が効かない | T1 | int >= 0.80 |
+| R-10 | コミット中の発動で決定を未公開化し、再試行が AlreadyDecided で失敗して UI/DB が不整合になる | T1 | unit >= 0.90, int >= 0.80 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -82,7 +84,7 @@ TD3 (test case) の順で導出した。
 | --- | --- | --- |
 | equivalence partitioning | 5.2.1 | トークン正常/欠落/誤値、kill switch 状態 |
 | boundary value analysis | 5.2.3 | pending 0/cap-1/cap/cap+1、timeout 前後 |
-| decision table testing | 5.2.6 | kill switch x トークン x ID 状態、scope(API/admin) x トークン x 決定種別 |
+| decision table testing | 5.2.6 | kill switch x トークン x ID 状態、scope(API/admin) x トークン x 決定種別、commit gate x 発動タイミング |
 | state transition testing | 5.2.8 | pending -> approved/denied/expired |
 | scenario testing | 5.2.9 | HTTP 往復 (request -> list -> decide) |
 | error guessing | 5.4.1 | 破損 state file、二重決定、同一 ID |
@@ -105,7 +107,7 @@ TD3 (test case) の順で導出した。
 
 ## Scenarios
 
-### Kill switch (REQ-1〜REQ-4)
+### Kill switch (REQ-1〜REQ-4, REQ-15)
 
 ```gherkin
 Scenario: TC-K1 管理者トークンによる発動
@@ -117,14 +119,27 @@ Scenario: TC-K1 管理者トークンによる発動
 ```
 
 ```gherkin
-Scenario: TC-K2 発動中の fail-closed
-  Given kill switch が発動中
+Scenario: TC-K2 発動中の fail-closed (決定のコミットより前に発動)
+  Given kill switch がコミット前に発動中
   When /v1/check と承認要求を呼ぶ
   Then allowed=false と Denied が返る
   When approve と deny を呼ぶ
   Then いずれも 409 KillSwitchActivated を返す
   When 正当トークンで deactivate を呼ぶ
   Then 以降の承認決定が再有効化される
+```
+
+```gherkin
+Scenario: TC-K5 コミット中の kill switch 発動 (mid-commit, REQ-15)
+  Given 承認要求 ID=X が pending
+  And commit gate が永続化の直前で authority を一度だけ再判定する
+  When 永続化コミット中に kill switch が発動する（gate 通過後）
+  Then 決定はコミットされて公開され HTTP 200 + Approved が返る
+  And approval_status(ID=X) は Approved を返す
+  When mcp-gw がツール実行前に post-approval 再判定を行う
+  Then kill switch が発動中なら実行は fail-closed で拒否される
+  When 正当トークンで deactivate を呼ぶ
+  Then 以降のツール実行は再判定で許可され得る
 ```
 
 ```gherkin
@@ -261,6 +276,7 @@ Scenario: TC-D2 決定の排他とエラー応答
 | TC-K2 | REQ-3 | v5.0.0-V8.3.2 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-K3 | REQ-4 | v5.0.0-V16.5.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-K4 | REQ-11 | v5.0.0-V16.5.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-K5 | REQ-15 | v5.0.0-V8.3.2 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-A1 | REQ-5 | v5.0.0-V8.3.1 | SP800-53r5.2/IA-5 | ATE_FUN.1 | 5.2.1 | T1 |
 | TC-A2 | REQ-6 | v5.0.0-V8.1.1 | SP800-53r5.2/AC-6 | ATE_FUN.1 | 5.2.1 | T2 |
 | TC-A3 | REQ-12 | v5.0.0-V8.3.3 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.9 | T1 |
@@ -288,6 +304,17 @@ TC-A3〜A5 は `admin_token_splits_decision_authority_from_api_token` /
 `api_token_still_approves_when_admin_token_is_unset` /
 `blank_configured_admin_token_cannot_be_bypassed_with_empty_header`
 でカバーする。実行結果は `evidence/` の test-run JSON に記録する。
+
+I46-A (Round 44) の commit_gate 1 回化は
+[lib.rs](../rust/jarvis-policy/src/lib.rs) の
+`kill_switch_during_commit_is_not_published` で回帰確認できる。
+同テストの期待値は既に `Approved` へ更新済みだが、名前は旧契約
+（未公開）のままで期待値と逆である。lib.rs は本タスクの担当外のため
+改名は行わず、`kill_switch_during_commit_is_published_but_execution_is_fail_closed`
+への変更を提案する。TC-K5 の UI 側は
+[approvals.rs](../ui/src/approvals.rs) の
+`status_for_decision_with_kill_switch` と
+[policy_client.rs](../ui/src/policy_client.rs) の health プローブでカバーする。
 
 文中のテスト件数（本ファイルおよび他 spec の「14 テスト」等）は
 エビデンス生成時点のスナップショットであり、現時点の実測値ではない。
