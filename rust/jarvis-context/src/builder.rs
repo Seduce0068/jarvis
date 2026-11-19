@@ -306,15 +306,70 @@ fn prepare_context(
     truncate_context_to_tokens(context, max_tokens)
 }
 
-/// Drop the memory arrays when the serialized context exceeds the configured
-/// budget (roughly 4 characters per token).
-fn truncate_context_to_tokens(mut context: Value, max_tokens: usize) -> Result<Value> {
-    let serialized = serde_json::to_string(&context)?;
-    if serialized.len() > max_tokens * 4 {
-        context["memories"] = Value::Array(vec![]);
-        context["recent"] = Value::Array(vec![]);
+/// Estimated UTF-8 bytes per token used by the coarse budget check below.
+///
+/// This is a heuristic for typical (mostly ASCII / English) text, not a real
+/// tokenizer count. The actual bytes-per-token ratio varies with the model,
+/// language, and content, so the budget check is intentionally approximate.
+const ESTIMATED_UTF8_BYTES_PER_TOKEN: usize = 4;
+
+/// The observable outcome of applying the token budget. `None` means the
+/// context fit and no section was dropped. When truncation happens, the report
+/// carries only the dropped section names and the approximate serialized sizes
+/// — never content — so it is safe both to log and to assert on in tests
+/// without capturing `tracing` output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TruncationReport {
+    before_bytes: usize,
+    after_bytes: usize,
+}
+
+/// Drop the memory arrays when the serialized context appears to exceed the
+/// configured token budget.
+///
+/// The budget is only *estimated*: `str::len()` counts UTF-8 **bytes**, not
+/// Unicode characters, and one token is approximated as roughly
+/// [`ESTIMATED_UTF8_BYTES_PER_TOKEN`] bytes for typical text. A token is
+/// therefore neither a character nor a byte: this is a coarse heuristic, not
+/// a tokenizer, and non-ASCII text (e.g. Japanese, where a character commonly
+/// occupies 3 UTF-8 bytes) will be over-counted.
+fn truncate_context_to_tokens(context: Value, max_tokens: usize) -> Result<Value> {
+    let (context, report) = apply_token_budget(context, max_tokens)?;
+    if let Some(report) = report {
+        warn!(
+            before_bytes = report.before_bytes,
+            after_bytes = report.after_bytes,
+            sections = "memories,recent",
+            "context exceeded estimated token budget; dropped memory sections"
+        );
     }
     Ok(context)
+}
+
+/// Pure core of the token-budget step. Returns the (possibly trimmed) context
+/// together with a [`TruncationReport`] when the memory arrays were emptied, or
+/// `None` when the context was left untouched. Kept free of logging so the
+/// truncation decision is directly testable.
+fn apply_token_budget(
+    mut context: Value,
+    max_tokens: usize,
+) -> Result<(Value, Option<TruncationReport>)> {
+    let before_bytes = serde_json::to_string(&context)?.len();
+    let budget_bytes = max_tokens.saturating_mul(ESTIMATED_UTF8_BYTES_PER_TOKEN);
+    if before_bytes <= budget_bytes {
+        return Ok((context, None));
+    }
+
+    context["memories"] = Value::Array(vec![]);
+    context["recent"] = Value::Array(vec![]);
+    let after_bytes = serde_json::to_string(&context)?.len();
+    Ok((
+        context,
+        Some(TruncationReport {
+            before_bytes,
+            after_bytes,
+        }),
+    ))
 }
 
 pub mod memory {
@@ -538,6 +593,48 @@ mod tests {
         assert_eq!(output["memories"], json!([]));
         assert_eq!(output["recent"], json!([]));
         assert_eq!(output["event"], "state_changed");
+    }
+
+    #[test]
+    fn truncation_report_is_none_when_context_fits_budget() {
+        let context = json!({"memories": [1, 2], "recent": [3]});
+        let before = serde_json::to_string(&context).expect("serialize").len();
+        let (output, report) = apply_token_budget(context.clone(), 1000).expect("budget");
+
+        assert_eq!(output, context, "a fitting context must not be modified");
+        assert_eq!(report, None, "no truncation must produce no report");
+        assert!(before <= 1000 * ESTIMATED_UTF8_BYTES_PER_TOKEN);
+    }
+
+    #[test]
+    fn truncation_report_records_only_sections_and_approximate_sizes() {
+        let secret = "alice@example.com";
+        let context = json!({
+            "memories": [{"content": format!("contact {secret}")}],
+            "recent": [{"content": "y".repeat(100)}],
+            "event": "state_changed",
+        });
+        let (output, report) = apply_token_budget(context, 1).expect("budget");
+        let report = report.expect("an oversized context must be reported");
+
+        assert_eq!(output["memories"], json!([]));
+        assert_eq!(output["recent"], json!([]));
+        assert_eq!(output["event"], "state_changed");
+
+        let budget_bytes = ESTIMATED_UTF8_BYTES_PER_TOKEN;
+        assert!(
+            report.before_bytes > budget_bytes,
+            "truncation triggers only above the estimated budget"
+        );
+        assert!(
+            report.after_bytes < report.before_bytes,
+            "emptying the memory arrays must shrink the serialized context"
+        );
+
+        // The report must carry no payload content (including PII).
+        let report_debug = format!("{report:?}");
+        assert!(!report_debug.contains(secret));
+        assert!(!report_debug.contains("state_changed"));
     }
 
     fn email_filter() -> crate::pii::PiiFilter {
