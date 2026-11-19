@@ -52,6 +52,43 @@ fn retain_unexpired(entries: Vec<MemoryEntry>, now: DateTime<Utc>) -> Vec<Memory
         .collect()
 }
 
+/// How many candidates to request from Qdrant for a caller limit of `limit`.
+///
+/// Policy for the expired-hits problem (Round 19 B3): a memory point's Qdrant
+/// payload carries only `metadata` (see [`memory::upsert_vector`]) — it does
+/// **not** contain `expires_at`. A server-side `expires_at` payload filter on
+/// `SearchPoints` is therefore not applied: it would either match nothing on
+/// legacy points that lack the field, or silently drop valid points whose
+/// `metadata` happens to carry an `expires_at` key. Instead, PostgreSQL's
+/// `expires_at IS NULL OR expires_at > $now` stays the authoritative expiry
+/// gate, Qdrant is asked for a wider candidate pool, and the pool is filtered
+/// then trimmed back to `limit`. That way an expired hit ranked in the top-K
+/// cannot steal a slot from a still-valid memory.
+const EXPIRY_OVERFETCH_FACTOR: usize = 2;
+
+/// Candidate count sent to Qdrant for a caller limit of `limit`. Pure so the
+/// over-fetch policy is directly testable without a live Qdrant connection.
+fn overfetch_limit(limit: usize) -> usize {
+    limit.saturating_mul(EXPIRY_OVERFETCH_FACTOR)
+}
+
+/// Final top-`limit` selection after the expiry gate.
+///
+/// `candidates` must be in Qdrant relevance order. Expired entries are removed
+/// here with the same inclusive `<=` boundary SQL uses, *before* trimming, so
+/// they cannot occupy a slot that a valid memory should fill. Kept pure so the
+/// regression is testable without Qdrant/PostgreSQL.
+fn select_top_valid(
+    candidates: Vec<MemoryEntry>,
+    now: DateTime<Utc>,
+    limit: usize,
+) -> Vec<MemoryEntry> {
+    retain_unexpired(candidates, now)
+        .into_iter()
+        .take(limit)
+        .collect()
+}
+
 /// Classify the outcome of producing a query embedding.
 ///
 /// `None` means the endpoint is intentionally unconfigured: vector search is
@@ -518,13 +555,15 @@ impl Builder {
             None => return Ok(Vec::new()),
         };
 
-        // Search Qdrant. Keep the score alongside each id: the PostgreSQL
-        // refetch below only returns row columns and cannot recover it (P1-1).
+        // Search Qdrant with an over-fetched limit (Round 19 B3): expired hits
+        // must not consume the caller's top-K slots. Keep the score alongside
+        // each id: the PostgreSQL refetch below only returns row columns and
+        // cannot recover it (P1-1).
         let results = memory::search_vectors(
             &self.qdrant_client,
             &self.config.collection_name,
             &embedding,
-            limit,
+            overfetch_limit(limit),
         )
         .await?;
         let ids: Vec<Uuid> = results.iter().map(|(id, _)| *id).collect();
@@ -533,6 +572,8 @@ impl Builder {
         // Fetch full entries from PostgreSQL, then reassemble in Qdrant's
         // relevance order (P1-1). Expired rows are excluded by SQL and filtered
         // again in Rust so the same UTC `<=` boundary holds on both sides.
+        // Both gates run on the over-fetched pool so an expired hit cannot
+        // crowd out a valid memory before the final trim (Round 19 B3).
         let client = self.pg_pool.get().await?;
         let rows = client.query(
             "SELECT id, content, metadata, source, created_at, updated_at, expires_at FROM memories WHERE id = ANY($1) AND (expires_at IS NULL OR expires_at > $2)",
@@ -553,8 +594,11 @@ impl Builder {
                 score: None,
             })
             .collect();
+        // `ids` came from the over-fetched Qdrant result, so the reordered list
+        // can be longer than the caller's limit. `select_top_valid` applies the
+        // expiry gate and trims back to the requested result size.
         Ok(attach_scores(
-            reorder_by_ids(retain_unexpired(fetched, now), &ids),
+            select_top_valid(reorder_by_ids(fetched, &ids), now, limit),
             &scores,
         ))
     }
@@ -1174,6 +1218,73 @@ mod tests {
             (Some("42".to_string()), HashMap::new()),
         ];
         assert!(entries_from_raw_points(points).is_empty());
+    }
+
+    // --- Round 19 B3: expired Qdrant hits must not occupy top-K slots ---
+    // Pure tests only: no live Qdrant/PostgreSQL, no unsafe code.
+
+    #[test]
+    fn tc_g_overfetch_limit_widens_the_candidate_pool() {
+        assert_eq!(overfetch_limit(0), 0);
+        assert!(overfetch_limit(1) > 1);
+        assert_eq!(overfetch_limit(2), 2 * EXPIRY_OVERFETCH_FACTOR);
+        assert!(overfetch_limit(10) > 10);
+    }
+
+    #[test]
+    fn tc_g_expired_top_hits_do_not_consume_the_requested_slots() {
+        let now = fixed_now();
+        let expired_boundary = entry_with_expiry(Some(now));
+        let expired_past = entry_with_expiry(Some(now - chrono::Duration::seconds(1)));
+        let valid_future = entry_with_expiry(Some(now + chrono::Duration::seconds(30)));
+        let valid_never = entry_with_expiry(None);
+
+        // Without over-fetch, the two expired hits are the whole top-2 Qdrant
+        // result; after the expiry gate there is nothing left for the caller.
+        let narrow = vec![expired_boundary.clone(), expired_past.clone()];
+        assert!(
+            select_top_valid(narrow, now, 2).is_empty(),
+            "an expired top hit must never be returned"
+        );
+
+        // Over-fetch lets the same top-2 request reach valid memories ranked
+        // immediately below the expired ones.
+        let fetch = overfetch_limit(2);
+        let ranked = vec![
+            expired_boundary,
+            expired_past,
+            valid_future.clone(),
+            valid_never.clone(),
+        ];
+        assert_eq!(
+            ranked.len(),
+            fetch,
+            "the model uses the full over-fetch pool"
+        );
+        let selected = select_top_valid(ranked, now, 2);
+        assert_eq!(
+            selected.iter().map(|e| e.id).collect::<Vec<_>>(),
+            vec![valid_future.id, valid_never.id],
+            "valid memories must fill the slots freed by expired hits"
+        );
+        assert!(
+            selected.iter().all(|e| !is_expired(e.expires_at, now)),
+            "every returned memory must still be valid at now"
+        );
+    }
+
+    #[test]
+    fn tc_g_final_result_never_exceeds_the_requested_limit() {
+        let now = fixed_now();
+        let ranked: Vec<_> = (0..6)
+            .map(|_| entry_with_expiry(Some(now + chrono::Duration::seconds(30))))
+            .collect();
+        let selected = select_top_valid(ranked, now, 2);
+        assert_eq!(
+            selected.len(),
+            2,
+            "over-fetch must be trimmed back to limit"
+        );
     }
 
     #[test]
