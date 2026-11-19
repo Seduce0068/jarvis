@@ -993,25 +993,25 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 32 のレビュー／発掘結果
 
-- [ ] **migration unit が読む SQL ソースがどの配布経路からもコピーされない**
+- [x] **migration unit が読む SQL ソースがどの配布経路からもコピーされない** — 2026-11-19 対応済み: build-selfhost.sh に `install -d /opt/jarvis/rust/migrations`＋`rust/migrations/*.sql` のコピー＋`.jarvis-source-commit` 生成を組み込み。SQL 0件／マーカー欠落・不一致は unit 生成前に fail-fast。`bash -n` / shellcheck OK。
   （confirmed high）— `jarvis-migrations.service:35` の `--source /opt/jarvis/rust/migrations`
   に対し、repo 全体に `rust/migrations/*.sql` を配置する処理が存在しない。
   build-selfhost.sh のガードはマーカー欠落時に警告のみで fail-open。
   → SQL の配置をデプロイ手順へ組み込み、欠落時 fail-fast にするか unit を廃止。
-- [ ] **build-selfhost.sh の Wants= 失敗伝播の記述が実態と逆**（confirmed medium）—
+- [x] **build-selfhost.sh の Wants= 失敗伝播の記述が実態と逆**（confirmed medium）— 2026-11-19 対応済み: 「Wants= は失敗を伝播しない（fail-open）」へ訂正し、`systemctl is-active jarvis-migrations` による個別確認を案内。fail-closed 化の選択肢（Requires=+After / ExecStartPre CHECK）を docs に記録 —
   systemd の `Wants=` は弱い依存で unit が failed でも起動を続ける。
   「migration 失敗ならサービスも止まる」というコメント／docs を訂正するか、
   `Requires= + After=` または ExecStartPre の適用済みバージョン CHECK へ変更。
-- [ ] **lost-ack 対応が再接続失敗／最終試行のプローブ失敗時に機能しない**
+- [x] **lost-ack 対応が再接続失敗／最終試行のプローブ失敗時に機能しない** — 2026-11-19 対応済み: `read_back_after_error()` が MAX_DB_ATTEMPTS 世代ぶん再接続（非致命）＋read-back を反復し、OurCommit→Ok / CompetingDecision→AlreadyDecided / 不明→Persistence。approval.rs 側もタイムアウト時に CAS 勝者の公開決定を 100ms grace で拾い provisional Expired を訂正。回帰8件追加。
   （likely high）— `persistence.rs:380` の reconnect 失敗時にプローブへ到達せず、
   DB=approved / 待機側=Expired / operator=409(503) の分裂が残る。
-- [ ] **expired reconcile の `settled_expired` が試行件数を成功件数と誤報告**
+- [x] **expired reconcile の `settled_expired` が試行件数を成功件数と誤報告** — 2026-11-19 対応済み: Ok / AlreadyDecided の行のみカウント。warning に `ApprovalError::category()` の固定語彙（NotFound / QueueFull / Persistence 等）を付与し、UUID・URL・SQL・本文は非出力。網羅テスト追加。
   （confirmed low）— 実際に Ok/AlreadyDecided だった件数へ変更し、warning に
   ApprovalError の固定語彙分類を付与。
-- [ ] **install-backup-timer の rollback が導入前から有効な timer まで停止**
+- [x] **install-backup-timer の rollback が導入前から有効な timer まで停止** — 2026-11-19 対応済み: 最初の書き込み前に is-active / is-enabled を記録し、rollback は「この実行が新規有効化した場合のみ」stop/disable。既存有効だった場合は元の状態へ復元。`bash -n` / shellcheck / safety-test OK。
   （likely medium）— 適用前に is-active/is-enabled を記録し、この実行が新規に
   有効化した場合のみ stop/disable する。
-- [ ] **発掘: 仕様ギャップ5件** — tool-matrix.md の egress allowlist「未実装」
+- [x] **発掘: 仕様ギャップ5件** — **2026-11-19 対応済み: tool-matrix.md の egress allowlist を実装済み（DenyAll fail-closed）へ、test-ui.md を API/admin 2-scope（REQ-19/20、R-10）へ、test-context.md にスコア保持（REQ-12/13、R-8）と TC-P3 の Given を追加。evidence 2件を実測再生成（UI 36 / context 92）し index 同期、check-evidence ok=6 errors=0**（当初: tool-matrix.md の egress allowlist「未実装」
   記述、specs/test-mcp-gateway.md の egress/admin token 要件、
   specs/test-ui.md の 2-scope トークン前提、specs/test-context.md の
   スコア保持契約、同 TC-P3 の redact 期待値 `[X]` と既定 `[REDACTED]` の不一致。
@@ -1023,3 +1023,25 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   webhook 公開範囲と実送信者、kill switch ローテ周期、sudo 実行の可否。
 
 - 親が対応: evidence 2件を実測再生成、flaky なスパン捕捉アサーションを削除。
+
+### Round 33 のレビュー結果（未対応）
+
+- [ ] **コミット照合ガードがバイナリ上書き後に走る**（confirmed high）—
+  `build-selfhost.sh:36-38` で4バイナリを配置した後の `:44-56` で照合し、
+  不一致なら exit 1 するため、新旧混在（新バイナリ＋旧 migration）が残る。
+  照合とマーカー記録を `cargo build` 直後・バイナリ install 前に移動する。
+- [ ] **REQ-18/TC-B5 に対応する自動テストが無く evidence だけが pass を主張**
+  （confirmed medium）— `--retain-days` の境界値拒否は手動確認のみで回帰ゲートが無い。
+  ci/scripts に回帰テストを追加し、TC 単位の実行記録を evidence に持たせる。
+- [ ] **flaky 修正でスパン捕捉アサーションを削除した結果、非漏洩テストが
+  vacuous pass しうる**（confirmed medium）— subscriber がスパンを捕捉しなければ
+  logs は空文字列で `!contains` はすべて真。テスト内で既知マーカの span を発行し
+  捕捉を確認する deterministic な健全性アサーションを残す。
+- [ ] **BUILD_COMMIT の `unknown` フォールバックで fail-open**（likely medium）—
+  git rev-parse 失敗時に記録される `unknown` とマーカー側が一致すると照合を通過する。
+  rev-parse 失敗を明示 exit 1 に変更。
+- [ ] **backup エビデンスの passed=23 が runtime 宣言（2ゲート）と矛盾**
+  （likely low）— safety-test の22件が反映されない。ゲートごとの内訳を記録する
+  か runtime 宣言を実際の集計コマンドへ限定。
+
+- 親が対応: clippy の collapsible_if（let chain 化）、evidence 2件の実測再生成。
