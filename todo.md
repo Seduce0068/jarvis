@@ -1091,29 +1091,52 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 36 のレビュー／発掘結果（未対応）
 
-- [ ] **lost-ack の ours-commit が最終試行の probe 失敗で 503 に後退**
+- [x] **lost-ack の ours-commit が最終試行の probe 失敗で 503 に後退** — 2026-11-19 対応済み: 最終 attempt の transport error に限り別 generation で probe を1回再試行（`probe_with_final_retry_resolution`）。決定的 Ok(None) は再試行せず、MAX_DB_ATTEMPTS=3 のトランザクション上限は維持。純粋回帰テスト追加。
   （confirmed high）— `persistence.rs:331-337,474-494` の `read_back_once` は1回の
   probe のみで、Err は Undecided→最終試行で Persistence(503)。試行予算統合の
   回帰。最終 attempt に限り probe を1回再試行するか、probe transport error 時に
   in-transaction read を再実行する。
-- [ ] **タイムアウト待機が 100ms grace 2回＋DB re-read で deadline 超過**
+- [x] **タイムアウト待機が 100ms grace 2回＋DB re-read で deadline 超過** — 2026-11-19 対応済み: AlreadyDecided 後に `load_decision_with_time` を即座に起動し、watch／durable／grace の3Way `tokio::select!` で先着を採用。待機は max(grace, DB RTT) に短縮。RECOVERY_GRACE / MAX_DECIDE_YIELDS を定数化。
   （confirmed medium）— `approval.rs:492-493,514-516,533`。2つの grace を統合
   するか load_decision を grace と並列開始して先着を採用。grace 長と再読取り
   回数を設定可能にして SLA を明示。
-- [ ] **durable re-read で復元した決定の decided_at がタイムアウト時刻で上書き**
+- [x] **durable re-read で復元した決定の decided_at がタイムアウト時刻で上書き** — 2026-11-19 対応済み: `LoadedDecision { decision, decided_at }` と trait 既定 `load_decision_with_time` を追加。DB の権威決定時刻で entry.decided_at を上書き（prune の保持判定が正確に）。既存モック／Noop は既定実装で吸収、http.rs の網羅 match 不変。
   （confirmed medium）— `approval.rs:559` の `entry.decided_at = Some(expired_at)`。
   DB の権威決定時刻とメモリが不一致で prune の保持判定が誤る。load_decision が
   decided_at も返すようにする。
-- [ ] **TC-U13 が本番起動配線（encoded bundle → new_with_token）を通っていない**
+- [x] **TC-U13 が本番起動配線（encoded bundle → new_with_token）を通っていない** — 2026-11-19 対応済み: `PolicyTokens::new(api, None/None, admin).encode()` → `new_with_token` → `decode_or_legacy` → `effective_admin_token` → POST の実送信テスト2件を追加（API-only / admin-only）。UI 43 tests pass。
   （likely medium）— API-only ケースが `new_with_tokens`（embedders 用）のみ。
   `PolicyTokens::new(Some(api), None).encode()` を本番経路へ渡すテストを追加。
-- [ ] **stale SQL 削除と新 SQL 配置が非原子的**（likely medium）— `build-selfhost.sh:156-163`
+- [x] **stale SQL 削除と新 SQL 配置が非原子的**（likely medium）— 2026-11-19 対応済み: unit の旧 active 状態記録→`systemctl stop`→stale rm＋新 SQL install→マーカー→旧 active なら start の順序を採用（初回は unit 存在確認でスキップ）。ディレクトリ swap は `--source` パス契約と renameat2 要件で不採用とコメント明記 —
   の rm→install の窓で migration unit が pre-flight しうる。入れ替え前に unit を
   stop するか staging ディレクトリを atomic rename で切り替える。
-- [ ] **発掘: 自動修正可能な残タスク5件** — docs/architecture/AGENTS.md の存在しない
+- [x] **発掘: 自動修正可能な残タスク5件** — **2026-11-19 うち4件対応済み: docs/architecture/AGENTS.md の参照先を実在ファイルへ、3 unit の 1Password コメントを bws run 実態へ、evidence-regeneration.md のゲート表・ファイル名検証・backup 再生成コマンドを現行化、ADR 3件＋テンプレートの date を RFC 3339 準拠へ。残る1件: specs/test-backup.md の TC-V2 Traceability 欠落＋:286 の件数表記（evidence 再生成が必要で別途対応）**（当初: docs/architecture/AGENTS.md の存在しない
   資料への参照、3 unit の旧 1Password コメント（ExecStart は bws run）、
   specs/test-backup.md の TC-V2 Traceability 欠落（evidence 再生成要）、
   docs/integration/evidence-regeneration.md が現行ゲートと矛盾、ADR 3件＋
   テンプレートの date が RFC 3339 違反（オフセット欠落）。
 
 - 親が対応: なし（全ゲート初回通过）。
+
+### Round 37 のレビュー結果（未対応）
+
+- [ ] **evidence/index.md の実測件数が6件中5件で古い**（confirmed medium）—
+  index の 53/17/23/24/14 に対し実際は 144/92/29/70/36。`check-evidence.sh:237-250`
+  はリンク存在のみ検査し数値主張を検証しない。索引の N passed と JSON results を
+  照合するゲートを追加し、6件を実測値へ再生成。
+- [ ] **specs/test-backup.md:286 の件数表記が evidence 29件と矛盾**
+  （confirmed medium）— 23 checks + 22 checks と記載だが spec_hash は一致し
+  ゲートが通る。29（23+6）へ更新して spec_hash／ファイル名／index を再生成。
+- [ ] **dirty gate が build-selfhost.sh 限定で deploy-mcp-gw-safe.sh が迂回**
+  （confirmed medium）— `deploy-mcp-gw-safe.sh:18,80,176` は
+  `rust/target/release/jarvis-mcp-gw` をそのまま install し rev-parse／diff／
+  マーカー照合が無い。同じゲートを追加するか mcp-gw 配置を build-selfhost 経由へ。
+- [ ] **untracked 検査が `--exclude-standard` で ignore 済み SQL を通す**
+  （likely low）— glob は全 `*.sql` を拾うのに git 側は ignore 済みを除外。
+  ペイロード集合と照合対象を完全一致させる。
+- [ ] **試行予算の世代上限が契約と矛盾**（confirmed low）—
+  `persistence.rs:39-43` は MAX_DB_ATTEMPTS 世代と明記するが最終試行でも
+  reconnect するため gen0+3=4（I40-A 追加で最大5）。最終試行では reconnect
+  をスキップするか共有カウンタで真の上限にし、世代数をテストで検証。
+
+- 親が対応: clippy の manual map、型エラー（`rx.changed().is_ok()`）、rustfmt。
