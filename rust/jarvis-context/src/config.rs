@@ -67,7 +67,10 @@ impl Default for ContextConfig {
         Self {
             grpc_addr: "127.0.0.1:50054".into(),
             http_addr: "127.0.0.1:8084".into(),
-            pg_url: "postgres://jarvis:jarvis@localhost:5432/jarvis".into(),
+            // No compiled-in credentials: authentication is delegated to libpq
+            // (PGUSER / PGPASSWORD / .pgpass / IAM ...). Deployments supply the
+            // full URL via JARVIS_CONTEXT_PG_URL or config/context.toml.
+            pg_url: "postgres://localhost:5432/jarvis".into(),
             qdrant_url: "http://127.0.0.1:6334".into(),
             qdrant_api_key: None,
             collection_name: "jarvis_memories".into(),
@@ -92,7 +95,7 @@ mod tests {
     const LEGACY_TOML: &str = r#"
 grpc_addr = "127.0.0.1:50054"
 http_addr = "127.0.0.1:8084"
-pg_url = "postgres://jarvis:jarvis@localhost:5432/jarvis"
+pg_url = "postgres://localhost:5432/jarvis"
 qdrant_url = "http://127.0.0.1:6334"
 collection_name = "jarvis_memories"
 embedding_model = "sentence-transformers/all-MiniLM-L6-v2"
@@ -147,5 +150,57 @@ max_context_tokens = 8000
             .extract()
             .expect("env-style key merges into the admin token field");
         assert_eq!(config.admin_token(), Some("env-secret"));
+    }
+
+    /// The compiled-in default must never embed a password. Auth is delegated
+    /// to libpq; a hardcoded `user:password@` here would leak into every config
+    /// dump and test snapshot. Regression guard for I12-D.
+    #[test]
+    fn default_pg_url_has_no_embedded_credentials() {
+        let config = ContextConfig::default();
+        let url = config.pg_url();
+        assert_eq!(url, "postgres://localhost:5432/jarvis");
+        assert!(
+            !url.contains('@'),
+            "default pg_url must not carry userinfo/password; delegate to libpq",
+        );
+    }
+
+    /// `JARVIS_CONTEXT_PG_URL` must keep overriding the configured URL through
+    /// the same `Env::prefixed("JARVIS_CONTEXT_")` chain used by `load()`. No
+    /// OS env var is mutated; the env-style key is merged as a figment value.
+    #[test]
+    fn pg_url_env_key_overrides_configured_url() {
+        const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
+        const ENV_KEY: &str = "JARVIS_CONTEXT_PG_URL";
+
+        let field = ENV_KEY
+            .strip_prefix(ENV_PREFIX)
+            .expect("key uses the context env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "pg_url");
+
+        let override_url = "postgres://override-host:5432/override_db";
+        let config: ContextConfig = Figment::from(Toml::string(LEGACY_TOML))
+            .merge(Serialized::default(field.as_str(), override_url))
+            .extract()
+            .expect("env-style key merges into the pg_url field");
+        assert_eq!(config.pg_url(), override_url);
+    }
+
+    /// An explicitly configured URL is preserved verbatim; only the compiled
+    /// default is passwordless. This guards against an over-broad change that
+    /// would reject legitimate operator-supplied libpq connection strings.
+    #[test]
+    fn explicit_pg_url_from_toml_is_preserved() {
+        let toml = LEGACY_TOML.replace(
+            "pg_url = \"postgres://localhost:5432/jarvis\"",
+            "pg_url = \"postgres://db.internal:5432/custom_db\"",
+        );
+        assert_ne!(toml.as_str(), LEGACY_TOML, "fixture replacement must apply");
+        let config: ContextConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("explicit pg_url parses");
+        assert_eq!(config.pg_url(), "postgres://db.internal:5432/custom_db");
     }
 }
