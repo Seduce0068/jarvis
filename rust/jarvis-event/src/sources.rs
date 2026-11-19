@@ -1,6 +1,6 @@
 //! External source clients
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use futures_util::{SinkExt, StreamExt};
 use jarvis_core::{EventSource, UnifiedEvent};
 use reqwest::Client;
@@ -234,6 +234,23 @@ pub fn parse_event_message(message: &Value) -> Option<UnifiedEvent> {
     })
 }
 
+/// Decode a Home Assistant WebSocket text frame into JSON.
+///
+/// The error deliberately records only metadata (source, byte length, serde
+/// error category) and never the raw payload. A malformed frame can carry the
+/// bearer token or device details, and the resulting error is logged via
+/// `tracing` (and therefore persisted in the journal).
+fn decode_ha_message(text: &str) -> Result<Value> {
+    let byte_len = text.len();
+    serde_json::from_str(text).map_err(|error| {
+        let category = error.classify();
+        anyhow::anyhow!(
+            "decoding Home Assistant message failed \
+             (source=home_assistant, bytes={byte_len}, category={category:?}): {error}"
+        )
+    })
+}
+
 /// Read the next text message as JSON, skipping non-text frames.
 ///
 /// Pong replies to ping frames are queued automatically by tungstenite and
@@ -244,10 +261,7 @@ async fn read_json(socket: &mut HomeAssistantSocket) -> Result<Value> {
             bail!("Home Assistant closed the WebSocket");
         };
         match message? {
-            Message::Text(text) => {
-                return serde_json::from_str(&text)
-                    .with_context(|| format!("decoding Home Assistant message: {text}"));
-            }
+            Message::Text(text) => return decode_ha_message(&text),
             _ => continue,
         }
     }
@@ -384,5 +398,28 @@ mod tests {
         let event = parse_event_message(&message).expect("event parsed");
         assert!(!event.correlation_id.is_empty());
         assert_ne!(event.correlation_id, "01JTESTCONTEXT");
+    }
+
+    #[test]
+    fn decode_error_context_omits_raw_message_body() {
+        let body = "tokenish marker value device=living-room-sensor";
+        let err = decode_ha_message(body).expect_err("plain text is not valid JSON");
+        let rendered = format!("{err:#}");
+        assert!(
+            !rendered.contains(body),
+            "error context must not contain the raw body: {rendered}"
+        );
+        assert!(
+            !rendered.contains("tokenish marker value"),
+            "token-like payload leaked into error: {rendered}"
+        );
+        assert!(
+            rendered.contains("source=home_assistant"),
+            "source metadata missing: {rendered}"
+        );
+        assert!(
+            rendered.contains(&format!("bytes={}", body.len())),
+            "length metadata missing: {rendered}"
+        );
     }
 }
