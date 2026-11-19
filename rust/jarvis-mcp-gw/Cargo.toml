@@ -38,13 +38,13 @@ jarvis-policy = { path = "../jarvis-policy" }
 # gRPC
 tonic = { workspace = true }
 prost = { workspace = true }
-prost-types = { workspace = true }
+# prost-types は参照0のため削除。well-known types を使うなら再宣言。
 tonic-prost = { workspace = true }
 
 # HTTP
 axum = { workspace = true }
 reqwest = { workspace = true }
-tower-http = { workspace = true }
+# tower-http は参照0のため削除。CORS / trace / limit ミドルウェアを追加するなら再宣言。
 
 # Config parsing
 toml = "0.8"

@@ -26,7 +26,7 @@ tracing-opentelemetry = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 figment = { workspace = true }
-zeroize = { workspace = true }
+# zeroize は参照0のため削除。Secret の明示的消去を実装するなら再宣言。
 chrono = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
@@ -43,12 +43,12 @@ casbin = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 futures-util = { workspace = true }
-prost-types = { workspace = true }
+# prost-types は参照0のため削除。well-known types を使うなら再宣言。
 tonic-prost = { workspace = true }
 
 # HTTP
 axum = { workspace = true }
-tower-http = { workspace = true }
+# tower-http は参照0のため削除。CORS / trace / limit ミドルウェアを追加するなら再宣言。
 
 [build-dependencies]
 tonic-prost-build = { workspace = true }

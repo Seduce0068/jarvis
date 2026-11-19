@@ -53,7 +53,7 @@ jarvis-core = { path = "../jarvis-core" }
 
 # HTTP
 axum = { workspace = true }
-tower-http = { workspace = true }
+# tower-http は参照0のため削除。CORS / trace / limit ミドルウェアを追加するなら再宣言。
 
 # Metrics
 metrics-exporter-prometheus = { workspace = true }
