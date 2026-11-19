@@ -1620,3 +1620,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: UI fmt 差分、spec 変更に伴う evidence 実測再生成
   （UI 64 / mcp-gw 124）、notes 件数同期。
+
+### Round 55（R4 で修正済み）
+
+- [x] embedding の NaN/±Inf 無検証（medium）→ `validate_embedding` に
+  `is_finite()` 追加、両 ingress＋core recheck で 400/InvalidArgument。
+- [x] axum JsonRejection が bare-400/no-leak 契約を迂回（medium）→
+  `BareJson<T>` extractor で型不正も空本文400＋固定語彙ログへ集約。
+- [x] 語彙パリティを RPC 別検証へ（low）→ 各(case,RPC)に独立バッファ、
+  (operation,error_kind) の組 21×2 を個別アサート。
+- [x] OTel SDK DEBUG の生エラー（low）→ 4サービスに
+  `opentelemetry_sdk=warn` / `opentelemetry_otlp=warn` のガード追加。
+- [x] content/source/metadata のサイズ・深さ境界（low）→ 共有 validation
+  に MAX_* 定数と深さ上限、両 ingress で拒否。
+- [x] check-evidence に REQ 集合一致ゲート（`REQ_SET_MISMATCH`）追加、
+  tamper 回帰と Runbook 同期。仕様追加に伴う evidence の requirements
+  同期（UI 1..28 / mcp 1..21）と UI Traceability へ REQ-1 行追加。
+
+### Round 55 の残り指摘（未対応）
+
+- [ ] 409 本文が非空の別本文なら winner に倒れる残存 fail-open（medium）—
+  policy/UI のビルド世代ずれや中継改変で非常停止が隠れる。既知の
+  already-decided 本文に完全一致した場合のみ winner へ進めるか 423 分離。
+- [ ] Round 54 の shell fail-closed 修正（egress 重複・env 復元・drift
+  exit 3）に自動回帰が無い（low）— `test-legacy-guards.sh` に3ケース追加。
+
+- 親が対応: fmt 差分、`BareJson` extractor の不要な `?`（3箇所）、
+  REQ 集合中不一致（evidence requirements 同期＋UI spec の REQ-1 行）。
