@@ -686,7 +686,7 @@ generated:
 
 ## follow-up（2026-11-19 Round 2 / R4 レビュー）
 
-- [ ] **仕様書 REQ-7 をキュー枯渇の 503 挙動へ同期** — 根拠
+- [x] **仕様書 REQ-7 をキュー枯渇の 503 挙動へ同期**（2026-11-19 対応済み: 仕様 REQ-7 と TC-Q1 を更新、証跡を実測 53 passed / 0 failed で再生成（`evidence/test-run-20261119-cc55d64f971a.json`）、両 index 更新、`make check-evidence` ok=6 errors=0） — 根拠
   `specs/test-policy-approval.md:44,177` / R4 レビュー / 優先度 中。
   - 現状は「max_pending 超過は approval queue full で即 Denied」とあり、
     HTTP 層が 503 を返す実装と乖離している。
