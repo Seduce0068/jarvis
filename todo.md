@@ -1048,24 +1048,43 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 34 のレビュー結果（未対応）
 
-- [ ] **expiry CAS の lost-ack で durable re-read が無く待機側が Expired を返す**
+- [x] **expiry CAS の lost-ack で durable re-read が無く待機側が Expired を返す** — 2026-11-19 対応済み: `ApprovalPersistence::load_decision(id)` seam を追加（Noop は Ok(None)、Pg は committed 行のみ SELECT）。100ms grace 満了時に DB の権威決定でメモリ・待機側を上書きし tx.send。DB エラー／未決定は Expired フォールバック。lost-ack 回帰2件追加。
   （confirmed high）— `approval.rs:490-521`（特に 517-521 の warn + Expired）。
   並行 decide が CAS に勝っても watch::send が 100ms 以内に届かなければ、
   DB=approved / 待機側=Expired に分裂。`ApprovalPersistence` に id による
   decision 再読取り seam を追加し、grace 満了時に DB の権威決定で上書きする。
-- [ ] **read-back の生成リフレッシュが試行単位で掛け算され 503 が遅延**
+- [x] **read-back の生成リフレッシュが試行単位で掛け算され 503 が遅延** — 2026-11-19 対応済み: `read_back_after_error` を `read_back_once`（1 reconnect＋1 probe）へ置換し、各 attempt で1回のみ probe。接続世代は初期1＋最大3 reconnect に抑制（旧最大9回）。OurCommit / CompetingDecision 判定と上限は不変。
   （confirmed medium）— `persistence.rs:301-324` が1呼び出しで3回 reconnect＋probe し、
   呼び出し元がさらに3回トランザクション再試行（最大9回の TCP 接続）。
   単一の試行予算へ統合する。
-- [ ] **migration SQL 配布が上書きのみで古い *.sql を /opt に残す**
+- [x] **migration SQL 配布が上書きのみで古い *.sql を /opt に残す** — 2026-11-19 対応済み: 配置前に配布先とステージングのファイル名集合を照合し、余分な `*.sql` を `sudo rm -f` で削除してから新 SQL／マーカーを配置。失敗境界と順序は不変、`bash -n` / shellcheck OK。
   （likely medium）— `build-selfhost.sh:125` は上書きのみで削除しない。
   削除されたマイグレーションが残存すると unit の pre-flight が適用し、
   context の checksum 不一致で起動失敗しうる。配置前に余分なファイルを削除。
-- [ ] **timer rollback が next elapse を記録するだけで復元しない**
+- [x] **timer rollback が next elapse を記録するだけで復元しない** — 2026-11-19 対応済み: 先頭コメントを「active/enabled を復元、next elapse は再計算で変わり得る」へ訂正。`pre_timer_next` は情報提供のみで rollback への復元を試みない旨を明記。ロジック変更なし。
   （confirmed low）— `install-backup-timer.sh:5-6` の「next elapse は restored」は
   誤記。active/enabled を復元し next elapse は再計算される旨へ訂正するか、
   OnCalendar 自体を退避・復元。
-- [ ] **UI の admin→API scope フォールバックが test-only の複製で検証され
+- [x] **UI の admin→API scope フォールバックが test-only の複製で検証され** — 2026-11-19 対応済み: `PolicyClient::approve` / `deny` の実 HTTP 送信経路を loopback スタブで検証するテスト5件を追加（admin 未設定時 API scope、admin 設定時 admin scope、両方未設定時ヘッダなし）。UI 41 tests pass。specs/evidence の「カバー済み」主張が実測裏付けを得た —
   証跡がカバー済みと主張**（likely medium）— `policy_client.rs:80-81` の
   test-only ヘルパのみを検証し、ランタイム送信パス（`:386-388`）は未検証。
   スタブサーバで実送信を検証し TC-U13 の Traceability に明示。
+
+### Round 35 のレビュー結果（未対応）
+
+- [ ] **check-evidence の notes 件数照合が最初の一致しか検証しない**
+  （confirmed medium）— `check-evidence.sh:114,121` の `re.search` は1件目のみ。
+  「23 checks ＋ 22 checks ＋ 23 passed」のような混在を通過させてしまう。
+  `re.finditer` ですべての一致を照合し、`test-legacy-guards.sh` の tamper
+  モードに「正しい件数＋矛盾する2つ目」を追加して回帰を担保。
+- [ ] **backup 証跡が REQ-18 カバレッジを主張しつつ集計ゲートがそれを実行して
+  いない**（confirmed medium）— runtime を `make test-verify-backup` に限定した
+  結果、TC-B5 の6ケース（test-backup-args.sh）が23件に含まれない。
+  requirements / notes から REQ-18 を外すか、6ケースを集計へ含めて実測再生成。
+- [ ] **コミット照合が dirty ツリーチェックを欠く**（likely medium）—
+  `build-selfhost.sh:47-54` は `git rev-parse HEAD` のみで作業ツリー差分を
+  検査せず、両マーカーに同じ BUILD_COMMIT を書くため照合が常に真。
+  ビルド前に `git diff --quiet && git diff --cached --quiet` を必須化し、
+  dirty なら exit 1（必要なら untracked も検査）。
+
+- 親が対応: rustfmt 差分（policy / ui）の自動修正。
