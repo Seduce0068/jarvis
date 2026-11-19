@@ -69,6 +69,16 @@ generated:
   - **実機対応は残る**: 実機は `/etc/jarvis/otelcol-config.yaml` を読み込む
     ため、repo テンプレートの同期と `ss -lnt` による確認は未実施。
 - [ ] **P0-7** Grafana 認証情報の供給経路を確定（R1-SEC-003）
+  - **2026-11-19 設計調査**: 3案を比較し **案A（bws run 経由で注入）を推奨**。
+    otelcol.service に `EnvironmentFile=-/etc/jarvis/bws.env` を追加し、
+    `bws run --project-id <ID> -- otelcol-contrib` で起動。値は bws vault に
+    集約し repo/config/ディスク平文へ置かない。既存4サービスと同じ既知経路で
+    repo 側変更が小さい。ローテーションは bws 更新＋otelcol 再起動。
+  - **ユーザー確認が必要**: (1) Grafana へのテレメトリ送信継続とデータ範囲、
+    (2) Basic 認証の API key スコープ・ローテ周期、(3) 既存 bws project に追加
+    するか otelcol 専用 project を新設するか、(4) bws 側 secret の正確な名前、
+    (5) `GRAFANA_CLOUD_OTLP_ENDPOINT` の供給元、(6) 再起動による数秒の送信停止
+    が許容か、(7) 実機 config と repo テンプレートの同期方針。
   - `otelcol-config.yaml` が `GRAFANA_CLOUD_AUTH` を要求するが unit は
     直接起動で未注入。実値を config / journal に残さない経路を統一。
   - **2026-11-18 判断材料**: [3案の比較](docs/integration/remaining-tasks.md)
@@ -83,7 +93,7 @@ generated:
 
 ## P1: データ整合性・アーキテクチャ・DR（高）
 
-- [ ] **P1-1** ベクトル検索の順序を保持（2026-11-18 一部対応: 順序保持は実装済み、スコア保持は残。PG の `WHERE id = ANY` が順序を保たないため、Qdrant の relevance 順に再組み立てる reorder_by_ids を追加。純粋関数テスト2件。スコア自体の保持は MemoryEntry 共有型変更が必要で保留）（R2-DATA-001）
+- [x] **P1-1** ベクトル検索の順序を保持（2026-11-19 完了: `search_vectors` が `(id, score)` を返し `attach_scores()` で `MemoryEntry.score: Option<f32>`（serde default）へ付与。proto に加算フィールド、HTTP/gRPC DTO も後方互換でスコアを返す。legacy JSON 回帰含む純粋テスト5件追加）（R2-DATA-001）
   - `ScoredPoint.score` を破棄し `WHERE id = ANY($1)`（ORDER BY なし）で
     再取得 → ランキングが失われハイブリッド検索が ID 突き合わせに退化。
 - [x] **P1-2** PG / Qdrant 二段書き込みに補償を追加（2026-11-19 対応済み: `pending_embeddings` outbox を新設し Qdrant 失敗時に id/content/metadata/ vector を記録、起動時 reconcile で再 upsert・成功時のみ削除。回帰テスト5件追加）（R2-DATA-002）
@@ -105,7 +115,7 @@ generated:
     R3-DR-003）
   - manifest は平文 SHA-256 のみ、署名なし。`--retain-days` は opt-in で
     unit が渡していない。ディスク枯渇と改ざん検知不能のリスク。
-- [ ] **P1-7** 共有ドメインモデルを一本化（**2026-11-19 スライス1-2 対応済み: `jarvis-core/src/approval.rs` に正規形（Uuid/DateTime/4 variant）と旧型からの TryFrom を追加、policy のローカル定義を core 型の `pub use` へ置換。tagged JSON ゴールデン7件追加、workspace.dependencies に jarvis-core を追加。残るスライス: mcp-gw と UI の境界変換・旧 root 型の整理）（R2-ARCH-001, R2-ARCH-005,
+- [ ] **P1-7** 共有ドメインモデルを一本化（**2026-11-19 スライス1-3 対応済み: core の正規形＋policy re-export に加え、mcp-gw の `ApprovalOutcome` を core::ApprovalDecision へ寄せ、wire DTO→core 変換を `outcome_from_wire()` へ集約。JSON 契約 golden3件追加。残るスライス: UI の境界変換・旧 root 型の整理）（R2-ARCH-001, R2-ARCH-005,
     R2-ARCH-009）
   - `jarvis-core` が policy / mcp-gw / UI から未参照で、承認型が
     4 種類（`String+i64` / `Uuid+DateTime` / …）に分裂。core を真の
@@ -136,7 +146,7 @@ generated:
 
 ## P2: ゲート・テスト・CI（中）
 
-- [ ] **P2-1** PII フィルタと normalizer にテスト追加（2026-11-17 一部対応: pii.rs に from_config を追加し再帰 redact / enabled=false パススルー / 不正パターンスキップの3テスト。normalizer 側は未対応）（R4-TEST-001,
+- [x] **P2-1** PII フィルタと normalizer にテスト追加（2026-11-19 完了: pii.rs は from_config/再帰 redact/キー redact/衝突一意化/深度ガード、normalizer.rs は変換7件＋emit/overflow/本文非漏洩/相関ログ含む15件。 policy deny 分岐のモック差し替えは seams が無いため未検証で別タスク候補）（R4-TEST-001,
     R4-TEST-002, R2-DATA-008)
   - `pii.rs` / `normalizer.rs` に `#[cfg(test)]` が皆無。無効パターンの
     サイレントスキップ、`enabled=false` バイパス、policy deny 時の
@@ -783,9 +793,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **deploy ロールバックが退避ファイル欠落時に新規 unit/allowlist/バイナリを残す** — 2026-11-19 対応済み: 各復元 if に else 分支（install 先の明示削除）を追加、退避コピー失敗時は `die` で新規配置前に中止。ロールバック後に drift 検査を情報表示で実行。残る判断点: 退避失敗時の部分適用と repo allowlist は削除せず警告（意図的） / B4 / 高 / confirmed。
 - [x] **HTTP 型ベースエラー分類の取りこぼし（入力エラーが 500 に後退）** — 2026-11-19 対応済み: sandbox.rs の bare `bail!` を全除去し入力由来エラーを `ClientError` へ型化（内部エラーは 500 維持）。HTTP 400/500 境界の回帰テスト追加 / B1 / 高 / confirmed。
 - [x] **egress allowlist が TOML 設定を黙って無視し空値で fail-open** — 2026-11-19 対応済み: `McpGatewayConfig.egress_allowlist` を正式フィールド化し TOML/env 両対応、空値・不正値は DenyAll（fail-closed）。unit に `JARVIS_MCP_GW_EGRESS_ALLOWLIST`（既定 example.com、ホスト側で上書き）を追加。起動ログに実効ホストを出力 / B1 / 高 / confirmed。
-- [ ] **P1-1 ベクトル検索スコアの保持** — `context/src/builder.rs:15,228` / B5 / 高。`ScoredPoint.score` を捨てている。後方互換の `score` 付与＋テスト。
-- [ ] **P1-2 PG/Qdrant 二段書き込みの補償** — `context/src/builder.rs:198` / B5 / 高。outbox＋起動時再埋め込み。
-- [ ] **P1-3 マイグレーションのバージョン管理移行** — `context/src/builder.rs:396` / B5 / 高。sqlx migrate + baseline 記録。
+- [x] **P1-1 ベクトル検索スコアの保持**（重複: 本体は行86の P1-1。こちらはバックログ補充時の重複エントリ） — `context/src/builder.rs:15,228` / B5 / 高。
+- [x] **P1-2 PG/Qdrant 二段書き込みの補償**（重複: 行89の P1-2 で 2026-11-19 対応済み） — `context/src/builder.rs:198` / B5 / 高。
+- [x] **P1-3 マイグレーションのバージョン管理移行**（重複: 行92の P1-3 で 2026-11-19 対応済み） — `context/src/builder.rs:396` / B5 / 高。
 - [ ] **Grafana Cloud アラート／失敗通知が未整備** — `docs/integration/remaining-tasks.md:667` / B7 / 高 / needs_user。kill switch 発動・承認タイムアウト・バックアップ失敗の通知先を確定。
 - [ ] **bws.env の復元・再配置経路が未定義** — `docs/integration/backup-restore-runbook.md:70-72,186` / B7 / 高 / needs_user。ディスク故障後にサービスが起動できない。
 - [ ] **pprof/zpages が常時有効でネットワーク制限も未判断** — `otelcol-config.yaml:144`, `otelcol.service:27-32` / B7 / 高 / needs_user。
@@ -798,12 +808,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] kill switch status API が無認証で自由文字列 reason / actor を開示 — 2026-11-19 対応済み: HTTP は `x-jarvis-kill-switch-token` ヘッダ / gRPC は同名 metadata で dedicated admin token を検証。`KillSwitchStatus::redacted()` で reason/actor を固定語彙へ丸め、内部監査用 `status()` は生文字列維持 / B2 / 中。
 - [x] kill switch admin token 比較が非定数時間 — 2026-11-19 対応済み: `constant_time_eq` を kill_switch モジュールの `pub(crate)` 共通ヘルパへ集約し、HTTP 承認トークンゲートと kill switch の全比較が同じ実装を共有 / `kill_switch.rs:135,217` / B2 / 中。
 - [ ] 失効フィルタが Qdrant top-K 選択後に適用され recall が低下 — `context/builder.rs:228-259` / B3 / 中。
-- [ ] PII キー redact がキー衝突で別フィールドを上書き — `context/pii.rs:124-164` / B3 / 中。
+- [x] PII キー redact がキー衝突で別フィールドを上書き — 2026-11-19 対応済み: `unique_key()` で `[REDACTED]#1` 等のサフィックスを付与し通常キーとの衝突も回避。回帰テスト4件追加 / `context/pii.rs:124-164` / B3 / 中。
 - [x] check-deploy-drift がサービス停止時の E2E SKIP を OK と報告 — 2026-11-19 対応済み: サービス停止時を `DANGER: サービス停止` + `danger=1`（exit 2）へ変更。RESULT 文言も SKIP を OK と扱わない旨を明記。deploy の厳密 gate（:191）が exit 2 を受け取るため誤合格経路も閉じた / `check-deploy-drift.sh:169-182` / B4 / 中。
 - [x] 日次バックアップが verify-backup を通さない（導入時のみ検証） — 2026-11-19 対応済み: `jarvis-backup.service` に `ExecStartPost=` で `verify-backup.sh --latest` を追加（接頭辞 '-' なしで失敗時 unit failed）。`install-backup-timer.sh` は verify 作業コピー欠落時に jq と同じ fail-closed。`systemd-analyze verify` / bash -n OK / `jarvis-backup.service:12` / B4 / 中。
 - [x] check-shell が予測可能 `/tmp` パスを使用 — 2026-11-19 対応済み: `mktemp -d` + `trap 'rm -rf "$tmpdir"' EXIT` で出力先を隔離。旧 `/tmp/check-shell.err` 等への参照0件、shfmt 警告のみ・shellcheck 必須の挙動は維持 / `check-shell.sh:25,27,39,43` / B4 / 中。
 - [x] jarvis-backup.service に `Wants=postgresql.service qdrant.service` が欠落 — 2026-11-19 対応済み: repo unit へ追加し systemd-analyze verify exit 0。**実機への unit 再適用は root 必須・ユーザー実行が残る** / `jarvis-backup.service:4` / B7 / 中 / confirmed。
-- [ ] S9 のうち隔離先統合テストのみ自動化可能 — `docs/integration/local-restore-design.md:253-255` / B5 / 中。
+- [x] S9 のうち隔離先統合テストのみ自動化可能（重複: 行683 の S9 で 2026-11-19 一部対応済み、`test-restore-local.sh` 47 tests pass） — `docs/integration/local-restore-design.md:253-255` / B5 / 中。
 - [x] AGENTS.md の adr/ 一覧が ADR-0002/0003/0005 を欠落 — 2026-11-19 対応済み: Project Structure ツリーと References に実在する5件すべてを追記 / `AGENTS.md:37-39` / B8 / 中。
 - [x] ADR-0005 の「ui-build/ui-run 追加」が実装済みなのに未完了 — 2026-11-19 対応済み: 該当チェックを [x] へ更新（本番自動起動は未実装で [ ] 維持）/ `adr/0005:104` / B8 / 中。
 - [x] ADR-0003 の web.fetch `requires_approval=false` 記述が古い — 2026-11-19 対応済み: 現行 `true`・人間承認必須・allowlist 同期確認へ更新し、旧記述は「（履歴）」と明記。ADR の決定内容（ネイティブ実装・SSRF 対策）は不変 / `adr/0003:35-40` / B8 / 中。
