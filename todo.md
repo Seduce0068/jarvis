@@ -1964,3 +1964,35 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   のまま（low）、build-selfhost.sh のガードコメントも未更新。
 - 親が対応: test-restore-local.sh の DROP アサートを本番 DB 宛に限定、
   証跡の実測件数同期。
+
+### Round 67（R4 で修正済み）
+
+- [x] restore-local の非 allowlist config 回帰を `test-restore-local.sh` へ
+  追加（`--apply --confirm` と `--skip-configs` の両方で DB/Qdrant/サービス
+  未接触を検証、48→60件）。
+- [x] migration 範囲コメントを policy/context unit・build-selfhost.sh・
+  Runbook の4箇所へ through 005 反映、同一コミット更新ルール明記。
+
+### Round 67 の残り指摘（未対応）
+
+- [ ] **restore-local が jarvis-backup.timer を停止せず本番 DB 上書きと
+  日次バックアップが競合**（confirmed high）— SERVICE_INVENTORY へ timer
+  追加＋apply 前 stop／on_exit 復元、runbook へ必須ステップ追加。
+- [ ] **setup-selfhost.sh の `chown -R` が root:root 配置のバックアップ
+  スクリプトを jarvis 所有へ劣化**（confirmed high）— chown 対象をデータ系
+  ディレクトリへ限定、bin/scripts は root 所有を冪等維持。
+- [ ] **smoke-mcp-gw.sh の inputSchema 検証が旧契約を固定**（high）—
+  filesystem.read は path が optional（既定 '.'）、required 無しを検証する
+  形へ更新。現行のままでは deploy-mcp-gw-safe.sh のスモークが失敗し
+  デプロイが中止される。
+- [ ] generate-evidence.sh が failed=0 を固定出力（medium）— 実測 run から
+  failed を導出するモード追加、または --list 断片を「予測値」と明示。
+- [ ] restore_configs が owner/mode を明示せず root:root 0600 方針から
+  漂移（medium）— allowlist6対象の期待 owner/mode を単一表で定義し
+  install で是正。
+- [ ] P1-6 暗号化導入時に verify/restore のペイロード名・形式ハードコード
+  がゲートを停止（medium）— manifest に format/encryption/signature 記述子。
+- [ ] dsh.md / remaining-tasks.md の firejail・Cedar informational・
+  build-selfhost.sh:47 参照などの古い記述（low 4件）。
+
+- 親が対応: 全ゲート再検証（restore 60件 pass）。
