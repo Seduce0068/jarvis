@@ -9,13 +9,16 @@ Type=oneshot
 User=postgres
 Group=postgres
 # Script is installed to /opt/jarvis/scripts/backup-local.sh by the deploy step.
-ExecStart=/usr/bin/bash /opt/jarvis/scripts/backup-local.sh --backup-dir /var/lib/postgresql/jarvis-backups --apply
+ExecStart=/usr/bin/bash /opt/jarvis/scripts/backup-local.sh --backup-dir /var/lib/postgresql/jarvis-backups --repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis --apply
 
 # Security hardening (no OCI / rclone / 1Password / secrets).
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ProtectHome=yes
+# Git archive needs read access to the jarvis repo passed via --repo-dir.
+# ProtectHome=yes masks /home entirely; read-only matches jarvis-mcp-gw.service
+# and keeps writes confined to ReadWritePaths.
+ProtectHome=read-only
 ReadWritePaths=/var/lib/postgresql/jarvis-backups
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
