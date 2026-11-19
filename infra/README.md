@@ -271,6 +271,18 @@ variables each service expects. 旧デプロイ資産（`deploy.rs`）は
 > 現状の論点・再設計メモ: [docs/integration/backup-redesign-notes.md](../docs/integration/backup-redesign-notes.md)  
 > 関連タスク: [docs/integration/remaining-tasks.md](../docs/integration/remaining-tasks.md)（BK-1/BK-2/SEC-2）
 
+> **2026-11-19 現行状態（ADR-0004 準拠）**: `jarvis-backup.timer` を実機へ
+> 導入済みでバックアップジョブは稼働中。OCI を使用せず、ローカル完結の
+> backup / verify / restore パスへ移行した。
+
+現行のローカルバックアップ運用（ADR-0004 準拠、OCI 不使用）:
+
+- 取得: [backup-local.sh](scripts/backup-local.sh)
+- 整合性検証: [verify-backup.sh](scripts/verify-backup.sh)
+- 復旧: [restore-local.sh](scripts/restore-local.sh)
+- 設計: [local-restore-design.md](../docs/integration/local-restore-design.md)
+- 定期実行: `jarvis-backup.timer`（2026-11-19 実機導入、稼働中）
+
 Daily backups run via `jarvis-backup.timer`（旧構成）:
 
 - PostgreSQL dump → OCI Object Storage
