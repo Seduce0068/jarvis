@@ -964,26 +964,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 30 のレビュー／発掘結果
 
-- [ ] **migrations unit が通常デプロイ経路に配線されず cargo-sqlx も未配布**
+- [x] **migrations unit が通常デプロイ経路に配線されず cargo-sqlx も未配布** — 2026-11-19 対応済み: `build-selfhost.sh` の `JARVIS_SERVICE_UNITS` と配置ループの両方へ追加。sqlx-cli 導入を `cargo install sqlx-cli --no-default-features --features postgres --locked --root /usr/local` に統一し、両ドキュメントへ配置／有効化／検証手順を追記。`bash -n` / shellcheck / systemd verify OK。
   （confirmed high）— `build-selfhost.sh:60-75` の `JARVIS_SERVICE_UNITS` に
   `jarvis-migrations.service` が無く、`command -v cargo-sqlx` も開発環境に無い。
   policy/context は Wants で待つが unit 未配置なら無視され、003 未適用で
   reconcile が失敗する。unit を配置リストへ追加し sqlx-cli 導入を手順化する
   か、context の `migrate!()` を唯一の主体に統一して unit を廃止する。
-- [ ] **install-backup-timer.sh の rollback が migrations unit / verify-backup.sh
+- [x] **install-backup-timer.sh の rollback が migrations unit / verify-backup.sh** — 2026-11-19 対応済み: 退避と復元を単一の `restore_pairs` 配列（5対象）から生成し、migrations unit と verify スクリプトも復元対象化。バックアップ欠落時は新規配置を削除。最初の書き込み前に退避を移動。dry-run / root / post-install 検証は不変、`bash -n` / shellcheck OK。
   を復元しない**（confirmed medium）— 退避と復元を単一のペア配列から生成し、
   欠落時は新規配置を削除する。
-- [ ] **再接続時の ambiguous commit が AlreadyDecided に変換される**
+- [x] **再接続時の ambiguous commit が AlreadyDecided に変換される** — 2026-11-19 対応済み: CAS 0行時／トランザクション失敗時に id で現在の decision を SELECT し、試行値と一致すれば `AlreadyCommittedByUs`（Ok）として扱う。二重 audit 行なし、CAS＋audit の同一 tx 構造とリトライ上限は不変。純粋ロジックの回帰4件追加（実 DB での lost-ack 完全再現は不可）。
   （likely high）— COMMIT 成功後にレスポンスが失われると再試行 CAS が0行となり、
   DB=approved / 待機側=Expired / operator=409 に分裂。再試行前に id で現在の
   decision を SELECT し、コミット済みなら publish して Ok を返す。
-- [ ] **起動リコンサイルの expired 決着が1件のエラーで全体中止**
+- [x] **起動リコンサイルの expired 決着が1件のエラーで全体中止** — 2026-11-19 対応済み: 行単位 best-effort 化（`AlreadyDecided` は成功扱い、他エラーは warn 可視化して継続）。未決着行が残った場合のみ起動失敗という fail-closed 契約を維持。回帰2件追加、I33-A の修正は不変。
   （likely medium）— 行ごとに結果を収集し AlreadyDecided は成功扱い、
   他エラーは warn＋メトリクスで可視化して残り行の決着を続行する。
-- [ ] **「単一 owner」コメントが実態と矛盾（unit と context の二重実行、
+- [ ] **「単一 owner」コメントが実態と矛盾（unit と context の二重実行、**2026-11-19 一部対応: 3 unit の範囲記述を「001 以降（現在 004 まで）」へ更新。ただし migration の実行主体は unit と `jarvis-context::builder.rs:862` の `sqlx::migrate!()` の2つが残り、所有権の一本化は未実施（sqlx advisory lock で直列化されるが、配布ソースのズレで checksum mismatch のリスク）。いずれかを廃止する設計判断が必要** —
   範囲も 001-003 で 004 を含まない）**（confirmed medium）— 所有権を明確化し
   コメントを実ファイルと同期。
-- [ ] **発掘: 小さな残タスク5件** — install-backup-timer rollback の
+- [ ] **発掘: 小さな残タスク5件** — **2026-11-19 うち3件対応済み: install-backup-timer rollback の migrations/verify 復元、unit コメント 001-004、ui/README の MSRV 1.100+。残る2件: specs/test-backup.md の `--retain-days` 境界値拒否シナリオ、specs/test-event.md の 503/RESOURCE_EXHAUSTED 契約（いずれも evidence 実測再生成が必要）**（当初: install-backup-timer rollback の
   migrations/verify 未復元（上記と同一）、unit コメントの 001-003→001-004、
   ui/README の Rust 1.85+→1.100+、specs/test-backup.md の `--retain-days`
   境界値拒否シナリオ、specs/test-event.md の 503/RESOURCE_EXHAUSTED 契約
