@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:511e048a9211d7975487b77206c3d2678e66f0e9de27d5f3612044b98bedcbbe",
-  "timestamp": "2026-11-19T22:41:43+09:00",
+  "spec_hash": "sha256:872d3a97659d399e51a40a207554ffd83fdba884a828cca160679def48c0b49a",
+  "timestamp": "2026-11-20T07:03:27+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-context --lib --offline",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 92,
+    "passed": 156,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 50,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-context.md",
-    "spec_hash": "sha256:511e048a9211d7975487b77206c3d2678e66f0e9de27d5f3612044b98bedcbbe",
+    "spec_hash": "sha256:872d3a97659d399e51a40a207554ffd83fdba884a828cca160679def48c0b49a",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -151,5 +151,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-context の 92 テスト再実行結果。REQ-12/13（attach_scores が Qdrant スコアを保持し 0 と欠落を区別）を追加。TC-P3 にテスト用 replacement [X] の Given を明記。実機 DB/Qdrant 結合試験は対象外。カバレッジ・ミューテーションは未測定。"
+  "notes": "jarvis-context の 156 テスト再実行結果。REQ-12/13（attach_scores が Qdrant スコアを保持し 0 と欠落を区別）を追加。TC-P3 にテスト用 replacement [X] の Given を明記。実機 DB/Qdrant 結合試験は対象外。カバレッジ・ミューテーションは未測定。"
 }

@@ -1,19 +1,19 @@
 {
-  "spec_hash": "sha256:a44222ca21afa1b8294fee48c1cb0821422469d5eddd8dc131ff7342e9be1188",
-  "timestamp": "2026-11-20T05:41:17+09:00",
+  "spec_hash": "sha256:3011f64142ea1fd5419122a568408ba75f9b01e59f72c321f4fadb35730c3dd2",
+  "timestamp": "2026-11-20T07:03:27+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
-    "runtime": "cargo test -p jarvis-mcp-gw --lib --offline",
+    "runtime": "cargo test -p jarvis-event --lib --offline",
     "versions": {
       "rustc": "1.100.0",
       "cargo": "1.100.0"
     }
   },
   "results": {
-    "passed": 124,
+    "passed": 76,
     "failed": 0,
-    "skipped": 1,
-    "duration_ms": 200,
+    "skipped": 0,
+    "duration_ms": 10,
     "coverage": {},
     "mutation_score": 0
   },
@@ -21,8 +21,8 @@
   "document_type": "test-execution-log",
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
-    "spec_path": "specs/test-mcp-gateway.md",
-    "spec_hash": "sha256:a44222ca21afa1b8294fee48c1cb0821422469d5eddd8dc131ff7342e9be1188",
+    "spec_path": "specs/test-event.md",
+    "spec_hash": "sha256:3011f64142ea1fd5419122a568408ba75f9b01e59f72c321f4fadb35730c3dd2",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -40,11 +40,7 @@
       "REQ-14",
       "REQ-15",
       "REQ-16",
-      "REQ-17",
-      "REQ-18",
-      "REQ-19",
-      "REQ-20",
-      "REQ-21"
+      "REQ-17"
     ]
   },
   "techniques": [
@@ -76,41 +72,41 @@
   "risk_items": [
     {
       "id": "R-1",
-      "tier": "T1",
-      "description": "policy を通らず allowlist だけで実行される",
+      "tier": "T2",
+      "description": "payload 誤解析でイベント種別が誤分類される",
       "asvs": [
-        "v5.0.0-V8.3.1"
+        "v5.0.0-V2.2.1"
       ],
       "controls": [
-        "SP800-53r5.2/AC-3"
+        "SP800-53r5.2/AU-3"
       ]
     },
     {
       "id": "R-2",
-      "tier": "T1",
-      "description": "allowlist 外のツールが upstream 経由で動く",
+      "tier": "T2",
+      "description": "固定 type webhook に型指定を偽装される",
       "asvs": [
-        "v5.0.0-V8.2.2"
+        "v5.0.0-V2.2.2"
       ],
       "controls": [
-        "SP800-53r5.2/CM-7"
+        "SP800-53r5.2/AU-3"
       ]
     },
     {
       "id": "R-3",
       "tier": "T1",
-      "description": "未許可 principal が特権ツールを呼ぶ",
+      "description": "flood 状態でメモリが無制限に伸びる",
       "asvs": [
-        "v5.0.0-V8.3.3"
+        "v5.0.0-V15.2.2"
       ],
       "controls": [
-        "SP800-53r5.2/AC-6"
+        "SP800-53r5.2/SC-5"
       ]
     },
     {
       "id": "R-4",
       "tier": "T1",
-      "description": "過大引数で承認要求・実行が枠を占有する",
+      "description": "満杯時にハンドラがブロックして可用性が落ちる",
       "asvs": [
         "v5.0.0-V2.4.1"
       ],
@@ -121,45 +117,54 @@
     {
       "id": "R-5",
       "tier": "T1",
-      "description": "承認トークン未送信時の fail-closed",
-      "asvs": [
-        "v5.0.0-V13.2.3"
-      ],
+      "description": "ドロップ済みイベントが処理される",
+      "asvs": [],
       "controls": [
-        "SP800-53r5.2/IA-5"
+        "SP800-53r5.2/SC-5"
       ]
     },
     {
       "id": "R-6",
-      "tier": "T1",
-      "description": "承認後に kill switch が発動しても実行される",
-      "asvs": [
-        "v5.0.0-V8.3.2"
-      ],
-      "controls": [
-        "SP800-53r5.2/AC-3"
-      ]
-    },
-    {
-      "id": "R-7",
       "tier": "T2",
-      "description": "allowlist 破損時に空許可で起動する",
+      "description": "停止時の closed channel で panic する",
       "asvs": [
         "v5.0.0-V16.5.3"
       ],
       "controls": [
-        "SP800-53r5.2/CM-7"
+        "SP800-53r5.2/SI-4"
+      ]
+    },
+    {
+      "id": "R-7",
+      "tier": "T1",
+      "description": "policy 到達不能時に自動応答が fail-open する",
+      "asvs": [
+        "v5.0.0-V8.3.1"
+      ],
+      "controls": [
+        "SP800-53r5.2/AC-3"
       ]
     },
     {
       "id": "R-8",
-      "tier": "T1",
-      "description": "opt-in 既定 false の残存リスクと監査粒度の低下",
+      "tier": "T3",
+      "description": "source/correlation 欠落で追跡性が失われる",
       "asvs": [
-        "v5.0.0-V8.3.3"
+        "v5.0.0-V16.2.4"
       ],
       "controls": [
-        "SP800-53r5.2/AC-3"
+        "SP800-53r5.2/AU-3"
+      ]
+    },
+    {
+      "id": "R-9",
+      "tier": "T1",
+      "description": "キュー満杯時の失敗レスポンス欠落",
+      "asvs": [
+        "v5.0.0-V16.2.4"
+      ],
+      "controls": [
+        "SP800-53r5.2/SC-5"
       ]
     }
   ],
@@ -171,5 +176,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-mcp-gw lib テスト 124 件の実測結果（124 passed / 0 failed / 1 ignored）。P0-3 opt-in server-side principal ガード (TC-A4: 既定 false、true で caller principal を mcp_principal に上書き、/mcp は固定) を含む。wire 形式は不変。TC-S1 境界カバー済み。カバレッジ・ミューテーションは未測定。"
+  "notes": "jarvis-event の 76 テスト再実行結果。REQ-16/17（キュー満杯時 503 / RESOURCE_EXHAUSTED）を追加。flaky なスパン捕捉アサーションを削除し非漏洩検証のみ維持。実機 policy サービス結合試験は対象外。カバレッジ・ミューテーションは未測定。"
 }
