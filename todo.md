@@ -188,7 +188,7 @@ generated:
 - [x] **P2-7** `deploy.rs` を fail-closed 化（2026-11-18 対応済み: `make deploy` を無効化し ADR-0004 準拠の `make deploy-mcp-gw` を案内。`deploy.sh` は既に fail-closed 済み。`make deploy-dry` は参照用として維持）（R2-DEBT-004）
   - `make deploy` が ADR-0004 否定のリモート aarch64 配送を実行可能。
     `deploy.sh` と同じ fail-closed へ。
-- [ ] **P2-8** デプロイスクリプトへ `-e` と HTTP ステータス検証（2026-11-17 一部対応: health check を `%{http_code}=200` 判定へ強化、dry-run 成功。`-e` は rollback ロジックへの影響があるため未適用）（R1-SEC-008,
+- [x] **P2-8** デプロイスクリプトへ `-e` と HTTP ステータス検証（2026-11-19 完了: HTTP 200 検証に加え `rustup target add` 失敗と必須スクリプト（backup.rs / restore.rs）欠落を warn+continue から `bail!` の fail-fast へ変更。dry-run exit 0 とヘルス fail-closed は維持、deploy rust-script pass）（R1-SEC-008,
     R1-SUPPLY-001)
   - `set -uo pipefail` で配置失敗が fail-open。ヘルス確認も `curl -f` /
     `200` 判定が無い。Runtime Proof で `set -uo pipefail` 確認済み。
@@ -245,7 +245,7 @@ generated:
   - **2026-11-18 一部対応**: 期限切れ強調、テスト数表記（7）、
     `approved_by` 固定値とトークン注入経路を README に記録。
     （解消済み）旧状態: リダイレクトでトークン送信、ポーラー競合。
-- [ ] **P3-7** マイナーな設定・静的ガード（2026-11-18 一部対応: `web_max_bytes` の u64→usize キャストを clamp-then-try_from に修正し巨大値で wrap しないようにした。回帰テスト追加。その他の項目は未対応）（R1-MCP-004〜006, R4-SCRIPT-005〜009,
+- [x] **P3-7** マイナーな設定・静的ガード（2026-11-19 完了: `secret_scan.py` の SAFE_PATHS 免除を前方一致から完全一致へ（look-alike ファイルの fail-open を遮断）、`review-run.sh` の dsh バックエンド引数順のコントラクトテスト2件追加。残る提案: TOML 構文 gate（Python tomllib 利用可否は未確認））（R1-MCP-004〜006, R4-SCRIPT-005〜009,
     R2-DATA-009〜011, R1-SUPPLY-003）
   - 機微パス判定、タイムアウト clamp、テストの辞書順依存、エラー型丸め、
     arm64 apt ミラーの HTTP など。
@@ -308,6 +308,7 @@ generated:
 - [x] **P0-9** drift 検査の allowlist 欠落 fail-open（2026-11-17 対応済み: 配備版 allowlist 欠落時に `MISSING (deployed)` + danger=1。回帰テスト追加）（A-H2）
   - `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist が無いと allowlist 検査と `web.fetch` danger 判定ごとスキップされ、`drift`/`danger` が立たない。欠落時に `MISSING` + `danger=1` を設定し回帰テストを追加。
 - [ ] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
+  - **2026-11-19 一部対応**: 空／未設定トークンを `config.rs::validate_kill_switch_admin_token()` と `kill_switch.rs::hash_matches()` で無条件 fail-closed 化（実起動経路 `load_from_path` にも検証を追加、全トークンゲートで空提示を拒否、回帰6件）。プレースホルダ `changeme` の拒否は依然 opt-in ガード依存（warn-only 互換を維持）。ガード既定値 false→true の反転は本番トークン注入確認後の運用判断として残る。
   - **2026-11-18 現状**: opt-in strict ガードは実装済み（一部対応）。
     `require_kill_switch_admin_token`（既定 `false`）が `true` のときだけ
     既定トークンで起動を拒否し、既定のままなら従来どおり warn のみで継続する。
@@ -423,7 +424,7 @@ generated:
   `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
   `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
   event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
-- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — 根拠
+- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
   重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
 - [x] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる**（2026-11-19 対応済み: id と requested_at はサーバ生成、expires_at は server timeout でクランプし生成値をレスポンスで返却。不正値は 400 で拒否。回帰テスト6件追加、policy 73 tests pass） — 根拠
@@ -838,3 +839,18 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `GRAFANA_CLOUD_OTLP_ENDPOINT` と `GRAFANA_CLOUD_AUTH` の供給経路
   （P0-7）は未確定のまま、実機テンプレート同期と bws 側の値設定は
   ユーザー判断として残る。ダミー env で `otelcol-contrib validate` exit 0。
+
+## 完了記録（2026-11-19 Round 25）
+
+- [x] **実機承認待ちタスクの手順を一元化**
+  — `docs/integration/remaining-tasks.md` に「確認 → 修正 → 再確認」の
+  6ブロック（timer 再適用 / S9 実復元演習 / P1-4 外部化 / P0-7 Grafana /
+  P1-12 Webhook / 共通前提）を追加。`backup-restore-runbook.md` の
+  「隔離復元未実装」記述を現行状態（restore-local + 47 tests pass）へ更新。
+  値・秘密情報・推測日付は記載せず、sudo が必要なコマンドを明示。
+  実機操作・外部送信は行っていない。
+- [ ] **追跡 TOML の構文パース gate 追加（提案・未実装）**
+  — `ci-local` は secret_scan / check-shell / check-evidence / test-* のみで
+  `rust/Cargo.toml` や `infra/config/*.toml` をパースしない。
+  Python `tomllib` の CI 利用可否を確認した上で `ci/scripts/check-toml.sh`
+  を追加し Makefile / ci.yml へ配線する案。担当外のため未実施。
