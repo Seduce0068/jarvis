@@ -288,14 +288,78 @@ sudo mv -Tf "${MIGRATION_LINK_TMP}" "${MIGRATIONS_DST}"
 sudo install -o root -g root -m 0644 "${bin_commit_file}" /opt/jarvis/bin/.jarvis-build-commit
 
 # Keep the 3 newest version trees as immutable snapshots for manual rollback.
-mapfile -t old_versions < <(
-  sudo find "${MIGRATIONS_VERSIONS}" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | head -n -3
+#
+# I43-A: harden the prune so it can never delete the tree the --source
+# symlink currently publishes. The old
+#   find ... -printf '%f\n' | sort | head -n -3
+# ordered candidates by *filename*. A version dir is named
+# ${BUILD_COMMIT}-${MIGRATION_TS}-$$, so the SHA prefix dominated that lexical
+# order: after deploying a different commit the active tree could sort into
+# the "oldest 3" and `rm -rf` removed it immediately after `mv -Tf`, leaving
+# /opt/jarvis/rust/migrations as a dangling symlink. Three independent layers:
+#   (A) order by mtime, not by name;
+#   (B) explicitly exclude the resolved --source symlink target;
+#   (C) re-verify each candidate is not that target before rm and fail closed
+#       (abort the whole prune) if the invariant is ever violated.
+# No other deploy behaviour changes: the atomic symlink swap, mask/unmask
+# window, clean-tree gate, provenance markers, privilege model and the 3-tree
+# rollback snapshots are all preserved.
+
+# Resolve the tree published by the symlink. This runs after the atomic swap,
+# so it names the tree we just deployed (not the previous one). Fail closed on
+# a resolution error: pruning without knowing the live target is unsafe.
+active_migrations_version=""
+if [[ -L "${MIGRATIONS_DST}" ]]; then
+  active_target="$(sudo readlink -f -- "${MIGRATIONS_DST}")" || {
+    echo "readlink -f failed on ${MIGRATIONS_DST}; refusing to prune version trees" >&2
+    exit 1
+  }
+  active_migrations_version="$(basename -- "${active_target}")"
+  if [[ -z "${active_migrations_version}" ]]; then
+    echo "could not resolve a version name from ${MIGRATIONS_DST}; refusing to prune" >&2
+    exit 1
+  fi
+fi
+
+# (A) mtime order, oldest first. `%T@` is the modification epoch
+# (seconds.nanoseconds), `%f` the bare dir name; `-k1,1n` compares the epoch
+# numerically and `-k2,2` breaks same-second ties deterministically by name.
+# `head -n -3` keeps the 3 newest snapshots; `cut` drops the timestamp column
+# so only directory names remain. LC_ALL=C makes numeric parsing deterministic.
+mapfile -t prune_versions < <(
+  sudo find "${MIGRATIONS_VERSIONS}" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %f\n' \
+    | LC_ALL=C sort -k1,1n -k2,2 \
+    | head -n -3 \
+    | cut -d' ' -f2-
 )
-if (( ${#old_versions[@]} > 0 )); then
-  for old_version in "${old_versions[@]}"; do
-    sudo rm -rf -- "${MIGRATIONS_VERSIONS}/${old_version}"
+
+# (C) fail-closed tripwire over the whole candidate set. If the active tree is
+# ever selected for pruning (e.g. mtime skew, or a future refactor reintroducing
+# lexical order), delete nothing and abort rather than risk a dangling symlink.
+# The EXIT trap still unmasks the unit if this script applied the mask.
+if (( ${#prune_versions[@]} > 0 )); then
+  for pv in "${prune_versions[@]}"; do
+    if [[ -n "${active_migrations_version}" && "${pv}" == "${active_migrations_version}" ]]; then
+      echo "refusing to prune: ${pv} is the current symlink target of ${MIGRATIONS_DST}" >&2
+      exit 1
+    fi
   done
 fi
+
+# (B) explicit exclusion: build the final deletion list without the active
+# tree. Redundant with (C) on purpose (defence in depth) but keeps the intent
+# local: the live tree is never even an `rm` candidate.
+prune_candidates=()
+for pv in "${prune_versions[@]}"; do
+  if [[ -n "${active_migrations_version}" && "${pv}" == "${active_migrations_version}" ]]; then
+    continue
+  fi
+  prune_candidates+=("${pv}")
+done
+
+for old_version in "${prune_candidates[@]}"; do
+  sudo rm -rf -- "${MIGRATIONS_VERSIONS}/${old_version}"
+done
 
 # Unmask BEFORE the unit-generation loop rewrites the unit file below: a
 # lingering mask symlink at /etc/systemd/system/${name} would make `tee`
