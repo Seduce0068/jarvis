@@ -6,7 +6,7 @@ use jarvis_core::{MemoryEntry, UnifiedEvent};
 use qdrant_client::Qdrant;
 use serde_json::Value;
 use std::sync::Arc;
-use tracing::{instrument, warn};
+use tracing::{error, instrument, warn};
 use uuid::Uuid;
 
 /// Fixed-vocabulary error categories for builder-layer warnings.
@@ -969,8 +969,10 @@ pub mod memory {
     /// Compare an existing collection's real vector size with the configured
     /// value. Qdrant cannot resize an existing collection, so a mismatch fails
     /// fast with an actionable message instead of surfacing later as an opaque
-    /// upsert/search error. An unreadable dimension only warns: keep starting
-    /// rather than blocking deployments against older servers.
+    /// upsert/search error. An unreadable dimension (`actual = None`) only
+    /// warns and keeps starting, for compatibility with older servers and
+    /// multi-vector collections. A *failed inspection* is a different case and
+    /// is fail-closed in [`check_inspected_dimension`] (I47-C).
     pub(super) fn check_existing_dimension(
         name: &str,
         expected: usize,
@@ -990,6 +992,52 @@ pub mod memory {
                      assuming configured embedding_dim={expected}"
                 );
                 Ok(())
+            }
+        }
+    }
+
+    /// Apply the I47-C dimension-verification policy to a `collection_info`
+    /// outcome. `inspected` is `Ok(actual)` when the inspection succeeded
+    /// (`actual` is `None` when the response carried no single dense size), and
+    /// `Err(())` when the inspection call itself failed.
+    ///
+    /// Adopted policy: **fail closed on inspection failure**. The only reliable
+    /// way to establish that an existing collection can serve the configured
+    /// embedding dimension is a successful `collection_info` response. If that
+    /// call fails (transport error, Qdrant 5xx, response-shape change that the
+    /// client rejects), starting anyway would defer a dimension mismatch to
+    /// every subsequent upsert/search and leave the outbox retrying forever.
+    /// Startup must therefore fail with an actionable error instead.
+    ///
+    /// The two successful-response outcomes keep their historical behavior:
+    /// a readable mismatch is a hard error, while an unreadable dimension
+    /// (`Ok(None)`) only warns and continues (older servers / multi-vector
+    /// collections), so `unknown_existing_dimension_only_warns` stays valid.
+    ///
+    /// The raw Qdrant error is deliberately discarded at the call site: its
+    /// `Display` can embed endpoints and response fragments. Only the fixed
+    /// `error_kind` vocabulary and non-sensitive metadata (collection name and
+    /// configured dimension) reach the log record or the returned error.
+    pub(super) fn check_inspected_dimension(
+        name: &str,
+        embedding_dim: usize,
+        inspected: std::result::Result<Option<u64>, ()>,
+    ) -> Result<()> {
+        match inspected {
+            Ok(actual) => check_existing_dimension(name, embedding_dim, actual),
+            Err(()) => {
+                let kind = ErrorKind::Qdrant.as_str();
+                error!(
+                    collection = %name,
+                    embedding_dim = embedding_dim,
+                    error_kind = kind,
+                    "could not inspect Qdrant collection dimension; failing closed"
+                );
+                anyhow::bail!(
+                    "could not inspect Qdrant collection '{name}' to verify vector \
+                     dimension (error_kind={kind}); refusing to start with an unverified \
+                     embedding_dim={embedding_dim}"
+                )
             }
         }
     }
@@ -1040,23 +1088,17 @@ pub mod memory {
 
         // Existing collection: measure its vector size and fail fast on a
         // mismatch rather than letting upsert/search fail with an opaque error.
-        match client.collection_info(name).await {
-            Ok(info) => {
-                let actual = info.result.as_ref().and_then(configured_vector_size);
-                check_existing_dimension(name, embedding_dim, actual)
-            }
-            Err(_) => {
-                // The Qdrant error Display can embed endpoints and response
-                // fragments; log only fixed vocabulary and safe metadata.
-                warn!(
-                    collection = %name,
-                    embedding_dim = embedding_dim,
-                    error_kind = "qdrant",
-                    "could not inspect Qdrant collection dimension; assuming configured embedding_dim"
-                );
-                Ok(())
-            }
-        }
+        // An inspection failure is fail-closed (I47-C): without a successful
+        // `collection_info` response we cannot verify dimension compatibility,
+        // so `Builder::new` must not report a healthy startup.
+        let inspected = match client.collection_info(name).await {
+            Ok(info) => Ok(info.result.as_ref().and_then(configured_vector_size)),
+            // Drop the raw error: its Display can embed endpoints and response
+            // fragments, which must never reach logs. The failure kind is
+            // conveyed by the fixed `error_kind` vocabulary in the helper.
+            Err(_) => Err(()),
+        };
+        check_inspected_dimension(name, embedding_dim, inspected)
     }
 
     pub async fn upsert_vector(
@@ -1490,6 +1532,43 @@ mod tests {
             memory::check_existing_dimension("jarvis_memories", 384, None).is_ok(),
             "older servers may omit the config; warn and keep starting"
         );
+    }
+
+    #[test]
+    fn failed_dimension_inspection_fails_closed() {
+        // I47-C: a `collection_info` failure must not be recorded as a
+        // successful compatibility check. The raw Qdrant error is discarded by
+        // the seam, so only the fixed `error_kind` vocabulary and non-sensitive
+        // metadata (collection + configured dimension) can reach the caller.
+        let err = memory::check_inspected_dimension("jarvis_memories", 384, Err(()))
+            .expect_err("an unverifiable collection must fail startup");
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("jarvis_memories"),
+            "the error must name the collection: {message}"
+        );
+        assert!(
+            message.contains("error_kind=qdrant"),
+            "the error must carry the fixed vocabulary token: {message}"
+        );
+        assert!(
+            message.contains("384"),
+            "the error must report the configured dimension: {message}"
+        );
+        assert!(
+            !message.contains("http") && !message.contains("response"),
+            "no endpoint or response fragment may leak: {message}"
+        );
+    }
+
+    #[test]
+    fn inspected_dimension_preserves_successful_response_outcomes() {
+        // A readable matching dimension is accepted.
+        assert!(memory::check_inspected_dimension("jarvis_memories", 384, Ok(Some(384))).is_ok());
+        // A readable mismatch is still a hard error.
+        assert!(memory::check_inspected_dimension("jarvis_memories", 384, Ok(Some(768))).is_err());
+        // An unreadable dimension keeps the historical warn-only behavior.
+        assert!(memory::check_inspected_dimension("jarvis_memories", 384, Ok(None)).is_ok());
     }
 
     #[test]
