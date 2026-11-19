@@ -1,6 +1,7 @@
 [package]
 name = "jarvis-core"
 version = { workspace = true }
+rust-version = { workspace = true }
 edition = { workspace = true }
 license = { workspace = true }
 authors = { workspace = true }
@@ -18,3 +19,6 @@ uuid = { workspace = true }
 [lib]
 name = "jarvis_core"
 path = "src/lib.rs"
+
+[lints]
+workspace = true

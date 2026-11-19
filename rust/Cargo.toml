@@ -11,9 +11,19 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+# MSRV: matches the locally installed stable toolchain (rustup channel manifest, read-only check).
+rust-version = "1.100"
 license = "MIT OR Apache-2.0"
 authors = ["Sovereign AI Agent"]
 repository = "https://github.com/Seduce0068/jarvis"
+
+# Workspace-wide lint declarations. Each crate must opt in with
+# `lints.workspace = true` in its [package] table for these to take effect.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "deny"
 
 [workspace.dependencies]
 # Async runtime
