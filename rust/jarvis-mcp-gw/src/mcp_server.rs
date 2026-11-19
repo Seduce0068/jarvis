@@ -57,26 +57,42 @@ impl JarvisMcpServer {
 /// fall back to a permissive object schema (upstream MCP tools publish
 /// their own schema).
 fn tool_input_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
+    // `Sandbox::resolve_path` maps a missing `path` to "." for every native
+    // handler, so the filesystem tools must not advertise it as required:
+    // clients would otherwise reject calls the gateway is able to accept.
     let path = serde_json::json!({
+        "type": "string",
+        "description": "Path relative to the configured base directory (optional; defaults to \".\" when omitted)"
+    });
+    // git.* keep their original contract: `path` stays required there.
+    let git_path = serde_json::json!({
         "type": "string",
         "description": "Path relative to the configured base directory"
     });
-    let max_bytes = serde_json::json!({
+    // `web.fetch` honours `max_bytes` through `web_max_bytes`, which clamps to
+    // 1024..=1048576 (default 262144). `filesystem.read` ignores the argument
+    // entirely (`native_read` enforces a fixed 1 MiB cap), so it is no longer
+    // advertised there rather than advertising a value we do not respect.
+    let web_max_bytes = serde_json::json!({
         "type": "integer",
-        "minimum": 1,
+        "minimum": 1024,
         "maximum": 1048576,
-        "description": "Maximum bytes returned"
+        "description": "Maximum bytes returned (clamped to 1024..=1048576; defaults to 262144)"
     });
     let schema = match name {
         "filesystem.read" => serde_json::json!({
             "type": "object",
-            "properties": { "path": path, "max_bytes": max_bytes },
-            "required": ["path"],
+            "properties": { "path": path },
             "additionalProperties": true
         }),
-        "filesystem.list" | "git.status" | "git.diff" => serde_json::json!({
+        "filesystem.list" => serde_json::json!({
             "type": "object",
             "properties": { "path": path },
+            "additionalProperties": true
+        }),
+        "git.status" | "git.diff" => serde_json::json!({
+            "type": "object",
+            "properties": { "path": git_path },
             "required": ["path"],
             "additionalProperties": true
         }),
@@ -87,7 +103,7 @@ fn tool_input_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
                     "type": "string",
                     "description": "Public HTTP(S) URL (private addresses are refused)"
                 },
-                "max_bytes": max_bytes
+                "max_bytes": web_max_bytes
             },
             "required": ["url"],
             "additionalProperties": true
@@ -246,16 +262,49 @@ requires_approval = true
             .to_string()
     }
 
+    /// `path` is optional for the filesystem tools: `Sandbox::resolve_path`
+    /// resolves a missing `path` to ".", so the native handlers accept calls
+    /// that omit it. Advertising it as `required` made clients reject those
+    /// calls before they ever reached the gateway. `web.fetch` keeps `url`
+    /// required because `native_web_fetch` has no default for it, and now
+    /// advertises exactly the `max_bytes` range the implementation honours;
+    /// `filesystem.read` drops `max_bytes` because `native_read` ignores it.
     #[test]
     fn native_tools_advertise_required_arguments() {
         use super::tool_input_schema;
 
         let read = tool_input_schema("filesystem.read");
-        assert_eq!(read["required"], serde_json::json!(["path"]));
+        assert!(
+            read.get("required")
+                .and_then(|value| value.as_array())
+                .is_none_or(|fields| !fields.iter().any(|field| field.as_str() == Some("path"))),
+            "path defaults to \".\" natively and must not be required"
+        );
         assert!(read["properties"]["path"].is_object());
+        assert!(
+            read["properties"]["path"]["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("defaults to \".\""),
+            "path description must document the native \".\" default"
+        );
+        assert!(
+            read["properties"].get("max_bytes").is_none(),
+            "native_read ignores max_bytes; it must not be advertised"
+        );
+
+        let list = tool_input_schema("filesystem.list");
+        assert!(
+            list.get("required")
+                .and_then(|value| value.as_array())
+                .is_none_or(|fields| !fields.iter().any(|field| field.as_str() == Some("path"))),
+            "path defaults to \".\" natively and must not be required"
+        );
 
         let fetch = tool_input_schema("web.fetch");
         assert_eq!(fetch["required"], serde_json::json!(["url"]));
+        assert_eq!(fetch["properties"]["max_bytes"]["minimum"], 1024);
+        assert_eq!(fetch["properties"]["max_bytes"]["maximum"], 1048576);
 
         let unknown = tool_input_schema("some.upstream.tool");
         assert_eq!(unknown["type"], "object");
