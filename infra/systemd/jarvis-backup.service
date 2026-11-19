@@ -2,6 +2,7 @@
 Description=JARVIS Local Backup (PostgreSQL + Qdrant + config)
 Documentation=https://github.com/Seduce0068/jarvis
 After=network.target postgresql.service qdrant.service
+Wants=postgresql.service qdrant.service
 
 [Service]
 Type=oneshot
