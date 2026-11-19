@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:30e64f87a992fdfbd920665055230b0bab32e297368a3e8108db9c3e00582d5b",
-  "timestamp": "2026-11-19T22:26:46+09:00",
+  "spec_hash": "sha256:7e4e4b859e57d20f79685b15473b710d19f22d80e402f65f84e0374568ce1f63",
+  "timestamp": "2026-11-20T00:21:41+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "GNU make + bash (make test-verify-backup + make test-backup-args)",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-backup.md",
-    "spec_hash": "sha256:30e64f87a992fdfbd920665055230b0bab32e297368a3e8108db9c3e00582d5b",
+    "spec_hash": "sha256:7e4e4b859e57d20f79685b15473b710d19f22d80e402f65f84e0374568ce1f63",
     "requirements": [
       "REQ-1",
       "REQ-2",
