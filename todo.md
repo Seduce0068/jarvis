@@ -548,16 +548,16 @@ generated:
   `/mcp` は無認証のまま。
 - [ ] **承認要求と承認決定が同一トークンで保護され自己承認が可能** — 根拠
   `rust/jarvis-policy/src/http.rs:84-93` / R3-AU1 / 重大度 high / confirmed。
-- [ ] **`check-shell.sh` が `set -uo pipefail`（`-e` 無し）で fail-open** — 根拠
+- [x] **`check-shell.sh` が `set -uo pipefail`（`-e` 無し）で fail-open**（2026-11-19 対応済み: `set -euo pipefail` 化、`git ls-files` 失敗とチェック対象0件を明示 exit 1、shfmt WARN／shellcheck SKIP の警告扱いは維持。実機で通常 exit 0・失敗注入2パターンとも exit 1 を確認、`ci-local` exit 0） — 根拠
   `ci/scripts/check-shell.sh:6` / R2-ER4 / 重大度 high / confirmed。
   チェック対象ゼロや `git ls-files` 失敗が成功扱いになる。
-- [ ] **`build-selfhost.sh` の再デプロイで policy 設定が入れ子コピーされる** — 根拠
+- [x] **`build-selfhost.sh` の再デプロイで policy 設定が入れ子コピーされる**（2026-11-19 対応済み: 既存 `/etc/jarvis/policy` を `.bak-<ts>` へ退避してから `cp -r "${POLICY_SRC}/." "${POLICY_DST}/"` で内容のみ直下へコピー。`bash -n` / dry-run / `ci-local` exit 0。実機 /etc への書き込みは未実施） — 根拠
   `infra/scripts/build-selfhost.sh:26` / R4-DR3 / 重大度 high / confirmed。
   `cp -r .../policy /etc/jarvis/` が既存 `/etc/jarvis/policy` の
   中に `policy/` を作り実効設定が更新されない。
-- [ ] **`install-backup-timer.sh` のロールバックが有効化済み timer を停止・無効化しない** — 根拠
+- [x] **`install-backup-timer.sh` のロールバックが有効化済み timer を停止・無効化しない**（2026-11-19 対応済み: `rollback()` の先頭で unit 存在確認後に `systemctl stop` / `disable` を追加（失敗は無視）、その後ファイル復元→`daemon-reload` の順序を維持。成功経路は無変更、`bash -n` / dry-run exit 0） — 根拠
   `infra/scripts/install-backup-timer.sh:63` / R4-DR3 / 重大度 high / confirmed。
-- [ ] **最新バックアップ選択が pg 系のみで他コンポーネントの欠落を検証しない** — 根拠
+- [x] **最新バックアップ選択が pg 系のみで他コンポーネントの欠落を検証しない**（2026-11-19 対応済み: `validate_backup_set()` を新設し選択日付の pg/qdrant/configs 3コンポーネントを事前検証、欠落時は `bail!` で部分復元を拒否。`--dry-run` でも検証。fake rclone で部分セット exit 1／完全セット exit 0 を実機確認、5 tests pass） — 根拠
   `rust/scripts/restore.rs:194-216` / R4-DR2 / 重大度 high / confirmed。
 - [ ] **`store_memory` が呼び出し側指定 id で既存メモリを無条件上書き** — 根拠
   `rust/jarvis-context/src/http.rs:133-136` / R3-AU2 / 重大度 high / confirmed。
@@ -569,7 +569,7 @@ generated:
   コメントは `JARVIS_POLICY_APPROVAL_TOKEN` と書かれている。
 - [ ] **承認キュー枯渇が HTTP 200 の通常拒否として返る** — 根拠
   `rust/jarvis-policy/src/approval.rs:109-113` / R5-VU1 / 重大度 high / confirmed。
-- [ ] **kill switch の非常停止ログが永続化失敗後の実状態と矛盾** — 根拠
+- [x] **kill switch の非常停止ログが永続化失敗後の実状態と矛盾**（2026-11-19 対応済み: `persist()` を `Result<()>` 化し全失敗経路で fail-closed の `arm()` を維持した上で Err を返す。`activate()` は未永続化時に「NOT PERSISTED」warn を出し、成功時のみ従来ログ。新規回帰テスト追加、kill_switch 関連 12 tests pass） — 根拠
   `rust/jarvis-policy/src/kill_switch.rs:61-65` / R5-VU1 / 重大度 high / confirmed。
 - [ ] **現行ローカルバックアップが Git リポジトリを含まない** — 根拠
   `infra/README.md:274-279` / R5-VU3 / 重大度 high / confirmed。
@@ -643,3 +643,20 @@ generated:
   `setup-selfhost.sh || true`、初回 review の全 high 指摘。
 - **制約**: 観点を 2/ラウンドに絞ったため、前回のような全観点網羅ではない。
   既知情報として前回の全 high を配布し重複は回避できた。
+
+## 補足発見（2026-11-19 イテレーション3 / R4 レビュー）
+
+- [ ] **restore.rs のバックアップ命名体系が現行 `backup-local.sh` の出力と不一致（実バックアップから復元不能）** — 根拠
+  `rust/scripts/restore.rs:133-135`, `infra/scripts/backup-local.sh:35` /
+  R4 レビュー / 重大度 high / confirmed。
+  - `restore.rs` は rclone リモート上のフラットな日付命名
+    （`pg-<date>.sql.gz` / `qdrant-<date>.snapshot` / `configs-<date>.tar.gz`）
+    を探す。
+  - 一方、2026-11-19 に実機導入した `backup-local.sh` は
+    `<host>-<stamp>/` ディレクトリ内に
+    `postgres-jarvis.sql.gz` / `qdrant-snapshot.bin` / `config-*.tar`
+    を生成する（ADR-0004 のローカル専用運用）。
+  - 今回追加した `validate_backup_set()` は `restore.rs` 内部の整合性を
+    改善したが、**実バックアップセットは依然として見つからない**。
+  - 復元演習の前に、`restore.rs` をローカルバックアップ体系へ接続する
+    （またはレガシー rclone 経路を明示的に廃止する）必要がある。
