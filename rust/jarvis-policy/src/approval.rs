@@ -588,6 +588,20 @@ impl ApprovalStore {
     /// Recovered, expired and over-limit counts are emitted in one `INFO` log
     /// line so a backlog is visible after every restart.
     ///
+    /// Expired-row settlement is best-effort per row (I34-E): a failed
+    /// [`ApprovalPersistence::mark_expired`] no longer short-circuits the loop,
+    /// so every remaining expired row is still settled. `AlreadyDecided` counts
+    /// as success (the row was already settled by a concurrent decision or
+    /// expiry). Other failures are reported as a structured warning carrying
+    /// only the request id and fixed message text — no URL, SQL or upstream
+    /// error string — and the first failure is returned only after the loop.
+    ///
+    /// Startup policy: reconciliation still fails closed if any expired row
+    /// could not be settled, so an undecided, unaudited durable row is never
+    /// silently ignored by `PolicyEngine::new()`. Startup therefore fails only
+    /// when unsettled rows actually remain, not merely because an earlier row
+    /// failed; every other row is settled before the error reaches the caller.
+    ///
     /// With [`NoopPersistence`] this is a true no-op: `load_pending` yields an
     /// empty vector, so nothing is registered and nothing is audited. No
     /// existing API's return type or behavior changes.
@@ -641,19 +655,49 @@ impl ApprovalStore {
                 }
             }
         }
+        // Per-row settlement (I34-E): one failed `mark_expired` must not strand
+        // the remaining expired rows. `AlreadyDecided` means the row was already
+        // settled by a concurrent decision/expiry and counts as success. Other
+        // errors are reported with only the request id and fixed vocabulary
+        // (no URL, SQL or upstream error text) and are collected so the loop
+        // always visits every row.
+        let settled_expired = expired.len();
+        let mut settlement_failed = 0usize;
+        let mut first_error: Option<ApprovalError> = None;
+        for id in expired {
+            match self.inner.persistence.mark_expired(id, now).await {
+                Ok(()) | Err(ApprovalError::AlreadyDecided(_)) => {}
+                Err(error) => {
+                    settlement_failed += 1;
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                    tracing::warn!(
+                        request_id = %id,
+                        "failed to settle expired approval; continuing with remaining rows"
+                    );
+                }
+            }
+        }
         tracing::info!(
             loaded = total,
             recovered,
-            settled_expired = expired.len(),
+            settled_expired,
+            settlement_failed,
             over_limit,
             already_present,
             max_pending = self.inner.max_pending,
             "approval startup reconciliation complete"
         );
-        for id in expired {
-            self.inner.persistence.mark_expired(id, now).await?;
+        // Fail-closed: after attempting every row, fail startup only if an
+        // expired row is still unsettled. Returning here keeps
+        // `PolicyEngine::new()` from silently ignoring an undecided, unaudited
+        // durable row, while the loop above has already settled every other
+        // row before the error reaches the caller.
+        match first_error {
+            Some(error) => Err(error),
+            None => Ok(()),
         }
-        Ok(())
     }
 
     /// Drop entries that can no longer produce a real decision, settling every
@@ -1517,13 +1561,20 @@ mod tests {
 
     /// Mock durable backend that replays a fixed set of undecided rows and
     /// mirrors the Pg backend's audit write inside `mark_expired` (one audit row
-    /// per settled hold). No database is contacted.
+    /// per settled hold). No database is contacted. The optional id fields
+    /// inject settlement outcomes for I34-E without any I/O.
     #[derive(Debug, Default)]
     struct ReconcilePersistence {
         rows: tokio::sync::Mutex<Vec<ApprovalRequest>>,
         expired: tokio::sync::Mutex<Vec<Uuid>>,
         audit: tokio::sync::Mutex<Vec<Uuid>>,
         decisions: tokio::sync::Mutex<Vec<Uuid>>,
+        /// `mark_expired` for this id fails with [`ApprovalError::Persistence`]
+        /// and writes no audit row, simulating a failed durable settlement.
+        fail_mark_expired_for: Option<Uuid>,
+        /// `mark_expired` for this id reports [`ApprovalError::AlreadyDecided`],
+        /// simulating a row a concurrent decision/expiry already settled.
+        already_decided_for: Option<Uuid>,
     }
 
     #[async_trait::async_trait]
@@ -1555,6 +1606,12 @@ mod tests {
             id: Uuid,
             _expired_at: DateTime<Utc>,
         ) -> Result<(), ApprovalError> {
+            if self.already_decided_for == Some(id) {
+                return Err(ApprovalError::AlreadyDecided(id));
+            }
+            if self.fail_mark_expired_for == Some(id) {
+                return Err(ApprovalError::Persistence);
+            }
             self.expired.lock().await.push(id);
             // `PgApprovalPersistence::mark_expired` commits an Expired decision
             // plus one audit row; the mock mirrors that observable effect.
@@ -1986,5 +2043,84 @@ mod tests {
             1,
             "the surplus settlement writes exactly one audit row"
         );
+    }
+
+    /// I34-E regression: a single failed `mark_expired` must not strand the
+    /// remaining expired rows. Every row after the failure is still settled and
+    /// audited; because one row remains unsettled, reconciliation still fails
+    /// closed (the old `?` short-circuit stranded the later rows).
+    #[tokio::test]
+    async fn reconcile_continues_settling_after_one_mark_expired_failure() {
+        let mut failing = make_request();
+        failing.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        let mut good_a = make_request();
+        good_a.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        let mut good_b = make_request();
+        good_b.expires_at = Utc::now() - chrono::Duration::seconds(1);
+
+        // The failing row is first: the old short-circuit never reached the
+        // two rows behind it.
+        let mock = Arc::new(ReconcilePersistence {
+            fail_mark_expired_for: Some(failing.id),
+            ..Default::default()
+        });
+        {
+            let mut rows = mock.rows.lock().await;
+            rows.push(failing.clone());
+            rows.push(good_a.clone());
+            rows.push(good_b.clone());
+        }
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            mock.clone(),
+        );
+        assert!(
+            store.reconcile_pending().await.is_err(),
+            "an unsettled row must keep startup fail-closed"
+        );
+
+        let settled = mock.expired.lock().await;
+        assert!(
+            settled.contains(&good_a.id) && settled.contains(&good_b.id),
+            "a single failure must not strand later rows: {settled:?}"
+        );
+        assert!(!settled.contains(&failing.id));
+        let audit = mock.audit.lock().await;
+        assert_eq!(audit.len(), 2, "exactly the two good rows are audited");
+        assert!(audit.contains(&good_a.id) && audit.contains(&good_b.id));
+    }
+
+    /// I34-E: `AlreadyDecided` is a success outcome for `mark_expired` (the row
+    /// was settled by a concurrent decision/expiry), so reconciliation succeeds
+    /// and the remaining expired rows are still settled.
+    #[tokio::test]
+    async fn reconcile_treats_already_decided_as_success() {
+        let mut already = make_request();
+        already.expires_at = Utc::now() - chrono::Duration::seconds(1);
+        let mut good = make_request();
+        good.expires_at = Utc::now() - chrono::Duration::seconds(1);
+
+        let mock = Arc::new(ReconcilePersistence {
+            already_decided_for: Some(already.id),
+            ..Default::default()
+        });
+        {
+            let mut rows = mock.rows.lock().await;
+            rows.push(already.clone());
+            rows.push(good.clone());
+        }
+
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            mock.clone(),
+        );
+        store.reconcile_pending().await.expect("reconcile");
+
+        let settled = mock.expired.lock().await;
+        assert_eq!(*settled, vec![good.id]);
+        assert_eq!(*mock.audit.lock().await, vec![good.id]);
     }
 }
