@@ -140,6 +140,33 @@ make check-evidence
 | `document_type` | 設定時は `test-execution-log` / `test-result` / `test-summary-report` のいずれか（`BAD_DOCUMENT_TYPE`） |
 | 仕様構造 | 必須4セクション、7列 Traceability、Document map、6情報項目、`tailored`（`MISSING_SECTION` 等） |
 
+## JSON リジェクションの status 回帰（I61-A）
+
+`jarvis_core::BareJson` は axum の `JsonRejection` を種別別の空本文 status へ
+変換する。型不正・構文エラーは従来どおり 400 のままである。
+
+| 種別 | status | クライアント側の対処 |
+| --- | --- | --- |
+| `MissingJsonContentType` | 415 | `Content-Type: application/json` を付ける |
+| `BytesRejection`（既定 2 MiB 超過） | 413 | 本文を小さくする |
+| `JsonDataError` / `JsonSyntaxError` | 400 | JSON の型・構文を直す |
+
+回帰は `jarvis-core` の `bare_json_missing_content_type_is_415` /
+`bare_json_oversized_body_is_413` /
+`bare_json_type_and_syntax_errors_stay_400` で検証する。拒否ログは固定語彙
+（`invalid_input` / `body`）の DEBUG レコードのみで、本文や axum の rejection
+テキストは出力しない。context の I57-A ログ回帰はサブスクライバを DEBUG に
+設定したうえで、同じ固定語彙が残ることを検証する。
+
+仕様・証跡を更新した場合は上記の再生成手順に従い、次の実測値を証跡へ記録する。
+
+```bash
+cd rust && cargo test -p jarvis-core --features http --lib
+cd rust && cargo test --workspace
+```
+
+ハッシュだけの書き換えは禁止する。
+
 ## 関連
 
 - [specs/index.md](../../specs/index.md): テスト仕様の索引
