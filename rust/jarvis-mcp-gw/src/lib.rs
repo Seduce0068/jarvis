@@ -17,6 +17,29 @@ mod testing;
 use anyhow::Result;
 use std::sync::Arc;
 
+/// Build the Cedar authorization context from server-controlled,
+/// allowlist-derived attributes only.
+///
+/// The caller's raw tool arguments are deliberately excluded: forwarding them
+/// would let a caller forge ABAC attributes (e.g. inject a `principal` or
+/// `requires_approval` field) and influence the policy decision. The shipped
+/// policy (`infra/config/policy/policies.cedar`) conditions only on
+/// `principal`/`action`/`resource`, so no argument-derived field is required
+/// and no existing policy condition is broken by this restricted context.
+fn policy_context(
+    tool: &str,
+    principal: &str,
+    resource: &str,
+    requires_approval: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tool": tool,
+        "principal": principal,
+        "resource": resource,
+        "requires_approval": requires_approval,
+    })
+}
+
 #[derive(Clone)]
 #[allow(dead_code)]
 pub struct McpGateway {
@@ -79,13 +102,26 @@ impl McpGateway {
             principal
         };
 
-        // Policy first. Gateway capabilities use the canonical resource
-        // form `tool:<name>` (see infra/config/policy/casbin_policy.csv).
+        // Gateway capabilities use the canonical resource form `tool:<name>`
+        // (see infra/config/policy/casbin_policy.csv).
         let resource = format!("tool:{tool}");
+
+        // Build the Cedar context from server-controlled, allowlist-derived
+        // attributes only. The caller's raw `args` are deliberately excluded:
+        // forwarding them would let a caller forge ABAC attributes and sway
+        // the decision. Fetch the allowlist entry first so `requires_approval`
+        // comes from trusted configuration rather than the wire payload.
+        let tool_config = self.allowlist.get_config(tool);
+        let requires_approval = tool_config
+            .as_ref()
+            .map(|cfg| cfg.requires_approval)
+            .unwrap_or(false);
+        let context = policy_context(tool, principal, &resource, requires_approval);
+
         // `is_allowed` fails closed (false on transport errors).
         let allowed = self
             .policy_client
-            .is_allowed(principal, "execute", &resource, &args)
+            .is_allowed(principal, "execute", &resource, &context)
             .await;
         if !allowed {
             return Err(error::McpGatewayError::PolicyDenied {
@@ -99,10 +135,8 @@ impl McpGateway {
         // admitted, and the tool entry must grant the principal. The
         // allowlist remains the single source of truth for what may run.
         self.allowlist.check(tool)?;
-        let tool_config = self
-            .allowlist
-            .get_config(tool)
-            .ok_or_else(|| error::McpGatewayError::NotAllowed(tool.into()))?;
+        let tool_config =
+            tool_config.ok_or_else(|| error::McpGatewayError::NotAllowed(tool.into()))?;
         if !self.allowlist.is_principal_allowed(principal)
             || !tool_config
                 .allowed_principals
@@ -186,7 +220,7 @@ impl McpGateway {
         if tool_config.requires_approval
             && !self
                 .policy_client
-                .is_allowed(principal, "execute", &resource, &args)
+                .is_allowed(principal, "execute", &resource, &context)
                 .await
         {
             return Err(error::McpGatewayError::PolicyDenied {
@@ -235,6 +269,20 @@ mod tests {
         run_mock_mcp_server, shipped_policy_client_with_engine, start_policy_http,
     };
     use serde_json::json;
+
+    #[test]
+    fn policy_context_uses_only_server_derived_attributes() {
+        let context = policy_context("shell.execute", "opencode", "tool:shell.execute", true);
+        assert_eq!(
+            context,
+            json!({
+                "tool": "shell.execute",
+                "principal": "opencode",
+                "resource": "tool:shell.execute",
+                "requires_approval": true,
+            })
+        );
+    }
 
     const APPROVAL_ALLOWLIST: &str = r#"
 principals = ["opencode"]
