@@ -54,6 +54,51 @@ fn query_embedding_outcome(
     }
 }
 
+/// Payload fields of a Qdrant scored point, keyed by payload name.
+type QdrantPayload = std::collections::HashMap<String, qdrant_client::qdrant::Value>;
+
+/// Map a raw Qdrant point id string to a `Uuid`.
+///
+/// Returns `None` for a missing or malformed id instead of fabricating a
+/// `Uuid::nil()` (or a random v4). A fabricated id would silently leak into
+/// the caller's search results as if Qdrant had returned a real memory.
+fn parse_point_id(id_str: Option<&str>) -> Option<Uuid> {
+    Uuid::parse_str(id_str?).ok()
+}
+
+/// Convert Qdrant scored-point fields into memory entries, skipping every
+/// point whose id is missing or not a valid UUID.
+///
+/// This is the single place a Qdrant result becomes a `MemoryEntry`, so the
+/// "no invalid ids" guarantee is testable without a live Qdrant connection.
+/// Skipped points are reported with a warning rather than injected as a nil
+/// UUID; a nil id must never reach `reorder_by_ids` or the SQL `ANY($1)` list.
+fn entries_from_raw_points(points: Vec<(Option<String>, QdrantPayload)>) -> Vec<MemoryEntry> {
+    let now = Utc::now();
+    points
+        .into_iter()
+        .filter_map(|(id_str, payload)| {
+            let id = match parse_point_id(id_str.as_deref()) {
+                Some(id) => id,
+                None => {
+                    warn!("skipping Qdrant result with missing or invalid point id: {id_str:?}");
+                    return None;
+                }
+            };
+            Some(MemoryEntry {
+                id,
+                content: String::new(), // Fetched from PostgreSQL afterwards.
+                embedding: vec![],
+                metadata: serde_json::to_value(payload).unwrap_or_default(),
+                source: String::new(),
+                created_at: now,
+                updated_at: now,
+                expires_at: None,
+            })
+        })
+        .collect()
+}
+
 pub struct Builder {
     config: crate::config::ContextConfig,
     pg_pool: Arc<deadpool_postgres::Pool>,
@@ -355,32 +400,29 @@ pub mod memory {
             .await
             .map_err(|e| crate::error::ContextError::Qdrant(e.to_string()))?;
 
-        Ok(response
+        // A missing point id, missing `point_id_options`, or a numeric id
+        // cannot be represented as a `Uuid` matching PostgreSQL's `uuid`
+        // column. Map those to `None` so `entries_from_raw_points` skips the
+        // point (with a warning) instead of falling back to a nil/random id.
+        let points = response
             .result
             .into_iter()
             .map(|scored| {
-                let id_str = match &scored.id {
-                    Some(id) => match &id.point_id_options {
-                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(u)) => u.clone(),
-                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(n)) => {
-                            n.to_string()
+                let id_str = match scored.id.as_ref() {
+                    Some(id) => match id.point_id_options.as_ref() {
+                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Uuid(u)) => {
+                            Some(u.to_string())
                         }
-                        None => Uuid::new_v4().to_string(),
+                        Some(qdrant_client::qdrant::point_id::PointIdOptions::Num(_)) | None => {
+                            None
+                        }
                     },
-                    None => Uuid::new_v4().to_string(),
+                    None => None,
                 };
-                MemoryEntry {
-                    id: Uuid::parse_str(&id_str).unwrap_or_default(),
-                    content: String::new(), // Will be fetched from PG
-                    embedding: vec![],
-                    metadata: serde_json::to_value(scored.payload).unwrap_or_default(),
-                    source: String::new(),
-                    created_at: Utc::now(),
-                    updated_at: Utc::now(),
-                    expires_at: None,
-                }
+                (id_str, scored.payload)
             })
-            .collect())
+            .collect();
+        Ok(entries_from_raw_points(points))
     }
 }
 
@@ -388,6 +430,7 @@ pub mod memory {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn context_within_budget_is_unchanged() {
@@ -546,6 +589,45 @@ mod tests {
         let vector = vec![0.1_f32, 0.2, 0.3];
         let outcome = query_embedding_outcome(Some(Ok(vector.clone()))).expect("embed succeeds");
         assert_eq!(outcome, Some(vector));
+    }
+
+    #[test]
+    fn tc_f_parse_point_id_rejects_missing_and_malformed_ids() {
+        let valid = Uuid::new_v4();
+        let valid_str = valid.to_string();
+        assert_eq!(parse_point_id(Some(valid_str.as_str())), Some(valid));
+        assert_eq!(parse_point_id(Some("not-a-uuid")), None);
+        assert_eq!(parse_point_id(Some("")), None);
+        assert_eq!(parse_point_id(None), None);
+    }
+
+    #[test]
+    fn tc_f_malformed_point_id_is_skipped_instead_of_nil_uuid() {
+        let valid = Uuid::new_v4();
+        let points = vec![
+            (Some("definitely-not-a-uuid".to_string()), HashMap::new()),
+            (None, HashMap::new()), // missing / numeric point id
+            (Some(valid.to_string()), HashMap::new()),
+        ];
+
+        let entries = entries_from_raw_points(points);
+
+        assert_eq!(entries.len(), 1, "invalid ids must not enter the results");
+        assert_eq!(entries[0].id, valid);
+        assert!(
+            !entries.iter().any(|entry| entry.id.is_nil()),
+            "no nil UUID fallback is allowed"
+        );
+    }
+
+    #[test]
+    fn tc_f_all_invalid_point_ids_produce_no_entries() {
+        let points = vec![
+            (Some("bad-id".to_string()), HashMap::new()),
+            (None, HashMap::new()),
+            (Some("42".to_string()), HashMap::new()),
+        ];
+        assert!(entries_from_raw_points(points).is_empty());
     }
 }
 
