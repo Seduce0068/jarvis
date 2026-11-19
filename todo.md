@@ -1647,3 +1647,31 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、`BareJson` extractor の不要な `?`（3箇所）、
   REQ 集合中不一致（evidence requirements 同期＋UI spec の REQ-1 行）。
+
+### Round 56（R4 で修正済み）
+
+- [x] 409 本文が非空の別本文なら winner に倒れる fail-open（medium）→
+  `ALREADY_DECIDED_409_BODY` 完全一致時のみ winner、それ以外の全409を
+  停止側へ fail-closed。共有定数＋UI/core/policy の独立 pin。UI 67 tests。
+- [x] Round 54 の shell fail-closed 修正に自動回帰が無い（low）→
+  egress 重複拒否・env 復元構造ガード・drift DANGER→exit3 の3ケース追加。
+- [x] specs/test-ui.md の旧分類記述を新契約（fail-closed）へ更新し、
+  evidence 実測再生成（67件）。
+
+### Round 56 の残り指摘（未対応）
+
+- [ ] シナリオ充足ゲートが skipped を「実行済み」と計上（medium）—
+  `check-evidence.sh:184-186` の executed から skipped を除外し、
+  near-total skip を通さない。
+- [ ] 有限性チェックが store ingress のみ（medium）— query embedding /
+  reconcile / f64→f32 キャスト経路へ `validate_embedding` を適用。
+- [ ] REQ 集合ゲートが spec ごとに最後の evidence しか検証しない（low）。
+- [ ] OTel SDK ガードがより詳細な RUST_LOG ターゲット指定で上書き可能（low）。
+- [ ] サイズ境界が content/source/metadata のみ（low）— payload / query /
+  event_type / correlation_id にも上限を追加。
+- [ ] 発掘: policy/mcp-gw/event の JsonRejection 未対応、event の生 anyhow
+  ログ、UI の expires_at 境界不一致、backup-preflight の BK-4 表記、
+  docs/architecture/AGENTS.md の verify.rs 欠落。
+
+- 親が対応: fmt 差分、shellcheck の SC2329（eval 間接呼び出し）、
+  spec 変更に伴う evidence 実測再生成（UI 67）。
