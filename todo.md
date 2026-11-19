@@ -481,7 +481,7 @@ generated:
 - [x] `check-shell` が shellcheck 未インストール時に SKIP して成功扱い — 2026-11-19 対応済み: 未検出時に fail-closed でエラー終了。CI runner へ shellcheck を導入するため `.github/workflows/ci.yml` の apt_packages にも追加。shfmt 警告のみの挙動は維持 / `ci/scripts/check-shell.sh:22-33` / R5-VU4 / confirmed
 - [x] `check-evidence.sh` が skipped 数・仕様シナリオ数を照合せず合格 — 2026-11-19 対応済み: `Scenario:` 行数と `passed+failed+skipped` を照合し不足時に `SCENARIO_COUNT_MISMATCH`。1シナリオが複数テストへ展開される既存設計のため下限判定を採用、既存6証跡すべて合格（ok=6 errors=0） / `ci/scripts/check-evidence.sh:82-85` / R3-TQ4 / confirmed
 - [x] deploy がヘルスチェック失敗を警告のみで完了報告 — 2026-11-19 対応済み: `evaluate_health_checks()` を追加し異常なら `bail!` で非ゼロ終了（全失敗ポートを列挙）。dry-run の skip と 200 は維持。回帰テスト4件追加、deploy rust-script pass / `rust/scripts/deploy.rs:385-389` / R4-DR2 / confirmed（既存 P2-8 と関連）
-- [x] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — 2026-11-19 対応済み: 完全セットに postgres/qdrant/config-* の実在を必須化し欠落時 `REQUIRED MISSING` で失敗。子の指摘で既存フィクスチャ2件が新チェックで失敗したため親が必須ペイロードを追加、`test-verify-backup` 23 tests pass / `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
+- [x] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — 2026-11-19 対応は **COMPLETE-gated な部分修正に過ぎなかった**: `:69` の `if [ -f "$set/COMPLETE" ]` 配下でのみ postgres/qdrant/config-* の実在を必須化し、完全セットの欠落は `REQUIRED MISSING` で失敗。COMPLETE が無い legacy セットは検査自体がスキップされ、`created_at` ヘッダもペイロードも無い manifest だけのディレクトリが exit 0 で通過する fail-open が残存。子の指摘で既存フィクスチャ2件が新チェックで失敗したため親が必須ペイロードを追加し `test-verify-backup` 23 tests pass を記録したが、この23件に fail-open 期待が含まれていたため完了主張は過大。完全修正は Round 65 残り指摘の I69-B を参照 / `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
 - [x] jq 欠落時にバックアップ整合性検証をスキップして verified と報告 — 2026-11-19 対応済み: apply 時に jq が無ければ `fail()` で非ゼロ終了（verified に到達しない）。dry-run は jq 不要を維持、bash -n OK / `infra/scripts/install-backup-timer.sh:96` / R2-ER3 / confirmed
 - [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed。
   - **2026-11-19 調査**: repo 内に SHA256SUMS / 署名鍵 / 公開ダイジェストは存在せず（glob/grep 0件）、Qdrant / otelcol-contrib / bws / code-server の取得元を照合できない。勝手なハードコードや外部取得は追加せず、未検証の旨と推奨対応（リリース側でバージョン固定の SHA256SUMS + 署名を公開し取得・照合）を setup-selfhost.sh のコメントに明記。情報源が用意されるまで未解決。
@@ -1923,9 +1923,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **restore-local の config allowlist 検証が本番 DB/Qdrant 上書き後**
   （confirmed high）— `configs.sh:62` の検査を `verify_set()` の必須ゲート
   （stop_services より前）へ移動。`--skip-configs` 時も通过させる。
-- [ ] verify-backup.sh の legacy 経路がペイロード0件を受理（medium）—
-  COMPLETE の有無に関わらず必須ペイロード実在を検査、回帰テストの
-  fail-open 期待を訂正。
+- [x] verify-backup.sh の legacy 経路がペイロード0件を受理（confirmed medium / I69-B）—
+  2026-11-20 対応済み: 必須ペイロード実在検査を COMPLETE marker の有無に
+  かかわらず全セットへ適用し、空／ヘッダのみの manifest も
+  `manifest has no file entries` で拒否。既存 legacy 合格フィクスチャは
+  postgres/qdrant/config-* の完全ペイロード付きへ変更し期待値名を実態に
+  合わせ、新規2ケース（ヘッダ無し・ペイロード無し／自明ファイルのみ）で
+  exit 1 を追加。値・パス非出力、実バックアップ先は非接触。検証は親が実施
+  （回帰は 23→25 件、証跡の passed 29→31 は親が再生成）。
 - [ ] 隔離 DB `jarvis_restore_test` が後始末されず2回目の復元が不能
   （medium）— Qdrant と対称に DROP、失敗経路も trap で片付け。
 - [ ] migration 範囲コメントが jarvis-policy/context service で through 004
@@ -1936,3 +1941,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   または JUnit 出力から機械導出する生成器の導入。
 
 - 親が対応: fmt 差分、JSON/YAML 構文確認、全ゲート再検証。
+
+### Round 66（R4 で修正済み）
+
+- [x] **restore-local の config allowlist 検証が本番 DB/Qdrant 上書き後**
+  （confirmed high）→ 検査を `verify_set()` の必須ゲート（stop_services より前）
+  へ移動、`--skip-configs` も通过不可。`configs.sh` は共有helper に統一。
+- [x] verify-backup.sh の legacy fail-open（medium）→ 必須ペイロード検査の
+  COMPLETE ゲート撤廃、空 manifest 拒否、回帰2件追加（23→25）。
+- [x] 隔離 DB の後始末（medium）→ 検証後の DROP＋EXIT trap、
+  `--keep-isolated-db` オプション、設計書同期。
+- [x] 証跡 generator（`ci/scripts/generate-evidence.sh`）追加、
+  outbox gauge を terminal 遷移後に再集計（回帰4件）。
+- [x] 証跡の実測件数を同期（context 162→166、backup 29→31）。
+
+### Round 66 の残り指摘（未対応）
+
+- [ ] restore-local の非 allowlist config 回帰が `test-restore-local.sh` に
+  未追加（子の担当外）— `verify_set()` ゲートで拒否され DB が触られない
+  ケースを `--apply --confirm` と `--skip-configs` の両方で検証。
+- [ ] migration 範囲コメントが jarvis-policy/context service で through 004
+  のまま（low）、build-selfhost.sh のガードコメントも未更新。
+- 親が対応: test-restore-local.sh の DROP アサートを本番 DB 宛に限定、
+  証跡の実測件数同期。
