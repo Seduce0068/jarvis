@@ -80,6 +80,48 @@ rollback() {
 [ -x "$bin" ] || die "リリースバイナリがありません: cargo build --release -p jarvis-mcp-gw"
 if [ "$apply" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then die "rootで実行してください（sudo）"; fi
 
+# I41-B: 配置前 provenance ゲート（--apply 時のみ・必須）。
+# build-selfhost.sh の clean-tree gate は自スクリプト内に閉じており、
+# rust/target/release/ の成果物をここから直接 install すると迂回できた。
+# HEAD 解決とクリーンツリー確認を配置前の必須ゲートとし、未コミット成果物の
+# 配置を拒否する。step2 は repo 側 allowlist を書き換えるため、ゲートは
+# その前（ここ）に置く（書き換え後だと dirty を誤検出する）。
+if [ "$apply" -eq 1 ]; then
+  echo "== 0a. 配置前 provenance ゲート（git 整合性・必須） =="
+  # rev-parse は fail-closed。git 失敗 / 空 / unknown は差分を出さず exit 1。
+  if ! deploy_head="$(git -C "$repo" rev-parse HEAD 2>/dev/null)"; then
+    die "git rev-parse HEAD が失敗しました: $repo（配置拒否）"
+  fi
+  if [ -z "$deploy_head" ] || [ "$deploy_head" = "unknown" ]; then
+    die "git rev-parse HEAD が不正な値を返しました（配置拒否）"
+  fi
+  # --quiet は差分内容を出力しない。unstaged / staged の両方を must pass とする。
+  if ! git -C "$repo" diff --quiet; then
+    die "作業ツリーに未コミット差分があります: $repo（配置拒否）"
+  fi
+  if ! git -C "$repo" diff --cached --quiet; then
+    die "インデックスにステージ済み差分があります: $repo（配置拒否）"
+  fi
+  echo "  HEAD=$deploy_head / tracked tree clean: OK"
+
+  # 配置対象バイナリに .jarvis-build-commit が添付されていれば HEAD と照合する。
+  # build-selfhost.sh のマーカーと同じ形式（1行のコミット値）を読み取り、
+  # 存在する場合のみ fail-closed で検証。現行ビルド経路はマーカーを
+  # rust/target/release/ へ置かないため、未添付は best-effort として許容する。
+  bin_marker="${bin%/*}/.jarvis-build-commit"
+  if [ -e "$bin_marker" ]; then
+    [ -s "$bin_marker" ] || die "ビルドマーカーが空です: $bin_marker（配置拒否）"
+    marker_head="$(tr -d '[:space:]' < "$bin_marker")"
+    if [ -z "$marker_head" ] || [ "$marker_head" = "unknown" ]; then
+      die "ビルドマーカーが不正です: $bin_marker（配置拒否）"
+    fi
+    if [ "$marker_head" != "$deploy_head" ]; then
+      die "ビルドマーカー $marker_head が HEAD $deploy_head と不一致（配置拒否）"
+    fi
+    echo "  build marker: OK ($marker_head)"
+  fi
+fi
+
 echo "== 0. 前提確認 =="
 id -u koppe >/dev/null 2>&1 || die "ユーザー koppe が存在しません（unit の User= と不一致）"
 [ -r /home/koppe ] || die "/home/koppe が読めません（ProtectHome=read-only と base dir の前提を確認）"
