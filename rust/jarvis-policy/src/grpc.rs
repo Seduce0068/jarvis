@@ -33,12 +33,18 @@ impl PolicyService for GrpcPolicyService {
         // handler. Cedar rejects JSON `null`, so without this the gRPC server
         // would error on contexts the client used to sanitize before sending.
         let context = crate::client::without_nulls(&context);
-        let allowed = self
+        // I21-E: use the same reason-aware evaluation as the HTTP handler so
+        // both transports classify a decision identically. Evaluation errors
+        // are fail-closed (allowed = false) with a fixed reason instead of an
+        // internal status carrying an error string that may leak policy data.
+        let outcome = self
             .engine
-            .is_allowed(&req.principal, &req.action, &req.resource, &context)
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-        Ok(Response::new(CheckResponse { allowed }))
+            .check_with_reason(&req.principal, &req.action, &req.resource, &context)
+            .await;
+        Ok(Response::new(CheckResponse {
+            allowed: outcome.allowed,
+            reason: outcome.reason.to_owned(),
+        }))
     }
 
     async fn get_kill_switch_status(
@@ -277,5 +283,81 @@ mod tests {
             normalized, clean,
             "nulls in the context must not change the gRPC decision"
         );
+    }
+
+    /// I21-E: the additive `reason` field uses the same closed vocabulary as
+    /// HTTP and never carries request data or internal error strings.
+    #[tokio::test]
+    async fn check_response_carries_fixed_reasons() {
+        let service = test_service("grpc-reasons").await;
+
+        let allowed = service
+            .check(check_request_for("tool:filesystem.read", "{}"))
+            .await
+            .expect("check runs")
+            .into_inner();
+        assert!(allowed.allowed);
+        assert_eq!(allowed.reason, "allowed");
+
+        let rbac_denied = service
+            .check(check_request_for("tool:no.such.tool", "{}"))
+            .await
+            .expect("check runs")
+            .into_inner();
+        assert!(!rbac_denied.allowed);
+        assert_eq!(rbac_denied.reason, "rbac_denied");
+
+        // A quoted principal cannot be parsed as a Cedar entity UID. The RPC
+        // still succeeds so the caller can see the fixed `evaluation_error`
+        // reason instead of an internal status carrying the parse error.
+        let failed = service
+            .check(Request::new(CheckRequest {
+                principal: "bad\"principal".into(),
+                action: "execute".into(),
+                resource: "tool:filesystem.read".into(),
+                context: "{}".into(),
+            }))
+            .await
+            .expect("evaluation failure is returned in the response")
+            .into_inner();
+        assert!(!failed.allowed);
+        assert_eq!(failed.reason, "evaluation_error");
+
+        for reason in [&allowed.reason, &rbac_denied.reason, &failed.reason] {
+            assert!(matches!(
+                reason.as_str(),
+                "allowed" | "kill_switch" | "rbac_denied" | "cedar_denied" | "evaluation_error"
+            ));
+            assert!(!reason.contains("tool:"));
+        }
+
+        service
+            .engine
+            .activate_kill_switch(
+                "SENTINEL-KILL-REASON-DO-NOT-LEAK".into(),
+                "test-admin-token",
+            )
+            .expect("activate kill switch");
+        let killed = service
+            .check(check_request_for("tool:filesystem.read", "{}"))
+            .await
+            .expect("check runs")
+            .into_inner();
+        assert!(!killed.allowed);
+        assert_eq!(killed.reason, "kill_switch");
+        assert!(!killed.reason.contains("SENTINEL-KILL-REASON-DO-NOT-LEAK"));
+    }
+
+    /// I21-E: a Cedar policy set that actively denies is reported as such.
+    #[tokio::test]
+    async fn check_response_reports_cedar_denied() {
+        let service = cedar_only_service("grpc-cedar-denied").await;
+        let response = service
+            .check(check_request_for("tool:not.permitted", "{}"))
+            .await
+            .expect("check runs")
+            .into_inner();
+        assert!(!response.allowed);
+        assert_eq!(response.reason, "cedar_denied");
     }
 }

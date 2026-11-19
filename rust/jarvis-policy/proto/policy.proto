@@ -18,6 +18,11 @@ message CheckRequest {
 
 message CheckResponse {
   bool allowed = 1;
+  // Additive field 2: a fixed, non-sensitive reason for the decision, e.g.
+  // "allowed", "kill_switch", "rbac_denied", "cedar_denied" or
+  // "evaluation_error". Old clients may ignore it; the existing `allowed`
+  // field keeps its meaning.
+  string reason = 2;
 }
 
 message KillSwitchStatusResponse {

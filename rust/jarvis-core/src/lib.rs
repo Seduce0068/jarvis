@@ -55,6 +55,14 @@ pub struct PolicyCheckRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyCheckResponse {
     pub allowed: bool,
+    /// Fixed, non-sensitive decision reason (e.g. `allowed`, `kill_switch`,
+    /// `rbac_denied`, `cedar_denied`, `evaluation_error`).
+    ///
+    /// `#[serde(default)]` keeps deserialization backward compatible with
+    /// payloads written before this field existed, and serde ignores unknown
+    /// keys by default so older readers can still consume new payloads.
+    #[serde(default)]
+    pub reason: String,
 }
 
 /// Approval request
@@ -184,6 +192,31 @@ mod tests {
         let json = serde_json::to_value(&event).expect("event serializes");
         assert_eq!(json["source"], "home_assistant");
         assert_eq!(json["event_type"], "state_changed");
+    }
+
+    /// The additive `reason` field must not break payloads from older peers
+    /// that only know `allowed`.
+    #[test]
+    fn policy_check_response_accepts_legacy_payload_without_reason() {
+        let legacy: PolicyCheckResponse =
+            serde_json::from_str(r#"{"allowed":false}"#).expect("legacy payload parses");
+        assert!(!legacy.allowed);
+        assert_eq!(legacy.reason, "");
+    }
+
+    /// A new payload carries the fixed reason and stays readable by callers
+    /// that ignore unknown keys (serde's default behavior).
+    #[test]
+    fn policy_check_response_round_trips_reason() {
+        let response = PolicyCheckResponse {
+            allowed: false,
+            reason: "kill_switch".into(),
+        };
+        let encoded = serde_json::to_string(&response).expect("serializes");
+        assert_eq!(encoded, r#"{"allowed":false,"reason":"kill_switch"}"#);
+        let decoded: PolicyCheckResponse = serde_json::from_str(&encoded).expect("parses");
+        assert!(!decoded.allowed);
+        assert_eq!(decoded.reason, "kill_switch");
     }
 
     #[test]

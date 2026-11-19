@@ -72,9 +72,52 @@ struct CheckRequest {
     context: serde_json::Value,
 }
 
+/// Closed vocabulary for `/v1/check` and the gRPC `Check` RPC.
+///
+/// These literals are the only values ever returned as a decision reason. No
+/// request-derived data (principal, context, kill-switch reason, policy path)
+/// is included, so a caller cannot use this field to exfiltrate policy content.
+pub(crate) mod check_reasons {
+    pub const ALLOWED: &str = "allowed";
+    pub const KILL_SWITCH: &str = "kill_switch";
+    pub const RBAC_DENIED: &str = "rbac_denied";
+    pub const CEDAR_DENIED: &str = "cedar_denied";
+    pub const EVALUATION_ERROR: &str = "evaluation_error";
+}
+
+/// Allow decision plus its fixed reason, shared by both check transports so
+/// HTTP and gRPC always agree on the classification of the same request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CheckOutcome {
+    pub(crate) allowed: bool,
+    pub(crate) reason: &'static str,
+}
+
 #[derive(Serialize, Debug)]
 struct CheckResponse {
     allowed: bool,
+    reason: &'static str,
+}
+
+/// Whether the configured Cedar source actually contains policy data.
+///
+/// This only labels a denial (RBAC-only vs. Cedar deep path); it never changes
+/// the allow/deny decision. It mirrors the source selection in
+/// `policy::CedarEngine::new` (`*.cedar` files in a directory, or a single
+/// policy file), so the label matches what the engine loaded. Filesystem
+/// errors are treated as "no Cedar source" and both outcomes remain deny.
+fn cedar_policy_source_present(configured: &str) -> bool {
+    let path = std::path::Path::new(configured);
+    if path.is_dir() {
+        std::fs::read_dir(path).ok().is_some_and(|entries| {
+            entries.flatten().any(|entry| {
+                let entry = entry.path();
+                entry.is_file() && entry.extension().and_then(|ext| ext.to_str()) == Some("cedar")
+            })
+        })
+    } else {
+        path.is_file()
+    }
 }
 
 /// Wire DTO for `POST /v1/approval`.
@@ -389,11 +432,13 @@ async fn check(
     // JSON `null`, so passing the wire context through verbatim made /v1/check
     // silently deny requests the gRPC client used to sanitize before sending.
     let context = crate::client::without_nulls(&req.context);
-    let allowed = engine
-        .is_allowed(&req.principal, &req.action, &req.resource, &context)
-        .await
-        .unwrap_or(false);
-    Json(CheckResponse { allowed })
+    let outcome = engine
+        .check_with_reason(&req.principal, &req.action, &req.resource, &context)
+        .await;
+    Json(CheckResponse {
+        allowed: outcome.allowed,
+        reason: outcome.reason,
+    })
 }
 
 /// HTTP 専用の承認受付。
@@ -404,6 +449,73 @@ async fn check(
 /// 公開シグネチャを変えずに区別を追加するため、このヘルパーは HTTP モジュール内
 /// に置き、`request_approval` 自体は gRPC/既存クライアント互換のまま維持する。
 impl PolicyEngine {
+    /// Reason-aware evaluation shared by the HTTP and gRPC check handlers.
+    ///
+    /// This mirrors `PolicyEngine::is_allowed` layer for layer (kill switch,
+    /// Casbin RBAC, then Cedar ABAC) so the allow/deny decision is unchanged;
+    /// it only classifies the outcome. Evaluation failures stay fail-closed
+    /// and are reported with a fixed reason instead of leaking an internal
+    /// error string to the caller.
+    pub(crate) async fn check_with_reason(
+        &self,
+        principal: &str,
+        action: &str,
+        resource: &str,
+        context: &serde_json::Value,
+    ) -> CheckOutcome {
+        if self.kill_switch.is_activated() {
+            return CheckOutcome {
+                allowed: false,
+                reason: check_reasons::KILL_SWITCH,
+            };
+        }
+
+        let rbac_allowed = match self
+            .casbin_enforcer
+            .enforce(principal, action, resource)
+            .await
+        {
+            Ok(allowed) => allowed,
+            Err(_) => {
+                return CheckOutcome {
+                    allowed: false,
+                    reason: check_reasons::EVALUATION_ERROR,
+                };
+            }
+        };
+        if rbac_allowed {
+            return CheckOutcome {
+                allowed: true,
+                reason: check_reasons::ALLOWED,
+            };
+        }
+
+        match self
+            .cedar_engine
+            .is_authorized(principal, action, resource, context)
+        {
+            Ok(true) => CheckOutcome {
+                allowed: true,
+                reason: check_reasons::ALLOWED,
+            },
+            // The RBAC layer did not grant the request. If the Cedar source
+            // has no policies, ABAC cannot add an allow either, so the denial
+            // is attributed to RBAC; otherwise the deep path actively denied.
+            Ok(false) => CheckOutcome {
+                allowed: false,
+                reason: if cedar_policy_source_present(&self.config.cedar_policy_dir) {
+                    check_reasons::CEDAR_DENIED
+                } else {
+                    check_reasons::RBAC_DENIED
+                },
+            },
+            Err(_) => CheckOutcome {
+                allowed: false,
+                reason: check_reasons::EVALUATION_ERROR,
+            },
+        }
+    }
+
     /// Optional separate token for approve/deny. Kept next to the HTTP-only
     /// helpers so the rest of the engine is untouched.
     fn approval_admin_token(&self) -> Option<&str> {
@@ -892,6 +1004,116 @@ mod tests {
         assert_eq!(denied["allowed"], false);
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    async fn check_body(
+        client: &reqwest::Client,
+        base: &str,
+        principal: &str,
+        resource: &str,
+    ) -> Value {
+        client
+            .post(format!("{base}/v1/check"))
+            .json(&json!({
+                "principal": principal,
+                "action": "execute",
+                "resource": resource,
+                "context": {},
+            }))
+            .send()
+            .await
+            .expect("check request runs")
+            .json()
+            .await
+            .expect("check response is JSON")
+    }
+
+    /// I21-E: the additive `reason` field uses a fixed vocabulary, distinguishes
+    /// allow / RBAC deny / kill switch / evaluation failure, and never echoes
+    /// the principal, resource or the free-form kill-switch reason.
+    #[tokio::test]
+    async fn check_endpoint_reports_fixed_reasons() {
+        let (engine, dir) = test_engine("check-reasons").await;
+        let base = start_server(engine.clone()).await;
+        let client = reqwest::Client::new();
+
+        let allowed = check_body(&client, &base, "jarvis", "tool:filesystem.read").await;
+        assert_eq!(allowed["allowed"], true);
+        assert_eq!(allowed["reason"], "allowed");
+
+        let rbac_denied = check_body(&client, &base, "jarvis", "tool:no.such.tool").await;
+        assert_eq!(rbac_denied["allowed"], false);
+        assert_eq!(rbac_denied["reason"], "rbac_denied");
+
+        // A principal containing a quote cannot be parsed as a Cedar entity
+        // UID: evaluation fails and the reason stays a fixed literal.
+        let failed = check_body(&client, &base, "bad\"principal", "tool:filesystem.read").await;
+        assert_eq!(failed["allowed"], false);
+        assert_eq!(failed["reason"], "evaluation_error");
+
+        for body in [&allowed, &rbac_denied, &failed] {
+            let reason = body["reason"].as_str().expect("string reason");
+            assert!(matches!(
+                reason,
+                "allowed" | "kill_switch" | "rbac_denied" | "cedar_denied" | "evaluation_error"
+            ));
+            assert!(!reason.contains("jarvis"));
+            assert!(!reason.contains("tool:"));
+        }
+
+        engine
+            .activate_kill_switch(
+                "SENTINEL-KILL-REASON-DO-NOT-LEAK".into(),
+                "test-admin-token",
+            )
+            .expect("activate kill switch");
+        let killed = check_body(&client, &base, "jarvis", "tool:filesystem.read").await;
+        assert_eq!(killed["allowed"], false);
+        assert_eq!(killed["reason"], "kill_switch");
+        assert!(
+            !killed
+                .to_string()
+                .contains("SENTINEL-KILL-REASON-DO-NOT-LEAK")
+        );
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// I21-E: when the Cedar source has policies but denies the request, the
+    /// reason points at the deep path instead of the RBAC fast path.
+    #[tokio::test]
+    async fn check_endpoint_reports_cedar_denied_when_deep_path_denies() {
+        let (engine, dir) = cedar_only_engine("check-cedar-denied").await;
+        let base = start_server(engine).await;
+        let response = check_body(
+            &reqwest::Client::new(),
+            &base,
+            "jarvis",
+            "tool:not.permitted",
+        )
+        .await;
+        assert_eq!(response["allowed"], false);
+        assert_eq!(response["reason"], "cedar_denied");
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// Guard against drift between the reason-aware helper and the engine's
+    /// original `is_allowed`: both transports must keep the same decision.
+    #[tokio::test]
+    async fn check_with_reason_keeps_the_engine_decision() {
+        let (engine, _dir) = test_engine("reason-parity").await;
+        let context = json!({});
+        for resource in ["tool:filesystem.read", "tool:no.such.tool"] {
+            let outcome = engine
+                .check_with_reason("jarvis", "execute", resource, &context)
+                .await;
+            let decided = engine
+                .is_allowed("jarvis", "execute", resource, &context)
+                .await
+                .expect("engine decision");
+            assert_eq!(outcome.allowed, decided, "{resource} decision must agree");
+        }
     }
 
     /// I14-B: over HTTP, a context containing `null` must be judged exactly
