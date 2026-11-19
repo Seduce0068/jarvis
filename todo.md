@@ -1247,3 +1247,36 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   チェーン全体を OTLP logs へ送出（medium）— 固定語彙化が必要。
 - 親が対応: fmt 差分、JoinHandle 型不一致（spawn 内で Result を unwrap）、
   tracing field 形式依存アサーションの削除。
+
+### Round 43（R4 で修正済み）
+
+- [x] 未使用依存を削除: tower-http（workspace＋4サービス）、zeroize、
+  prost-types、figment json feature、uuid v7（workspace）と v4（UI）、
+  rmcp の transport-child-process / transport-sse-client。`Cargo.lock` の
+  orphan（process-wrap / windows-* 等）も整理。`--locked` で整合確認済み。
+- [x] jarvis-context の outbox/Qdrant 失敗ログを固定語彙化（`error_kind`
+  と id/attempts のみ、anyhow チェーン全体は非出力）。回帰テスト追加。
+- [x] 期限境界 select! に `biased`＋Grace 分岐の watch 最終確認、
+  `Connection::reconnect` をキャンセル安全化（完全 open → mem::replace → 旧 driver abort）。
+- [x] bin マーカーを versioned ツリー経由の symlink で公開し migration swap と
+  同一の原子境界で更新。
+
+### Round 43 の残り指摘（未対応）
+
+- [ ] commit_gate のコミット後再読が「永続化済みだが未公開」を作る
+  （confirmed medium）— DB=approved / HTTP=409 / メモリ=Pending の分裂。
+  コミット前に1回に限定するか、コミット済みとして決定を返す。
+- [ ] DecidingGuard が共有 bool で世代/オーナーを持たず、prune と timeout が
+  同じ Arc に第2ガードを作り得る（medium）— 世代付きトークン化＋
+  apply_prune の `decided_at.is_some()` 温存。
+- [ ] mcp_allowlist.toml の timeout_ms 一律15000化は web.fetch 以外の
+  shell.execute / github.create_pr / web.search に不要な機能後退（high）—
+  30000 へ戻すかルートごとの実効値を明記。
+- [ ] egress テンプレートの「unset は deny-all」が unit の example.com
+  フォールバックと矛盾（low）。
+- [ ] policy gRPC の kill switch エラーログだけ `{error:#}` でチェーン全体を
+  OTLP へ送出（medium）— context 側と同じ固定語彙化が必要。
+
+- 親が対応: builder.rs の未定義変数 `expected`、`embedding_dim` 修正、
+  tracing field 形式依存アサーション削除、secret_scan 誤検出（PROBE 定数＋
+  `concat!` 分割）。
