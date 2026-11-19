@@ -104,7 +104,24 @@ async fn metrics() -> String {
     }
 }
 
-#[instrument(skip(builder))]
+/// Preserve an internal failure's reason in the server log while keeping the
+/// client contract unchanged (bare 500, no error body).
+///
+/// `{err:#}` is anyhow's full kind/context chain. The request itself is never
+/// passed here, so payloads, correlation IDs and other raw data cannot leak
+/// into this log record.
+fn log_internal_error<T>(
+    result: anyhow::Result<T>,
+    op: &'static str,
+) -> Result<T, axum::http::StatusCode> {
+    result.map_err(|err| {
+        let chain = format!("{err:#}");
+        tracing::error!(operation = op, error = %chain, "internal error");
+        axum::http::StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
+
+#[instrument(skip(builder, req))]
 async fn build_context(
     State(builder): State<Arc<ContextBuilder>>,
     Json(req): Json<BuildContextRequest>,
@@ -117,10 +134,7 @@ async fn build_context(
         timestamp: chrono::Utc::now(),
         correlation_id: req.correlation_id,
     };
-    let context = builder
-        .build_context(&event)
-        .await
-        .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
+    let context = log_internal_error(builder.build_context(&event).await, "build_context")?;
     Ok(Json(BuildContextResponse { context }))
 }
 
@@ -168,4 +182,60 @@ pub async fn serve(builder: Arc<ContextBuilder>, addr: std::net::SocketAddr) -> 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::log_internal_error;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// In-memory `MakeWriter` target: no new dependency and no global
+    /// subscriber, so other tests can still install their own.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut guard = self.0.lock().expect("log buffer mutex");
+            guard.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn internal_error_is_logged_with_chain_and_mapped_to_bare_500() {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let outcome = tracing::subscriber::with_default(subscriber, || {
+            let err = anyhow::anyhow!("qdrant request timed out")
+                .context("producing query embedding for memory vector search");
+            log_internal_error::<()>(Err(err), "build_context")
+        });
+
+        assert_eq!(
+            outcome.unwrap_err(),
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(logs.contains("ERROR"), "{logs}");
+        assert!(logs.contains("build_context"), "{logs}");
+        assert!(
+            logs.contains("producing query embedding for memory vector search"),
+            "{logs}"
+        );
+        assert!(logs.contains("qdrant request timed out"), "{logs}");
+    }
 }
