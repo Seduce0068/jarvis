@@ -62,9 +62,10 @@ curl -s http://127.0.0.1:8082/health
   - リダイレクトは手動検証（最大3回・各ホップで公開IP確認）
   - テキスト系content-typeのみ、サイズ上限1MiB（既定256KiB）
   - URL内の認証情報を拒否
-- **注意**: allowlistには`web.fetch`が既に登録済み（`requires_approval = false`）。
-  そのため**新バイナリのデプロイで有効化される**。安全のため、デプロイ前に
-  `requires_approval = true` へ変更するか宛先制限を導入すること
+- **注意**: allowlist の `web.fetch` は `requires_approval = true` に変更済み
+  （2026-11-15 時点、[mcp_allowlist.toml](../../infra/config/mcp_allowlist.toml)
+  の `web.fetch` エントリ）。新バイナリをデプロイしても承認なしでは実行されない。
+  宛先制限は `JARVIS_MCP_GW_EGRESS_ALLOWLIST` で設定する
   （`adr/0003-native-web-fetch.md`）。
 - 有効化/安全化の手順:
   1. `infra/config/mcp_allowlist.toml` に `web.fetch` エントリを追加（`requires_approval = true` 推奨）
@@ -121,24 +122,29 @@ DSH 側の設定箇所（2026-11-15 確認）:
 - ゲートウェイ側の修正デプロイ後は、同じ設定のまま `filesystem.*` / `git.*` が
   実行可能になる（再起動や設定変更は不要）。
 
-## 承認フロー（MCP-1、2026-11-15 実装・未適用）
+## 承認フロー（MCP-1、2026-11-15 実装・現行）
 
 - `requires_approval = true` のツールも `tools/list` に表示されるようになる
   （旧「非表示」ワークアラウンド廃止。次回デプロイ適用後から有効）。
 - 呼び出すと gateway が jarvis-policy の承認要求へ転送し、オペレータが
   承認/却下するまで応答を待つ（policy 側の既定タイムアウトは300秒、
   期限切れは拒否）。クライアントは HTTP/MCP タイムアウトを長めに設定すること。
-- オペレータの承認方法（ローカルホストから）:
-  1. `curl -s http://127.0.0.1:8081/v1/approvals` で保留中の要求を確認
-  2. 承認: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/approve -H 'content-type: application/json' -d '{"approved_by":"koppe"}'`
-     却下: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/deny -H 'content-type: application/json' -d '{"reason":"not now"}'`
+- オペレータの承認方法（ローカルホストから）。トークン認証が有効な場合、
+  一覧・ステータスには API scope、承認・却下には admin scope の値を
+  `X-Jarvis-Approval-Token` ヘッダで送る（値はこの文書に記載しない）。
+  未設定ならヘッダ不要（後方互換）。admin 未設定時は API トークンへ
+  フォールバックし、職務分離は効かない。
+  1. `curl -s -H "X-Jarvis-Approval-Token: $APPROVAL_API_TOKEN" http://127.0.0.1:8081/v1/approvals` で保留中の要求を確認
+  2. 承認: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/approve -H 'content-type: application/json' -H "X-Jarvis-Approval-Token: $APPROVAL_ADMIN_TOKEN" -d '{"approved_by":"koppe"}'`
+     却下: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/deny -H 'content-type: application/json' -H "X-Jarvis-Approval-Token: $APPROVAL_ADMIN_TOKEN" -d '{"reason":"not now"}'`
 - jarvis-policy の HTTP（8081）に到達できない場合の呼び出しは fail-closed で拒否される。
-- 承認UI・通知・監査永続化（PostgreSQL）は今後の拡張（[remaining-tasks.md](remaining-tasks.md) MCP-1）。
+- 承認UI と監査永続化（PostgreSQL）は実装済み、通知（ntfy 橋渡し）は実装見送り
+  （後述「現状更新」、[remaining-tasks.md](remaining-tasks.md) MCP-1）。
 
 ### 現状更新（2026-11-18、A-M13）
 
-見出しの「2026-11-15 実装・未適用」および上記の一文は、いずれも
-2026-11-15 時点の記録。既存の実測ログは保持したまま、現状を次に追記する。
+見出しは現行状態を示す。上記の 2026-11-15 時点の記述は当時の記録として
+保持し、既存の実測ログはそのままに、現状を次に追記する。
 
 - **承認必須ツールの `tools/list` 公開**: repo 側は実装済み。
   旧「非表示」ワークアラウンドは廃止され、E2E テストも追加済み

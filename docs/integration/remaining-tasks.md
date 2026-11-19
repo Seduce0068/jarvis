@@ -62,6 +62,15 @@ generated:
   `.jarvis-source-commit` 生成も同スクリプトへ統合し、ソース／マーカー
   欠落時は fail-fast 化（I36-A）。sqlx-cli の導入と、配置・有効化・検証手順は
   後述「承認待ち実機タスクの実行手順」の MIG 節に集約。
+- **opencode.jsonc の配布は未配線（2026-11-20 確認・記録のみ）**: repo 側の
+  秘密ファイル read deny は
+  [infra/config/opencode/opencode.jsonc](../../infra/config/opencode/opencode.jsonc)
+  に定義されているが、
+  [build-selfhost.sh](../../infra/scripts/build-selfhost.sh) の配布対象に
+  含まれていない（旧 cloud-init レガシー
+  [cloud-init.yaml](../../infra/opentofu/cloud-init.yaml) にのみ記載）。
+  したがって repo 側の deny は実機に届かない。**未配線**として記録し、
+  配線自体は別タスクの担当とする（本タスクではスクリプトを変更しない）。
 
 ## 確認前提（2026-11-17 の洗い出し時点・履歴として保持）
 
@@ -76,21 +85,25 @@ generated:
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| MCP-1 | 承認フローの設計・実装・E2E 配線 | **2026-11-15 実装済み（repo側）**: gateway が `requires_approval=true` のツール呼び出しを jarvis-policy の HTTP 承認フロー（`POST /v1/approval`）に転送し、オペレータが `POST /v1/approval/{id}/approve|deny` で決定するまで待機する（`rust/jarvis-mcp-gw/src/approval.rs`, `lib.rs`）。失敗・期限切れは fail-closed で拒否。承認必須ツールも `tools/list` に表示されるよう変更（旧「非表示」ワークアラウンド廃止）。E2E テスト追加（`http::tests::execute_endpoint_blocks_until_operator_approval` 等）。 | 実機適用は次回 `deploy-mcp-gw-safe.sh --apply` 時（policy HTTP addr 既定 `127.0.0.1:8081` は unit 既存設定と整合）。**オペレーター承認UI は GPUI コンソール（`ui/`, ADR-0005）で実装済み**（2026-11-16、実機ビルド・起動検証済み、`make ui-run`）。監査永続化は今後の拡張。 |
+| MCP-1 | 承認フローの設計・実装・E2E 配線 | **2026-11-15 実装済み（repo側）**: gateway が `requires_approval=true` のツール呼び出しを jarvis-policy の HTTP 承認フロー（`POST /v1/approval`）に転送し、オペレータが `POST /v1/approval/{id}/approve|deny` で決定するまで待機する（`rust/jarvis-mcp-gw/src/approval.rs`, `lib.rs`）。失敗・期限切れは fail-closed で拒否。承認必須ツールも `tools/list` に表示されるよう変更（旧「非表示」ワークアラウンド廃止）。E2E テスト追加（`http::tests::execute_endpoint_blocks_until_operator_approval` 等）。 | 実機適用は次回 `deploy-mcp-gw-safe.sh --apply` 時（policy HTTP addr 既定 `127.0.0.1:8081` は unit 既存設定と整合）。**オペレーター承認UI は GPUI コンソール（`ui/`, ADR-0005）で実装済み**（2026-11-16、実機ビルド・起動検証済み、`make ui-run`）。監査永続化（`PgApprovalPersistence`）は 2026-11-19 に実装済み（opt-in、`pg_url` 設定時に注入）。 |
 | MCP-2 | 未実装ツールのネイティブ実装または上流 MCP 登録 | `web.search` / `homeassistant.get_state` / `android.get_device_info` 等はネイティブ未実装（2026-11-15 時点で `requires_approval = true` 化）。`filesystem.write` / `shell.execute` / `git.commit` / `github.create_pr` / `homeassistant.call_service` / `android.send_notification` も承認必須（[tool-matrix.md](tool-matrix.md), [dsh.md](dsh.md)）。※ 2026-11-16 以降は MCP-1 実装により承認必須ツールも `tools/list` に表示される。 | **2026-11-16 現状**: MCP-1 実装で未実装ツールも `tools/list` に表示されるようになり、呼び出しは承認フローを通過した後 `no native handler ... register an upstream MCP server` で fail-closed に失敗する（安全だが UX 上のデッドエンド）。ネイティブ実装には外部サービス接続（HA/Android/Web 検索）と資格情報、書き込み系には systemd `ReadWritePaths` の拡張が必要であり、ツール単位の利用要件判断が先。当面は現状の fail-closed 挙動を維持する。 |
 | MCP-3 | allowlist `sandbox_type`（ツール単位）の整理 | **2026-11-15 解消（repo側）**: ADR-0002 の `opencode` CLI sandbox fallback 撤去に伴い、option A（dead config 削除）を採用。[infra/config/mcp_allowlist.toml](../../infra/config/mcp_allowlist.toml) から per-tool `sandbox_type` キーを削除（TOML parse 検証済み）。gateway 全体設定 `JARVIS_MCP_GW_SANDBOX_TYPE` は既存 unit/env 互換のため解析のみ残存し、実行経路には影響しない（[adr/0002-runtime-agnostic.md](../../adr/0002-runtime-agnostic.md) 更新済み）。 | `/etc/jarvis/mcp_allowlist.toml` への同期は次回 `deploy-mcp-gw-safe.sh --apply` 時（適用まで `check-deploy-drift.sh` は PENDING を表示する）。将来ツール単位の隔離が必要になった場合は、上流 MCP サーバ側の sandbox 設定（`register_mcp_server` のコマンド）で実装する。 |
 | MCP-4 | 読み取り基準ディレクトリの絞り込み | **2026-11-15 解消（repo側）**: [infra/systemd/jarvis-mcp-gw.service](../../infra/systemd/jarvis-mcp-gw.service) の `JARVIS_MCP_GW_BASE_DIR` を `/home/koppe` から repo ルート（`/home/koppe/ドキュメント/作業用/jarvis/jarvis`）へ絞り込み。`ProtectHome=read-only` は `/home` 読取に必要なため維持。smoke にも `JARVIS_MCP_GW_BASE_DIR="$repo"` を追加し、狭い基準での `filesystem.list`/`git.status` を検証する。 | `/etc` への同期は次回 `deploy-mcp-gw-safe.sh --apply` 時。適用後は repo 外の読み取りが拒否されることを代表的 `tools/call` で確認する（実機変更は別判断）。 |
 
 ### A-M16 監査永続化の要件分離・判断材料（2026-11-18）
 
-以下は A-M16 の判断材料。**結論: 要判断**で、実装・実機変更は行っていない。
-3要件を混同せず、目的・保存場所・保持期間・機微情報の扱い・コストで比較する。
+以下は A-M16 の判断材料（2026-11-18 時点）。**結論: 要判断**だったが、
+(1) の永続監査は 2026-11-19 に `PgApprovalPersistence` として実装済み
+（opt-in）。3要件を混同せず、目的・保存場所・保持期間・機微情報の扱い・
+コストで比較する。
 
 #### 現状（Runtime Proof / A-M16）
 
-- [approval.rs](../../rust/jarvis-policy/src/approval.rs):1-6 は
-  「決定はメモリ保持、PostgreSQL 監査永続化とユーザ通知は後で積む」TODO。
-  実際に永続化するコードはない。
+- [approval.rs](../../rust/jarvis-policy/src/approval.rs):1-18 は、決定を
+  メモリ保持しつつ opt-in の PostgreSQL バックエンド
+  （[persistence.rs](../../rust/jarvis-policy/src/persistence.rs) の
+  `PgApprovalPersistence`）で決定と監査行を同一トランザクションでコミットする
+  設計を説明する。2026-11-18 時点では未実装だったが、2026-11-19 に実装済み。
 - [001_initial.sql](../../rust/migrations/001_initial.sql):20-36 に `audit_log`
   テーブル（event_id / correlation_id / principal / action / resource /
   decision / context / policy_version / latency_ms）と3インデックスが
@@ -99,9 +112,9 @@ generated:
   `status` のみを保持。決定済み履歴や CSV / JSON export はない。
 - [ui/README.md](../../ui/README.md):80-90 は `approved_by` 固定値の送信と、
   P0-1 / P0-3 対応で認証 Identity へ紐付ける方針を記録（値は記載しない）。
-- [dsh.md](dsh.md):138-160 は承認 UI 実装済み・通知と監査永続化は未実装と
-  整理。[todo.md](../../todo.md) の P3-9 は「実装見送り」判断
-  （公開 ntfy への機微 `context` 送信リスク）。
+- [dsh.md](dsh.md) の「現状更新」は、承認 UI と監査永続化を実装済み、
+  通知を実装見送りと整理。[todo.md](../../todo.md) の P3-9 は
+  「実装見送り」判断（公開 ntfy への機微 `context` 送信リスク）。
 
 #### 3要件の比較（A-M16）
 
@@ -326,6 +339,17 @@ S9 の実機復元演習とバックアップ外部化（P1-4）は承認待ち�
   [restore.sh](../../infra/scripts/restore.sh) が fail-closed（exit 2）で
   委譲を止め、`make safety-test` が回帰を担保（既存の BK/SEC 進捗記録と整合）。
 
+### code-server の PASSWORD_FILE 扱い（2026-11-20 確認・記録のみ）
+
+- [build-selfhost.sh](../../infra/scripts/build-selfhost.sh):459 は生成する
+  unit から `Environment=PASSWORD_FILE=` 行を `sed` で削除する。
+- 一方 [code-server.service](../../infra/systemd/code-server.service):33 と
+  [code_server.env](../../infra/config/code_server.env):6 には `PASSWORD_FILE`
+  が残り、テンプレート記述と実機の起動経路が食い違う。
+- **訂正方針**: パスワードは `config.yaml` に集約し、デプロイ時に
+  `PASSWORD_FILE` は除去する。unit / env テンプレートの記述もこの方針へ
+  合わせる（テンプレート自身の編集は本タスクの担当外のため記録のみ）。
+
 ### BK/SEC 進捗（2026-11-16 追記）
 
 ### BK-2 進捗（2026-11-17）
@@ -549,8 +573,12 @@ repo 側の参照関係を調査した結果を記録する。**結論: 要判�
   の2テストを追加（後者は `cedar_policy::Validator` の strict mode で
   `policies.cedar` が schema に適合することを検証）。
 
-**未実施**: gateway が渡す tool 引数は untyped JSON のため closed record として
-表現できず、**runtime での schema validation は有効化していない**（schema は
+**実施済み**: 起動時に `cedar_policy::Validator` の strict mode で
+`policies.cedar` が schema に適合することを検証する
+（[policy.rs](../../rust/jarvis-policy/src/policy.rs):27-35, 140）。
+
+**未実装**: gateway が渡す tool 引数は untyped JSON のため closed record として
+表現できず、引数値の runtime schema validation は有効化していない（schema は
 引き続き informational）。有効化にはツール単位の typed context 契約が必要。
 
 ### 承認フロー堅牢化（2026-11-17 追加）
@@ -659,8 +687,9 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
   auto-merge 対象にしうる。実行者と対象 PR の制限を追加する。
 - branch protection / 必須レビュー / 承認済みであることの明示的な確認が
   マージ前にない。有効化するなら検証 step を追加する。
-- `concurrency` が未設定で、同一 PR の再実行や複数 trigger が競合しうる。
-  安全版は PR 単位の group を設定済みなので、配線時に同等の設定を入れる。
+- `concurrency` は 2026-11-18 に PR 単位へ追加済み（前述「permissions」参照）。
+  安全版と同じ `cancel-in-progress: true` で同一 PR の再実行や複数 trigger の
+  競合を抑止する。配線時も同等設定を維持する。
 
 **判定**: 上記の権限・認証情報・自動承認・auto-merge の方針が確定するまで、
 参照実装は未配線の参照用として維持し、安全版を配線経路とする。
