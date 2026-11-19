@@ -945,6 +945,58 @@ curl -fsS http://127.0.0.1:8081/health
   確認する。S9・BK-2 の手順とは独立に実行できるが、本番 DB への書き込みを
   伴うため既存の承認窓に合わせる。
 
+#### 適用主体の定義と配布ズレのリスク（I35-A、2026-11-19）
+
+**方針（確定）**: マイグレーションの最終的な適用主体は
+`jarvis-context` の `sqlx::migrate!()`
+（[builder.rs](../../rust/jarvis-context/src/builder.rs):862）とする。
+バイナリに埋め込まれたマイグレーションが権威であり、context の起動時に
+`_sqlx_migrations` へ適用履歴を記録して適用を完了する。
+`jarvis-migrations.service` はその**前段の pre-flight 適用**であり、
+依存サービスの可用性を上げる補助にすぎず、所有権は持たない。
+コードは変更せず、context 側の `migrate!()` は残す（受け入れ条件）。
+
+**判断根拠**:
+
+- 2つの適用経路（unit の `cargo sqlx migrate run` と context の
+  `migrate!()`）は、sqlx の advisory lock により同時実行なら直列化される。
+  したがって「二重適用そのもの」は故障要因ではない。
+- 一方で sqlx は適用済みマイグレーションの checksum を
+  `_sqlx_migrations` に保存する。適用主体を unit と決めて context 側を
+  廃止すれば、配布ソースのズレを隠蔽できるが、バイナリ側の権威を失う。
+- 起動主体が自分でスキーマを完了できる方が fail-safe であり、
+  unit は「先に適用して起動を速くする」最適化として扱うのが自然である。
+  以上の理由で、埋め込みマイグレーションを権威とする本方針を採用した。
+
+**残るリスク（配布ズレ時の checksum mismatch）**:
+
+- `/opt/jarvis/rust/migrations`（unit が `--source` で読む）と
+  `/opt/jarvis/bin/jarvis-context`（`migrate!()` がビルド時に埋め込み）が
+  異なるコミットから配布されると、既に適用済みのバージョンの内容が
+  変わったと判定され、context は起動時に checksum mismatch で失敗する。
+  unit の pre-flight が先に走ると `_sqlx_migrations` へ追加された行が
+  context 側の埋め込みセットと突き合わされ、バージョンの欠落や checksum
+  不一致として起動失敗になる（sqlx は適用済み行を書き換えない）。
+- これは意図した fail-closed 挙動であり、黙って起動させることはしない。
+  **軽減策は「両者を同一コミットから配布する」ことのみ**で、
+  `sqlx migrate baseline` や履歴行の手削除はデータ不整合を招くため行わない。
+
+**今回の変更（軽減策の実装）**:
+
+- 3 unit のコメントから "Single owner" に相当する表現を削除し、
+  上記の方針（context が最終適用主体、unit は pre-flight）へ置換した。
+  `After=` / `Wants=` / `ExecStart=` / hardening は不変。
+- [build-selfhost.sh](../../infra/scripts/build-selfhost.sh) に、
+  ビルド元 HEAD を `/opt/jarvis/bin/.jarvis-build-commit` へ記録し、
+  配布済み migration ソースの
+  `/opt/jarvis/rust/migrations/.jarvis-source-commit` と照合するガードを
+  追加した（不一致ならデプロイ停止、マーカー未配置なら注意喚起）。
+  migration ソースの自動コピーは行わず、同一コミット配置は運用側の手順として
+  明示する（大幅なロジック変更の回避）。
+- なお P1-3 の「現状」節は `migrate!()` 導入前のスナップショットであり、
+  現在は [builder.rs](../../rust/jarvis-context/src/builder.rs):862 に
+  `migrate!()` が存在する。本節の記述を現状として優先する。
+
 ### P1-4: バックアップ外部化（設計決定が先）
 
 保全先・RPO/RTO が未決定のため、方針確定後に値を設定して実行する。

@@ -1,9 +1,12 @@
 [Unit]
 Description=JARVIS Context Builder
 Documentation=https://github.com/Seduce0068/jarvis
-# jarvis-migrations.service is the shared oneshot owner of migrations
-# 001 and later (currently through 004); the existing policy ordering below
-# is preserved (no cycle is introduced).
+# This binary embeds the shared migrations (001 and later, currently through
+# 004) via `sqlx::migrate!()` and applies them at startup: it is the final,
+# authoritative applier. jarvis-migrations.service is only the pre-flight
+# oneshot that applies the same sources early for availability; from here it
+# is just an ordering dependency. The existing policy ordering below is
+# preserved (no cycle is introduced).
 After=network.target postgresql.service qdrant.service jarvis-policy.service jarvis-migrations.service
 Wants=postgresql.service qdrant.service jarvis-policy.service jarvis-migrations.service
 

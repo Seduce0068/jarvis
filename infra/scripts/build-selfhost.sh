@@ -15,12 +15,45 @@ if [[ ! -d "${REPO_DIR}/rust" ]]; then
   exit 1
 fi
 
+# I35-A: one-commit distribution guarantee for migrations.
+# `sqlx::migrate!()` in jarvis-context embeds rust/migrations into the binary
+# at build time, while jarvis-migrations.service applies the same SQL from
+# /opt/jarvis/rust/migrations as a pre-flight. sqlx records a per-migration
+# checksum in _sqlx_migrations, so a binary/source mismatch makes context fail
+# at startup ("migration ... was previously applied but has been modified").
+# Every artifact here is built from this single checkout: never combine a
+# binary from another commit with these migration sources (or vice versa).
+MIGRATIONS_SRC="${REPO_DIR}/rust/migrations"
+if [[ ! -d "${MIGRATIONS_SRC}" ]]; then
+  echo "migration sources not found at ${MIGRATIONS_SRC}" >&2
+  exit 1
+fi
+BUILD_COMMIT="$(git -C "${REPO_DIR}" rev-parse HEAD 2>/dev/null || echo unknown)"
+
 cd "${REPO_DIR}/rust"
 cargo build --release --workspace
 
 for bin in jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context; do
   install -m 755 "target/release/${bin}" "/opt/jarvis/bin/${bin}"
 done
+
+# I35-A guard: record the commit that produced the binaries and compare it
+# with the marker shipped alongside the deployed migration source. This is a
+# check, not an auto-fix: a mismatch stops the deploy before units are
+# installed, so a half-updated binary/source pair is never left behind.
+bin_commit_file="/opt/jarvis/bin/.jarvis-build-commit"
+printf '%s\n' "${BUILD_COMMIT}" | sudo tee "${bin_commit_file}" >/dev/null
+
+mig_commit_file="/opt/jarvis/rust/migrations/.jarvis-source-commit"
+if [[ -f "${mig_commit_file}" ]]; then
+  mig_commit="$(<"${mig_commit_file}")"
+  if [[ "${mig_commit}" != "${BUILD_COMMIT}" ]]; then
+    echo "migration source commit ${mig_commit} != binary commit ${BUILD_COMMIT}; deploy both from the same commit" >&2
+    exit 1
+  fi
+else
+  echo "note: ${mig_commit_file} missing; deploy ${MIGRATIONS_SRC} from commit ${BUILD_COMMIT} (same as binaries)" >&2
+fi
 
 sudo mkdir -p /etc/jarvis
 # Copy the *contents* of infra/config/policy/ directly into /etc/jarvis/policy/.
@@ -108,6 +141,7 @@ sudo systemctl daemon-reload
 
 echo "binaries and units installed; create /etc/jarvis/bws.env before starting services"
 echo "migrations: install sqlx-cli (cargo-sqlx) on the service PATH before starting policy/context"
+echo "migration sources: deploy ${MIGRATIONS_SRC} -> /opt/jarvis/rust/migrations from commit ${BUILD_COMMIT} (same as binaries); drift causes a context checksum mismatch"
 echo "start with:"
 echo "  sudo systemctl enable --now qdrant opencode jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context"
 echo "jarvis-migrations.service is pulled in via Wants= from policy/context (no separate enable needed)"
