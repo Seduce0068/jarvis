@@ -1557,3 +1557,34 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   None 降格（medium）— 共通ヘルパで拒否（additive degrade とは区別）。
 
 - 親が対応: UI fmt 差分のみ。
+
+### Round 53（R4 で修正済み）
+
+- [x] **gRPC search_memory が符号付き limit を `as usize` で受け流す**
+  （confirmed high）→ `validate_search_limit(i64)`（try_from＋上限1000）を
+  HTTP/gRPC 共通ヘルパへ集約、負値・上限超過を 400/InvalidArgument 化。
+- [x] store_memory の embedding 次元・metadata object・expires_at 範囲を
+  共有 validation モジュールで検証（additive degrade 契約は維持）。
+- [x] jarvis-policy の TracerGuard::Drop を固定語彙 warn 化（他3サービスと
+  統一）、早期リターン経路の回帰追加。
+- [x] 語彙パリティを実戻り値比較へ変更、`GrpcBackend` 注入で gRPC 3 RPC ×
+  7語彙の実呼び出し検証を追加（文字列スキャンは補助へ格下げ）。
+
+### Round 53 の残り指摘（未対応）
+
+- [ ] **egress allowlist の重複キー検査が未実装**（confirmed high、Runtime
+  Proof 付き）— 先頭空値・末尾 example.com で `--env-only` が OK を返す。
+  BASE_DIR と同じ重複拒否＋最終行検査を egress にも適用。
+- [ ] 409 本文の読み取り失敗が空文字→AlreadyDecided に倒れる（medium）—
+  `read_to_string().unwrap_or_default()` を Result 保持へ。
+- [ ] kill switch latch が 409 より前に取得した probe で解除される TOCTOU
+  （medium）— generation／時刻を持たせ 409 確定以降の probe のみ解除。
+- [ ] デプロイロールバックが env を削除し example.com fail-open を情報表示
+  のみで放置（high）— テンプレートを書き戻すか unit を fail-closed 化。
+- [ ] I54-D 即時停止が event/context に未適用（"exiting cleanly" 残存、
+  TimeoutStopSec=30）— policy と同じ固定語彙・10秒へ揃える。
+- [ ] 発掘: UI/mcp-gw の仕様・証跡が古い（36/45 件のまま）、check-evidence
+  の requirements 集合未検証、Runbook ゲート表の古さ、mcp_allowlist 旧コメント。
+
+- 親が対応: fmt 差分、`tracing_subscriber::fmt()` 修正（3箇所）、
+  grpc.rs テストの UnifiedEvent / MemoryEntry import。
