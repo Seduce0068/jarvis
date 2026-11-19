@@ -253,6 +253,7 @@ mod tests {
         INTERNAL_ERROR_MESSAGE, Request, StoreMemoryRequest, Utc, authorize,
         event_metadata_from_request, internal_status, prepare_store_memory, to_proto_memory_entry,
     };
+    use crate::error::QdrantErrorKind;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -476,7 +477,12 @@ mod tests {
             .finish();
 
         let status = tracing::subscriber::with_default(subscriber, || {
-            let err: anyhow::Error = ContextError::Qdrant(SENSITIVE.to_owned()).into();
+            // I51-D: the fixed-vocabulary constructor cannot carry hostile
+            // text. Keep the probe as an outer `anyhow` context so the
+            // regression still proves no part of the error chain — not only
+            // the Qdrant variant — is echoed to the client or the logs.
+            let err: anyhow::Error = ContextError::qdrant(QdrantErrorKind::FAILED).into();
+            let err = err.context(SENSITIVE);
             internal_status::<()>(Err(err), "build_context").expect_err("internal failure")
         });
 

@@ -4,23 +4,28 @@ use thiserror::Error;
 
 /// Fixed-vocabulary category for Qdrant failures at the `ContextError` boundary.
 ///
-/// A raw `qdrant_client` error is never accepted here: its `Display` can embed
-/// endpoint URLs and response fragments. Only this single fixed token can be
-/// turned into the text carried by [`ContextError::Qdrant`], so a formatted
-/// client error cannot reach stderr/journal/OTLP through `Builder::new()`'s
-/// `?` propagation or the HTTP/gRPC transports.
+/// The token is a *private field*: neither sibling modules nor external crates
+/// can build a `QdrantErrorKind` from a `String`. A raw `qdrant_client` error's
+/// `Display` can embed endpoint URLs and response fragments; because the only
+/// construction path is the crate-private `ContextError::qdrant` constructor
+/// taking this type, no such text can be stored in [`ContextError::Qdrant`] and
+/// then reach stderr/journal/OTLP through `Builder::new()`'s `?` propagation or
+/// the HTTP/gRPC transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QdrantErrorKind {
-    /// Any Qdrant client failure, reduced to a non-sensitive category.
-    Failed,
+pub struct QdrantErrorKind {
+    token: &'static str,
 }
 
 impl QdrantErrorKind {
+    /// The single category produced by this crate.
+    ///
+    /// Crate-private for the same reason as the field: only in-crate call sites
+    /// may obtain a kind to pass to `ContextError::qdrant`.
+    pub(crate) const FAILED: Self = Self { token: "qdrant" };
+
     /// Stable token shared with the builder/transport `error_kind` vocabulary.
     pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Failed => "qdrant",
-        }
+        self.token
     }
 }
 
@@ -37,14 +42,14 @@ pub enum ContextError {
 
     /// A Qdrant failure carrying fixed vocabulary only.
     ///
-    /// Production code must build this with [`ContextError::qdrant`]: the raw
-    /// client error is discarded before that constructor is reached. The
-    /// `String` field is retained for source compatibility with the existing
-    /// gRPC log-safety test, which deliberately injects a hostile string to
-    /// prove the transport never echoes error text. No builder call site may
-    /// construct this variant directly.
+    /// The payload is [`QdrantErrorKind`], whose inner token is private, so the
+    /// only construction path is the crate-private `ContextError::qdrant`
+    /// constructor. Its `Display` is the fixed token `qdrant`; no client error,
+    /// endpoint or response fragment can enter the error chain here. The
+    /// variant stays public so read-only matches such as `Qdrant(_)` in the
+    /// transport `error_kind` mappers keep compiling unchanged.
     #[error("Qdrant error: {0}")]
-    Qdrant(String),
+    Qdrant(QdrantErrorKind),
 
     #[error("PII detection error: {0}")]
     Pii(String),
@@ -62,11 +67,27 @@ pub enum ContextError {
 impl ContextError {
     /// Construct a Qdrant failure from the fixed vocabulary.
     ///
-    /// The raw client error type is not even accepted as an argument, so no
-    /// endpoint, response fragment or formatted message can be stored here.
+    /// The raw client error type is not even accepted as an argument, and the
+    /// kind's token is private, so no endpoint, response fragment or formatted
+    /// message can be stored here.
     pub(crate) fn qdrant(kind: QdrantErrorKind) -> Self {
-        Self::Qdrant(kind.as_str().to_owned())
+        Self::Qdrant(kind)
     }
 }
 
 pub type Result<T> = std::result::Result<T, ContextError>;
+
+#[cfg(test)]
+mod tests {
+    use super::{ContextError, QdrantErrorKind};
+
+    /// The newtype is the boundary: its only value renders as the fixed token,
+    /// never as client-supplied text.
+    #[test]
+    fn qdrant_error_carries_only_fixed_vocabulary() {
+        let err = ContextError::qdrant(QdrantErrorKind::FAILED);
+        assert_eq!(QdrantErrorKind::FAILED.as_str(), "qdrant");
+        assert_eq!(err.to_string(), "Qdrant error: qdrant");
+        assert!(!err.to_string().contains("http://"));
+    }
+}
