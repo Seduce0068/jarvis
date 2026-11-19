@@ -185,6 +185,16 @@ Scenario: TC-S2 HTTP での上限エラー
   Given 上限を超える JSON 引数
   When POST /v1/execute を呼ぶ
   Then 400 と {"error": ...} が返る
+  # I61-A: BareJson の JSON 入力受け取り契約（/v1/execute の抽出段階）
+  When Content-Type を外した JSON 本文で POST する
+  Then 空本文の 415 を返す（ヘッダ付与を促す）
+  When axum 既定上限 2 MiB を超える本文で POST する
+  Then 空本文の 413 を返す（本文縮小を促す）
+  When 型不正または構文エラーの本文で POST する
+  Then axum の 422 を採らず空本文の 400 を返す
+  Then 3 種とも rejection 文と入力本文バイトを応答・ログへ出さない
+  Then ログは DEBUG の error_kind=invalid_input / field=body 固定語彙のみ
+  Then 空本文 400 はハンドラの ArgsTooLarge (JSON エラー本体) と別経路
 ```
 
 ### 承認トークンと承認結果 (REQ-9〜REQ-11)

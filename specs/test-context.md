@@ -187,6 +187,15 @@ Scenario: TC-C 組み立て後のフィルタ適用
   Given event/memories/recent を含む文脈
   When build_context を呼ぶ
   Then 各フィールドの PII が redact された値が返る
+  # I61-A: BareJson の JSON 入力受け取り契約（context の全 JSON ルート共通）
+  When Content-Type を外した JSON 本文で POST する
+  Then 空本文の 415 を返す（ヘッダ付与を促す）
+  When axum 既定上限 2 MiB を超える本文で POST する
+  Then 空本文の 413 を返す（本文縮小を促す）
+  When 型不正または構文エラーの本文で POST する
+  Then axum の 422 を採らず空本文の 400 を返す
+  Then 3 種とも rejection 文と入力本文バイトを応答・ログへ出さない
+  Then ログは DEBUG の error_kind=invalid_input / field=body 固定語彙のみ
 ```
 
 ```gherkin
