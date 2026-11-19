@@ -1866,3 +1866,23 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、clippy `collapsible_if`（let-chain 化）、shellcheck
   SC2016（SQL プレースホルダのリテラル一致）。
+
+### Round 64（R4 で修正済み）
+
+- [x] 4証跡の notes に契約キーワードを同期し `BASELINE_CONTRACT_STEPS` を
+  削除して strict 化。tamper を notes キーワード除去方式へ更新。
+- [x] 4サービスの status_label に 413/415 を追加し "other" 丸めを解消、
+  行動テスト4件追加。
+- [x] BareJson 契約を「3種」→「4種」（UnknownBodyError→400）へ訂正、
+  /health の `.trim()` を外し完全バイト一致へ fail-closed 強化。
+  前後空白の回帰追加、UI 83 tests。
+- [x] 5仕様の変更に伴い証跡を実測再生成（context 162 / event 77 /
+  mcp 126 / policy 207 / UI 83）、index 同期。
+
+### Round 64 の残り指摘（未対応）
+
+- [ ] todo.md:1858 付近の旧 Round 63 残指摘（grandfather 記述、413/415
+      メトリクス、UnknownBodyError、trim 契約）はすべて本ラウンドで解消済み。
+      次回レビューで重複排除すること。
+- 親が対応: spec_hash drift の再生成、tamper が古い証跡ファイル名を参照
+  していた問題、notes/index の件数表記同期。
