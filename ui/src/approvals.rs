@@ -6,7 +6,7 @@ use gpui::{
     Styled, Window, actions, div, prelude::*, rgb,
 };
 
-use crate::policy_client::{ApprovalRequest, PolicyClient, request_to_core};
+use crate::policy_client::{ApprovalRequest, DecisionOutcome, PolicyClient, request_to_core};
 use anyhow::Context as _;
 use jarvis_core::approval::ApprovalDecision as CoreApprovalDecision;
 
@@ -34,6 +34,12 @@ pub struct ApprovalsView {
     /// tool execution is fail-closed at `jarvis-mcp-gw`. Kept separate from
     /// `status`/`error` so existing approval display logic is unchanged.
     kill_switch_active: bool,
+    /// Independent pin for the "approved, execution halted" row status
+    /// (I50-C (a)). While this and `kill_switch_active` are both true, polls
+    /// must not overwrite `status` with the queue count. Deliberately separate
+    /// from `action_status`, whose one-poll clearing contract still governs
+    /// ordinary decision/error messages.
+    halted_decision_status: bool,
 }
 
 impl ApprovalsView {
@@ -53,6 +59,7 @@ impl ApprovalsView {
             loaded: false,
             action_status: false,
             kill_switch_active: false,
+            halted_decision_status: false,
         };
         view.spawn_poller(cx);
         view
@@ -84,7 +91,7 @@ impl ApprovalsView {
                 let stopped = weak
                     .update(cx, |view, cx| {
                         view.apply_poll(result);
-                        view.kill_switch_active = kill_switch_active;
+                        view.apply_kill_switch(kill_switch_active);
                         cx.notify();
                     })
                     .is_err();
@@ -102,28 +109,47 @@ impl ApprovalsView {
     ///
     /// This only updates the queue; `status` / `error` are owned by the most
     /// recent operator action. Clearing `error` here would hide an approve/
-    /// deny failure on the very next 3-second refresh (P0-8).
+    /// deny failure on the very next 3-second refresh (P0-8). The one-poll
+    /// `action_status` contract is unchanged; an independent halt pin keeps
+    /// the "approved, execution halted" status visible while the switch stays
+    /// active (I50-C (a)).
     fn apply_poll(&mut self, result: anyhow::Result<Vec<ApprovalRequest>>) {
         self.loaded = true;
+        let pinned = self.kill_switch_active && self.halted_decision_status;
         match result {
             Ok(pending) => {
-                // Preserve a status/error set by `decide`; only report the
-                // count when nothing more important is pending.
-                if !self.action_status {
-                    self.status = format!("保留中: {} 件", pending.len()).into();
-                } else {
-                    // The decision message has been shown for one refresh
-                    // cycle; subsequent polls report the queue count again.
-                    self.action_status = false;
+                if !pinned {
+                    // Preserve a status/error set by `decide`; only report the
+                    // count when nothing more important is pending.
+                    if !self.action_status {
+                        self.status = format!("保留中: {} 件", pending.len()).into();
+                    } else {
+                        // The decision message has been shown for one refresh
+                        // cycle; subsequent polls report the queue count again.
+                        self.action_status = false;
+                    }
                 }
                 self.pending = pending;
             }
             Err(error) => {
                 // Keep the last known list visible, but surface the failure so
-                // a stale queue is not mistaken for an empty one.
-                self.status = "jarvis-policy に接続できません".into();
+                // a stale queue is not mistaken for an empty one. The error is
+                // still recorded while the halt status is pinned.
+                if !pinned {
+                    self.status = "jarvis-policy に接続できません".into();
+                }
                 self.error = Some(format!("{error:#}").into());
             }
+        }
+    }
+
+    /// Fold a freshly observed kill-switch state into the view. When the switch
+    /// lifts, the independent halt pin is released so the queue count can be
+    /// reported again on subsequent polls (I50-C (a)).
+    fn apply_kill_switch(&mut self, active: bool) {
+        self.kill_switch_active = active;
+        if !active {
+            self.halted_decision_status = false;
         }
     }
 
@@ -139,6 +165,7 @@ impl ApprovalsView {
                 self.status = format!("{label}に失敗しました").into();
                 self.error = Some(format!("{error:#}").into());
                 self.action_status = true;
+                self.halted_decision_status = false;
                 cx.notify();
                 return;
             }
@@ -148,6 +175,9 @@ impl ApprovalsView {
         // Only the fields consumed by the unchanged HTTP body are read below.
         let intent = operator_decision(approve);
         self.status = format!("{label}を送信中… ({id})").into();
+        // A new decision supersedes any previous halt-pinned status until its
+        // outcome is known (I50-C (a)).
+        self.halted_decision_status = false;
 
         cx.spawn(async move |weak, cx| {
             let decide_client = client.clone();
@@ -158,10 +188,10 @@ impl ApprovalsView {
                 .spawn(async move {
                     match &intent {
                         CoreApprovalDecision::Approved { approved_by, .. } => {
-                            decide_client.approve(&decide_id, approved_by)
+                            decide_client.approve_outcome(&decide_id, approved_by)
                         }
                         CoreApprovalDecision::Denied { reason } => {
-                            decide_client.deny(&decide_id, reason)
+                            decide_client.deny_outcome(&decide_id, reason)
                         }
                         CoreApprovalDecision::Pending | CoreApprovalDecision::Expired => {
                             unreachable!("an operator action is never Pending or Expired")
@@ -185,24 +215,28 @@ impl ApprovalsView {
                 // Refresh the queue first; then set the decision outcome so
                 // the poll result cannot overwrite it (P0-8).
                 view.apply_poll(refresh);
-                view.kill_switch_active = kill_switch_active;
+                view.apply_kill_switch(kill_switch_active);
                 match result {
-                    Ok(decision) => {
+                    Ok(outcome) => {
                         // The service's tagged decision JSON crossed the core
-                        // boundary in the client; project it onto the UI view
-                        // instead of echoing the pre-send intent.
-                        let status =
-                            status_for_decision_with_kill_switch(&decision, kill_switch_active);
-                        view.status = status.into();
+                        // boundary in the client; project the winner onto the
+                        // UI view instead of echoing the pre-send intent. An
+                        // HTTP 409 is an already-decided winner, not a failure
+                        // (I50-C (b)).
+                        let halt_pinned = halt_was_pinned(outcome.decision(), kill_switch_active);
+                        view.status = status_for_outcome(&outcome, kill_switch_active).into();
                         view.error = None;
                         view.action_status = true;
+                        view.halted_decision_status = halt_pinned;
                     }
                     Err(error) => {
-                        // The request may already be decided or expired; show
-                        // the reason rather than dropping it silently.
+                        // A genuine failure (unreachable service, bad decision
+                        // JSON, unreadable winner) still surfaces as a failure;
+                        // it is never pinned as a halted-approval status.
                         view.status = format!("{label}に失敗しました").into();
                         view.error = Some(format!("{error:#}").into());
                         view.action_status = true;
+                        view.halted_decision_status = false;
                     }
                 }
                 cx.notify();
@@ -445,6 +479,25 @@ fn status_for_decision_with_kill_switch(
     }
 }
 
+/// Whether an approved decision's status must be pinned across polls while the
+/// emergency stop is active (I50-C (a)).
+fn halt_was_pinned(decision: &CoreApprovalDecision, kill_switch_active: bool) -> bool {
+    kill_switch_active && matches!(decision, CoreApprovalDecision::Approved { .. })
+}
+
+/// Operator-visible status for a full decision outcome (I50-C (b)).
+///
+/// A fresh 2xx commit keeps its existing text; a 409 winner-preservation is
+/// marked "既に決定済み" followed by the authoritative winner status. Only fixed
+/// status strings are used — no reason body, token or operator input is shown.
+fn status_for_outcome(outcome: &DecisionOutcome, kill_switch_active: bool) -> String {
+    let base = status_for_decision_with_kill_switch(outcome.decision(), kill_switch_active);
+    match outcome {
+        DecisionOutcome::Decided(_) => base.to_string(),
+        DecisionOutcome::AlreadyDecided(_) => format!("既に決定済み: {base}"),
+    }
+}
+
 /// Represent the operator action with the canonical core decision type.
 ///
 /// The values read from this type are exactly the ones the existing HTTP
@@ -476,8 +529,9 @@ mod tests {
     use super::{
         ApprovalsView, CoreApprovalDecision, UiDecision, decision_target, format_args, is_expired,
         operator_decision, status_for_decision, status_for_decision_with_kill_switch,
+        status_for_outcome,
     };
-    use crate::policy_client::{ApprovalRequest, PolicyClient, request_to_core};
+    use crate::policy_client::{ApprovalRequest, DecisionOutcome, PolicyClient, request_to_core};
     use serde_json::json;
 
     #[test]
@@ -513,6 +567,7 @@ mod tests {
             loaded: true,
             action_status,
             kill_switch_active: false,
+            halted_decision_status: false,
         }
     }
 
@@ -705,6 +760,68 @@ mod tests {
         assert_eq!(
             status_for_decision_with_kill_switch(&CoreApprovalDecision::Pending, true),
             "保留中"
+        );
+    }
+
+    /// I50-C (a): the "approved, execution halted" status is pinned by an
+    /// independent flag while the kill switch is active. Polls must not
+    /// overwrite it with the queue count; lifting the switch releases the pin
+    /// and the ordinary one-poll `action_status` contract resumes unchanged.
+    #[test]
+    fn kill_switch_decision_status_survives_polls_and_releases() {
+        let mut view = view_with("承認済み・実行は非常停止中", None, true);
+        view.halted_decision_status = true;
+        view.apply_kill_switch(true);
+        let pending = vec![request_with_expiry("a", None)];
+
+        for _ in 0..3 {
+            view.apply_poll(Ok(pending.clone()));
+            view.apply_kill_switch(true);
+            assert_eq!(view.status.to_string(), "承認済み・実行は非常停止中");
+            assert_eq!(view.pending.len(), 1);
+        }
+
+        // Switch lifts: the pin is released while action_status is still set,
+        // so the queue count returns after the usual one-poll deferral.
+        view.apply_kill_switch(false);
+        assert!(!view.halted_decision_status);
+        view.apply_poll(Ok(pending.clone()));
+        assert_eq!(view.status.to_string(), "承認済み・実行は非常停止中");
+        view.apply_poll(Ok(pending));
+        assert_eq!(view.status.to_string(), "保留中: 1 件");
+    }
+
+    /// I50-C (b): a 409 winner-preservation outcome is shown as "already
+    /// decided" plus the authoritative winner status, never as an error and
+    /// never with the winner's reason body. A fresh 2xx keeps its existing text.
+    #[test]
+    fn already_decided_outcome_shows_winner_without_error_or_reason() {
+        let winner = CoreApprovalDecision::Denied {
+            reason: "secret reason must not be displayed".into(),
+        };
+        let status = status_for_outcome(&DecisionOutcome::AlreadyDecided(winner.clone()), false);
+        assert_eq!(status, "既に決定済み: 却下しました");
+        assert!(
+            !status.contains("secret reason"),
+            "reason text must never surface"
+        );
+
+        assert_eq!(
+            status_for_outcome(&DecisionOutcome::Decided(winner), false),
+            "却下しました"
+        );
+
+        let approved = CoreApprovalDecision::Approved {
+            approved_by: "koppe".into(),
+            approved_at: chrono::Utc::now(),
+        };
+        assert_eq!(
+            status_for_outcome(&DecisionOutcome::AlreadyDecided(approved.clone()), true),
+            "既に決定済み: 承認済み・実行は非常停止中"
+        );
+        assert_eq!(
+            status_for_outcome(&DecisionOutcome::Decided(approved), true),
+            "承認済み・実行は非常停止中"
         );
     }
 }

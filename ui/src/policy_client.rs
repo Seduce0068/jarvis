@@ -240,6 +240,38 @@ pub fn decision_from_json(value: &serde_json::Value) -> Result<Decision> {
     Err(anyhow::anyhow!("unrecognized approval decision JSON"))
 }
 
+/// Outcome of an approve/deny POST.
+///
+/// A `2xx` body crosses the canonical decision boundary and yields [`Self::Decided`].
+/// An HTTP 409 means the row was already settled (a competing winner was kept,
+/// I48-C); the authoritative decision is then read back from the status endpoint
+/// and reported as [`Self::AlreadyDecided`] so the UI never mistakes a durable
+/// commit for an operator failure (I50-C (b)).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecisionOutcome {
+    Decided(Decision),
+    AlreadyDecided(Decision),
+}
+
+impl DecisionOutcome {
+    /// The canonical decision to display, regardless of which path produced it.
+    pub fn decision(&self) -> &Decision {
+        match self {
+            Self::Decided(decision) | Self::AlreadyDecided(decision) => decision,
+        }
+    }
+
+    /// Consume the outcome and return the canonical decision. Keeps the legacy
+    /// `approve`/`deny` signatures unchanged for existing tests; production
+    /// call sites use `decide_outcome` directly.
+    #[cfg(test)]
+    pub fn into_decision(self) -> Decision {
+        match self {
+            Self::Decided(decision) | Self::AlreadyDecided(decision) => decision,
+        }
+    }
+}
+
 /// Boundary: UI wire request -> canonical core [`CoreApprovalRequest`].
 ///
 /// The UI wire DTO intentionally keeps a `String` id and nullable timestamps so
@@ -295,6 +327,12 @@ pub struct PolicyClient {
     /// Guards the admin scope (POST approve/deny); API token is the fallback.
     admin_token: Option<RedactedToken>,
     agent: ureq::Agent,
+    /// Display-only health probe agent. Shares the main agent's deadlines
+    /// (`timeout_global` / `timeout_connect`, I50-C (c)) so an unresponsive
+    /// policy service cannot hang the poller, but disables status-as-error so
+    /// the fixed `503` degraded body stays readable (I48-D). No token is ever
+    /// attached to this agent.
+    probe_agent: ureq::Agent,
 }
 
 impl fmt::Debug for PolicyClient {
@@ -365,6 +403,9 @@ impl PolicyClient {
     ) -> Self {
         // Both polling and decision posts are short; a hung policy service
         // must not occupy a GPUI background thread indefinitely.
+        // REQUEST_TIMEOUT / CONNECT_TIMEOUT (via the constructor arguments) are
+        // applied to *both* agents below so the health probe cannot silently
+        // fall back to ureq's unbounded defaults (I50-C (c)).
         let config = ureq::config::Config::builder()
             .timeout_global(Some(request_timeout))
             .timeout_connect(Some(connect_timeout))
@@ -374,11 +415,19 @@ impl PolicyClient {
             // 3xx response is returned as-is and the token stays on loopback.
             .max_redirects(0)
             .build();
+        let probe_config = ureq::config::Config::builder()
+            .timeout_global(Some(request_timeout))
+            .timeout_connect(Some(connect_timeout))
+            // The probe reads the fixed 503 body, which the main agent's
+            // status-as-error default would otherwise discard.
+            .http_status_as_error(false)
+            .build();
         Self {
             base_url: base_url.into().trim_end_matches('/').to_string(),
             api_token: tokens.api_token.map(RedactedToken::new),
             admin_token: tokens.admin_token.map(RedactedToken::new),
             agent: ureq::Agent::new_with_config(config),
+            probe_agent: ureq::Agent::new_with_config(probe_config),
         }
     }
 
@@ -428,16 +477,11 @@ impl PolicyClient {
     /// it cannot confirm. No reason text, token, or request data is surfaced.
     pub fn kill_switch_active(&self) -> bool {
         let url = format!("{}/health", self.base_url);
-        // ureq 3 turns 4xx/5xx into `Error::StatusCode` by default, which
-        // discards the body. Use a probe-only agent with that behavior disabled
-        // so the fixed degraded body can be read without touching the main
-        // approval agent (which must keep its token and redirect policy).
-        let probe_agent = ureq::Agent::new_with_config(
-            ureq::config::Config::builder()
-                .http_status_as_error(false)
-                .build(),
-        );
-        let Ok(mut response) = probe_agent.get(&url).call() else {
+        // The probe-only agent was built in `with_tokens` with the same
+        // `timeout_global` / `timeout_connect` as the main agent (I50-C (c)) and
+        // with status-as-error disabled so the fixed degraded body can be read.
+        // It carries no token and never touches the main approval agent.
+        let Ok(mut response) = self.probe_agent.get(&url).call() else {
             return false;
         };
         if response.status().as_u16() != 503 {
@@ -451,19 +495,40 @@ impl PolicyClient {
 
     /// Approve the request `id` as `approved_by`.
     ///
-    /// Returns the canonical decision parsed from the response body.
+    /// Returns the canonical decision parsed from the response body. A 409 is
+    /// resolved to the authoritative winner via [`Self::winner_decision`], so
+    /// the legacy `Result<Decision>` signature keeps its meaning. Test-only:
+    /// production call sites use `approve_outcome` to distinguish 409 winners.
+    #[cfg(test)]
     pub fn approve(&self, id: &str, approved_by: &str) -> Result<Decision> {
-        self.decide(id, "approve", &ApproveBody { approved_by })
+        Ok(self.approve_outcome(id, approved_by)?.into_decision())
     }
 
     /// Deny the request `id` with `reason`.
     ///
-    /// Returns the canonical decision parsed from the response body.
+    /// Mirrors [`Self::approve`] for the deny endpoint. Test-only.
+    #[cfg(test)]
     pub fn deny(&self, id: &str, reason: &str) -> Result<Decision> {
-        self.decide(id, "deny", &DenyBody { reason })
+        Ok(self.deny_outcome(id, reason)?.into_decision())
     }
 
-    fn decide<B: Serialize + ?Sized>(&self, id: &str, verb: &str, body: &B) -> Result<Decision> {
+    /// Approve with the full outcome, distinguishing a fresh 2xx commit from a
+    /// winner-preservation 409 (I50-C (b)). Used by the approval console.
+    pub fn approve_outcome(&self, id: &str, approved_by: &str) -> Result<DecisionOutcome> {
+        self.decide_outcome(id, "approve", &ApproveBody { approved_by })
+    }
+
+    /// Deny with the full outcome, mirroring [`Self::approve_outcome`].
+    pub fn deny_outcome(&self, id: &str, reason: &str) -> Result<DecisionOutcome> {
+        self.decide_outcome(id, "deny", &DenyBody { reason })
+    }
+
+    fn decide_outcome<B: Serialize + ?Sized>(
+        &self,
+        id: &str,
+        verb: &str,
+        body: &B,
+    ) -> Result<DecisionOutcome> {
         let url = format!("{}/v1/approval/{id}/{verb}", self.base_url);
         let mut request = self.agent.post(&url);
         // Admin scope: approve/deny require the separate admin token when it
@@ -472,24 +537,64 @@ impl PolicyClient {
         if let Some(token) = self.effective_admin_token() {
             request = request.header("X-Jarvis-Approval-Token", token.expose());
         }
-        let mut response = request
-            .send_json(body)
-            .with_context(|| format!("POST {url} failed"))?;
-        // send_json() succeeds for any HTTP response; a 401/500/3xx must not
-        // be reported to the operator as a successful approve/deny.
+        let sent = request.send_json(body);
+        // ureq 3 turns a 409 into `Error::StatusCode(409)` because
+        // status-as-error is enabled on the main agent. I48-C winner
+        // preservation makes that the success path of a competing decision:
+        // read the authoritative decision back instead of failing the operator.
+        if matches!(&sent, Err(ureq::Error::StatusCode(409))) {
+            return Ok(DecisionOutcome::AlreadyDecided(self.winner_decision(id)?));
+        }
+        let mut response = sent.with_context(|| format!("POST {url} failed"))?;
+        // Defensive: if status-as-error is ever disabled, a raw 409 response
+        // must take the same winner-preservation path.
+        if response.status().as_u16() == 409 {
+            return Ok(DecisionOutcome::AlreadyDecided(self.winner_decision(id)?));
+        }
+        // A 401/500/3xx must not be reported to the operator as a successful
+        // approve/deny. The fixed error body is never surfaced.
         let status = response.status();
         if !status.is_success() {
             bail!("POST {url} returned HTTP {}", status.as_u16());
         }
         // A 2xx body is the canonical tagged decision. Route it through the
         // same boundary as any other decision JSON before it reaches the UI:
-        // a malformed body must not be reported as a successful approval.
+        // this 2xx -> canonical decision boundary is unchanged (I50-C (b)).
         let value: serde_json::Value = response
             .body_mut()
             .read_json()
             .with_context(|| format!("invalid decision JSON from POST {url}"))?;
+        Ok(DecisionOutcome::Decided(
+            decision_from_json(&value)
+                .with_context(|| format!("unexpected decision JSON from POST {url}"))?,
+        ))
+    }
+
+    /// Read the authoritative decision from the API-scoped status endpoint
+    /// (`GET /v1/approval/{id}`) after a 409, parsed through the same canonical
+    /// boundary as a 2xx body. No reason text, token or error body is surfaced.
+    fn winner_decision(&self, id: &str) -> Result<Decision> {
+        let url = format!("{}/v1/approval/{id}", self.base_url);
+        let mut request = self.agent.get(&url);
+        // Status is API-scoped (jarvis-policy `ApprovalScope::Api`), never admin.
+        if let Some(token) = &self.api_token {
+            request = request.header("X-Jarvis-Approval-Token", token.expose());
+        }
+        let mut response = request
+            .call()
+            .with_context(|| format!("GET {url} failed"))?;
+        // A 3xx is returned as-is (redirects disabled) and must not be parsed
+        // as a decision; other non-2xx statuses are explicit errors too.
+        let status = response.status();
+        if !status.is_success() {
+            bail!("GET {url} returned HTTP {}", status.as_u16());
+        }
+        let value: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .with_context(|| format!("invalid decision JSON from GET {url}"))?;
         decision_from_json(&value)
-            .with_context(|| format!("unexpected decision JSON from POST {url}"))
+            .with_context(|| format!("unexpected decision JSON from GET {url}"))
     }
 }
 
@@ -1471,5 +1576,148 @@ mod tests {
             assert!(!client.kill_switch_active());
         }
         server.join().expect("server thread");
+    }
+
+    // --- I50-C: winner preservation (409) and probe deadlines ---------------
+
+    /// I50-C (b): an HTTP 409 on approve is not a failure. The authoritative
+    /// winner is read from the status endpoint and reported as AlreadyDecided,
+    /// even when it differs from the operator's intent (I48-C). No reason text
+    /// is printed, displayed or logged on this path.
+    #[test]
+    fn already_decided_409_returns_authoritative_winner() {
+        use std::sync::{Arc, Mutex};
+
+        let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_for_thread = seen.clone();
+        let mut bodies = [
+            ("HTTP/1.1 409 Conflict", "already decided"),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"decision":"Denied","reason":"competing operator"}"#,
+            ),
+        ]
+        .into_iter();
+        let (addr, handle) = spawn_test_server(
+            move |stream, request| {
+                seen_for_thread.lock().expect("lock").push(request);
+                let (status, body) = bodies.next().expect("queued response");
+                respond_json(stream, status, body);
+            },
+            2,
+        );
+
+        let id = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let outcome = client.approve_outcome(id, "koppe");
+        handle.join().expect("server thread");
+
+        let outcome = outcome.expect("409 resolves to the winner decision");
+        let is_winner_denied = matches!(
+            outcome,
+            DecisionOutcome::AlreadyDecided(Decision::Denied { .. })
+        );
+        assert!(
+            is_winner_denied,
+            "409 must resolve to the authoritative winner"
+        );
+
+        let requests = seen.lock().expect("lock");
+        assert_eq!(requests.len(), 2, "POST then status GET");
+        assert!(
+            requests[0].starts_with(&format!("POST /v1/approval/{id}/approve ")),
+            "first request must be the decision POST"
+        );
+        assert!(
+            requests[1].starts_with(&format!("GET /v1/approval/{id} ")),
+            "second request must be the status GET"
+        );
+    }
+
+    /// I50-C (b): the same winner-preservation path applies to a deny POST.
+    /// The operator's intent (Denied) cannot masquerade as the outcome when the
+    /// winner is Approved.
+    #[test]
+    fn already_decided_409_on_deny_returns_approved_winner() {
+        let mut bodies = [
+            ("HTTP/1.1 409 Conflict", "already decided"),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"decision":"Approved","approved_by":"other","approved_at":"2026-11-15T08:00:00Z"}"#,
+            ),
+        ]
+        .into_iter();
+        let (addr, handle) = spawn_test_server(
+            move |stream, _request| {
+                let (status, body) = bodies.next().expect("queued response");
+                respond_json(stream, status, body);
+            },
+            2,
+        );
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let outcome = client.deny_outcome("req-1", "because");
+        handle.join().expect("server thread");
+
+        let outcome = outcome.expect("409 resolves to the winner decision");
+        let is_winner_approved = matches!(
+            outcome,
+            DecisionOutcome::AlreadyDecided(Decision::Approved { .. })
+        );
+        assert!(
+            is_winner_approved,
+            "the winner must win over the deny intent"
+        );
+    }
+
+    /// I50-C (b): a 409 whose winner cannot be read is an explicit error, not
+    /// a silent success. The error text carries only URLs/status, never a
+    /// reason body or token.
+    #[test]
+    fn already_decided_winner_fetch_failure_is_an_error() {
+        let mut bodies = [
+            ("HTTP/1.1 409 Conflict", "already decided"),
+            ("HTTP/1.1 500 Internal Server Error", "unavailable"),
+        ]
+        .into_iter();
+        let (addr, handle) = spawn_test_server(
+            move |stream, _request| {
+                let (status, body) = bodies.next().expect("queued response");
+                respond_json(stream, status, body);
+            },
+            2,
+        );
+
+        let client = PolicyClient::new(format!("http://{addr}"));
+        let outcome = client.approve_outcome("req-1", "koppe");
+        handle.join().expect("server thread");
+        assert!(outcome.is_err(), "unreadable winner must fail closed");
+    }
+
+    /// I50-C (c): the health probe shares the main agent's deadlines. Without
+    /// them ureq's default is unbounded and the poller could hang forever.
+    #[test]
+    fn hung_health_probe_respects_configured_deadline() {
+        let (addr, handle) = spawn_test_server(
+            |stream, _request| {
+                std::thread::sleep(Duration::from_millis(600));
+                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            },
+            1,
+        );
+        let client = PolicyClient::with_timeouts(
+            format!("http://{addr}"),
+            None,
+            Duration::from_millis(150),
+            Duration::from_secs(1),
+        );
+        let started = std::time::Instant::now();
+        let active = client.kill_switch_active();
+        assert!(!active, "a hung probe must report inactive, never hang");
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "probe must respect the configured deadline"
+        );
+        let _ = handle.join();
     }
 }
