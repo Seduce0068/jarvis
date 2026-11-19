@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:aece518bbdca01f6b298dbc20b23d7d52222b09c7562cda642c7486433e875eb",
-  "timestamp": "2026-11-18T04:30:29+09:00",
+  "spec_hash": "sha256:511e048a9211d7975487b77206c3d2678e66f0e9de27d5f3612044b98bedcbbe",
+  "timestamp": "2026-11-19T22:41:43+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-context --lib --offline",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 17,
+    "passed": 92,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 50,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-context.md",
-    "spec_hash": "sha256:aece518bbdca01f6b298dbc20b23d7d52222b09c7562cda642c7486433e875eb",
+    "spec_hash": "sha256:511e048a9211d7975487b77206c3d2678e66f0e9de27d5f3612044b98bedcbbe",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -34,7 +34,9 @@
       "REQ-8",
       "REQ-9",
       "REQ-10",
-      "REQ-11"
+      "REQ-11",
+      "REQ-12",
+      "REQ-13"
     ]
   },
   "techniques": [
@@ -128,6 +130,17 @@
       "description": "予算超過で必要な event データまで失われる",
       "asvs": [],
       "controls": []
+    },
+    {
+      "id": "R-8",
+      "tier": "T2",
+      "description": "ベクトルスコアの欠落／順序との不整合",
+      "asvs": [
+        "v5.0.0-V16.2.4"
+      ],
+      "controls": [
+        "SP800-53r5.2/AU-3"
+      ]
     }
   ],
   "assurance": {
@@ -138,5 +151,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-context lib テスト 17 件の実測結果。既存テストは保持しつつ回帰テストを追加。TC-P4 (設定 fallback)、TC-C (filter→truncate 順序)、PII 境界 (object key 保持・値のみ redact) はカバー済み。実機 DB/Qdrant 結合試験は対象外。カバレッジ・ミューテーションは未測定。"
+  "notes": "jarvis-context の 92 テスト再実行結果。REQ-12/13（attach_scores が Qdrant スコアを保持し 0 と欠落を区別）を追加。TC-P3 にテスト用 replacement [X] の Given を明記。実機 DB/Qdrant 結合試験は対象外。カバレッジ・ミューテーションは未測定。"
 }

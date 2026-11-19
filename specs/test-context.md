@@ -1,7 +1,7 @@
 ---
 type: Test Specification
 title: "jarvis-context PII フィルタ・検索順序 テスト仕様"
-description: "再帰的 redact / enabled=false / 不正パターン / reorder_by_ids"
+description: "再帰的 redact / enabled=false / 不正パターン / reorder_by_ids / スコア保持"
 tags:
   - test-spec
   - jarvis-context
@@ -20,7 +20,7 @@ status: draft
 
 | 項目 | 内容 |
 | --- | --- |
-| test item | `jarvis-context` の `PiiFilter` と `reorder_by_ids` |
+| test item | `jarvis-context` の `PiiFilter`、`reorder_by_ids`、`attach_scores` |
 | 根拠 | [todo.md](../todo.md) P1-9, P1-1, P0-11 |
 | 判定基準 | 実装の観測可能挙動と既存 Rust テストの期待値 |
 | 対象外 | PostgreSQL/Qdrant 実機、embedding モデル精度 |
@@ -46,6 +46,11 @@ status: draft
 | REQ-9 | 空の ID 列または空の取得行では空結果を返す |
 | REQ-10 | `build_context` は組み立て後に PII フィルタを適用する |
 | REQ-11 | 予算超過時は memories/recent を落とし event は保持する |
+| REQ-12 | `attach_scores` が Qdrant のスコアを `MemoryEntry.score` へ付与し、順序変更後も id とスコアが対応する |
+| REQ-13 | スコア 0 は `Some(0.0)`、ランク外は `None` とし、両者を区別する |
+
+`MemoryEntry.score` は `Option<f32>` で serde default を持ち、
+legacy JSON からスコアが欠落しても後方互換で読める。
 
 ## Risk & tier
 
@@ -58,6 +63,7 @@ status: draft
 | R-5 | 検索順が失われ関連度ランキングが壊れる | T2 | unit >= 0.80 |
 | R-6 | 欠損/余分行で重複や誤順序が発生する | T2 | unit >= 0.80 |
 | R-7 | 予算超過で必要な event データまで失われる | T3 | unit >= 0.60 |
+| R-8 | refetch でスコアが失われ関連度が壊れる / 0 と欠落が混同される | T2 | unit >= 0.80 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -119,6 +125,7 @@ Scenario: TC-P2 無効化時は passthrough
 ```gherkin
 Scenario: TC-P3 不正パターンの隔離
   Given 不正な正規表現と有効な email パターンが混在する
+  Given replacement は既定の [REDACTED] ではなく [X] が設定されている
   When from_config でフィルタを構築する
   Then 警告が出て起動は成功する
   When 文字列を filter する
@@ -157,6 +164,22 @@ Scenario: TC-O3 空入力
   Then 空の Vec を返す
 ```
 
+### スコア保持 (REQ-12, REQ-13)
+
+```gherkin
+Scenario: TC-S1 並べ替え後のスコア追従
+  Given PostgreSQL の取得行と Qdrant の (id, score) がある
+  When reorder_by_ids の結果へ attach_scores を適用する
+  Then 返却順は ID 順で、各 id のスコアは元の対応を保つ
+```
+
+```gherkin
+Scenario: TC-S2 ゼロと欠落の区別
+  Given スコア 0.0 の id とスコアを持たない id がある
+  When attach_scores を適用する
+  Then 前者の score は Some(0.0)、後者の score は None になる
+```
+
 ### 文脈組み立て (REQ-10, REQ-11)
 
 ```gherkin
@@ -189,6 +212,8 @@ Scenario: TC-C2 トークン予算の境界
 | TC-O1 | REQ-7 | - | - | ATE_FUN.1 | 5.2.11 | T2 |
 | TC-O2 | REQ-8 | - | - | ATE_COV.2 | 5.2.1 | T2 |
 | TC-O3 | REQ-9 | - | - | ATE_COV.2 | 5.2.3 | T2 |
+| TC-S1 | REQ-12 | - | - | ATE_FUN.1 | 5.2.11 | T2 |
+| TC-S2 | REQ-13 | - | - | ATE_COV.2 | 5.2.3 | T2 |
 | TC-C | REQ-10 | v5.0.0-V14.2.4 | SP800-53r5.2/SC-28 | ATE_FUN.1 | 5.2.9 | T1 |
 | TC-C2 | REQ-11 | - | - | ATE_FUN.1 | 5.2.3 | T3 |
 
@@ -205,4 +230,6 @@ SP 800-53 を Release 5.2、CC を ISO/IEC 15408-3:2022 の構成要素 ID と�
 
 TC-P4 (設定 fallback)、TC-C (filter→truncate 順序)、PII 境界
 (object key を保持し値のみ redact) は回帰テスト追加でカバー済み（17 テスト）。
+TC-S1 / TC-S2 は `builder.rs` の純粋テスト（Qdrant/PostgreSQL 接続なし）で
+カバー済み。TC-P3 の `[X]` はテスト用 replacement を Given で明示した。
 実機 DB/Qdrant を用いる結合試験は対象外として未検証のままとする。

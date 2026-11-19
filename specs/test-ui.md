@@ -1,7 +1,7 @@
 ---
 type: Test Specification
 title: "承認コンソール UI テスト仕様"
-description: "エラー保持 / 期限切れ強調 / トークン保護 / a11y / full args / timeout"
+description: "エラー保持 / 期限切れ強調 / scope 別トークン保護 / a11y / full args / timeout"
 tags:
   - test-spec
   - gpuui
@@ -45,7 +45,7 @@ status: draft
 | REQ-8 | 承認引数は切り詰めず完全な pretty JSON を表示する |
 | REQ-9 | 承認/却下は focusable・tab_stop・Role::Button・aria_label を持つ |
 | REQ-10 | Tab / Shift-Tab でフォーカス移動し、Enter/Space は1回だけ決定する |
-| REQ-11 | 全リクエストに X-Jarvis-Approval-Token を付け、3xx で再送しない |
+| REQ-11 | pending 一覧 GET に API scope、approve/deny POST に admin scope のトークンを X-Jarvis-Approval-Token として付ける |
 | REQ-12 | リダイレクトは追従せず、トークンは元ホスト外へ漏れない |
 | REQ-13 | 応答の無い policy はタイムアウトし UI を固めない |
 | REQ-14 | pending の JSON は追加フィールドを許容し、空配列も受け付ける |
@@ -53,6 +53,15 @@ status: draft
 | REQ-16 | ウィンドウ閉鎖時は poller が停止する |
 | REQ-17 | pending の非2xx (401/500/3xx) はエラーとし空キューと誤らない |
 | REQ-18 | decide の非2xx (401/500/3xx) はエラーとし成功と誤らない |
+| REQ-19 | トークン未設定の scope ではヘッダを送らない。3xx では再送しない |
+| REQ-20 | admin scope 未設定時は API scope へフォールバックする。レガシー ENV は警告付きで API scope にフォールバックし、空文字は未設定として扱う |
+
+トークン関連の REQ-11 / REQ-19 / REQ-20 は
+[policy_client.rs](../ui/src/policy_client.rs) の scope 定数に対応する。
+API scope は `JARVIS_POLICY_APPROVAL_API_TOKEN`、レガシー
+`JARVIS_POLICY_APPROVAL_TOKEN` は警告付きフォールバック、admin scope は
+`JARVIS_POLICY_APPROVAL_ADMIN_TOKEN` を読み、未設定時は API scope へ
+フォールバックする。両 scope ともヘッダ名は `X-Jarvis-Approval-Token`。
 
 ## Risk & tier
 
@@ -67,6 +76,7 @@ status: draft
 | R-7 | poller が停止せずリソースをリークする | T3 | unit >= 0.60 |
 | R-8 | JSON 形状違いでキューが読めない | T3 | unit >= 0.60 |
 | R-9 | 非2xx が空キュー/成功と誤認される | T1 | unit >= 0.90 |
+| R-10 | scope 誤りでトークンが別 API へ送られる / 未設定 scope で誤送信される | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -85,7 +95,7 @@ TD3 (test case) の順で導出した。
 | --- | --- | --- |
 | equivalence partitioning | 5.2.1 | 成功/失敗、期限前/後、空/非空キュー |
 | boundary value analysis | 5.2.3 | 3 秒 refresh、timeout、長い引数 |
-| decision table testing | 5.2.6 | 決定結果 x refresh x action_status |
+| decision table testing | 5.2.6 | 決定結果 x refresh x action_status、scope x トークン設定 |
 | state transition testing | 5.2.8 | 読込 -> 決定 -> 次 poll |
 | scenario testing | 5.2.9 | 演算子がキューを確認し決定する |
 | error guessing | 5.4.1 | 302 応答、hang、追加 JSON 項目 |
@@ -162,13 +172,15 @@ Scenario: TC-U6 フォーカスと操作
   Then 決定は一度だけ送信される
 ```
 
-### policy クライアント (REQ-11〜REQ-16)
+### policy クライアント (REQ-11〜REQ-16, REQ-19, REQ-20)
 
 ```gherkin
-Scenario: TC-U7 トークンヘッダ
-  Given approval token が設定されている
+Scenario: TC-U7 scope 別トークンヘッダ
+  Given API scope と admin scope の両方にトークンが設定されている
   When pending / approve / deny を呼ぶ
-  Then 全リクエストに X-Jarvis-Approval-Token が付く
+  Then pending には API scope のトークンが付く
+  Then approve / deny には admin scope のトークンが付く
+  Then ヘッダ名はいずれも X-Jarvis-Approval-Token で、3xx では再送しない
 ```
 
 ```gherkin
@@ -214,6 +226,28 @@ Scenario: TC-U12 decide の非2xx
   Then 成功として表示しない
 ```
 
+### policy トークンの scope 解決 (REQ-19, REQ-20)
+
+```gherkin
+Scenario: TC-U13 scope 別フォールバックと未設定時
+  Given admin scope のトークンが未設定
+  When approve / deny を呼ぶ
+  Then API scope のトークンが X-Jarvis-Approval-Token として付く
+  Given API scope のトークンも空文字で未設定
+  When pending と approve を呼ぶ
+  Then いずれのリクエストにも X-Jarvis-Approval-Token を送らない
+```
+
+```gherkin
+Scenario: TC-U14 レガシー ENV の警告付きフォールバック
+  Given レガシー ENV のみで API scope トークンが設定されている
+  When 起動時にトークンを解決する
+  Then API scope に設定され警告が出る
+  Given 正規 ENV とレガシー ENV の両方が設定されている
+  When 起動時にトークンを解決する
+  Then 正規 ENV が優先され警告は出ない
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -237,6 +271,9 @@ Scenario: TC-U12 decide の非2xx
 | TC-U10 | REQ-16 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T3 |
 | TC-U11 | REQ-17 | - | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-U12 | REQ-18 | - | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-U13 | REQ-19 | v5.0.0-V14.2.1 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.2.6 | T1 |
+| TC-U13 | REQ-20 | v5.0.0-V14.2.1 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.2.6 | T1 |
+| TC-U14 | REQ-20 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.1 | T1 |
 
 ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではない)。
 それ以外は ASVS を v5.0.0、SP 800-53 を Release 5.2、CC を
@@ -252,4 +289,7 @@ ISO/IEC 15408-3:2022 の構成要素 ID とする。
 TC-U2 / TC-U3 / TC-U4 は 2026-11-18 に状態ロジックのテストを追加し
 カバー済み（14 テスト）。TC-U5 / TC-U7〜U12 もカバー済みで、
 TC-U8 の 3xx 非追従・明示エラー、TC-U11/12 の非2xx エラー化を含む。
+TC-U13 の scope 別フォールバックと TC-U14 のレガシー ENV 警告は
+`policy_client.rs` のトークン解決テストでカバー済み。
+トークン未設定時にヘッダを送らない挙動は送信側の `if let Some` ガードに依存する。
 GPUI の実描画に依存する TC-U1 / TC-U6 は未検証のままとする。

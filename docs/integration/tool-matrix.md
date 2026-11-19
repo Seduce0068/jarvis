@@ -56,7 +56,7 @@ generated:
 3. **`web.fetch`の承認**
    - 2026-11-10 に `requires_approval = true` を配備済み。承認フロー実装後に扱いを再検討。
    - 2026-11-15: 承認フロー実装済み（MCP-1）。`requires_approval = true` のままでも
-     呼び出しごとに人間承認を待つため実行可能。宛先ドメイン制限（egress allowlist）は引き続き検討事項。
+     呼び出しごとに人間承認を待つため実行可能。宛先ドメイン制限（egress allowlist）は `jarvis-mcp-gw` に実装済み。
 
 ## デプロイ前チェックリスト
 
@@ -159,7 +159,12 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
   ただし両者とも repo 側の変更であり、**実機 `/etc` への反映は次回デプロイ適用時**。
 - 未実装ツールは承認を通過しても `no native handler` で fail-closed となる
   （MCP-2）。外部サービス接続・資格情報・`ReadWritePaths` の判断待ち。
-- `web.fetch` の宛先ドメイン制限（egress allowlist）は未実装。
+- **解消済み**: `web.fetch` の宛先ドメイン制限（egress allowlist）は実装済み。
+  TOML の `egress_allowlist` または `JARVIS_MCP_GW_EGRESS_ALLOWLIST` で
+  ホストパターンを設定し、`sandbox.rs` の `EgressAllowlist::from_config` が
+  `parse_egress_allowlist` 経由で検証する。未設定・空・不正値は `DenyAll`
+  となり全宛先を拒否する（fail-closed）。検証済みホストパターンのみ起動時に
+  ログへ出力し、資格情報を含む設定値は出力しない。
 
 ## 全体タスク一覧
 

@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:2b7a98b3f08589fde29793f9430789599c64e77d5c2c7e3180e6cf78cac56278",
-  "timestamp": "2026-11-18T03:50:00+09:00",
+  "spec_hash": "sha256:a18d47250ed9c698066bbd128df7a10b8ae307f615f51585391825c768dd9aa2",
+  "timestamp": "2026-11-19T22:41:43+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test --offline (working directory: ui)",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 14,
+    "passed": 36,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 600,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-ui.md",
-    "spec_hash": "sha256:2b7a98b3f08589fde29793f9430789599c64e77d5c2c7e3180e6cf78cac56278",
+    "spec_hash": "sha256:a18d47250ed9c698066bbd128df7a10b8ae307f615f51585391825c768dd9aa2",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -41,7 +41,9 @@
       "REQ-15",
       "REQ-16",
       "REQ-17",
-      "REQ-18"
+      "REQ-18",
+      "REQ-19",
+      "REQ-20"
     ]
   },
   "techniques": [
@@ -162,6 +164,18 @@
         "SP800-53r5.2/SC-8",
         "SP800-53r5.2/AC-3"
       ]
+    },
+    {
+      "id": "R-10",
+      "tier": "T1",
+      "description": "承認トークンの scope 混同による自己承認／未設定 scope の誤送信",
+      "asvs": [
+        "v5.0.0-V8.3.1"
+      ],
+      "controls": [
+        "SP800-53r5.2/AC-3",
+        "SP800-53r5.2/IA-5"
+      ]
     }
   ],
   "assurance": {
@@ -172,5 +186,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-ui の 14 テスト実測結果（状態ロジック 4 件追加を含む）。TC-U2/U3/U4 カバー済み。TC-U1/U6 は GPUI 実描画依存のため未検証。カバレッジ・ミューテーションは未測定。"
+  "notes": "UI の 36 テスト再実行結果。REQ-11 を API/admin の 2-scope 送信へ更新し、REQ-19（未設定 scope ではヘッダを送らない）と REQ-20（admin 未設定時は API へフォールバック、レガシー ENV は警告付き）を追加。カバレッジ・ミューテーションは未測定。"
 }
