@@ -168,50 +168,134 @@ printf '%s %s\n' "$action" "$unit" >> "${MOCK_LOG:?}/systemctl.log"
 exit 0
 MOCK_SYSTEMCTL
 
+# I77-C: 失敗注入モードは MOCK_PSQL_MODE / MOCK_CURL_MODE / MOCK_JQ_MODE で指定する
+# （既定は空 = 旧モックと同じ成功応答）。既存ケースの挙動は変えない。
 cat > "$tmp/bin/psql" <<'MOCK_PSQL'
 #!/usr/bin/env bash
 printf 'psql %s\n' "$*" >> "${MOCK_LOG:?}/psql.log"
-sql=""
-prev=""
+sql="" prev="" db=""
 for arg in "$@"; do
-  if [ "$prev" = "-tAc" ]; then
-    sql="$arg"
-  fi
+  case "$prev" in
+    -tAc) sql="$arg" ;;
+    -d) db="$arg" ;;
+  esac
   prev="$arg"
 done
-case "$sql" in
-  *"FROM pg_database"*) : ;;                  # 隔離 DB は存在しないと答える
-  *information_schema.tables*) printf '2\n' ;;
-esac
+mode="${MOCK_PSQL_MODE:-ok}"
+out="" rc=0
+if [[ "$sql" == *"datname = 'jarvis_restore_test'"* ]]; then
+  case "$mode" in
+    exists_fail) rc=1 ;;
+    exists_nonempty) out='1' ;;
+  esac
+elif [[ "$sql" == *"datname = 'jarvis_restore_backup_"* ]]; then
+  # 退避DB は既定で「存在する」と答える（--confirm の後続分岐に到達させる）。
+  out='1'
+  case "$mode" in
+    backup_verify_fail) rc=1 ;;
+    backup_missing) out='' ;;
+  esac
+elif [ "$sql" = 'CREATE DATABASE "jarvis_restore_test"' ]; then
+  [ "$mode" = create_fail ] && rc=1
+elif [ "$sql" = 'DROP DATABASE "jarvis_restore_test"' ]; then
+  [ "$mode" = drop_fail ] && rc=1
+elif [[ "$sql" == 'CREATE DATABASE "jarvis_restore_backup_'* ]]; then
+  [ "$mode" = backup_fail ] && rc=1
+elif [ "$sql" = 'DROP DATABASE "jarvis"' ]; then
+  [ "$mode" = prod_drop_fail ] && rc=1
+elif [ "$sql" = 'CREATE DATABASE "jarvis"' ]; then
+  [ "$mode" = prod_create_fail ] && rc=1
+elif [[ "$sql" == *information_schema.tables* ]]; then
+  # 既定は隔離/本番どちらでも 2 件を返す。モードは対象 DB だけを上書きする。
+  out='2'
+  case "$mode" in
+    count_fail)      [ "$db" = jarvis_restore_test ] && rc=1 ;;
+    count_bad)       [ "$db" = jarvis_restore_test ] && out='not-a-number' ;;
+    count_zero)      [ "$db" = jarvis_restore_test ] && out='0' ;;
+    prod_count_fail) [ "$db" = jarvis ] && rc=1 ;;
+    prod_count_bad)  [ "$db" = jarvis ] && out='not-a-number' ;;
+    prod_count_zero) [ "$db" = jarvis ] && out='0' ;;
+  esac
+elif [ -z "$sql" ] && [ "$db" = jarvis_restore_test ]; then
+  [ "$mode" = restore_fail ] && rc=1
+elif [ -z "$sql" ] && [ "$db" = jarvis ]; then
+  [ "$mode" = prod_restore_fail ] && rc=1
+fi
 # ダンプはパイプで渡される。pipefail 下で gzip が SIGPIPE にならないよう
 # 入力を最後まで読み捨てる（内容は保持も出力もしない）。
 cat >/dev/null
-exit 0
+[ -n "$out" ] && printf '%s\n' "$out"
+exit "$rc"
 MOCK_PSQL
 
 cat > "$tmp/bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >> "${MOCK_LOG:?}/curl.log"
+all="$*"
 want_body=1
 for arg in "$@"; do
   if [ "$arg" = "/dev/null" ]; then
     want_body=0
   fi
 done
-if [ "$want_body" -eq 1 ]; then
-  # コレクション情報取得（points_count 検証用）。値はダミー固定。
-  printf '%s\n%s\n' '{"result":{"points_count":3}}' '200'
-else
-  printf '%s\n' '200'
+# スコープ（isolated / prod）と要求種別（upload / probe / delete）を判定する。
+scope='prod'
+case "$all" in *jarvis_memories_restore_test*) scope='isolated' ;; esac
+kind='probe'
+case "$all" in
+  *"/snapshots/upload"*) kind='upload' ;;
+  *"-X DELETE"*)         kind='delete' ;;
+esac
+key="${scope}_${kind}"
+mode="${MOCK_CURL_MODE:-ok}"
+rc=0
+code='200'
+body='{"result":{"points_count":3}}'
+if [ "$mode" = "${key}_non2xx" ]; then
+  code='500'
+elif [ "$mode" = "${key}_rc" ]; then
+  rc=7
+  code='000'
+elif [ "$mode" = "${key}_zero" ]; then
+  body='{"result":{"points_count":0}}'
+elif [ "$mode" = "${key}_bad" ]; then
+  body='{"result":{"points_count":"x"}}'
 fi
-exit 0
+if [ "$want_body" -eq 1 ]; then
+  printf '%s\n%s\n' "$body" "$code"
+else
+  printf '%s\n' "$code"
+fi
+exit "$rc"
 MOCK_CURL
 
 cat > "$tmp/bin/jq" <<'MOCK_JQ'
 #!/usr/bin/env bash
 printf 'jq %s\n' "$*" >> "${MOCK_LOG:?}/jq.log"
-cat >/dev/null
-printf '3\n'
+input="$(cat)"
+# 呼び出し順: 1=隔離コレクション / 2=本番コレクション（--confirm 時のみ）。
+state="${MOCK_LOG:?}/jq.calls"
+n=0
+[ -f "$state" ] && n="$(cat "$state")"
+n=$((n + 1))
+printf '%s\n' "$n" > "$state"
+mode="${MOCK_JQ_MODE:-ok}"
+case "$mode" in
+  fail)       [ "$n" -eq 1 ] && exit 4 ;;
+  empty)      [ "$n" -eq 1 ] && exit 0 ;;
+  zero)       if [ "$n" -eq 1 ]; then printf '0\n'; exit 0; fi ;;
+  bad)        if [ "$n" -eq 1 ]; then printf 'x\n'; exit 0; fi ;;
+  prod_fail)  [ "$n" -eq 2 ] && exit 4 ;;
+  prod_empty) [ "$n" -eq 2 ] && exit 0 ;;
+  prod_zero)  if [ "$n" -eq 2 ]; then printf '0\n'; exit 0; fi ;;
+  prod_bad)   if [ "$n" -eq 2 ]; then printf 'x\n'; exit 0; fi ;;
+esac
+# 既定は curl モックが返したボディを反映（points_count の値のみ）。
+case "$input" in
+  *'"points_count":0'*)   printf '0\n' ;;
+  *'"points_count":"'*)  printf 'x\n' ;;
+  *)                      printf '3\n' ;;
+esac
 exit 0
 MOCK_JQ
 
@@ -275,13 +359,18 @@ fail_case() {
 
 run_driver() {
   # 前のケースで stop された状態を持ち越さないよう、呼び出しごとに初期化する。
+  # I77-C: jq モックの呼び出し順カウンタもリセットする。
   rm -rf -- "$tmp/logs/state"
+  rm -f -- "$tmp/logs/jq.calls"
   env \
     PATH="$tmp/bin:$PATH" \
     MOCK_LOG="$tmp/logs" \
     MOCK_DISABLED_UNITS="${MOCK_DISABLED_UNITS:-}" \
     MOCK_INACTIVE_UNITS="${MOCK_INACTIVE_UNITS:-}" \
     MOCK_STOP_INEFFECTIVE_UNITS="${MOCK_STOP_INEFFECTIVE_UNITS:-}" \
+    MOCK_PSQL_MODE="${MOCK_PSQL_MODE:-}" \
+    MOCK_CURL_MODE="${MOCK_CURL_MODE:-}" \
+    MOCK_JQ_MODE="${MOCK_JQ_MODE:-}" \
     TMPDIR="$tmp/tmp" \
     BACKUP_ROOT="$tmp/backups" \
     VERIFY_SCRIPT="$verifier" \
@@ -995,6 +1084,388 @@ if has_fragment "$orphan_out" 'stopping service:'; then
 else
   pass "I76-A: unresolvable input: stop_services never reached"
 fi
+
+# --- 8. I77-C: 失敗注入モックによる fail-closed 分岐の回帰 -------------------
+# 旧モックは curl / psql / jq が常に成功を返すため、次の分岐が未検証だった。
+#   - qdrant.sh:63-93   HTTP 非2xx / curl_rc!=0 / points_count<=0 / 不正値
+#   - qdrant.sh:113-141 本番 upload / probe の HTTP 2xx・curl_rc・points_count
+#   - pg.sh:76-98       psql 失敗 / 件数不正 / 0件 / 退避前の隔離 DB 処理
+#   - pg.sh:135-165     退避失敗 / 退避確認失敗 / 本番 DROP・CREATE・復元失敗
+# 各ケースで fail() が非ゼロ終了することを --apply と --apply --confirm の双方で
+# 確認し、本番 DB / Qdrant / サービスが触られないことをアサートする。
+# Qdrant 系ケースには --skip-db を付け、confirm 時に pg.sh が先に本番 DB を
+# 操作して「本番未接触」のアサートを汚さないようにする。本番段のケースでは
+# --apply では分岐に到達しない（成功・本番未接触）ことも合わせて確認する。
+# 実 DB / 実 Qdrant / 実 systemctl は一切使わない（既存モックと :1 のまま）。
+printf '%s\n' '-- I77-C: failure-injection fail-closed branches --'
+
+assert_no_production_contact() { # label
+  local label="$1"
+  assert_absent "$label: no production DB DROP" \
+    'DROP DATABASE "jarvis"' "$tmp/logs/psql.log"
+  assert_absent "$label: no production DB as -d target" \
+    '[-]d jarvis([[:space:]]|$)' "$tmp/logs/psql.log"
+  assert_absent "$label: no production DB name in SQL" \
+    "datname = 'jarvis'" "$tmp/logs/psql.log"
+  assert_absent "$label: no production collection path" \
+    '/collections/jarvis_memories([/?]|$)' "$tmp/logs/curl.log"
+  assert_absent "$label: qdrant service never touched" \
+    'qdrant' "$tmp/logs/systemctl.log"
+  assert_absent "$label: enablement bit never changed" \
+    '^(enable|disable) ' "$tmp/logs/systemctl.log"
+}
+
+assert_service_invariants() { # label
+  local label="$1"
+  assert_absent "$label: qdrant service never touched" \
+    'qdrant' "$tmp/logs/systemctl.log"
+  assert_absent "$label: enablement bit never changed" \
+    '^(enable|disable) ' "$tmp/logs/systemctl.log"
+}
+
+# inject_fail <curl_mode> <psql_mode> <jq_mode> <confirm> <label> <fragment> [extra...]
+inject_fail() {
+  local curl_mode="$1" psql_mode="$2" jq_mode="$3" confirm="$4"
+  local label="$5" fragment="$6" code=0 out=""
+  shift 6
+  local -a args=(--backup-set "$set_dir" --apply) extra=("$@")
+  [ "$confirm" -eq 1 ] && args+=(--confirm)
+  args+=("${extra[@]}")
+  rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
+  MOCK_CURL_MODE="$curl_mode"
+  MOCK_PSQL_MODE="$psql_mode"
+  MOCK_JQ_MODE="$jq_mode"
+  out="$(run_driver "${args[@]}" 2>&1)" || code=$?
+  if [ "$code" -ne 0 ]; then
+    pass "$label (exit $code)"
+  else
+    fail_case "$label: fail() did not exit non-zero"
+    printf '%s\n' "$out" | head -12 >&2
+  fi
+  if has_fragment "$out" "$fragment"; then
+    pass "$label: fail vocabulary"
+  else
+    fail_case "$label: fail vocabulary missing: $fragment"
+    printf '%s\n' "$out" | head -12 >&2
+  fi
+}
+
+# both <curl_mode> <psql_mode> <jq_mode> <label> <fragment> [extra...]
+# 隔離段の失敗: --apply / --apply --confirm の双方で同じ fail() に到達する。
+both() {
+  local curl_mode="$1" psql_mode="$2" jq_mode="$3" label="$4" fragment="$5"
+  shift 5
+  local -a extra=("$@")
+  inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 0 \
+    "$label: --apply" "$fragment" "${extra[@]}"
+  assert_no_production_contact "$label: --apply"
+  inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 1 \
+    "$label: --apply --confirm" "$fragment" "${extra[@]}"
+  assert_no_production_contact "$label: --apply --confirm"
+}
+
+# prod_stage <curl_mode> <psql_mode> <jq_mode> <label> <fragment> [extra...]
+# 本番段の失敗: --apply では到達せず成功（本番未接触）、
+# --apply --confirm で fail() が非ゼロ終了。双方でサービス不変を確認する。
+prod_stage() {
+  local curl_mode="$1" psql_mode="$2" jq_mode="$3" label="$4" fragment="$5"
+  shift 5
+  local -a extra=("$@")
+  local code=0 out=""
+  rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
+  MOCK_CURL_MODE="$curl_mode"
+  MOCK_PSQL_MODE="$psql_mode"
+  MOCK_JQ_MODE="$jq_mode"
+  out="$(run_driver --backup-set "$set_dir" --apply "${extra[@]}" 2>&1)" || code=$?
+  if [ "$code" -eq 0 ]; then
+    pass "$label: --apply stays green (branch unreachable)"
+  else
+    fail_case "$label: --apply unexpectedly failed (exit $code)"
+    printf '%s\n' "$out" | head -12 >&2
+  fi
+  assert_no_production_contact "$label: --apply"
+  inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 1 \
+    "$label: --apply --confirm" "$fragment" "${extra[@]}"
+  assert_service_invariants "$label: --apply --confirm"
+}
+
+# 8a. Qdrant 隔離段（qdrant.sh:63-93）。--skip-db で本番 DB を完全に除外。
+both isolated_upload_non2xx '' '' \
+  'curl: isolated upload HTTP 500' 'isolated snapshot upload failed' --skip-db
+both isolated_upload_rc '' '' \
+  'curl: isolated upload curl_rc=7' 'curl_rc=7' --skip-db
+both isolated_probe_non2xx '' '' \
+  'curl: isolated probe HTTP 500' 'isolated collection info request failed' --skip-db
+both isolated_probe_rc '' '' \
+  'curl: isolated probe curl_rc=7' 'curl_rc=7' --skip-db
+both isolated_probe_zero '' '' \
+  'curl: isolated points_count=0' 'isolated collection has no points' --skip-db
+both isolated_probe_bad '' '' \
+  'curl: isolated points_count non-numeric' \
+  'unexpected points_count format in isolated collection' --skip-db
+both isolated_delete_non2xx '' '' \
+  'curl: isolated cleanup HTTP 500' 'isolated collection cleanup failed' --skip-db
+both isolated_delete_rc '' '' \
+  'curl: isolated cleanup curl_rc=7' 'curl_rc=7' --skip-db
+both '' '' fail \
+  'jq: isolated points_count read failure' \
+  'could not read points_count from isolated collection' --skip-db
+both '' '' bad \
+  'jq: isolated points_count non-numeric' \
+  'unexpected points_count format in isolated collection' --skip-db
+both '' '' zero \
+  'jq: isolated points_count=0' 'isolated collection has no points' --skip-db
+
+# 8b. PostgreSQL 隔離段（pg.sh:76-112）。ここで失敗すれば本番段へ進まない。
+both '' exists_fail '' \
+  'psql: isolated existence check failure' '隔離DB の存在確認に失敗しました'
+both '' exists_nonempty '' \
+  'psql: isolated DB already exists' 'が既に存在します'
+both '' create_fail '' \
+  'psql: isolated CREATE failure' 'の作成に失敗しました'
+both '' restore_fail '' \
+  'psql: isolated restore failure' 'への復元に失敗しました'
+both '' count_fail '' \
+  'psql: isolated count query failure' 'テーブル件数取得に失敗しました'
+both '' count_bad '' \
+  'psql: isolated count non-numeric' 'テーブル件数が不正です'
+both '' count_zero '' \
+  'psql: isolated count 0' 'テーブル件数が 0 です'
+both '' drop_fail '' \
+  'psql: isolated DROP failure' 'の DROP に失敗しました'
+
+# 8c. PostgreSQL 本番段（pg.sh:135-178）。--confirm 時のみ到達。
+prod_stage '' backup_fail '' \
+  'psql: production backup CREATE failure' '旧DB の退避に失敗しました'
+prod_stage '' backup_verify_fail '' \
+  'psql: production backup verification failure' '退避DB の確認に失敗しました'
+prod_stage '' backup_missing '' \
+  'psql: production backup missing' '退避DB が見つかりません'
+prod_stage '' prod_drop_fail '' \
+  'psql: production DROP failure' "旧DB 'jarvis' の DROP に失敗しました"
+prod_stage '' prod_create_fail '' \
+  'psql: production CREATE failure' "本番DB 'jarvis' の CREATE に失敗しました"
+prod_stage '' prod_restore_fail '' \
+  'psql: production restore failure' "本番DB 'jarvis' への復元に失敗しました"
+prod_stage '' prod_count_fail '' \
+  'psql: production count query failure' '本番DB のテーブル件数取得に失敗しました'
+prod_stage '' prod_count_bad '' \
+  'psql: production count non-numeric' '本番DB のテーブル件数が不正です'
+prod_stage '' prod_count_zero '' \
+  'psql: production count 0' '本番DB のテーブル件数が 0 です'
+
+# 8d. Qdrant 本番段（qdrant.sh:113-141）。--skip-db で本番 DB を除外。
+prod_stage prod_upload_non2xx '' '' \
+  'curl: production upload HTTP 500' 'production snapshot upload failed' --skip-db
+prod_stage prod_upload_rc '' '' \
+  'curl: production upload curl_rc=7' 'curl_rc=7' --skip-db
+prod_stage prod_probe_non2xx '' '' \
+  'curl: production probe HTTP 500' 'production collection info request failed' --skip-db
+prod_stage prod_probe_rc '' '' \
+  'curl: production probe curl_rc=7' 'curl_rc=7' --skip-db
+prod_stage '' '' prod_fail \
+  'jq: production points_count read failure' \
+  'could not read points_count from production collection' --skip-db
+prod_stage '' '' prod_zero \
+  'jq: production points_count=0' \
+  'production collection has no points after restore' --skip-db
+prod_stage '' '' prod_bad \
+  'jq: production points_count non-numeric' \
+  'unexpected points_count format in production collection' --skip-db
+
+# --- 9. I77-A: role=other の config-* / git* は stop 前に拒否される ----------
+# is_config_payload / is_git_payload は basename からコンポーネントを数える一方、
+# 旧コードの role_basename_consistent は未知 role (other) に無条件 0 を返し、
+# resolve_restore_input は row_role==config/git しか一致させなかった。結果 rc=2
+# (absent) が「nothing to do 成功」扱いになり、/etc/jarvis の古い設定や古い git
+# チェックアウトが残った。共有 resolved_role_for() が双方を同じ role に解決し、
+# 明示 role と basename の矛盾を fail-closed にすることをここで固定する。
+printf '%s\n' '-- I77-A: role=other config-*/git* rejected before stop --'
+
+# 9a. config-* に明示 role=other。外部 verifier は role 列を補助情報として受理
+# するので、拒否が restore-local.sh 自身の共有 role ゲートによると分離できる。
+other_cfg="$tmp/described_other_config"
+cp -R -- "$set_dir" "$other_cfg" || exit 1
+write_described_manifest "$other_cfg" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|other' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$other_cfg/manifest.txt"
+check_exit "I77-A: verifier accepts other-role config row" 0 bash "$verifier" "$other_cfg"
+rm -f -- "$tmp/logs"/*.log
+other_cfg_code=0
+other_cfg_out="$(run_driver --backup-set "$other_cfg" --apply 2>&1)" || other_cfg_code=$?
+if [ "$other_cfg_code" -ne 0 ]; then
+  pass "I77-A: other-role config rejected with --apply (exit $other_cfg_code)"
+else
+  fail_case "I77-A: other-role config accepted with --apply"
+fi
+for fragment in 'role=other is not consistent with its basename' 'ROLE MISMATCH' \
+                'config-mcp_allowlist.toml' 'verification FAILED' 'no writes performed'; do
+  if has_fragment "$other_cfg_out" "$fragment"; then
+    pass "I77-A: other-role config output: $fragment"
+  else
+    fail_case "I77-A: other-role config output missing: $fragment"
+    printf '%s\n' "$other_cfg_out" | head -12 >&2
+  fi
+done
+assert_no_log "I77-A: other-role config: no service stop/start" "$tmp/logs/systemctl.log"
+assert_no_log "I77-A: other-role config: no systemctl query (gate precedes inventory)" \
+  "$tmp/logs/systemctl-query.log"
+assert_no_log "I77-A: other-role config: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I77-A: other-role config: curl never called" "$tmp/logs/curl.log"
+if has_fragment "$other_cfg_out" 'stopping service:'; then
+  fail_case "I77-A: other-role config: stop_services ran before the gate"
+else
+  pass "I77-A: other-role config: stop_services never reached"
+fi
+if has_fragment "$other_cfg_out" 'dispatch: restore_configs'; then
+  fail_case "I77-A: other-role config: configs dispatch ran before the gate"
+else
+  pass "I77-A: other-role config: no module dispatch before the gate"
+fi
+
+# 9b. git*.tar.gz を別名 (git-extra.tar.gz) にして明示 role=other。旧コードでは
+# legacy_role_for が固定名しか git を出さないため role=other のままで矛盾が
+# 検出されず、resolver が rc=2 を返して「success」になっていたケース。
+other_git="$tmp/described_other_git"
+cp -R -- "$set_dir" "$other_git" || exit 1
+mv -- "$other_git/git-jarvis-head.tar.gz" "$other_git/git-extra.tar.gz" || exit 1
+write_described_manifest "$other_git" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-extra.tar.gz|gzip|none|none|other' \
+  > "$other_git/manifest.txt"
+check_exit "I77-A: verifier accepts other-role git row" 0 bash "$verifier" "$other_git"
+rm -f -- "$tmp/logs"/*.log
+other_git_code=0
+other_git_out="$(run_driver --backup-set "$other_git" --apply 2>&1)" || other_git_code=$?
+if [ "$other_git_code" -ne 0 ]; then
+  pass "I77-A: other-role git rejected with --apply (exit $other_git_code)"
+else
+  fail_case "I77-A: other-role git accepted with --apply"
+fi
+for fragment in 'role=other is not consistent with its basename' 'ROLE MISMATCH' \
+                'git-extra.tar.gz' 'verification FAILED' 'no writes performed'; do
+  if has_fragment "$other_git_out" "$fragment"; then
+    pass "I77-A: other-role git output: $fragment"
+  else
+    fail_case "I77-A: other-role git output missing: $fragment"
+    printf '%s\n' "$other_git_out" | head -12 >&2
+  fi
+done
+assert_no_log "I77-A: other-role git: no service stop/start" "$tmp/logs/systemctl.log"
+assert_no_log "I77-A: other-role git: no systemctl query (gate precedes inventory)" \
+  "$tmp/logs/systemctl-query.log"
+assert_no_log "I77-A: other-role git: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I77-A: other-role git: curl never called" "$tmp/logs/curl.log"
+if has_fragment "$other_git_out" 'stopping service:'; then
+  fail_case "I77-A: other-role git: stop_services ran before the gate"
+else
+  pass "I77-A: other-role git: stop_services never reached"
+fi
+
+# 9c. ポジティブ対照: 3列 (role 空) の git-extra.tar.gz が共有 role 解決で git と
+# して解決され、rc=2 の「nothing to do」に落ちないことを dry-run で確認する。
+legacy_git="$tmp/described_legacy_git"
+cp -R -- "$set_dir" "$legacy_git" || exit 1
+mv -- "$legacy_git/git-jarvis-head.tar.gz" "$legacy_git/git-extra.tar.gz" || exit 1
+{
+  printf '# created_at=2026-11-20T00:00:00Z\n'
+  for name in postgres-jarvis.sql.gz qdrant-snapshot.bin \
+              config-mcp_allowlist.toml git-extra.tar.gz; do
+    bytes="$(wc -c < "$legacy_git/$name" | tr -d ' ')"
+    sha="$(sha256sum "$legacy_git/$name" | cut -d' ' -f1)"
+    printf '%s %s %s\n' "$name" "$bytes" "$sha"
+  done
+} > "$legacy_git/manifest.txt"
+rm -f -- "$tmp/logs"/*.log
+legacy_git_code=0
+legacy_git_out="$(run_driver --backup-set "$legacy_git" 2>&1)" || legacy_git_code=$?
+if [ "$legacy_git_code" -eq 0 ]; then
+  pass "I77-A: legacy git*.tar.gz accepted via shared role resolver (exit 0)"
+else
+  fail_case "I77-A: legacy git*.tar.gz rejected (exit $legacy_git_code)"
+  printf '%s\n' "$legacy_git_out" | head -12 >&2
+fi
+if has_fragment "$legacy_git_out" 'RESOLVED: git input = ' \
+   && has_fragment "$legacy_git_out" 'git-extra.tar.gz'; then
+  pass "I77-A: git input resolved to the renamed git*.tar.gz"
+else
+  fail_case "I77-A: renamed git*.tar.gz not resolved as role=git"
+fi
+if has_fragment "$legacy_git_out" 'cannot resolve git restore input'; then
+  fail_case "I77-A: resolver returned rc=2 for the renamed git payload"
+else
+  pass "I77-A: no rc=2 no-op for the renamed git payload"
+fi
+assert_no_log "I77-A: legacy git dry-run: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I77-A: legacy git dry-run: no service stop/start" "$tmp/logs/systemctl.log"
+
+# 9d. 任意コンポーネントが欠落しただけの set も rc=2 を成功扱いしない。
+# config を外した set は外部 verifier も拒否するが、ドライバ自身の
+# 「cannot resolve configs restore input (rc=2)」が stop 前に出ることを確認する。
+absent_cfg="$tmp/absent_config"
+cp -R -- "$set_dir" "$absent_cfg" || exit 1
+rm -f -- "$absent_cfg/config-mcp_allowlist.toml"
+write_described_manifest "$absent_cfg" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$absent_cfg/manifest.txt"
+check_exit "I77-A: verifier rejects set without config" 1 bash "$verifier" "$absent_cfg"
+rm -f -- "$tmp/logs"/*.log
+absent_cfg_code=0
+absent_cfg_out="$(run_driver --backup-set "$absent_cfg" --apply 2>&1)" || absent_cfg_code=$?
+if [ "$absent_cfg_code" -ne 0 ]; then
+  pass "I77-A: absent optional config rejected (exit $absent_cfg_code)"
+else
+  fail_case "I77-A: absent optional config accepted as a no-op"
+fi
+for fragment in 'cannot resolve configs restore input' 'rc=2' \
+                'verification FAILED' 'no writes performed'; do
+  if has_fragment "$absent_cfg_out" "$fragment"; then
+    pass "I77-A: absent config output: $fragment"
+  else
+    fail_case "I77-A: absent config output missing: $fragment"
+    printf '%s\n' "$absent_cfg_out" | head -12 >&2
+  fi
+done
+assert_no_log "I77-A: absent config: no service stop/start" "$tmp/logs/systemctl.log"
+assert_no_log "I77-A: absent config: psql never called" "$tmp/logs/psql.log"
+
+# 9e. git が欠落した set は外部 verifier は受理するので、rc=2 拒否が
+# ドライバの pre-stop ゲートによることを分離して確認する。
+absent_git="$tmp/absent_git"
+cp -R -- "$set_dir" "$absent_git" || exit 1
+rm -f -- "$absent_git/git-jarvis-head.tar.gz"
+write_described_manifest "$absent_git" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  > "$absent_git/manifest.txt"
+check_exit "I77-A: verifier accepts set without git" 0 bash "$verifier" "$absent_git"
+rm -f -- "$tmp/logs"/*.log
+absent_git_code=0
+absent_git_out="$(run_driver --backup-set "$absent_git" --apply 2>&1)" || absent_git_code=$?
+if [ "$absent_git_code" -ne 0 ]; then
+  pass "I77-A: absent optional git rejected (exit $absent_git_code)"
+else
+  fail_case "I77-A: absent optional git accepted as a no-op"
+fi
+for fragment in 'cannot resolve git restore input' 'rc=2' \
+                'verification FAILED' 'no writes performed'; do
+  if has_fragment "$absent_git_out" "$fragment"; then
+    pass "I77-A: absent git output: $fragment"
+  else
+    fail_case "I77-A: absent git output missing: $fragment"
+    printf '%s\n' "$absent_git_out" | head -12 >&2
+  fi
+done
+assert_no_log "I77-A: absent git: no service stop/start" "$tmp/logs/systemctl.log"
+assert_no_log "I77-A: absent git: psql never called" "$tmp/logs/psql.log"
 
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"
 [ "$bad" -eq 0 ]

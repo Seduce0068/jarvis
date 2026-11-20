@@ -76,6 +76,13 @@ on_payload_check() { # event detail
 # I74-B helpers (is_*_payload, role_basename_consistent, pg_dump_footer_present)
 # now live in lib/payload-descriptors.sh and are shared with restore-local.sh.
 
+# I77-B: register the reporting hook. Without it payload_format_check() fails
+# closed (rc=2) instead of silently discarding a corrupt/truncated payload.
+install_payload_check_hook || {
+  echo "ERROR: could not install payload check hook" >&2
+  exit 1
+}
+
 fail=0; ok=0
 for set in "${sets[@]}"; do
   manifest="$set/manifest.txt"
@@ -166,9 +173,17 @@ for set in "${sets[@]}"; do
     if is_config_payload "$name"; then
       has_config=1
     fi
-    # Format-level check: the shared implementation classifies the payload and
-    # routes the verdict through on_payload_check (ok/fail accounting above).
-    payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role"
+    # Format-level check: the shared function owns the classification and
+    # returns it as rc (0 ok / 1 mismatch / 2 hook missing). on_payload_check
+    # only emits the FORMAT OK/MISMATCH line and increments ok/fail above.
+    format_rc=0
+    payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role" || format_rc=$?
+    if [ "$format_rc" -eq 2 ]; then
+      # No hook recorded this verdict; force the gate closed. rc=1 mismatches
+      # are already counted by on_payload_check -- no double counting here.
+      echo "  ERROR: payload format check hook not installed; refusing to verify"
+      fail=$((fail+1))
+    fi
   done < "$manifest"
 
   if [ "$has_pg" -eq 0 ]; then

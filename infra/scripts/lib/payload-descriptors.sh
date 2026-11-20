@@ -11,8 +11,12 @@
 #
 # Sourcing this file defines the functions below and sets
 # PAYLOAD_DESCRIPTORS_LIB=1 so a caller can assert the source actually happened.
-# Callers override on_payload_check AFTER sourcing to map the shared verdict to
-# their own logging/counters; the classification itself lives only here.
+# Callers MUST override on_payload_check AFTER sourcing AND register it through
+# install_payload_check_hook(); the classification itself lives only here and is
+# ALSO returned as the exit status of payload_format_check(). The hook is
+# reporting only (log line + counters) -- a lost/never-installed hook can no
+# longer turn a corrupt gzip/tar, an unsupported descriptor or a truncated
+# pg_dump into a silent success (I77-B fail-closed).
 
 # Consumed by the sourcing scripts as a load assertion (SC2034 when checked
 # standalone).
@@ -32,7 +36,11 @@ legacy_role_for() { # name -> role
     postgres-jarvis.sql.gz) printf 'postgres\n' ;;
     qdrant-snapshot.bin) printf 'qdrant\n' ;;
     config-*) printf 'config\n' ;;
-    git-jarvis-head.tar.gz) printf 'git\n' ;;
+    # I77-A: use the SAME pattern as is_git_payload(). The old fixed-name-only
+    # mapping left git-extra.tar.gz with role=other while is_git_payload still
+    # counted it, so the resolver returned rc=2 (absent) and the run reported a
+    # successful no-op with a stale git checkout.
+    git*.tar.gz) printf 'git\n' ;;
     *) printf 'other\n' ;;
   esac
 }
@@ -88,6 +96,43 @@ role_basename_consistent() { # name role -> 0/1
   esac
 }
 
+# --- I77-A: the single role-resolution path ----------------------------------
+# resolved_role_for <name> <declared_role>
+#   stdout : the one canonical role (postgres|qdrant|config|git|other) that both
+#            verify_set() and resolve_restore_input() must use for a manifest row.
+#   return : 0 resolved; 2 unknown declared role; 1 explicit role contradicts
+#            the basename. Both non-zero statuses are fail-closed descriptor
+#            errors (the caller increments DESCRIPTOR_FAILURES / returns rc 1).
+#
+# An empty role marks a legacy row and is derived from the basename. A concrete
+# role is honoured only when the real basename can back it (I74-A/B: pg-data.sql.gz
+# is a valid postgres payload, readme.txt claiming postgres is not). An explicit
+# `other` may not shadow a basename that names a real component: config-* and
+# git*.tar.gz are the I77-A drift that used to make verify_set count a config/git
+# payload while the resolver saw no role match (rc=2) and silently succeeded,
+# leaving stale /etc/jarvis settings or a stale git checkout behind. `other` on
+# an unrelated basename stays legal (legacy / non-payload files).
+resolved_role_for() { # name declared_role -> role; 0 ok / 1 mismatch / 2 unknown
+  local name="$1" declared="${2:-}" base_role
+  case "$declared" in
+    ''|postgres|qdrant|config|git|other) ;;
+    *) return 2 ;;
+  esac
+  base_role="$(legacy_role_for "$name")"
+  if [ -z "$declared" ]; then
+    printf '%s\n' "$base_role"
+    return 0
+  fi
+  if [ "$declared" = other ]; then
+    [ "$base_role" = other ] || return 1
+    printf 'other\n'
+    return 0
+  fi
+  role_basename_consistent "$name" "$declared" || return 1
+  printf '%s\n' "$declared"
+  return 0
+}
+
 pg_dump_footer_present() { # path -> 0/1
   local path="$1"
   # Probe the real bytes instead of trusting the declared format: a truncated
@@ -114,24 +159,71 @@ payload_label() { # name role -> human-readable label used in reports
   esac
 }
 
+# --- I77-B: mandatory hook installation guard --------------------------------
+# Adopted policy: payload_format_check() owns the classification and returns it
+# as its exit status (0 = ok, 1 = verdict mismatch, 2 = hook not installed).
+# on_payload_check is *reporting only*: it emits the caller's FORMAT OK/MISMATCH
+# line and updates the caller's counters. Because a no-op hook used to swallow
+# every verdict (fail-open), a caller must replace the placeholder below and
+# register it with install_payload_check_hook() before the first format check.
+# An unregistered hook makes payload_format_check() fail closed with rc=2.
+PAYLOAD_CHECK_HOOK_INSTALLED=0
+
 # on_payload_check <event> <detail>
-# Reporting hook. Each caller overrides this after sourcing to map the shared
-# verdict to its own output and counters. The default is a no-op so sourcing
-# the library alone has no side effects. Events:
+# Placeholder no-op. Each caller overrides this after sourcing to map the shared
+# verdict to its own output and counters. Events:
 #   FORMAT_OK | FORMAT_MISMATCH | COMPLETE_OK | COMPLETE_MISMATCH
 on_payload_check() { :; }
 
+# Captured at source time so the installer can PROVE the placeholder was really
+# replaced instead of trusting a caller-set flag alone.
+_PAYLOAD_CHECK_PLACEHOLDER="$(declare -f on_payload_check)"
+
+# install_payload_check_hook -> 0/1
+# Call AFTER defining the caller's on_payload_check. Refuses a missing or still
+# identical placeholder definition, so a lost override cannot reintroduce the
+# old fail-open path. On success flips the mandatory installation flag.
+install_payload_check_hook() {
+  local current
+  current="$(declare -f on_payload_check 2>/dev/null)" || return 1
+  [ "$current" != "$_PAYLOAD_CHECK_PLACEHOLDER" ] || return 1
+  declare -F on_payload_check >/dev/null 2>&1 || return 1
+  PAYLOAD_CHECK_HOOK_INSTALLED=1
+  return 0
+}
+
+# assert_payload_check_hook -> 0/1
+# Fail-closed guard used at the top of payload_format_check(). It checks BOTH
+# the mandatory flag and that the hook is still a real (non-placeholder) override,
+# so a hand-set flag or a reverted no-op cannot reopen the fail-open path.
+assert_payload_check_hook() {
+  local current
+  [ "${PAYLOAD_CHECK_HOOK_INSTALLED:-0}" -eq 1 ] || return 1
+  current="$(declare -f on_payload_check 2>/dev/null)" || return 1
+  [ "$current" != "$_PAYLOAD_CHECK_PLACEHOLDER" ] || return 1
+  return 0
+}
+
 # payload_format_check <path> <name> <format> <encryption> <signature> <role>
 # Descriptor gate + read-only structural probe. Every outcome is delivered via
-# on_payload_check, so verify-backup.sh and restore-local.sh classify a payload
-# identically. Always returns 0 (accounting belongs to the caller).
+# on_payload_check (reporting only) AND reflected in the exit status:
+#   0 = every probed aspect ok / no verdict needed
+#   1 = at least one mismatch (unsupported descriptor, corrupt gzip/tar,
+#       missing pg_dump footer)
+#   2 = reporting hook not installed -> fail closed, no classification attempted
+# verify-backup.sh and restore-local.sh therefore classify a payload identically
+# and can enforce the verdict from the return value even if accounting is lost.
 payload_format_check() {
+  assert_payload_check_hook || {
+    printf '%s\n' 'ERROR: payload_format_check called with no installed on_payload_check hook' >&2
+    return 2
+  }
   local path="$1" name="$2" format="$3" encryption="$4" signature="$5" role="$6"
-  local label
+  local label rc=0
   label="$(payload_label "$name" "$role")"
   if ! descriptor_supported "$format" "$encryption" "$signature"; then
     on_payload_check FORMAT_MISMATCH "$name (unsupported descriptor format=$format encryption=$encryption signature=$signature)"
-    return 0
+    return 1
   fi
   [ -f "$path" ] || return 0
   case "$format" in
@@ -140,6 +232,7 @@ payload_format_check() {
         on_payload_check FORMAT_OK "$label (gzip readable)"
       else
         on_payload_check FORMAT_MISMATCH "$label gzip corrupt"
+        rc=1
       fi
       ;;
     tar)
@@ -147,6 +240,7 @@ payload_format_check() {
         on_payload_check FORMAT_OK "$label (tar readable)"
       else
         on_payload_check FORMAT_MISMATCH "$label unreadable"
+        rc=1
       fi
       ;;
     raw)
@@ -163,7 +257,8 @@ payload_format_check() {
       on_payload_check COMPLETE_OK "postgres dump has pg_dump footer"
     else
       on_payload_check COMPLETE_MISMATCH "postgres dump missing footer (truncated?)"
+      rc=1
     fi
   fi
-  return 0
+  return "$rc"
 }

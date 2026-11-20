@@ -53,13 +53,16 @@
 #            resolved role == <role>; the declared format participates through
 #            resolve_descriptors()/descriptor_supported().
 #   return : 0 resolved, 1 invalid / ambiguous / resolved file missing
-#            (fail-closed), 2 no role match (absent; only optional components
-#            may treat this as "nothing to do").
-#   Backward compatibility: a legacy 3-column row has no role column, so
-#   resolve_descriptors() derives the role from the canonical basename via
-#   legacy_role_for(). If that still yields no match, <legacy_name> is accepted
-#   ONLY when it is actually recorded in the manifest - a renamed payload in a
-#   role-less manifest is intentionally not discovered.
+#            (fail-closed), 2 no role match (absent; I77-A: callers must ALSO
+#            fail closed on this - it is never a successful "nothing to do").
+#   I77-A: every row's role is computed by resolved_role_for() from
+#   lib/payload-descriptors.sh - the very same function verify_set() uses.
+#   An unknown role, or an explicit role that contradicts the basename (e.g.
+#   role=other on config-* / git*.tar.gz), is rejected here; a legacy 3-column
+#   row derives its role from the basename (git*.tar.gz included). If that still
+#   yields no match, <legacy_name> is accepted ONLY when it is actually recorded
+#   in the manifest - a renamed payload in a role-less manifest is intentionally
+#   not discovered.
 #   P1-6 connection point: descriptor_supported() currently accepts only
 #   encryption=none / signature=none. Future encryption/signature support (a
 #   user decision) plugs in here and in lib/payload-descriptors.sh; this helper
@@ -67,7 +70,8 @@
 resolve_restore_input() {
   local set_dir="$1" role="$2" legacy_name="${3:-}" mode="${4:-one}"
   local manifest="$set_dir/manifest.txt"
-  local name _bytes _sha format encryption signature row_role resolved item
+  local name _bytes _sha format encryption signature row_role declared_role
+  local resolved resolved_role item
   local -a matches=()
   local matched_count=0
 
@@ -75,19 +79,16 @@ resolve_restore_input() {
 
   while read -r name _bytes _sha format encryption signature row_role; do
     case "$name" in ''|\#*) continue ;; esac
-    # Unknown explicit roles fail closed, exactly as in verify_set().
-    case "$row_role" in
-      ''|postgres|qdrant|config|git|other) ;;
-      *) return 1 ;;
-    esac
     resolved="$(resolve_descriptors "$name" "$format" "$encryption" "$signature" "$row_role")" || return 1
-    read -r format encryption signature row_role <<< "$resolved"
+    read -r format encryption signature declared_role <<< "$resolved"
+    # I77-A: the SAME role resolver verify_set() uses. Unknown declared roles
+    # and explicit roles that contradict the basename (role=other on config-* /
+    # git*.tar.gz) fail closed here too; a legacy empty role is derived from the
+    # basename. verify_set()/resolver can no longer disagree about a row's role.
+    resolved_role="$(resolved_role_for "$name" "$declared_role")" || return 1
     # I75-B: only the none/none contract is accepted (P1-6 undecided).
     descriptor_supported "$format" "$encryption" "$signature" || return 1
-    # A role claim that the real basename does not back is rejected by the
-    # same shared rule the verification gate uses.
-    role_basename_consistent "$name" "$row_role" || return 1
-    if [ "$row_role" = "$role" ]; then
+    if [ "$resolved_role" = "$role" ]; then
       matches+=("$name")
       matched_count=$((matched_count + 1))
     fi
@@ -205,12 +206,12 @@ restore_configs() {
   # stop_services()/dispatch_restore(), and also for --skip-configs). This block
   # merely re-checks via the same config_dest_for_base() helper as a
   # defense-in-depth net; rejection here never writes anything.
+  # I77-A: rc 2 (no role match) is NOT a successful no-op either here: a
+  # basename that looks like config-* but resolves to another/no role used to
+  # leave /etc/jarvis stale while the run reported success. Fail closed.
   input_text="$(resolve_restore_input "$set_dir" config '' all)" || rc=$?
-  if [ "$rc" -eq 2 ]; then
-    log "configs: no config payload resolved from manifest; nothing to do"
-    return 0
-  elif [ "$rc" -ne 0 ]; then
-    fail "configs: cannot resolve config payloads from manifest (unknown/ambiguous/missing)"
+  if [ "$rc" -ne 0 ]; then
+    fail "configs: cannot resolve config payloads from manifest (rc=$rc; unknown/ambiguous/missing/absent)"
     return 1
   fi
   if [ -n "$input_text" ]; then

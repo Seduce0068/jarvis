@@ -247,10 +247,19 @@ on_payload_check() { # event detail
       ;;
   esac
 }
+
+# I77-B: register the reporting hook. Without it payload_format_check() fails
+# closed (rc=2) instead of silently discarding a corrupt/truncated payload.
+install_payload_check_hook || {
+  log "FAIL: could not install payload check hook"
+  exit 1
+}
 DESCRIPTOR_FAILURES=0
 
 # I74-B helpers (is_*_payload, role_basename_consistent, pg_dump_footer_present)
-# now live in lib/payload-descriptors.sh and are shared with verify-backup.sh.
+# and the I77-A single role resolver (resolved_role_for) live in
+# lib/payload-descriptors.sh; verify_set() and resolve_restore_input() both use
+# resolved_role_for() so their role verdicts cannot diverge.
 
 # Single source of truth for the 6 reviewed, non-secret config-<basename>
 # entries. Given a basename (config-* with the prefix stripped), print its
@@ -298,14 +307,17 @@ load_restore_resolver() {
   return 0
 }
 
-# I76-A: pre-stop resolution of one restore input. Read-only (no service or
-# payload access); every verdict is accounted through DESCRIPTOR_FAILURES so the
-# existing "verification FAILED; no writes performed" path owns the fail-closed
-# decision before stop_services() is ever reached.
+# I76-A / I77-A: pre-stop resolution of one restore input. Read-only (no service
+# or payload access); every verdict is accounted through DESCRIPTOR_FAILURES so
+# the existing "verification FAILED; no writes performed" path owns the
+# fail-closed decision before stop_services() is ever reached.
 #   verify_restore_input <label> <role> <legacy_name> <one|all> <required 0|1>
-# rc 2 (no role match) is a warning for optional components (configs / git) and
-# a failure for a required one; rc 1 (unknown / ambiguous / resolved file
-# missing) always fails closed. The module-side checks stay as a second net.
+# rc 2 (no role match) is now a FAILURE for REQUIRED AND OPTIONAL components
+# alike. Treating "absent" as a successful no-op is exactly how a role=other
+# config-* / git* row used to leave stale production files behind while the run
+# reported success. rc 1 (unknown / ambiguous / resolved file missing) also
+# fails closed. `required` is kept for diagnostics only; it never downgrades a
+# resolver error to a warning. The module-side checks stay as a second net.
 verify_restore_input() {
   local label="$1" role="$2" legacy_name="$3" mode="$4" required="$5"
   local input_path rc=0
@@ -319,11 +331,7 @@ verify_restore_input() {
     log "RESOLVED: $label input = $input_path"
     return 0
   fi
-  if [ "$rc" -eq 2 ] && [ "$required" -eq 0 ]; then
-    log "WARN: $label payload absent from manifest; nothing to resolve"
-    return 0
-  fi
-  log "FAIL: cannot resolve $label restore input from manifest (rc=$rc; unknown/ambiguous/missing)"
+  log "FAIL: cannot resolve $label restore input from manifest (rc=$rc; required=$required; unknown/ambiguous/missing/absent)"
   DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
   return 0
 }
@@ -331,7 +339,7 @@ verify_restore_input() {
 verify_set() {
   local manifest="$SET_DIR/manifest.txt"
   local name expected_bytes expected_sha format encryption signature role
-  local path actual_bytes actual_sha base resolved
+  local path actual_bytes actual_sha base resolved resolved_role rr_rc format_rc
   local failures=0 has_pg=0 has_qdrant=0 has_config=0 has_git=0 verifier=""
 
   [ -d "$SET_DIR" ] || { log "FAIL: backup set directory not found: $SET_DIR"; return 1; }
@@ -368,28 +376,30 @@ verify_set() {
       failures=$((failures + 1))
     fi
 
-    # An explicit role must be in the vocabulary; an empty role marks a legacy
-    # row and is derived from the name below. Unknown values fail closed.
-    case "$role" in
-      ''|postgres|qdrant|config|git|other) ;;
-      *)
-        log "FORMAT MISMATCH: $name (unsupported role descriptor: $role)"
-        DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
-        continue
-        ;;
-    esac
+    # I77-A: ONE role-resolution path for the whole script. resolved_role_for()
+    # validates the vocabulary, derives an empty (legacy) role from the basename
+    # and rejects an explicit role the basename cannot back - including an
+    # explicit `other` on config-* / git*.tar.gz. resolve_restore_input() calls
+    # the same function, so this gate and the pre-stop resolver can no longer
+    # disagree about a row's role (the old drift that reported a successful
+    # no-op while /etc/jarvis stayed stale).
     resolved="$(resolve_descriptors "$name" "$format" "$encryption" "$signature" "$role")"
     read -r format encryption signature role <<< "$resolved"
-    # I74-B: role is auxiliary. A role claim that the basename does not back is
-    # a fail-closed descriptor error and never satisfies a mandatory component
-    # (restore of the I69-B "required payload really exists" contract).
-    if ! role_basename_consistent "$name" "$role"; then
-      log "FORMAT MISMATCH: $name (role=$role is not consistent with its basename; ROLE MISMATCH)"
+    if resolved_role="$(resolved_role_for "$name" "$role")"; then
+      role="$resolved_role"
+    else
+      rr_rc=$?
+      if [ "$rr_rc" -eq 2 ]; then
+        log "FORMAT MISMATCH: $name (unsupported role descriptor: $role)"
+      else
+        log "FORMAT MISMATCH: $name (role=$role is not consistent with its basename; ROLE MISMATCH)"
+      fi
       DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
       continue
     fi
-    # Mandatory presence comes from the real filename, not from the manifest's
-    # self-declared role column.
+    # Mandatory presence still comes from the real filename (I74-B
+    # "required payload really exists" contract); the resolved role above is
+    # what the resolver uses, and contradictions were rejected just now.
     if is_pg_payload "$name"; then
       has_pg=1
     fi
@@ -402,9 +412,17 @@ verify_set() {
     if is_git_payload "$name"; then
       has_git=1
     fi
-    # Format checks (read-only): the shared implementation reports through
-    # on_payload_check, which feeds DESCRIPTOR_FAILURES above.
-    payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role"
+    # Format checks (read-only): the shared function owns the classification
+    # and returns it as rc (0 ok / 1 mismatch / 2 hook missing); the hook only
+    # logs and feeds DESCRIPTOR_FAILURES above.
+    format_rc=0
+    payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role" || format_rc=$?
+    if [ "$format_rc" -eq 2 ]; then
+      # No hook recorded this verdict; force the gate closed. rc=1 mismatches
+      # are already counted by on_payload_check -- no double counting here.
+      log "ERROR: payload format check hook not installed; refusing to verify"
+      DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+    fi
   done < "$manifest"
   # I76-A: DESCRIPTOR_FAILURES is also fed by the pre-stop resolver gate below,
   # so fold it into `failures` once, after that gate has run.
@@ -436,12 +454,13 @@ verify_set() {
   # Calling the shared resolver here rejects the set while the host is still
   # untouched. The module-side fail-closed checks remain as a defense-in-depth
   # double check; they are deliberately not removed.
-  # SKIP_* semantics are preserved: a skipped REQUIRED component (--skip-db /
-  # --skip-qdrant) is not resolved at all and its absence stays acceptable,
-  # just as the has_pg/has_qdrant gates below stay conditional. configs / git
-  # remain optional (rc 2 = nothing to do) and are resolved unconditionally,
-  # like the allowlist gate above, so a malformed config/git entry cannot slip
-  # past the pre-stop gate.
+  # SKIP_* semantics are preserved: an explicitly skipped component is not
+  # resolved at all and its absence stays acceptable, just as the has_* gates
+  # below stay conditional. Every NON-skipped component is resolved here; a
+  # resolver rc 2 (no role match) is a fail-closed verification error even for
+  # the historically optional configs / git (I77-A). The config allowlist and
+  # the role-resolution loop above still run unconditionally, so a malformed
+  # entry cannot slip past this gate merely because its component was skipped.
   if ! load_restore_resolver; then
     DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
   else
@@ -455,10 +474,16 @@ verify_set() {
     else
       log "RESOLVE SKIP: qdrant (--skip-qdrant)"
     fi
-    # config / git are optional in the backup format; an absent payload (rc 2)
-    # is only a warning. Unknown/ambiguous/missing files still fail closed.
-    verify_restore_input configs config '' all 0
-    verify_restore_input git git git-jarvis-head.tar.gz one 0
+    if [ "$SKIP_CONFIGS" -eq 0 ]; then
+      verify_restore_input configs config '' all 0
+    else
+      log "RESOLVE SKIP: configs (--skip-configs)"
+    fi
+    if [ "$SKIP_GIT" -eq 0 ]; then
+      verify_restore_input git git git-jarvis-head.tar.gz one 0
+    else
+      log "RESOLVE SKIP: git (--skip-git)"
+    fi
   fi
   failures=$((failures + DESCRIPTOR_FAILURES))
 

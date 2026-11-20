@@ -17,6 +17,9 @@ restore_git() {
   local archive="" resolve_rc=0
   local repo='/home/koppe/ドキュメント/作業用/jarvis/jarvis'
   local tmp_dir='' bad='' status_out='' ts='' tag='' top='' real_repo='' suggested=''
+  # I77-C: root 実行 + tar 既定の owner 復元で koppe 所有ファイルが root:root に
+  # なる問題への対策用（repo 既存 owner と展開エントリ）。
+  local repo_owner='' tar_entry='' chown_target='' chown_rc=0
   # backup-local.sh の拒否条件 (.git / .env / *.key) を基数に、
   # 秘密ファイル (.pem / .ssh / id_rsa / bws.env / credentials) を追加。
   local secret_re='(^|/)\.git(/|$)|(^|/)\.env($|\.)|(^|/)bws\.env$|\.key$|\.pem$|(^|/)\.ssh(/|$)|(^|/)id_rsa|(^|/)credentials($|/)'
@@ -90,7 +93,10 @@ restore_git() {
     fail "git アーカイブに絶対パス/親ディレクトリ参照が含まれるため拒否" || true
     return 1
   fi
-  if ! tar -xzf "$archive" -C "$tmp_dir/tree" 2>/dev/null; then
+  # I77-C: --no-same-owner はアーカイブに記録された owner を復元しないための
+  # 共通オプション。一時領域は root 所有で良いが、本番反映経路と同じ抽出方法に
+  # 揃えておく（本番側では抽出後に既存 owner へ chown する）。
+  if ! tar -xzf "$archive" -C "$tmp_dir/tree" --no-same-owner 2>/dev/null; then
     rm -rf -- "$tmp_dir"
     fail "一時ディレクトリへの展開に失敗しました" || true
     return 1
@@ -149,11 +155,57 @@ restore_git() {
   fi
   log "退避タグ: $tag"
 
+  # I77-C (a): 実行ユーザーは root 固定（restore-local.sh:73-76）。tar を root で
+  # 実行するとアーカイブに記録された owner（root/root）が復元され、
+  # /home/koppe/.../jarvis のファイルを koppe が編集できなくなる。
+  # 採用方針: 「precondition で repo 所有者 == 実行ユーザーを要求し不一致なら
+  # fail-closed」ではなく、「--no-same-owner で展開し、展開前に取得した repo
+  # ディレクトリの既存 owner:group（stat -c %U:%G）へ明示的に chown する」を選ぶ。
+  # これにより root 実行でも既存所有者（koppe:koppe）が保持され、退避タグ作成後
+  # の展開途中で owner が取得できない場合は fail-closed とする。
+  repo_owner="$(stat -c '%U:%G' -- "$repo" 2>/dev/null || true)"
+  if [ -z "$repo_owner" ] || [[ "$repo_owner" != *:* ]]; then
+    rm -rf -- "$tmp_dir"
+    fail "git: repo の既存 owner を取得できません: $repo" || true
+    return 1
+  fi
+  if [ -z "${repo_owner%%:*}" ] || [ -z "${repo_owner##*:}" ]; then
+    rm -rf -- "$tmp_dir"
+    fail "git: repo の既存 owner が不正です: $repo_owner" || true
+    return 1
+  fi
+  log "git: 展開後に owner を $repo_owner へ戻します（root:root 化を防止）"
+
   # 検査済みアーカイブを作業ツリーへ展開する。
   # 注: git archive は追跡ファイルのみ。削除済みファイルの後始末は S7 の範囲外。
-  if ! tar -xzf "$archive" -C "$repo" 2>/dev/null; then
+  if ! tar -xzf "$archive" -C "$repo" --no-same-owner 2>/dev/null; then
     rm -rf -- "$tmp_dir"
     fail "作業ツリーへの展開に失敗しました（退避タグ: $tag）" || true
+    return 1
+  fi
+
+  # 抽出されたパスだけを chown する（repo 全体の再帰 chown はしない）。
+  # 入力は前述の secret / traversal 検査を通過した相対パスのみ。
+  # ディレクトリは -R で配下の新規ディレクトリも含めて戻し、ファイル/シンボリック
+  # リンクは -h でリンク先を追わずに owner を設定する。
+  chown_rc=0
+  while IFS= read -r tar_entry; do
+    [ -n "$tar_entry" ] || continue
+    chown_target="${tar_entry%/}"
+    [ -n "$chown_target" ] || continue
+    [ -e "$repo/$chown_target" ] || continue
+    if [ -d "$repo/$chown_target" ]; then
+      chown -R -- "$repo_owner" "$repo/$chown_target" || chown_rc=$?
+    else
+      chown -h -- "$repo_owner" "$repo/$chown_target" || chown_rc=$?
+    fi
+    if [ "$chown_rc" -ne 0 ]; then
+      break
+    fi
+  done < <(tar -tzf "$archive" 2>/dev/null)
+  if [ "$chown_rc" -ne 0 ]; then
+    rm -rf -- "$tmp_dir"
+    fail "git: 展開ファイルを $repo_owner へ chown できません（退避タグ: $tag）" || true
     return 1
   fi
 
