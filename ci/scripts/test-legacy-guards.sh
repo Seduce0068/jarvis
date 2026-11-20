@@ -901,7 +901,7 @@ cp "$repo"/specs/test-*.md "$step_tmp/specs/"
 # spec-only duplication is now rejected too (next case) because note matches
 # are counted against the spec count. The Scenario count is unchanged here, so
 # only the contract-coverage gate can reject this copy.
-step_evidence="$step_tmp/evidence/test-run-20261120-f1e67b2a5e2c.json"
+step_evidence="$step_tmp/evidence/test-run-20261120-de83a4552e45.json"
 if python3 - "$step_tmp/specs/test-context.md" "$step_evidence" <<'PY'
 import json, sys
 
@@ -950,7 +950,7 @@ cp "$repo/evidence/index.md" "$count_tmp/evidence/index.md"
 cp "$repo/todo.md" "$count_tmp/todo.md"
 cp "$repo"/evidence/test-run-*.json "$count_tmp/evidence/"
 cp "$repo"/specs/test-*.md "$count_tmp/specs/"
-count_evidence="$count_tmp/evidence/test-run-20261120-f1e67b2a5e2c.json"
+count_evidence="$count_tmp/evidence/test-run-20261120-de83a4552e45.json"
 if python3 - "$count_tmp/specs/test-context.md" "$count_evidence" <<'PY'
 import json, sys
 

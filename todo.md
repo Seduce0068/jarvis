@@ -2375,4 +2375,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
-- 親が対応: 全ゲート再検証。
+### Round 82（R4 で修正済み）
+
+- [x] **PII スキーマ不一致**（confirmed high）→ `pii_patterns.toml` を
+  `[patterns]` 配下へ移動し14パターンを有効化。実設定パース／AWS・GitHub・
+  JWT redact／warn 不出の回帰2件と仕様 TC-P5 追加、証跡再生成（context 166→172）。
+- [x] 証跡 generator／UI README／Makefile:test へ --locked、ContextConfig の
+  Debug で pg_url を redact（実接続用 getter は不変）。
+- [x] policy/event の起動検証テストを env 非依存化（vacuous pass 解消）、
+  egress ホスト長 253/254・ラベル長 63/64 の境界回帰4件。
+- [x] UI 二重 POST テストを実 decide() 駆動へ（seam 隔離）、root /run 枝・
+  no-/run 枝・sudo -u postgres psql 経路・カスタム Qdrant コレクション名の
+  回帰を追加（restore 437→461件）。
+- 親が対応: fmt 差分（型エイリアス／import）、UI テストの refresh 前提、
+  clippy type_complexity、証跡ハッシュ／REQ 同期、tamper の参照更新。
+
+### Round 82 の残り指摘（未対応）
+
+- [ ] CI の記録 SHA がコメント止まりで自動照合が無い／上流 v1 が未署名
+      （low）— API 照合ゲートを CI に追加するか §5 の例外明文化。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: 全ゲート再検証（restore 461件、ci-local ok=435）。
