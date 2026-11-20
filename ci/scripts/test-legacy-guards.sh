@@ -1269,6 +1269,63 @@ else
   fail=$((fail+1))
 fi
 
+# I97-A: egress must follow Rust's host-pattern rules, not the old loose
+# character class. Every value below passes the old regex but must be rejected
+# with the FIXED code only (the gate never prints the value).
+long_label="$(python3 -c 'print("a" * 64)')"
+too_long_host="$(python3 -c 'print(".".join(["a" * 63, "a" * 63, "a" * 63, "a" * 62]))')"
+strict_egress_env="$tmp/i97_invalid_egress.env"
+i97_invalid_values=(
+  'example..com'          # empty label
+  '-bad.example.com'      # leading hyphen
+  'bad-.example.com'      # trailing hyphen
+  'www.*.example.com'     # wildcard only allowed as a leading "*."
+  '*.'                    # empty host after the wildcard prefix
+  'example.com.'          # trailing dot => empty label
+  'example. com'          # whitespace inside a label
+  "${long_label}.com"     # label longer than 63
+  "$too_long_host"        # host longer than 253
+)
+i97_bad=0
+for value in "${i97_invalid_values[@]}"; do
+  printf '%s\n' \
+    'JARVIS_MCP_GW_BASE_DIR=/opt/jarvis' \
+    "JARVIS_MCP_GW_EGRESS_ALLOWLIST=$value" \
+    > "$strict_egress_env"
+  out=$(JARVIS_DRIFT_ENV="$strict_egress_env" \
+        bash "$repo/infra/scripts/check-deploy-drift.sh" --env-only 2>&1)
+  code=$?
+  if [ "$code" -ne 2 ] \
+     || ! printf '%s' "$out" | grep -q 'E_ENV_INVALID_EGRESS_ALLOWLIST' \
+     || printf '%s' "$out" | grep -qF -- "$value"; then
+    i97_bad=$((i97_bad+1))
+  fi
+done
+if [ "$i97_bad" -eq 0 ]; then
+  echo "  PASS: drift --env-only rejects malformed egress patterns (code only)"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift --env-only accepted a malformed egress pattern"
+  fail=$((fail+1))
+fi
+# Positive control: per-entry trim, a leading "*.", a trailing comma and a
+# 253-char host stay valid; deny-all (empty value) remains valid too.
+max_host="$(python3 -c 'print(".".join(["a" * 63, "a" * 63, "a" * 63, "a" * 61]))')"
+{
+  printf '%s\n' 'JARVIS_MCP_GW_BASE_DIR=/opt/jarvis'
+  printf '%s\n' "JARVIS_MCP_GW_EGRESS_ALLOWLIST= example.com , *.example.org ,${max_host}"
+} > "$strict_egress_env"
+out=$(JARVIS_DRIFT_ENV="$strict_egress_env" \
+      bash "$repo/infra/scripts/check-deploy-drift.sh" --env-only 2>&1)
+code=$?
+if [ "$code" -eq 0 ] && printf '%s' "$out" | grep -q 'mcp-gw env.*OK'; then
+  echo "  PASS: drift --env-only accepts Rust-valid egress patterns"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift --env-only rejected a Rust-valid egress pattern (exit=$code)"
+  fail=$((fail+1))
+fi
+
 # (b) A live rollback needs root and mutates /etc, /opt and systemd, so the
 # non-root CI gate cannot exercise it safely. Use a structural guard on the
 # rollback body instead: the missing-.bak branch must install the repo deny-all
@@ -1868,6 +1925,158 @@ PY
     fail=$((fail+1))
   fi
 done
+
+# I97-B: JARVIS_DRIFT_BINARY must drive BOTH the content and the owner/mode
+# check. Static guard plus a mocked-stat run; no real file/permission is touched.
+drift_src="$repo/infra/scripts/check-deploy-drift.sh"
+# Literal shell fragments are matched in the drift source.
+# shellcheck disable=SC2016
+if grep -Fq 'sha256sum "$deployed_binary"' "$drift_src" \
+   && grep -Eq '^check_owner_mode[[:space:]]+"binary"[[:space:]]+"\$deployed_binary"' "$drift_src" \
+   && ! grep -Fq 'sha256sum /opt/jarvis/bin/jarvis-mcp-gw' "$drift_src" \
+   && ! grep -Eq '^check_owner_mode[[:space:]]+"binary"[[:space:]]+/opt/jarvis' "$drift_src"; then
+  echo "  PASS: drift binary content/owner-mode share JARVIS_DRIFT_BINARY"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift binary checks bypassed JARVIS_DRIFT_BINARY"
+  fail=$((fail+1))
+fi
+
+bin_override_dir="$tmp/binary_override"
+mkdir -p "$bin_override_dir"
+printf 'override-binary\n' > "$bin_override_dir/custom-gw"
+chmod 0755 -- "$bin_override_dir/custom-gw"
+cat > "$bin_override_dir/stat" <<'MOCK'
+#!/usr/bin/env bash
+for last in "$@"; do :; done
+case "$last" in
+  *custom-gw) printf '%s\n' '1000:1000 755' ;;
+  *.env) printf '%s\n' '0:0 600' ;;
+  *bin/jarvis-mcp-gw) printf '%s\n' '0:0 755' ;;
+  *) printf '%s\n' '0:0 644' ;;
+esac
+MOCK
+chmod 0755 -- "$bin_override_dir/stat"
+bin_out=$(
+  # PATH is intentionally scoped to this drift invocation.
+  # shellcheck disable=SC2031
+  PATH="$bin_override_dir:$PATH" \
+  JARVIS_DRIFT_BINARY="$bin_override_dir/custom-gw" \
+  JARVIS_DRIFT_ALLOWLIST="$owner_tmp/mcp_allowlist.toml" \
+  JARVIS_DRIFT_POLICY_DIR="$owner_tmp/policy" \
+  JARVIS_DRIFT_PII="$owner_tmp/pii_patterns.toml" \
+  JARVIS_DRIFT_UNIT="$owner_tmp/jarvis-mcp-gw.service" \
+  JARVIS_DRIFT_ENV="$owner_tmp/jarvis-mcp-gw.env" \
+    bash "$repo/infra/scripts/check-deploy-drift.sh" 2>&1
+)
+bin_code=$?
+if [ "$bin_code" -eq 2 ] \
+   && printf '%s' "$bin_out" | grep -q 'binary.*E_BAD_OWNER_MODE' \
+   && ! printf '%s' "$bin_out" | grep -F "$bin_override_dir" | grep -q 'E_BAD_OWNER_MODE'; then
+  echo "  PASS: drift owner/mode uses JARVIS_DRIFT_BINARY (fixed code only)"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift owner/mode ignored JARVIS_DRIFT_BINARY (exit=$bin_code)"
+  fail=$((fail+1))
+fi
+
+# I97-C: runtime_check must JSON-escape the repo path. Run a COPY of the drift
+# script from a root whose path contains Japanese text and a double quote, with
+# stubbed systemctl/curl/stat. No service or deployed file is touched.
+esc_tmp="$tmp/drift_json_escape"
+jp_repo="$esc_tmp/日本語\"引用符/repo"
+mkdir -p "$jp_repo/infra/scripts" "$jp_repo/infra/config/policy" \
+         "$jp_repo/infra/systemd" "$jp_repo/rust/target/release" \
+         "$esc_tmp/bin"
+cp "$repo/infra/scripts/check-deploy-drift.sh" "$jp_repo/infra/scripts/"
+cp "$repo/infra/config/mcp_allowlist.toml" "$jp_repo/infra/config/"
+cp "$repo/infra/config/policy/casbin_policy.csv" \
+   "$repo/infra/config/policy/policies.cedar" \
+   "$repo/infra/config/policy/cedar_schema.cedarschema" "$jp_repo/infra/config/policy/"
+cp "$repo/infra/config/pii_patterns.toml" "$jp_repo/infra/config/"
+cp "$repo/infra/systemd/jarvis-mcp-gw.service" "$jp_repo/infra/systemd/"
+printf 'stub-binary\n' > "$jp_repo/rust/target/release/jarvis-mcp-gw"
+chmod 0755 -- "$jp_repo/rust/target/release/jarvis-mcp-gw"
+printf '%s\n' \
+  'JARVIS_MCP_GW_BASE_DIR=/opt/jarvis' \
+  'JARVIS_MCP_GW_EGRESS_ALLOWLIST=' \
+  > "$esc_tmp/jarvis-mcp-gw.env"
+cat > "$esc_tmp/bin/systemctl" <<'STUB'
+#!/usr/bin/env bash
+[ "${1:-}" = is-active ] && [ "${3:-}" = jarvis-mcp-gw ] && exit 0
+exit 1
+STUB
+cat > "$esc_tmp/bin/curl" <<'STUB'
+#!/usr/bin/env bash
+out=/dev/null
+hdr=
+payload=
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    -D) hdr="$2"; shift 2 ;;
+    -d) payload="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [ -n "$hdr" ]; then
+  printf '%s\n' 'mcp-session-id: stub-session' > "$hdr"
+fi
+case "$payload" in
+  *filesystem.list*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"{\"entries\":[]}"}]}}' > "$out" ;;
+  *git.status*)
+    printf '%s\n' "$payload" > "${CAPTURE_D:?}"
+    printf '%s\n' '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"{\"stdout\":\"ok\",\"stderr\":\"\",\"status\":0}"}]}}' > "$out" ;;
+  *tools/list*)
+    printf '%s\n' '{"jsonrpc":"2.0","id":4,"result":{"tools":[{"name":"filesystem.list"},{"name":"filesystem.read"},{"name":"git.diff"},{"name":"git.status"}]}}' > "$out" ;;
+esac
+exit 0
+STUB
+chmod 0755 -- "$esc_tmp/bin/systemctl" "$esc_tmp/bin/curl"
+esc_out=$(
+  # PATH is intentionally scoped to this drift invocation.
+  # shellcheck disable=SC2031
+  PATH="$esc_tmp/bin:$owner_tmp/bin:$PATH" \
+  CAPTURE_D="$esc_tmp/git-status-payload.json" \
+  JARVIS_DRIFT_ALLOWLIST="$jp_repo/infra/config/mcp_allowlist.toml" \
+  JARVIS_DRIFT_POLICY_DIR="$jp_repo/infra/config/policy" \
+  JARVIS_DRIFT_PII="$jp_repo/infra/config/pii_patterns.toml" \
+  JARVIS_DRIFT_UNIT="$jp_repo/infra/systemd/jarvis-mcp-gw.service" \
+  JARVIS_DRIFT_ENV="$esc_tmp/jarvis-mcp-gw.env" \
+  JARVIS_DRIFT_BINARY="$jp_repo/rust/target/release/jarvis-mcp-gw" \
+    bash "$jp_repo/infra/scripts/check-deploy-drift.sh" 2>&1
+)
+esc_code=$?
+if printf '%s' "$esc_out" | grep -q 'runtime tools/call.*OK' \
+   && python3 - "$esc_tmp/git-status-payload.json" "$jp_repo" <<'PY'
+import json, sys
+with open(sys.argv[1], encoding='utf-8') as fh:
+    payload = json.load(fh)
+sys.exit(0 if payload['params']['arguments']['path'] == sys.argv[2] else 1)
+PY
+then
+  echo "  PASS: drift runtime_check escapes a Japanese/quoted repo path"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift runtime_check broke on a Japanese/quoted path (exit=$esc_code)"
+  fail=$((fail+1))
+fi
+
+# I97-D: cargo-audit 0.23 does not auto-discover audit.toml; the gate must pass
+# --ignore explicitly and audit.toml must hold concrete RUSTSEC IDs.
+audit_gate="$repo/ci/scripts/check-dependency-audit.sh"
+# Literal shell fragment is matched in the audit gate source.
+# shellcheck disable=SC2016
+if grep -Fq 'ignore_args+=(--ignore "$advisory_id")' "$audit_gate" \
+   && grep -Fq 'cargo audit --no-fetch --file "$lock" "${ignore_args[@]}"' "$audit_gate" \
+   && ! grep -Fiq 'TODO-RUSTSEC' "$repo/audit.toml"; then
+  echo "  PASS: dependency audit passes --ignore with concrete RUSTSEC IDs"
+  ok=$((ok+1))
+else
+  echo "  FAIL: dependency audit contract regressed"
+  fail=$((fail+1))
+fi
 
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

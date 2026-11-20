@@ -132,11 +132,12 @@ make check-evidence
 | 時刻・署名・種別 | `BAD_TIMESTAMP`, `BAD_SIGNATURE`, `BAD_DOCUMENT_TYPE` |
 | 結果 | `FAILED_TESTS`, `NO_PASSING_TESTS`, `BAD_RESULTS_TYPE` |
 | notes | `BAD_NOTES_TYPE`, `SKIPPED_TESTS`, `NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH` |
-| 要件 | `REQ_SET_MISMATCH` |
+| 要件 | `REQ_SET_MISMATCH`, `REQ_SPEC_UNRESOLVED` |
+| リスク | `RISK_SET_MISMATCH` |
 | シナリオ | `SCENARIO_COUNT_MISMATCH` |
 | 契約 step | `SCENARIO_STEP_UNCOVERED` |
 | 仕様構造 | `MISSING_EVIDENCE`, `MISSING_SECTION`, `MISSING_TRACEABILITY`, `MISSING_INFO_ITEM`, `MISSING_CONFORMANCE` |
-| 索引 | `INDEX_NOT_FOUND`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK` |
+| 索引 | `INDEX_NOT_FOUND`, `*_NOT_IN_INDEX`, `INDEX_BROKEN_LINK`, `INDEX_UNRESOLVED_ENTRY`, `INDEX_SPEC_MISMATCH` |
 | 索引の件数 | `INDEX_RESULT_MISSING`, `INDEX_RESULT_MISMATCH` |
 
 ## ゲートが検証する項目
@@ -147,13 +148,14 @@ make check-evidence
 | ファイル名末尾 | ハッシュ接頭詞（12文字）が `spec_hash` と一致（不一致は `HASH_FILENAME_MISMATCH`） |
 | `test_basis_ref.spec_path` | 実在する仕様ファイル（未指定は `NO_SPEC_PATH`、欠落は `SPEC_PATH_NOT_FOUND`） |
 | `test_basis_ref.spec_hash` | トップレベルと一致（nested hash、不一致は `NESTED_HASH_MISMATCH`） |
-| `requirements` | 同一 spec を参照する**全証跡**の要件集合＝spec の `REQ-\d+` 定義集合＝Traceability の Req 列集合（不一致は `REQ_SET_MISMATCH`。エラーには対象証跡のパスを示すが要件値は出力しない） |
+| `requirements` | 同一 spec を参照する**全証跡**の要件集合＝spec の `REQ-\d+` 定義集合＝Traceability の Req 列集合（不一致は `REQ_SET_MISMATCH`。エラーには対象証跡のパスを示すが要件値は出力しない）。`spec_path` が `specs/test-*.md` の glob 外・`..` 脱出・絶対パスの場合は `REQ_SPEC_UNRESOLVED` |
+| `risk_items[].id` | 仕様の Risk & tier の R-ID 集合と完全一致（欠落・未宣言 ID の追加は `RISK_SET_MISMATCH`） |
 | `results` | `failed=0` / `passed>0` / 厳密な非負整数型（型不正は `BAD_RESULTS_TYPE`） |
 | `results.skipped` | 正の値は `notes` に数値付き `N ignored`（`N` = `results.skipped`）が必要（`SKIPPED_TESTS`） |
 | `notes` | 文字列型（`BAD_NOTES_TYPE`）。`passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致（`NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH`） |
 | `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed のみ、skipped は除外）がその数以上（`SCENARIO_COUNT_MISMATCH`）。`ignored` 明記済みのスキップでもカバレッジは満たせない |
 | 契約 step | strict モード。契約マーカー以降の step に現れるキーワードが証跡 `notes` にもあること（baseline 例外なし）。未同期なら `SCENARIO_STEP_UNCOVERED` |
-| index | 両 index が全成果物をリンクし、リンク切れなし |
+| index | 両 index が全成果物をリンクし、リンク切れなし。未解決エントリ／孤立参照定義は `INDEX_UNRESOLVED_ENTRY`、spec リンク先の不一致は `INDEX_SPEC_MISMATCH` |
 | index のエントリ | 参照定義・インラインリンクを等価に解決し、`N passed` / `N failed` が必須（欠落は `INDEX_RESULT_MISSING`） |
 | index の件数 | 見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
 | `timestamp` / `signature` | RFC 3339 の実在日時（`BAD_TIMESTAMP`）/ `self-attested`（`BAD_SIGNATURE`） |
@@ -517,10 +519,13 @@ CI / Makefile に既知脆弱性の検出ゲートが無く、`Cargo.lock` に�
 [check-dependency-audit.sh](../../ci/scripts/check-dependency-audit.sh) は
 リポジトリルートから `cargo audit --no-fetch --file <lock>` を走らせ、
 `rust/Cargo.lock` と `ui/Cargo.lock` の 2 ファイルを検査する。
-調整はルートの [audit.toml](../../audit.toml) に集約する。`cargo-audit` は
-CWD から `audit.toml` を検出するため、スクリプトは CWD をリポジトリ
-ルートへ固定する。`cargo-audit` が無い場合は `AUDIT_TOOL_MISSING` で
-fail-closed とする（CI はバージョン固定で導入する前提）。
+調整はルートの [audit.toml](../../audit.toml) に集約する。固定版
+`cargo-audit` 0.23 は CWD の `audit.toml` を **auto-discover しない**。
+スクリプトは CWD をリポジトリルートへ固定したうえで、
+`[advisories].ignore` から `RUSTSEC-<year>-<num>` を抽出し、各スキャンへ
+`--ignore <ID>` として明示的に渡す（ignore は暗黙には効かない）。
+`cargo-audit` が無い場合は `AUDIT_TOOL_MISSING` で fail-closed とする
+（CI はバージョン固定で導入する前提）。
 
 ### advisory DB 更新方針（採用方針）
 
@@ -551,10 +556,17 @@ fail-closed とする（CI はバージョン固定で導入する前提）。
 - unmaintained 16 件（主に `ui/Cargo.lock`）は情報警告として扱い、
   `--deny` を付けない方針で許容する。脆弱性（vulnerability）は引き続き
   fail-closed で拒否する。
-- `cargo-audit` の `ignore` は RUSTSEC-ID 文字列のみに一致する。現状の
-  `TODO-RUSTSEC-*` トークンは実測 ID へ置換えるためのプレースホルダであり、
-  置換えるまで実 advisory を抑制しない。ID は推測せず、
-  `cargo audit` の実測出力から取得して書き換えること。
+- `cargo-audit` の `ignore` は RUSTSEC-ID 文字列のみに一致する。現行
+  `audit.toml` に `TODO-RUSTSEC-*` のプレースホルダは残っておらず、すべて
+  `cargo audit --no-fetch --file rust/Cargo.lock --json` の実測出力から
+  転記した具体 ID（`RUSTSEC-<year>-<num>`）が列挙されている。新規追加時も
+  ID は推測せず実測出力から取得し、理由と再評価日をコメントで添えること。
+  スクリプトが `--ignore` へ渡すのはこの形式の ID だけなので、形式が崩れた
+  トークンは抑制されず未対応 advisory として検出される（fail-open には
+  ならないが、意図した抑制が効かない点に注意）。
+- この契約（`--ignore` の明示渡しとプレースホルダ不在）は
+  [test-legacy-guards.sh](../../ci/scripts/test-legacy-guards.sh) の静的ガード
+  で回帰される（`make safety-test` / `make ci-local` 経由）。
 
 ### cargo-audit の導入（I94-A）
 

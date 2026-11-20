@@ -10,6 +10,8 @@ deployed_policy_dir="${JARVIS_DRIFT_POLICY_DIR:-/etc/jarvis/policy}"
 deployed_pii="${JARVIS_DRIFT_PII:-/etc/jarvis/pii_patterns.toml}"
 # I50-A: unit が EnvironmentFile=- で読む host override env。
 deployed_env="${JARVIS_DRIFT_ENV:-/etc/jarvis/jarvis-mcp-gw.env}"
+# I97-B: binary も内容検査と owner/mode 検査で同じ override を使う。
+deployed_binary="${JARVIS_DRIFT_BINARY:-/opt/jarvis/bin/jarvis-mcp-gw}"
 drift=0; danger=0
 say() { printf '%-32s %s\n' "$1" "$2"; }
 # I95-C: stat-based owner/mode verification. EXPECTED_CONFIG_MODE in
@@ -56,12 +58,42 @@ done
 # よって BASE_DIR と egress の両方で同一キーの重複自体を DANGER とし、最後の
 # 割り当て行のみを抽出して形式検査する。BASE_DIR は絶対パス・/ 単独でない・
 # .. 成分なしを必須化。egress は空値を正当（genuine deny-all）として維持し、
-# 非空ならホストパターンとしてあり得る文字だけを許容する。値は一切出力しない
+# 非空なら Rust と同一のホストパターン規則で検証する。値は一切出力しない
 # （secret を含みうるためエラーコードのみ）。
+# I97-A: Rust の parse_egress_allowlist / is_valid_host_pattern
+# （rust/jarvis-mcp-gw/src/config.rs:209-244）と同じ規則:
+#   - ',' で分割し各 entry を trim、空 entry は無視（空値＝deny-all）
+#   - 先頭の '*.' のみワイルドカードとして許可（host は空不可・253 文字以下）
+#   - 各ラベルは非空・63 文字以下・ASCII 英数字/ハイフンのみ・前後ハイフン不可
+# python3 不在／解析不能も fail-closed（非 0 を返す）。値は stdout に出さない。
+valid_egress_allowlist() { # value -> 0 = valid (incl. deny-all), !0 = invalid
+  command -v python3 >/dev/null 2>&1 || return 2
+  printf '%s' "$1" | python3 -c '
+import sys
+
+raw = sys.stdin.read()
+
+def valid(entry):
+    host = entry[2:] if entry.startswith("*.") else entry
+    if not host or len(host) > 253:
+        return False
+    for label in host.split("."):
+        if not label or len(label) > 63:
+            return False
+        if not all(c.isascii() and (c.isalnum() or c == "-") for c in label):
+            return False
+        if label.startswith("-") or label.endswith("-"):
+            return False
+    return True
+
+entries = [e.strip() for e in raw.split(",")]
+sys.exit(0 if all(valid(e) for e in entries if e) else 1)
+'
+}
+
 check_mcp_env() {
   local base_count base_last base_val
   local egress_count egress_last egress_val
-  local egress_pattern='^[A-Za-z0-9*.,[:space:]-]+$'
   local env_ok=1
   if [ ! -r "$deployed_env" ]; then
     say "mcp-gw env" "DANGER: E_ENV_UNREADABLE (code only)"
@@ -115,9 +147,10 @@ check_mcp_env() {
       \"*\") egress_val="${egress_val#\"}"; egress_val="${egress_val%\"}" ;;
       \'*\') egress_val="${egress_val#\'}"; egress_val="${egress_val%\'}" ;;
     esac
-    # 空値は正当（deny-all）。非空なら値は出力せず形式のみ検査する。
-    if [ -n "$egress_val" ] && [[ ! "$egress_val" =~ $egress_pattern ]]; then
-      say "mcp-gw env" "DANGER: E_ENV_INVALID_EGRESS_ALLOWLIST (code only; unexpected characters)"
+    # 空値は正当（deny-all）。非空なら Rust と同一規則で検査し、
+    # 不正時は値を出さず固定コードのみを出す。
+    if [ -n "$egress_val" ] && ! valid_egress_allowlist "$egress_val"; then
+      say "mcp-gw env" "DANGER: E_ENV_INVALID_EGRESS_ALLOWLIST (code only; host pattern)"
       danger=1; env_ok=0
     fi
   fi
@@ -169,9 +202,9 @@ if [ "$env_only" -eq 1 ]; then
   echo "== RESULT: OK (env-only) =="
   exit 0
 fi
-# 1) binary
-if [ -x /opt/jarvis/bin/jarvis-mcp-gw ] && [ -x "$repo/rust/target/release/jarvis-mcp-gw" ]; then
-  a=$(sha256sum /opt/jarvis/bin/jarvis-mcp-gw | cut -d' ' -f1)
+# 1) binary（I97-B: 内容検査も JARVIS_DRIFT_BINARY を適用）
+if [ -x "$deployed_binary" ] && [ -x "$repo/rust/target/release/jarvis-mcp-gw" ]; then
+  a=$(sha256sum "$deployed_binary" | cut -d' ' -f1)
   b=$(sha256sum "$repo/rust/target/release/jarvis-mcp-gw" | cut -d' ' -f1)
   if [ "$a" = "$b" ]; then say "binary" "OK (same)"; else say "binary" "PENDING (installed != repo)"; drift=1; fi
 else
@@ -257,11 +290,12 @@ elif grep -Eq '^[[:space:]]*Environment=.*[$][{]' "$unit_sys"; then
 else
   say "systemd env expansion" "OK (no unexpanded variable in Environment=)"
 fi
-# 5d) I95-C: owner/mode 照合。パスは上記の内容検査と同じ JARVIS_DRIFT_*
-# オーバーライド（Round 71 契約の JARVIS_DRIFT_POLICY_DIR を含む）をそのまま
-# 使用し、ラベルは固定語彙のみ。unit/allowlist/policy(pii 含む)=root:root 0644、
-# mcp-gw env=root:root 0600、binary=root:root 0755 を要求する。
-check_owner_mode "binary"       /opt/jarvis/bin/jarvis-mcp-gw                 755
+# 5d) I95-C / I97-B: owner/mode 照合。パスは上記の内容検査と同じ
+# JARVIS_DRIFT_* オーバーライド（binary は JARVIS_DRIFT_BINARY、Round 71
+# 契約の JARVIS_DRIFT_POLICY_DIR を含む）をそのまま使用し、ラベルは固定語彙のみ。
+# unit/allowlist/policy(pii 含む)=root:root 0644、mcp-gw env=root:root 0600、
+# binary=root:root 0755 を要求する。
+check_owner_mode "binary"       "$deployed_binary"                            755
 check_owner_mode "allowlist"    "$deployed_allowlist"                         644
 check_owner_mode "policy"       "$deployed_policy_dir/casbin_policy.csv"      644
 check_owner_mode "cedar_policy" "$deployed_policy_dir/policies.cedar"         644
@@ -279,7 +313,7 @@ check_mcp_env
 #    ProtectHome の取り違えのように「設定一致でも実行不能」な乖離を検出する。
 runtime_check() {
   local mcp_url="${JARVIS_MCP_GW_URL:-http://127.0.0.1:8082}"
-  local tmp sid code
+  local tmp sid code git_payload
   tmp="$(mktemp -d)" || return 1
   curl -q -s -D "$tmp/h" -o /dev/null -m 5 -X POST "${mcp_url}/mcp" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
@@ -294,10 +328,13 @@ runtime_check() {
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
     -H "mcp-session-id: $sid" \
     -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"filesystem.list","arguments":{"path":"."}}}'
+  # I97-C: "$repo" を JSON 文字列へ直接埋め込まない。日本語や引用符を含む
+  # パスで JSON が壊れ誤 DANGER になるため、json.dumps で安全に構築する。
+  git_payload="$(python3 -c 'import json,sys; print(json.dumps({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"git.status","arguments":{"path":sys.argv[1]}}}))' "$repo")" || { rm -rf "$tmp"; return 1; }
   curl -q -s -o "$tmp/r2" -m 8 -X POST "${mcp_url}/mcp" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
     -H "mcp-session-id: $sid" \
-    -d "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"git.status\",\"arguments\":{\"path\":\"$repo\"}}}"
+    -d "$git_payload"
   curl -q -s -o "$tmp/r3" -m 8 -X POST "${mcp_url}/mcp" \
     -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
     -H "mcp-session-id: $sid" \

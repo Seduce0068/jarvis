@@ -183,7 +183,8 @@ curl -fsS -X DELETE "http://127.0.0.1:6333/collections/${COLLECTION}"
 **現状（2026-11-19 時点）**: 隔離復元は
 [restore-local.sh](../../infra/scripts/restore-local.sh) の `--apply` で自動化済み。
 さらに `infra/scripts/test-restore-local.sh` が合成フィクスチャで
-dry-run / apply 経路を自動検証し、47 tests pass（本番リソース非接触を多重ガード）。
+dry-run / apply 経路を自動検証する（本番リソース非接触を多重ガード）。
+件数は実行時の `result: ok=N fail=0` を参照し、固定値は本文に記載しない。
 実機の隔離先復元演習（S9）は残る（自動テストは完了、実機演習はユーザー承認待ち）。
 詳細は [ローカル復元設計](local-restore-design.md) を参照。
 
@@ -259,7 +260,8 @@ rm -rf "$TMP"
 
 ## 未実装・残課題（2026-11-19 時点）
 
-- 実機の隔離先復元演習（S9: 自動テスト47件 pass 済み、実機演習は承認待ち）
+- 実機の隔離先復元演習（S9: 自動テスト pass 済み、件数は
+  `test-restore-local.sh` の実測出力を参照、実機演習は承認待ち）
 - 本番反映の自動化（意図的に未実装: 破壊的操作は `--confirm` + ユーザー承認のまま）
 - restore 演習の定期実施（`backup-redesign-notes.md` の安全ゲート参照）
 - バックアップ保全先の外部化（P1-4: 現状はローカル保存、別媒体への保全が未決定）

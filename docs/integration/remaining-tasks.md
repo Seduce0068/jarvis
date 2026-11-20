@@ -38,8 +38,10 @@ generated:
   `ProtectHome=read-only` 変更を行ったため、**修正済み unit の実機再適用は未**
   （root 必須・ユーザー実行待ち）。
 - **復元（S9）**: `infra/scripts/test-restore-local.sh` を追加し、
-  合成フィクスチャで dry-run / apply 経路を自動検証（**47 tests pass**、
-  本番リソース非接触を多重ガード）。**実機の隔離先復元演習は承認待ち**。
+  合成フィクスチャで dry-run / apply 経路を自動検証（自動テスト pass 済み、
+  本番リソース非接触を多重ガード）。件数は実行時の
+  `result: ok=N fail=0` を参照し、固定値は記載しない。
+  **実機の隔離先復元演習は承認待ち**。
 - **承認 API**: オプションのトークン認証を追加（既定は無効で後方互換）。
   4コンポーネント横断の契約テスト済み。
 - **承認 UI のトークン名・scope 整合（R4-UI）**: UI が
@@ -306,7 +308,8 @@ generated:
 | BK-4 | レガシー設定テンプレートの整理 | 全6テンプレートを棚卸し（2026-11-17）。`policy/context/event/otel.env` は既に legacy 注記済み。`code_server.env` / `mcp_gateway.env` に残っていた「Populated by 1Password CLI at runtime」注記を、実機の `bws run` + `/etc/jarvis/bws.env` 前提へ訂正。値の変更・削除は行わず、secret scan もクリーン。 | ファイル単位の廃止/削除は実機設定の確定後に別判断（現状は参照テンプレートとして維持）。 |
 
 **BK 関連の 2026-11-19 更新**: BK-1/BK-2 のローカル実装に加え、
-`restore-local.sh` と `test-restore-local.sh`（47 tests pass）を追加した。
+`restore-local.sh` と `test-restore-local.sh`（自動テスト pass 済み、
+件数は実行時実測を参照）を追加した。
 timer は実機で active / enabled だが、repo 側 unit 変更の再適用は未実施。
 S9 の実機復元演習とバックアップ外部化（P1-4）は承認待ち。
 
@@ -887,7 +890,8 @@ echo "verify-backup exit: $rc"
 
 ### S9: 実復元演習（隔離先・本番リソース非接触）
 
-自動テストは 47 tests pass 済み。実機の隔離先復元演習はユーザー承認待ち。
+自動テストは pass 済み（件数は下記コマンドの実測出力を参照）。
+実機の隔離先復元演習はユーザー承認待ち。
 
 ```bash
 #!/usr/bin/env bash
@@ -898,7 +902,7 @@ set -euo pipefail
 echo "== 実行環境: Kubuntu ローカル / 隔離先 =="
 cd "$JARVIS_REPO"
 
-echo "== 確認: 自動テスト（合成フィクスチャ・47 tests）=="
+echo "== 確認: 自動テスト（合成フィクスチャ・件数は実測出力を参照）=="
 bash infra/scripts/test-restore-local.sh
 
 echo "== 確認: バックアップ整合性（読み取り専用）=="

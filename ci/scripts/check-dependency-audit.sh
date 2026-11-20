@@ -3,8 +3,11 @@
 #
 # The gate scans `rust/Cargo.lock` and `ui/Cargo.lock` with `cargo audit
 # --no-fetch --file <lock>` from the repository root. Tuning lives in the
-# repository-root `audit.toml` (cargo-audit discovers it from the CWD, which
-# this script pins to the repo root), so an ignore is never implicit.
+# repository-root `audit.toml`. cargo-audit 0.23 does NOT auto-discover it:
+# this script pins CWD to the repo root, extracts the RUSTSEC IDs from
+# [advisories].ignore and passes every one of them explicitly as `--ignore`,
+# so an ignore is never implicit and audit.toml stays the single source of
+# truth for documented suppressions.
 #
 # Fixed fail-closed vocabulary (no values or secrets in failure output):
 #   BAD_USAGE, AUDIT_TOOL_MISSING, AUDIT_CONFIG_MISSING,

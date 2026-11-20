@@ -1,9 +1,11 @@
 # I93-A: cargo-audit configuration (repo root).
 #
-# Discovered by `cargo audit --no-fetch` from the repository root. The gate
-# (ci/scripts/check-dependency-audit.sh) scans rust/Cargo.lock and
-# ui/Cargo.lock with `--no-fetch`, so every suppression here is explicit and
-# version-controlled. No values, tokens, or host-specific paths are stored.
+# NOT auto-discovered: cargo-audit 0.23 does not read audit.toml from the CWD.
+# The gate (ci/scripts/check-dependency-audit.sh) extracts the RUSTSEC IDs from
+# [advisories].ignore below and passes each one explicitly as `--ignore` to
+# every `cargo audit --no-fetch --file <lock>` scan, so every suppression here
+# is explicit and version-controlled. No values, tokens, or host-specific
+# paths are stored.
 #
 # 一時 ignore の根拠（Round 87/88 実測）:
 #   patch 版が無い major 更新待ちのため、アップグレード完了まで抑制する。
