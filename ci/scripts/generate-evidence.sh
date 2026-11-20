@@ -10,6 +10,13 @@
 #
 # Only aggregate counts are emitted. No test name, environment value, secret or
 # host-specific path is read or printed. Failures emit a value-less code only.
+#
+# I71-D: `failed: 0` in the fragment is a --list-derived PREDICTION, not a
+# measurement: `--list` only enumerates tests and never executes them, so it
+# cannot observe a failing test. The emitted lines label this explicitly, and
+# `--check` now runs the real suite and fails closed unless it exits 0 before
+# trusting that value. check-evidence.sh's `failed == 0` gate and the six
+# existing evidence files therefore stay intact.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -17,7 +24,8 @@ usage() {
   cat >&2 <<'EOF'
 Usage: ci/scripts/generate-evidence.sh <target> [--check evidence/test-run-*.json]
   target: policy | mcp | context | event | ui | core
-  --check compares the derived counts with an existing evidence JSON and
+  --check also RUNS the real suite (not --list) and requires it to pass,
+          then compares the derived counts with an existing evidence JSON;
           prints only MATCH / MISMATCH (no values).
 EOF
 }
@@ -88,10 +96,23 @@ if [ "$total" -le 0 ] || [ "$ignored" -gt "$total" ]; then
 fi
 passed=$((total - ignored))
 
+# I71-D: label the predicted `failed` value so it can never be mistaken for a
+# measured result when this fragment is pasted into evidence.
+printf '# LABEL: failed=0 は --list 由来の予測値であり実測ではない。\n'
+printf '#        --list はテストを実行しないため failing test を検出できない。\n'
+printf '#        適用前に実 suite を実行し失敗 0 を確認すること（--check は実 run も照合）。\n'
 printf 'results: {"passed": %d, "failed": 0, "skipped": %d}\n' "$passed" "$ignored"
-printf 'notes  : %d passed / 0 failed / %d ignored (cargo --list から機械導出)\n' "$passed" "$ignored"
+printf 'notes  : %d passed / 0 failed / %d ignored (cargo --list から機械導出; failed は予測値・実測ではない)\n' "$passed" "$ignored"
 
 if [ -n "$check_file" ]; then
+  # I71-D: --list cannot detect a failing test. Fail closed unless the real
+  # suite also passes; cargo's exit code is the only signal read/emitted here
+  # (no test names, values or log content).
+  if ! (cd "$repo/$workdir" && cargo "${cargo_args[@]}") \
+      >"$tmpdir/run.out" 2>"$tmpdir/run.err"; then
+    echo "FAIL: ActualRunDetectedFailure" >&2
+    exit 1
+  fi
   # Strict ints only (bool is an int subclass in Python). Mismatch exits 1 via
   # set -e; no field value is printed by this comparison.
   python3 - "$repo/$check_file" "$passed" "$ignored" <<'PY'

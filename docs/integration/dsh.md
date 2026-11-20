@@ -48,7 +48,10 @@ generated:
   - `tools/list` = 7ツール（filesystem.list/read, git.diff/status, homeassistant.get_state, web.fetch/search）
   - `filesystem.list` / `filesystem.read` / `git.status` の **tools/call 成功**
 - 未実装（明確なエラーを返す）: `web.*` / `homeassistant.*` は**上流MCPサーバー登録**で対応予定。
-  approval系（write/shell/commit）は従来通りfirejail等のレガシー経路（要見直し）。
+  firejail 等のレガシー実行経路は [ADR-0002](../../adr/0002-runtime-agnostic.md) で
+  撤去済み。未実装ツールは明示的エラーを返す fail-closed 挙動であり、
+  レガシー経路へフォールバックしない。承認必須ツールは jarvis-policy の
+  承認フローへ転送される（後述「承認フロー」節）。
 
 ### デプロイ手順（要root）
 ```bash
@@ -71,11 +74,13 @@ curl -s http://127.0.0.1:8082/health
   の `web.fetch` エントリ）。新バイナリをデプロイしても承認なしでは実行されない。
   宛先制限は `JARVIS_MCP_GW_EGRESS_ALLOWLIST` で設定する
   （`adr/0003-native-web-fetch.md`）。
-- 有効化/安全化の手順:
-  1. `infra/config/mcp_allowlist.toml` に `web.fetch` エントリを追加（`requires_approval = true` 推奨）
-  2. `infra/config/policy/casbin_policy.csv` に `tool:web.fetch` のexecute権限を追加
-  3. バイナリを再配置して `systemctl restart jarvis-mcp-gw`
-- 有効化後は、取得先・サイズ・リダイレクトの制約をテストで確認すること。
+- 設定は適用済み（2026-11-15 時点）。新規の有効化手順は不要:
+  - `infra/config/mcp_allowlist.toml` の `web.fetch` に `requires_approval = true` を設定済み
+    （上記のとおり）。
+  - [casbin_policy.csv](../../infra/config/policy/casbin_policy.csv) にも
+    `p, user, tool:web.fetch, execute` を追加済み。
+- バイナリを再配置した場合は `systemctl restart jarvis-mcp-gw` で反映し、
+  取得先・サイズ・リダイレクトの制約をテストで確認すること。
 
 ## 安全デプロイ（2026-11-09）
 

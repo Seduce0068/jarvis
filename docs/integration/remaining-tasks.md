@@ -471,8 +471,8 @@ repo 側の参照関係を調査した結果を記録する。**結論: 要判�
 - [otel.env](../../infra/config/otel.env) は値なしの `op://` テンプレートで、
   参照名は `GRAFANA_CLOUD_TOKEN` / `GRAFANA_CLOUD_INSTANCE`。
   設定が要求する `GRAFANA_CLOUD_AUTH` とは名前が一致しない。
-- [build-selfhost.sh](../../infra/scripts/build-selfhost.sh):47 は旧
-  `op run --env-file=otel.env` 起動接頭辞を除去して unit を生成する。
+- [build-selfhost.sh](../../infra/scripts/build-selfhost.sh):683 は旧
+  `op run --env-file=/etc/jarvis/otel.env` 起動接頭辞を除去して unit を生成する。
   `op run` 経路は既に意図的に外されている。
 - [AGENTS.md](../../AGENTS.md) の Configuration にも、otelcol は直接起動で
   Grafana 認証の供給経路は未特定、との記載がある。
@@ -564,8 +564,8 @@ repo 側の参照関係を調査した結果を記録する。**結論: 要判�
 
 ### Cedar schema の整備状況（2026-11-16、ユーザー指定項目）
 
-[infra/config/policy/cedar_schema.cedarschema](../../infra/config/policy/cedar_schema.cedarschema):7 の TODO に対応し、
-以下を実施済み:
+[infra/config/policy/cedar_schema.cedarschema](../../infra/config/policy/cedar_schema.cedarschema)
+の :4-8 は起動時 Strict 検証を明記しており、以下を実施済み:
 
 - namespace を braces 形式へ修正し schema 自体が parse 可能に。
 - entity 属性を optional 化し、`ApprovalRequest` entity を追加。
@@ -577,9 +577,13 @@ repo 側の参照関係を調査した結果を記録する。**結論: 要判�
 `policies.cedar` が schema に適合することを検証する
 （[policy.rs](../../rust/jarvis-policy/src/policy.rs):27-35, 140）。
 
-**未実装**: gateway が渡す tool 引数は untyped JSON のため closed record として
-表現できず、引数値の runtime schema validation は有効化していない（schema は
-引き続き informational）。有効化にはツール単位の typed context 契約が必要。
+**現状（2026-11-20 更新）**: schema は informational ではない。直上のとおり
+起動時に Strict 検証が強制され、エラー時は fail-closed で起動失敗となる。
+さらに gateway は caller の tool 引数を直接渡さず、
+[lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):20-41 の `policy_context` が
+server 管理の `tool` / `principal` / `resource` / `requires_approval` のみを
+渡すため、caller が ABAC 属性を偽装できない。引数値自体の runtime schema
+validation は未実装だが、それは schema が補助情報であることを意味しない。
 
 ### 承認フロー堅牢化（2026-11-17 追加）
 
