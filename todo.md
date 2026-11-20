@@ -2497,7 +2497,25 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [ ] major 更新待ち29件の解消（hickory 0.26 / rsa 0.10 / rmcp 3.9 /
       旧 rustls 0.22 系統 / libsqlite3-sys）— 再評価 2026-12-20。
-- [ ] CI runner への cargo-audit バージョン固定導入（未導入なら
-      AUDIT_TOOL_MISSING で fail-closed）。
+- [x] CI runner への cargo-audit 0.23.0 固定導入（冪等チェック付き、呼び出し側
+      extra_gates）。共有 workflow は別リポジトリのため呼び出し側を選択。
+
+### Round 89（R4 で修正済み）
+
+- [x] MCP discovery を timeout＋ページ(64)／ツール(4096)上限で fail-closed、
+      git 子プロセスを kill_on_drop＋明示 kill/reap、出力をストリーミング計測。
+- [x] deploy のバイナリ install を fail-closed、build 経路の9 unit を共有
+      owner/mode 表へ編入、setup の libssl-dev 削除。
+- [x] check-deploy-drift に stat ベース owner/mode 検査（固定語彙 E_BAD_OWNER_MODE）
+      と tamper 回帰。
+- [x] check-evidence に RISK_SET_MISMATCH ゲート、6証跡の risk_items 同期、
+      generator のパス厳格化・成功断片漏出排除・自動回帰。
+- 親が対応: テストの json import／pid unwrap／spawn env ガード、docs ガードの
+      ファイル名形式（日付＋ハッシュ）、全ゲート再検証。
+
+### Round 89 の残り指摘（未対応）
+
+- [ ] major 更新待ち29件の解消（hickory 0.26 / rsa 0.10 / rmcp 3.9 /
+      旧 rustls 0.22 系統 / libsqlite3-sys）— 再評価 2026-12-20。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
