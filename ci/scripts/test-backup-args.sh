@@ -92,5 +92,37 @@ else
   printf 'FAIL: TC-B7-backup-dir-missing\n'; fail=$((fail+1))
 fi
 
+# I97-A (confirmed high, Runtime Proof): --retain-days is bounded at parse time
+# to INT64_MAX/86400 = 106751991167300, before the int64 multiplication in the
+# retention step. The boundary value itself must still be accepted; the next
+# integer must be rejected with exit 2, no echoed value and the pre-existing
+# set untouched.
+retain_days_bound_guard() { # value expected_exit
+  local value="$1" expected="$2"
+  local out code sets
+  out="$(bash "$script" --backup-dir "$backup_dir" --skip-db --skip-qdrant \
+          --skip-git --retain-days "$value" 2>&1)" && code=0 || code=$?
+  [ "$code" -eq "$expected" ] || return 1
+  case "$out" in
+    *"$value"*|*'unbound variable'*) return 1 ;;
+  esac
+  [ -f "$sentinel" ] && [ -f "$backup_dir/$old_set/COMPLETE" ] || return 1
+  sets="$(find "$backup_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+  [ "$sets" -eq 1 ] || return 1
+  return 0
+}
+
+if retain_days_bound_guard 106751991167300 0; then
+  printf 'PASS: TC-I97A-bound-valid\n'; ok=$((ok+1))
+else
+  printf 'FAIL: TC-I97A-bound-valid\n'; fail=$((fail+1))
+fi
+
+if retain_days_bound_guard 106751991167301 2; then
+  printf 'PASS: TC-I97A-over-bound\n'; ok=$((ok+1))
+else
+  printf 'FAIL: TC-I97A-over-bound\n'; fail=$((fail+1))
+fi
+
 printf 'result: ok=%d fail=%d\n' "$ok" "$fail"
 [ "$fail" -eq 0 ]

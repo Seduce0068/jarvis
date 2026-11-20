@@ -43,6 +43,19 @@ while [ "$#" -gt 0 ]; do
         ''|*[!0-9]*) echo "ERROR: --retain-days must be a positive integer" >&2; exit 2 ;;
       esac
       [ "$2" -gt 0 ] || { echo "ERROR: --retain-days must be greater than zero" >&2; exit 2; }
+      # I97-A: bound the multiplier BEFORE any signed-64-bit arithmetic.
+      # Bash $(( )) is int64; the largest multiplier whose product with 86400
+      # still fits is INT64_MAX / 86400 = 9223372036854775807 / 86400
+      # = 106751991167300 (integer floor, remainder 55807). At 106751991167301
+      # the product wraps negative and `now - wrapped` can become a future
+      # cutoff_ts, making `epoch < cutoff_ts` true for every backup set
+      # (mass deletion). Adopted policy: reject out-of-range values here at
+      # parse time, before any multiplication or destructive path, instead of
+      # relying on downstream arithmetic to stay in range.
+      [ "$2" -le 106751991167300 ] || {
+        echo "ERROR: --retain-days exceeds the maximum supported value" >&2
+        exit 2
+      }
       retain_days="$2"; shift 2 ;;
     --skip-db) skip_db=1; shift ;;
     --skip-qdrant) skip_qdrant=1; shift ;;
@@ -245,7 +258,16 @@ echo "Backup complete: $set_dir"
 
 if [ -n "$retain_days" ]; then
   echo "Retention: ${retain_days} days (opt-in, destructive)"
-  cutoff_ts="$(( $(date +%s) - retain_days * 86400 ))"
+  now_ts="$(date +%s)"
+  cutoff_ts="$(( now_ts - retain_days * 86400 ))"
+  # I97-A defense in depth: the parse-time upper bound is the primary control.
+  # If a future caller bypasses it and the product overflows, a cutoff later
+  # than 'now' would match every manifest epoch and prune the whole backup
+  # directory. Never run the destructive loop with a future cutoff.
+  if [ "$cutoff_ts" -gt "$now_ts" ]; then
+    echo "ERROR: retention cutoff is in the future; refusing to prune" >&2
+    exit 1
+  fi
   while IFS= read -r old; do
     # Prefer the manifest timestamp; fall back to the <host>-<YYYYMMDD-HHMMSS>
     # directory name used by this script and the earlier Rust implementation.
