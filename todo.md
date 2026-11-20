@@ -2406,10 +2406,22 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 83 の残り指摘（未対応／次ラウンド候補）
 
-- [ ] --locked 取りこぼし: `build-selfhost.sh:200` の cargo build と
-      `docs/integration/*.md` / `AGENTS.md` のコマンド例に --locked が無い
-      （medium）。
-- [ ] PiiConfig に deny_unknown_fields が無く、パターン設定のタイポが黙って
-      消える（low）— 未知キー拒否の回帰を追加。
+- [x] --locked 取りこぼし（medium）→ build-selfhost.sh:200 と
+      `docs/integration/*.md` / `AGENTS.md` の25行へ付与。cargo fmt は非対応のため
+      据え置き。
+- [x] PiiConfig に deny_unknown_fields（low）→ 未知トップレベルキーで parse
+      失敗→warn＋既定パターンの回帰を追加。※ `[patterns]` 内のキーは HashMap
+      のため今回の対象外（将来の列挙型化タスク）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
+
+### Round 84 の残り指摘（未対応）
+
+- [ ] workflow pin ゲートの `api_unreachable` が `PIN_RECORD_MISSING` まで
+      UNVERIFIED に格下げする fail-open（medium）— ローカル検出は常に fail-closed。
+- [ ] workflow pin ゲート自体に自動回帰が無い（medium）— mini workflow と
+      疑似 API レスポンスで全分岐を検証する test-workflow-pins.sh を追加。
+- [ ] 起動検証テストが TOML を読まず Serialized 上書きで置換している
+      （medium）— TOML 権威のテストと env 上書きのテストを分離。
+- 親が対応: secret_scan の GITHUB_TOKEN 誤検出（`${VAR-}` 形式へ変更）、
+  全ゲート再検証。

@@ -67,9 +67,9 @@ if [ "${#workflows[@]}" -eq 0 ]; then
 fi
 
 auth_args=()
-if [ -n "${GITHUB_TOKEN:-}" ]; then
+if [ -n "${GITHUB_TOKEN-}" ]; then
   auth_args=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
-elif [ -n "${GH_TOKEN:-}" ]; then
+elif [ -n "${GH_TOKEN-}" ]; then
   auth_args=(-H "Authorization: Bearer ${GH_TOKEN}")
 fi
 
