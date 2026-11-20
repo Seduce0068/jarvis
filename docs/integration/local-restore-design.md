@@ -211,12 +211,28 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
   （履歴: 初期設計では「スキップ指定は事前検証の対象からは除外しない」としていた。
   実装と CLI help はスキップ時にゲートを除外するセマンティクスで運用されているため、
   現行動作に合わせて本項目を更新した。旧記述は現行セマンティクスではない。）
-- **同時実行防止**: `flock -n` で復元プロセスを 1 つに制限する。
-  `main()` 入口で `/tmp/jarvis-restore.lock`（`LOCK_FILE` で上書き可）の
-  排他ロックを取得し、取得失敗は固定語彙 `[restore-local] LOCK FAIL:`
-  で fail-closed とする。dry-run もロックを取得するが、`systemctl` を
-  呼ばないため timer を触らない契約は変わらない。ロックファイルは
+- **同時実行防止（I81-A）**: `flock -n` は **restore-local.sh インスタンス同士**
+  のみを直列化する。`backup-local.sh` はこのロックを取得しないため、
+  backup timer とのインリーブ除外は担わない。timer 除外は
+  `stop_services()` + `verify_stopped_services()` が担当する
+  （`jarvis-backup.timer` を停止し、dispatch 前に inactive を確認して
+  fail-closed する）。取得失敗は固定語彙 `[restore-local] LOCK FAIL:`
+  で fail-closed とする。
+- **ロックパスと inode 整合性**: 既定は安定パス `/run/jarvis/restore.lock`
+  （`LOCK_FILE` で上書き可）。`/run` が無い環境、または非 root で
+  `/run/jarvis` を作成できない場合は `/tmp/jarvis-restore.lock` へ
+  フォールバックし WARN を明示する。`/tmp` は world-writable なので、
+  inode 入れ替えの補完制御として open 前後の `stat -c '%d:%i'` 照合が必須。
+  変化時は `LOCK_INODE_CHANGED` で fail-closed する。ロックファイルは
   削除しない（保持中プロセスの inode を壊し相互排除を破壊するため）。
+- **子プロセスへの fd 漏洩防止**: bash の動的 fd（`{VAR}`）には FD_CLOEXEC が
+  立たないため、`psql` / `curl` 等の子が fd を継承すると親終了後も古い
+  flock が残り、後続復元が `LOCK_HELD` で拒否される。module dispatch 前に
+  `exec {LOCK_FD}>&-` で子へ渡さない。代わりにロックファイルへ
+  `pid=` / `acquired_at=`（非機微な値のみ）を記録し、stale 検出の
+  手掛かりを残す。
+- dry-run もロックを取得するが、`systemctl` を呼ばないため timer を触らない
+  契約は変わらない。
 - **秘密情報**: 設定ファイルの内容を標準出力・ログへ出さない。出力はファイル名、
   サイズ、ハッシュの先頭 12 文字、件数に限定する。`.env` / `bws.env` / token は
   読み取らず、config は allowlist のみ。

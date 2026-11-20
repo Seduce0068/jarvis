@@ -40,11 +40,24 @@ LATEST=0
 VERIFY_SCRIPT="${VERIFY_SCRIPT:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MODULE_DIR="$SCRIPT_DIR/restore-local.d"
-# I79-B (a): dedicated mutual-exclusion lock path. Overridable for isolated test
-# runs; the default is a single, well-known path under /tmp.
-LOCK_FILE="${LOCK_FILE:-/tmp/jarvis-restore.lock}"
+# I81-A (c): dedicated mutual-exclusion lock path. The default is a stable,
+# root-owned path so a non-root actor cannot delete/recreate the file (inode
+# swap) to break exclusion. Overridable via LOCK_FILE for isolated test runs.
+LOCK_FILE_EXPLICIT=0
+LOCK_FALLBACK_TMP=0
+if [ -n "${LOCK_FILE:-}" ]; then
+  LOCK_FILE_EXPLICIT=1
+elif [ -d /run ]; then
+  LOCK_FILE="/run/jarvis/restore.lock"
+else
+  # /run absent (non-systemd/container): fall back to /tmp and make it explicit.
+  LOCK_FILE="/tmp/jarvis-restore.lock"
+  LOCK_FALLBACK_TMP=1
+fi
+LOCK_DIR="$(dirname -- "$LOCK_FILE")"
 LOCK_FAIL_TAG='[restore-local] LOCK FAIL:'
 LOCK_FD=""
+LOCK_INODE=""
 
 # Qdrant is deliberately absent from this list. Restore uses its HTTP API, so
 # the process must keep listening; "stop then HTTP upload" is never produced.
@@ -749,19 +762,21 @@ dispatch_restore() {
 }
 
 # ---------------------------------------------------------------------------
-# I79-B (a): single-execution lock (main() entry gate).
+# I81-A (a): single-execution lock (main() entry gate).
 #
-# jarvis-backup.timer (OnCalendar=daily + Persistent=true) can fire while a
-# manual `--apply --confirm` is inside pg.sh's DROP/CREATE window. One
-# non-blocking exclusive flock held for the whole process keeps the two from
-# interleaving. Acquisition failure is fail-closed with the fixed vocabulary
-# above, before verification, inventory, service stop or any write.
+# SCOPE: this flock serializes restore-local.sh instances against EACH OTHER
+# only. backup-local.sh does not take this lock, so it does NOT exclude the
+# backup timer. Timer exclusion is the job of stop_services() +
+# verify_stopped_services(): jarvis-backup.timer is in SERVICE_INVENTORY, is
+# stopped before dispatch, and is confirmed inactive before any module write.
+# Acquisition failure is fail-closed with the fixed vocabulary above, before
+# verification, inventory, service stop or any write.
 #
-# Dry-run also takes the lock: it only opens a /tmp file and never calls
-# systemctl or stop_services(), so the existing "dry-run does not touch the
-# timer" contract is unchanged. The lock file is deliberately NOT unlinked -
-# removing it while another process holds a fd on the old inode would let a
-# third process lock a new inode and break mutual exclusion.
+# Dry-run also takes the lock: it only opens the lock file and never calls
+# systemctl or stop_services(), so the "dry-run does not touch the timer"
+# contract is unchanged. The lock file is deliberately NOT unlinked - removing
+# it while another process holds a fd on the old inode would let a third
+# process lock a new inode and break mutual exclusion.
 # ---------------------------------------------------------------------------
 acquire_restore_lock() {
   if ! command -v flock >/dev/null 2>&1; then
@@ -769,20 +784,74 @@ acquire_restore_lock() {
       'flock not found in PATH' >&2
     return 1
   fi
+
   # `exec` with a failing redirection terminates a non-interactive shell, so
-  # prove the path is usable first and emit our own fixed-vocabulary line.
-  if ! : >>"$LOCK_FILE"; then
+  # prove the directory + path are usable first and emit our own fixed-vocabulary
+  # line. If the default /run path cannot be created (e.g. a non-root test run),
+  # fall back to the documented /tmp path with a WARN. An explicit LOCK_FILE
+  # override is never silently redirected.
+  local attempt=0
+  while [ "$attempt" -lt 2 ]; do
+    # -m applies only to the deepest directory; parent /run is owned by systemd.
+    # shellcheck disable=SC2174
+    if mkdir -p -m 0755 -- "$LOCK_DIR" 2>/dev/null && : >>"$LOCK_FILE" 2>/dev/null; then
+      break
+    fi
+    if [ "$attempt" -eq 0 ] && [ "$LOCK_FILE_EXPLICIT" -eq 0 ] && [ "$LOCK_FALLBACK_TMP" -eq 0 ]; then
+      LOCK_FILE="/tmp/jarvis-restore.lock"
+      LOCK_DIR="/tmp"
+      LOCK_FALLBACK_TMP=1
+      attempt=1
+      continue
+    fi
     printf '%s %s: %s\n' "$LOCK_FAIL_TAG" LOCK_FILE_UNUSABLE \
       "cannot open lock file: $LOCK_FILE" >&2
     return 1
+  done
+
+  # I81-A (c): capture the inode identity BEFORE opening the lock fd, then again
+  # after. A delete + recreate between the two stats changes %d:%i; refuse to
+  # run instead of locking a stale inode and silently losing mutual exclusion.
+  local inode_before inode_after fd_inode
+  inode_before="$(stat -c '%d:%i' -- "$LOCK_FILE" 2>/dev/null || true)"
+  if [ -z "$inode_before" ]; then
+    printf '%s %s: %s\n' "$LOCK_FAIL_TAG" LOCK_FILE_UNUSABLE \
+      "cannot stat lock file before open: $LOCK_FILE" >&2
+    return 1
   fi
+
   exec {LOCK_FD}<>"$LOCK_FILE"
+  inode_after="$(stat -c '%d:%i' -- "$LOCK_FILE" 2>/dev/null || true)"
+  fd_inode="$(stat -Lc '%d:%i' -- "/proc/self/fd/$LOCK_FD" 2>/dev/null || true)"
+  if [ "$inode_after" != "$inode_before" ] ||
+     { [ -n "$fd_inode" ] && [ "$fd_inode" != "$inode_before" ]; }; then
+    printf '%s %s: %s\n' "$LOCK_FAIL_TAG" LOCK_INODE_CHANGED \
+      "lock file inode changed during open: $LOCK_FILE" >&2
+    exec {LOCK_FD}>&-
+    LOCK_FD=""
+    return 1
+  fi
+  LOCK_INODE="$inode_before"
+
   if ! flock -n "$LOCK_FD"; then
     printf '%s %s: %s\n' "$LOCK_FAIL_TAG" LOCK_HELD \
       "another restore holds $LOCK_FILE; refusing to run" >&2
     return 1
   fi
-  log "lock acquired: $LOCK_FILE"
+
+  # I81-A (b): leave a non-sensitive stale-lock clue (owner PID + UTC acquire
+  # time) in the file itself. Best effort: diagnostics never abort a valid run.
+  # The fd is closed before module dispatch in main(), so module children
+  # (psql/curl) do not inherit it and cannot keep the lock after this exit.
+  {
+    printf 'pid=%s\n' "$$"
+    printf 'acquired_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } >&"$LOCK_FD" || true
+
+  log "lock acquired: $LOCK_FILE (inode=$LOCK_INODE)"
+  if [ "$LOCK_FALLBACK_TMP" -eq 1 ]; then
+    log "WARN: /run lock path unavailable; using $LOCK_FILE (inode check active)"
+  fi
   return 0
 }
 
@@ -831,6 +900,17 @@ git=$([ "$SKIP_GIT" -eq 0 ] && echo restore || echo skip)"
   # still active. Fail closed before any module dispatch / DB write.
   if ! verify_stopped_services; then
     fail "timer still active after stop; aborting before dispatch"
+  fi
+
+  # I81-A (b): bash does not set FD_CLOEXEC on dynamic ({VAR}) fds, so a
+  # long-lived module child (psql/curl) would inherit the flock fd and keep the
+  # lock held after this process exits -> later runs get LOCK_HELD. Close it
+  # before any module code runs; the PID/timestamp written above is the stale
+  # lock diagnostic clue. Timer exclusion is unaffected: stop_services() +
+  # verify_stopped_services() above handle it, not this fd.
+  if [ -n "${LOCK_FD:-}" ]; then
+    exec {LOCK_FD}>&-
+    LOCK_FD=""
   fi
 
   dispatch_restore
