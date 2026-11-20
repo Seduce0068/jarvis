@@ -345,16 +345,20 @@ owner/mode 表の3経路統一、記述子ロジックの共有 lib 抽出、
   [restore.sh](../../infra/scripts/restore.sh) が fail-closed（exit 2）で
   委譲を止め、`make safety-test` が回帰を担保（既存の BK/SEC 進捗記録と整合）。
 
-### code-server の PASSWORD_FILE 扱い（2026-11-20 確認・記録のみ）
+### code-server の PASSWORD_FILE 扱い（2026-11-20 確認・同期済み）
 
-- [build-selfhost.sh](../../infra/scripts/build-selfhost.sh):459 は生成する
-  unit から `Environment=PASSWORD_FILE=` 行を `sed` で削除する。
-- 一方 [code-server.service](../../infra/systemd/code-server.service):33 と
-  [code_server.env](../../infra/config/code_server.env):6 には `PASSWORD_FILE`
-  が残り、テンプレート記述と実機の起動経路が食い違う。
-- **訂正方針**: パスワードは `config.yaml` に集約し、デプロイ時に
-  `PASSWORD_FILE` は除去する。unit / env テンプレートの記述もこの方針へ
-  合わせる（テンプレート自身の編集は本タスクの担当外のため記録のみ）。
+- [build-selfhost.sh](../../infra/scripts/build-selfhost.sh):720 は生成する
+  unit から `Environment=PASSWORD_FILE=` 行を `sed` で削除する
+  （旧記録の `:459` は陳腐化した行番号）。
+- [code-server.service](../../infra/systemd/code-server.service):33-34 と
+  [code_server.env](../../infra/config/code_server.env):6-7 は既に訂正済み。
+  `PASSWORD_FILE` を `config.yaml`（`~/.config/code-server/config.yaml`, 0600）
+  へ集約する方針をコメントで明記し、実際の代入行は持たないため、
+  テンプレート記述と生成 unit の起動経路は一致している。
+- **履歴との区別**: 発掘時点では「テンプレート側に `PASSWORD_FILE` が残り
+  食い違う」と記録されていたが、上記ファイルの訂正で解消済み。
+  パスワードを `config.yaml` に集約しデプロイ時に `PASSWORD_FILE` を
+  除去する方針自体は変更なし。
 
 ### BK/SEC 進捗（2026-11-16 追記）
 

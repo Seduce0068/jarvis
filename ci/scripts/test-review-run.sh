@@ -16,9 +16,19 @@ chmod +x "$tmp/stub-runner"
 ok=0; fail=0
 check() { if [ "$2" = "$3" ]; then echo "  PASS: $1"; ok=$((ok+1)); else echo "  FAIL: $1 expected=[$2] actual=[$3]"; fail=$((fail+1)); fi; }
 
-# 1) default backend + prompt forwarding
-out=$(JARVIS_REVIEW_RUNNER=stub-runner PATH="$tmp:$PATH" bash "$adapter" "/review-flow gate-check 42")
+# 0) true default backend: with JARVIS_REVIEW_RUNNER unset, review-run.sh:23
+# resolves to `opencode`. A stub named `opencode` on PATH exercises the
+# `${JARVIS_REVIEW_RUNNER:-opencode}` default branch (`run <prompt>`) without
+# a real agent runtime; PATH="$tmp:$PATH" makes the stub win.
+cp "$tmp/stub-runner" "$tmp/opencode"
+out=$(env -u JARVIS_REVIEW_RUNNER PATH="$tmp:$PATH" bash "$adapter" "/review-flow gate-check 42")
+check "default runner is opencode" "RUNNER=opencode" "$(echo "$out" | grep '^RUNNER=')"
 check "default runner args" "ARGS=run /review-flow gate-check 42" "$(echo "$out" | grep '^ARGS=')"
+
+# 1) explicit generic runner (non-dsh branch) + prompt forwarding.
+# The genuine default branch is covered by test 0 above.
+out=$(JARVIS_REVIEW_RUNNER=stub-runner PATH="$tmp:$PATH" bash "$adapter" "/review-flow gate-check 42")
+check "explicit generic runner args" "ARGS=run /review-flow gate-check 42" "$(echo "$out" | grep '^ARGS=')"
 
 # 2) --json flag forwarding
 out=$(JARVIS_REVIEW_RUNNER=stub-runner PATH="$tmp:$PATH" bash "$adapter" "/cross-review" --json)
