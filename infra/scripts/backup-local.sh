@@ -138,19 +138,33 @@ mkdir -p "$set_dir"
 chmod 0700 "$set_dir"
 
 manifest="$set_dir/manifest.txt"
-# Header line carries the creation time for precise, opt-in retention.
+# Header line carries the creation time for precise, opt-in retention. The
+# descriptor legend documents the row contract consumed by verify-backup.sh
+# and restore-local.sh; both skip '#' lines when reading the manifest.
 printf '# created_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$manifest"
+printf '# descriptor=name size sha256 format encryption signature role\n' >> "$manifest"
+printf '# descriptor_values=format: gzip|tar|raw encryption: none signature: none role: postgres|qdrant|config|git\n' >> "$manifest"
 
-record() { # name path
+# Single source of truth for the manifest row shape. All four descriptors are
+# written for every payload; the current default is unencrypted and unsigned,
+# so legacy sets and the existing verify/restore flows stay valid.
+# P1-6 encryption/signature is deliberately NOT implemented here: the key
+# injection point and the decrypt timing are a user decision. When that
+# decision is made, change this tuple and extend the descriptor allowlists in
+# verify-backup.sh / restore-local.sh in the same change ("将来 P1-6 で
+# 暗号化を適用する時にここへ接続する").
+record() { # name path [format] [encryption] [signature] [role]
   local name="$1" path="$2" bytes sha
+  local format="${3:-raw}" encryption="${4:-none}" signature="${5:-none}" role="${6:-other}"
   bytes="$(wc -c < "$path" | tr -d ' ')"
   sha="$(sha256sum "$path" | cut -d' ' -f1)"
-  printf '%s %s %s\n' "$name" "$bytes" "$sha" >> "$manifest"
+  printf '%s %s %s %s %s %s %s\n' \
+    "$name" "$bytes" "$sha" "$format" "$encryption" "$signature" "$role" >> "$manifest"
 }
 
 if [ "$skip_db" -eq 0 ]; then
   pg_dump -d jarvis | gzip > "$set_dir/postgres-jarvis.sql.gz"
-  record postgres-jarvis.sql.gz "$set_dir/postgres-jarvis.sql.gz"
+  record postgres-jarvis.sql.gz "$set_dir/postgres-jarvis.sql.gz" gzip none none postgres
   echo "PostgreSQL dump OK"
 fi
 
@@ -173,7 +187,7 @@ if [ "$skip_qdrant" -eq 0 ]; then
   sleep 2
   curl -fsS "${qdrant_collection_url}/snapshots/${snapshot_name}" \
     > "$set_dir/qdrant-snapshot.bin"
-  record qdrant-snapshot.bin "$set_dir/qdrant-snapshot.bin"
+  record qdrant-snapshot.bin "$set_dir/qdrant-snapshot.bin" tar none none qdrant
   echo "Qdrant snapshot OK (collection=${qdrant_collection}, snapshot=${snapshot_name})"
 fi
 
@@ -190,7 +204,7 @@ for source in /etc/jarvis/mcp_allowlist.toml /etc/jarvis/pii_patterns.toml \
   if [ -f "$source" ]; then
     name="config-$(basename "$source")"
     cp "$source" "$set_dir/$name"
-    record "$name" "$set_dir/$name"
+    record "$name" "$set_dir/$name" raw none none config
   fi
 done
 echo "Config copy OK"
@@ -216,7 +230,7 @@ if [ -n "$git_top" ]; then
     exit 1
   fi
   mv -f "$archive_tmp" "$archive"
-  record git-jarvis-head.tar.gz "$archive"
+  record git-jarvis-head.tar.gz "$archive" gzip none none git
   echo "Git repo archive OK: $git_top"
 fi
 

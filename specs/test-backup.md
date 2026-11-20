@@ -23,7 +23,7 @@ status: draft
 | test item | [backup-local.sh](../infra/scripts/backup-local.sh) 等3本 |
 | 根拠 | [todo.md](../todo.md) P1-9, BK-1, BK-2, P1-8 |
 | 判定基準 | 既存シェル回帰テストとスクリプトの観測可能挙動 |
-| 対象外 | 実機 systemd/PG/Qdrant、リストア実行、秘密情報の値 |
+| 対象外 | 実機 systemd/PG/Qdrant、リストア実行、秘密情報の値、P1-6 の暗号化鍵注入・復号処理 |
 | プロファイル | `web-api-l2-moderate` を参照した tailored |
 | 基準出典 | [ASVS 5.0.0][asvs], [SP 800-53 r5.2][sp53], [CC Part 3][cc3] |
 
@@ -53,6 +53,9 @@ status: draft
 | REQ-16 | 旧 backup/restore/deploy は fail-closed (exit 2) を維持する |
 | REQ-17 | drift 検査は欠落 allowlist と古い Cedar schema を検出する |
 | REQ-18 | `--retain-days` の値欠落・非整数・0 以下は exit 2 で拒否する |
+| REQ-19 | manifest はペイロードごとに `format` / `encryption` / `signature`（および `role`）記述子を記録し、現行既定は暗号化なし・署名なしで既存 set と互換である |
+| REQ-20 | verify / restore は固定名ではなく記述子から必須ロールと形式検査を導出し、未知の記述子は fail-closed で拒否する |
+| REQ-21 | 暗号化鍵の注入先・復号タイミングは実装せず、将来追加時の接続点をコードコメントと仕様に明記する |
 
 ## Risk & tier
 
@@ -66,6 +69,8 @@ status: draft
 | R-6 | timer 導入失敗時に旧 unit が戻らない | T2 | unit >= 0.80 |
 | R-7 | 旧ランチャー復活でデータ消失/OCI 転送が起きる | T1 | unit >= 0.90 |
 | R-8 | --retain-days の不正値受け付けによる誤削除 | T3 | unit >= 0.60 |
+| R-9 | 未知の形式/暗号化記述子を平文として検証し、破損を見逃す | T1 | unit >= 0.90 |
+| R-10 | 記述子導入で既存 set / verify / restore の互換性が失われる | T2 | unit >= 0.80 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -82,7 +87,7 @@ TD3 (test case) の順で導出した。
 
 | 技法 | 29119-4 節 | 適用箇所 |
 | --- | --- | --- |
-| equivalence partitioning | 5.2.1 | good/corrupt/partial/legacy set |
+| equivalence partitioning | 5.2.1 | good/corrupt/partial/legacy set、記述子の既定値/明示値/未知値 |
 | boundary value analysis | 5.2.3 | manifest サイズ、retention 境界 |
 | decision table testing | 5.2.6 | marker x created_at x ハッシュ結果 |
 | state transition testing | 5.2.8 | dry-run -> apply -> verify |
@@ -107,7 +112,7 @@ TD3 (test case) の順で導出した。
 
 ## Scenarios
 
-### backup-local.sh (REQ-1〜REQ-7)
+### backup-local.sh (REQ-1〜REQ-7, REQ-19)
 
 ```gherkin
 Scenario: TC-B1 dry-run は無書き込み
@@ -158,7 +163,17 @@ Scenario: TC-B5 --retain-days の引数拒否
   Then いずれも後続処理へ進まずバックアップ set を作らない
 ```
 
-### verify-backup.sh (REQ-8〜REQ-12)
+```gherkin
+Scenario: TC-B6 manifest 記述子の既定値
+  Given --apply でバックアップが作られる
+  When manifest のデータ行を読む
+  Then 各行は name size sha256 format encryption signature role を持つ
+  Then postgres は gzip/none/none/postgres、qdrant は tar/none/none/qdrant である
+  Then config は raw/none/none/config、git は gzip/none/none/git である
+  Then 暗号化と署名の既定値は none で既存 set と同じく検証できる
+```
+
+### verify-backup.sh (REQ-8〜REQ-12, REQ-20)
 
 ```gherkin
 Scenario: TC-V1 完全 set と改ざん set
@@ -192,6 +207,35 @@ Scenario: TC-V4 形式検査
   When 検証する
   Then gzip -t と tar -tf で読めることを確認する
   Then バックアップデータは変更されない
+```
+
+```gherkin
+Scenario: TC-V5 記述子駆動の形式検査と fail-closed
+  Given 3列の legacy manifest と記述子付き manifest がある
+  When それぞれを検証する
+  Then legacy は拡張子と名前から既定記述子を導出して従来どおり通る
+  Then 記述子付き set は format に応じて gzip -t / tar -tf / raw を選ぶ
+  Given encryption=age のように未知の記述子を含む set
+  When 検証する
+  Then 形式検査を試みず fail-closed で exit 1 を返す
+```
+
+### restore-local.sh (REQ-20, REQ-21)
+
+```gherkin
+Scenario: TC-R1 必須ロールを記述子から導出
+  Given ロール記述子が postgres / qdrant / config を示す set
+  When restore-local.sh を dry-run で呼ぶ
+  Then 固定名ではなく記述子から必須ロールを満たしたと判定する
+  Then --skip-db 指定時は postgres の欠落を許容する
+```
+
+```gherkin
+Scenario: TC-R2 未知記述子の拒否と P1-6 接続点
+  Given signature=ed25519 のように未対応の記述子を含む set
+  When restore-local.sh を dry-run で呼ぶ
+  Then 検証ゲートが拒否し DB / Qdrant / サービスに書き込まない
+  Then 鍵注入と復号タイミングは未実装で、接続点がコードと仕様に明記されている
 ```
 
 ### install-backup-timer.sh とガード (REQ-13〜REQ-17)
@@ -256,6 +300,10 @@ Scenario: TC-L2 drift 検出
 | TC-V3 | REQ-10 | - | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.1 | T2 |
 | TC-V3 | REQ-11 | v5.0.0-V16.5.3 | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-V4 | REQ-12 | - | SP800-53r5.2/SI-7 | ATE_FUN.1 | 5.2.9 | T2 |
+| TC-B6 | REQ-19 | v5.0.0-V14.2.4 | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.1 | T2 |
+| TC-V5 | REQ-20 | v5.0.0-V14.2.4 | SP800-53r5.2/SI-7 | ATE_COV.2 | 5.2.6 | T1 |
+| TC-R1 | REQ-20 | - | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.1 | T2 |
+| TC-R2 | REQ-21 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-7 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-I1 | REQ-13 | - | SP800-53r5.2/CM-3 | ATE_FUN.1 | 5.2.8 | T2 |
 | TC-I2 | REQ-14 | v5.0.0-V16.5.3 | SP800-53r5.2/CM-3 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-I3 | REQ-15 | - | SP800-53r5.2/CP-9 | ATE_FUN.1 | 5.2.9 | T1 |
@@ -273,6 +321,8 @@ ISO/IEC 15408-3:2022 の構成要素 ID とする。
 | L-1 | manifest 記載ファイルのサイズ/SHA-256 と形式のみ検証 | 未記載ファイルは検出しない |
 | L-2 | manifest と COMPLETE に署名が無い | 破損検出はできるが改ざん耐性は無い |
 | L-3 | 秘密走査は gzip/tar 内部を展開しない | allowlist が主制御 |
+| L-4 | 暗号化・署名記述子は未知値を拒否するのみで復号は未実装 | P1-6 のユーザー判断待ち。接続点はコードと本仕様に明記 |
+| L-5 | 復元モジュール (`restore-local.d/*.sh`) は入力ファイル名を固定で参照 | 記述子は検証ゲートのみに適用。ファイル名変更時はモジュールも要更新 |
 
 L-1: 検証対象は manifest に載ったファイルに限られ、バックアップ
 セットに付け加わった未記載ファイルは検出されない。
@@ -281,14 +331,29 @@ L-2: 完全性 (integrity) の確認はできるが、真正性 (authenticity) �
 L-3: [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh) の
 ダミー sentinel 走査はアーカイブ内部まで展開しないため、
 秘密情報の非包含は backup-local.sh の明示 allowlist に依存する。
+L-4: manifest の `format` / `encryption` / `signature` / `role` は
+記述子として記録・検証するが、暗号化鍵の注入先と復号タイミングは
+P1-6 のユーザー判断として実装しない。未知の記述子は fail-closed で
+拒否し、`backup-local.sh` の `record()`、`verify-backup.sh` と
+`restore-local.sh` の `descriptor_supported()` が将来の接続点である。
+L-5: 記述子による導出は `verify-backup.sh` と `restore-local.sh` の
+検証ゲートに適用する。実際の復元を行う `restore-local.d/{pg,qdrant,git}.sh`
+は入力パスを固定名で参照するため、P1-6 でファイル名・形式を変える際は
+モジュール側の更新が別途必要である。
 
 ## 既存テストとの対応
 
 回帰テストは [test-verify-backup.sh](../ci/scripts/test-verify-backup.sh)
 と [test-legacy-guards.sh](../ci/scripts/test-legacy-guards.sh) にあり、
-`make test-verify-backup` (23 checks) と `make test-backup-args` (6 checks)、
-合計 29 checks で実行する。
-実行結果は `evidence/` の test-run JSON に記録する。
+`make test-verify-backup` (25 checks) と `make test-backup-args` (6 checks)、
+合計 31 checks で実行する。restore-local.sh の合成フィクスチャ回帰は
+[test-restore-local.sh](../infra/scripts/test-restore-local.sh) の 60 checks
+で、別途実行する。実行結果は `evidence/` の test-run JSON に記録する。
+
+TC-B6 / TC-V5 / TC-R1 / TC-R2 は本ラウンドで追加した仕様シナリオであり、
+テストコードの追加は担当範囲外とする。既存の 25 / 6 / 60 checks は
+記述子の既定値（暗号化なし・署名なし）で従来どおり通ることを前提とし、
+spec_hash の変更に伴う証跡再生成は親が行う。
 
 TC-B3 (秘密情報の非包含) と TC-V4 (形式検査) は task-24 の
 回帰テスト追加でカバー済み。TC-B4 (retention) と TC-I3 (導入後検証) は

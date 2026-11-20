@@ -140,22 +140,97 @@ resolve_set() {
   fi
 }
 
-manifest_has() { # exact manifest name -> 0/1
-  local wanted="$1" name
-  while read -r name _; do
-    case "$name" in ''|\#*) continue ;; esac
-    [ "$name" = "$wanted" ] && return 0
-  done < "$SET_DIR/manifest.txt"
-  return 1
+# ---------------------------------------------------------------------------
+# Payload descriptors: the single derivation path for mandatory roles and
+# format checks (same contract as verify-backup.sh; defined in backup-local.sh).
+# Legacy 3-column manifests are still accepted by defaulting descriptors to
+# the historical extension/name mapping. An explicit but unknown descriptor is
+# rejected (fail-closed), so future encryption cannot silently skip a check.
+# ---------------------------------------------------------------------------
+legacy_format_for() { # name -> format
+  case "$1" in
+    *.gz) printf 'gzip\n' ;;
+    *.tar|*.bin) printf 'tar\n' ;;
+    *) printf 'raw\n' ;;
+  esac
 }
 
-manifest_has_prefix() { # manifest name prefix -> 0/1
-  local prefix="$1" name
-  while read -r name _; do
-    case "$name" in ''|\#*) continue ;; esac
-    case "$name" in "$prefix"*) return 0 ;; esac
-  done < "$SET_DIR/manifest.txt"
-  return 1
+legacy_role_for() { # name -> role
+  case "$1" in
+    postgres-jarvis.sql.gz) printf 'postgres\n' ;;
+    qdrant-snapshot.bin) printf 'qdrant\n' ;;
+    config-*) printf 'config\n' ;;
+    git-jarvis-head.tar.gz) printf 'git\n' ;;
+    *) printf 'other\n' ;;
+  esac
+}
+
+resolve_descriptors() { # name format encryption signature role -> "fmt enc sig role"
+  local name="$1" format="$2" encryption="$3" signature="$4" role="$5"
+  [ -n "$format" ] || format="$(legacy_format_for "$name")"
+  [ -n "$encryption" ] || encryption=none
+  [ -n "$signature" ] || signature=none
+  [ -n "$role" ] || role="$(legacy_role_for "$name")"
+  printf '%s %s %s %s\n' "$format" "$encryption" "$signature" "$role"
+}
+
+descriptor_supported() { # format encryption signature -> 0/1
+  local format="$1" encryption="$2" signature="$3"
+  case "$format" in gzip|tar|raw) ;; *) return 1 ;; esac
+  # P1-6: encryption/signature wiring (key injection point, decrypt timing) is
+  # a user decision and is intentionally not implemented. Anything other than
+  # the current none/none default is rejected here. Future support connects
+  # here: "将来 P1-6 で暗号化を適用する時にここへ接続する".
+  [ "$encryption" = none ] && [ "$signature" = none ]
+}
+
+DESCRIPTOR_FAILURES=0
+
+check_payload_format() { # name format encryption signature role
+  local name="$1" format="$2" encryption="$3" signature="$4" role="$5"
+  local path="$SET_DIR/$name" label="$name"
+  if ! descriptor_supported "$format" "$encryption" "$signature"; then
+    log "FORMAT MISMATCH: $name (unsupported descriptor format=$format encryption=$encryption signature=$signature)"
+    DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+    return 0
+  fi
+  [ -f "$path" ] || return 0
+  case "$role" in
+    postgres) label="postgres dump" ;;
+    qdrant) label="qdrant snapshot" ;;
+  esac
+  case "$format" in
+    gzip)
+      if gzip -t "$path" 2>/dev/null; then
+        log "FORMAT OK: $label (gzip readable)"
+        if [ "$role" = postgres ]; then
+          # grep -F without -q avoids SIGPIPE under pipefail; no values read.
+          if gzip -cd "$path" 2>/dev/null | tail -5 \
+             | grep -F "PostgreSQL database dump complete" >/dev/null 2>&1; then
+            log "COMPLETE OK: postgres dump has pg_dump footer"
+          else
+            log "FORMAT MISMATCH: postgres dump missing pg_dump footer"
+            DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+          fi
+        fi
+      else
+        log "FORMAT MISMATCH: $label gzip corrupt"
+        DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+      fi
+      ;;
+    tar)
+      if tar -tf "$path" >/dev/null 2>&1; then
+        log "FORMAT OK: $label (tar readable)"
+      else
+        log "FORMAT MISMATCH: $label unreadable"
+        DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+      fi
+      ;;
+    raw)
+      # Presence, size and SHA-256 were checked by the manifest loop above.
+      log "FORMAT OK: $name (raw payload present)"
+      ;;
+  esac
 }
 
 # Single source of truth for the 6 reviewed, non-secret config-<basename>
@@ -179,8 +254,9 @@ config_dest_for_base() {
 
 verify_set() {
   local manifest="$SET_DIR/manifest.txt"
-  local name expected_bytes expected_sha path actual_bytes actual_sha base
-  local failures=0 has_pg=0 has_qdrant=0 verifier=""
+  local name expected_bytes expected_sha format encryption signature role
+  local path actual_bytes actual_sha base resolved
+  local failures=0 has_pg=0 has_qdrant=0 has_config=0 has_git=0 verifier=""
 
   [ -d "$SET_DIR" ] || { log "FAIL: backup set directory not found: $SET_DIR"; return 1; }
   [ -f "$manifest" ] || { log "FAIL: manifest.txt missing: $manifest"; return 1; }
@@ -194,8 +270,12 @@ verify_set() {
     failures=$((failures + 1))
   fi
 
-  # Replicate verify-backup.sh:62-79 (size + SHA-256 for every recorded file).
-  while read -r name expected_bytes expected_sha; do
+  # Replicate verify-backup.sh's integrity pass (size + SHA-256 for every
+  # recorded file) and derive role/format from the manifest descriptors in the
+  # same loop. This is the single path that replaces fixed-name presence and
+  # format checks; unknown descriptors are rejected by check_payload_format.
+  DESCRIPTOR_FAILURES=0
+  while read -r name expected_bytes expected_sha format encryption signature role; do
     case "$name" in ''|\#*) continue ;; esac
     path="$SET_DIR/$name"
     if [ ! -f "$path" ]; then
@@ -211,7 +291,29 @@ verify_set() {
       log "MISMATCH: $name (size ${actual_bytes}/${expected_bytes} sha ${actual_sha:0:12}/${expected_sha:0:12})"
       failures=$((failures + 1))
     fi
+
+    # An explicit role must be in the vocabulary; an empty role marks a legacy
+    # row and is derived from the name below. Unknown values fail closed.
+    case "$role" in
+      ''|postgres|qdrant|config|git|other) ;;
+      *)
+        log "FORMAT MISMATCH: $name (unsupported role descriptor: $role)"
+        DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+        continue
+        ;;
+    esac
+    resolved="$(resolve_descriptors "$name" "$format" "$encryption" "$signature" "$role")"
+    read -r format encryption signature role <<< "$resolved"
+    case "$role" in
+      postgres) has_pg=1 ;;
+      qdrant) has_qdrant=1 ;;
+      config) has_config=1 ;;
+      git) has_git=1 ;;
+    esac
+    # Format checks (read-only), dispatched from the descriptor vocabulary.
+    check_payload_format "$name" "$format" "$encryption" "$signature" "$role"
   done < "$manifest"
+  failures=$((failures + DESCRIPTOR_FAILURES))
 
   # config-* allowlist: the authoritative "before any write" gate. It runs
   # unconditionally (also with --skip-configs), because a set carrying a
@@ -231,36 +333,9 @@ verify_set() {
     fi
   done < "$manifest"
 
-  # Format checks (read-only), matching verify-backup.sh:83-109.
-  if [ -f "$SET_DIR/postgres-jarvis.sql.gz" ]; then
-    if gzip -t "$SET_DIR/postgres-jarvis.sql.gz" 2>/dev/null; then
-      log "FORMAT OK: postgres dump (gzip readable)"
-      # grep -F without -q avoids SIGPIPE under pipefail; no values are read.
-      if gzip -cd "$SET_DIR/postgres-jarvis.sql.gz" 2>/dev/null | tail -5 \
-         | grep -F "PostgreSQL database dump complete" >/dev/null 2>&1; then
-        log "COMPLETE OK: postgres dump has pg_dump footer"
-      else
-        log "FORMAT MISMATCH: postgres dump missing pg_dump footer"
-        failures=$((failures + 1))
-      fi
-    else
-      log "FORMAT MISMATCH: postgres dump gzip corrupt"
-      failures=$((failures + 1))
-    fi
-  fi
-  if [ -f "$SET_DIR/qdrant-snapshot.bin" ]; then
-    if tar -tf "$SET_DIR/qdrant-snapshot.bin" >/dev/null 2>&1; then
-      log "FORMAT OK: qdrant snapshot (tar readable)"
-    else
-      log "FORMAT MISMATCH: qdrant snapshot unreadable"
-      failures=$((failures + 1))
-    fi
-  fi
-
   # Stricter than verify-backup.sh: at least one main data component, and every
-  # selected primary component must be recorded (no silent skip).
-  if manifest_has "postgres-jarvis.sql.gz"; then has_pg=1; fi
-  if manifest_has "qdrant-snapshot.bin"; then has_qdrant=1; fi
+  # selected primary component must be recorded (no silent skip). Presence is
+  # derived from the descriptor roles collected above, not from fixed names.
   if [ "$has_pg" -eq 0 ] && [ "$has_qdrant" -eq 0 ]; then
     log "FAIL: no main data component recorded in manifest"
     failures=$((failures + 1))
@@ -275,10 +350,10 @@ verify_set() {
   fi
   # configs and git are legitimately optional in the backup format; report an
   # explicit warning instead of silently skipping when they are absent.
-  if [ "$SKIP_CONFIGS" -eq 0 ] && ! manifest_has_prefix "config-"; then
+  if [ "$SKIP_CONFIGS" -eq 0 ] && [ "$has_config" -eq 0 ]; then
     log "WARN: no config-* entry in manifest; nothing to restore for configs"
   fi
-  if [ "$SKIP_GIT" -eq 0 ] && ! manifest_has "git-jarvis-head.tar.gz"; then
+  if [ "$SKIP_GIT" -eq 0 ] && [ "$has_git" -eq 0 ]; then
     log "WARN: git-jarvis-head.tar.gz not in manifest; nothing to restore for git"
   fi
 
