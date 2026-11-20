@@ -49,6 +49,10 @@ ADR-0002で「読み取り系ツールはゲートウェイ内のRust実装で�
 
 ## 影響
 
+> 以下の `web.search` 記述は本 ADR 決定時点の状態であり、現行の挙動ではない。
+> 現在は `mcp_allowlist.toml` に掲載された upstream MCP 経由で実行される
+> （`gateway.rs` の汎用ツール呼び出し経路）。
+
 - 既存の`web.search`は未実装のまま（呼ぶと400 `no native handler`）。
 - デプロイ前に allowlist の `requires_approval` をレビューすること。
 
