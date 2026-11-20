@@ -8,7 +8,9 @@
 # record fails closed with PIN_RECORD_MISSING / PIN_RECORD_MALFORMED. This
 # gate resolves the current SHA with the read-only GitHub REST API and compares
 # it with that record, so a silently retagged ref is detected instead of being
-# merely documented in a comment.
+# merely documented in a comment. Resolution tries `git/ref/tags/<ref>` first
+# and falls back to `git/ref/heads/<ref>` on HTTP 404, so mutable branch refs
+# (@main / @master) are verified online as well as tags.
 #
 # Fixed fail-closed vocabulary (no dynamic messages on failure paths):
 #   BAD_USAGE, NO_WORKFLOW_FILES, WORKFLOW_READ_FAILED,
@@ -89,8 +91,26 @@ api_get() {
     "${auth_args[@]}" "$1" 2>/dev/null
 }
 
+api_ref_get() {
+  # stdout: "<http-status>\n<response body>" for a git/ref/{tags,heads} lookup.
+  # return: curl status. `-w` exposes the status so a 404 can be told apart from
+  # other HTTP failures; without `-f` an error body is captured but never
+  # printed, and the status alone drives the tag -> branch fallback in the
+  # caller. Network failures still propagate their curl rc unchanged.
+  local raw code body
+  raw="$(curl -sSL --connect-timeout 10 --max-time 30 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "${auth_args[@]}" \
+    -w '\n%{http_code}' \
+    "$1" 2>/dev/null)" || return $?
+  code="${raw##*$'\n'}"
+  body="${raw%$'\n'*}"
+  printf '%s\n%s\n' "$code" "$body"
+}
+
 parse_ref_object() {
-  # stdin: GET /git/ref/tags/<ref> response; stdout: "<sha> <type>"
+  # stdin: GET /git/ref/{tags,heads}/<ref> response; stdout: "<sha> <type>"
   python3 -c '
 import json
 import sys
@@ -119,13 +139,26 @@ except Exception:
 resolve_current_sha() {
   # args: owner repo ref ; stdout: current commit sha ; return: 0 or curl rc.
   local owner="$1" repo_name="$2" ref="$3"
-  local response rc parsed sha obj_type
+  local response raw rc parsed sha obj_type base_url
 
+  base_url="https://api.github.com/repos/${owner}/${repo_name}/git/ref"
+
+  # Tags first (the documented pin convention); a missing tag ref (HTTP 404)
+  # falls back to the branch namespace so @main / @master resolve too. Other
+  # HTTP errors and malformed bodies stay fail-closed as API_RESOLVE_FAILED.
   rc=0
-  response="$(api_get "https://api.github.com/repos/${owner}/${repo_name}/git/ref/tags/${ref}")" || rc=$?
+  raw="$(api_ref_get "${base_url}/tags/${ref}")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     return "$rc"
   fi
+  if [ "${raw%%$'\n'*}" = '404' ]; then
+    rc=0
+    raw="$(api_ref_get "${base_url}/heads/${ref}")" || rc=$?
+    if [ "$rc" -ne 0 ]; then
+      return "$rc"
+    fi
+  fi
+  response="${raw#*$'\n'}"
 
   parsed="$(printf '%s' "$response" | parse_ref_object)" || return 1
   read -r sha obj_type <<< "$parsed"

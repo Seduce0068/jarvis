@@ -338,10 +338,12 @@ CWD 非依存を担保する一次防御ではない（混同しないこと）�
 再利用 workflow のタグ参照については直近コメントへ
 `refs/tags/v1 -> <40hex>` の形式で解決 SHA を記録し、
 [check-workflow-pins.sh](../../ci/scripts/check-workflow-pins.sh) が
-GitHub API（読み取り専用）で現行 SHA を解決して照合する。タグが付け替え
-られたのに記録が更新されていない場合は `SHA_MISMATCH` で fail-closed に
-拒否する。フル SHA（40hex）固定済みの `uses:`（例: `actions/checkout@11d596...`）は
-immutable なので対象外とし、**それ以外のすべての ref** を検査する。
+GitHub API（読み取り専用）で現行 SHA を解決して照合する。解決はタグ
+`git/ref/tags/<ref>` を優先し、404 ならブランチ `git/ref/heads/<ref>` を試す。
+タグが付け替えられたのに記録が更新されていない場合は `SHA_MISMATCH` で
+fail-closed に拒否する。フル SHA（40hex）固定済みの `uses:`
+（例: `actions/checkout@11d596...`）は immutable なので対象外とし、
+**それ以外のすべての ref** を検査する。
 
 ### 適用範囲（I91-C）
 
@@ -355,15 +357,22 @@ immutable なので対象外とし、**それ以外のすべての ref** を検�
 | `@main` / `@master` | 可変ブランチ。記録必須（無ければ `PIN_RECORD_MISSING`） |
 | `@v1-beta` / `@release/*` 等 | 可変 ref。記録必須 |
 
+記録コメントのキーは ref の種別によらず `refs/tags/<ref>` 形式である。
+たとえば `@main` なら `refs/tags/main -> <40hex>` を直前コメントへ書く
+（解決先がブランチであることは API 側の 404 フォールバックで判定する）。
+
 旧実装は `^v[0-9]+([.][0-9]+)*$` に一致しない ref を黙ってスキップしていたため、
 `@main` 等は記録が無くても対象外だった。現在は完全 SHA 固定のみを除外し、
 可変 ref に記録が無ければ `PIN_RECORD_MISSING`、記録形式が不正なら
 `PIN_RECORD_MALFORMED` で fail-closed に拒否する（ネットワーク到達不可による
 格下げは可変 ref の記録欠落には適用されない）。
 
-現行の API 解決は `git/ref/tags/<ref>` エンドポイントを使うため、ブランチ ref
-（`@main` 等）は記録があってもオンライン照合で `API_RESOLVE_FAILED` に
-なり得る（fail-closed）。記録欠落の検出自体は API 応答に依存しない。
+API 解決は `git/ref/tags/<ref>` を先に試し、HTTP 404 なら
+`git/ref/heads/<ref>` へ切り替えて**タグ／ブランチの両方を解決する**
+（I92-A）。したがってブランチ ref（`@main` / `@master` 等）も記録があれば
+オンライン照合で `OK` となる。404 以外の HTTP エラーや不正 JSON は従来
+どおり `API_RESOLVE_FAILED` で fail-closed とする。記録欠落の検出自体は
+API 応答に依存しない。
 
 ### 実行
 
@@ -406,6 +415,8 @@ make ci-local
 | 不整合 SHA | 記録値と異なる commit SHA を返す | `SHA_MISMATCH` / 終了 1 |
 | 記録欠落 | 直前コメントに `refs/tags/v1 -> <40hex>` が無い | `PIN_RECORD_MISSING` / 終了 1 |
 | 可変 ref `@main`（I91-C） | `@main` に記録が無い（旧 Filter では黙ってスキップ） | `PIN_RECORD_MISSING` / 終了 1 |
+| `@main` 記録あり（I92-A） | タグ側 404 → ブランチ側で commit SHA を解決 | `OK` / 終了 0（両 endpoint を呼び出し） |
+| `@main` 記録なし（I92-A） | 記録欠落で API を呼ばない | `PIN_RECORD_MISSING` / 終了 1 |
 | 到達不可 rc 6 | 疑似 curl が 6 を返す | `UNVERIFIED` / 終了 0 |
 | 到達不可 rc 28 | 疑似 curl が 28 を返す | `UNVERIFIED` / 終了 0 |
 | `--offline` | 引数指定と `WORKFLOW_PINS_OFFLINE=1` | curl 未呼び出し・`UNVERIFIED` / 終了 0 |

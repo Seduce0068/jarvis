@@ -6,7 +6,9 @@
 # access or touching the real workflow files, this test copies the gate into a
 # throwaway mini repository, supplies mini workflows, and shadows curl with a
 # canned-response stub on PATH. python3 is used only by the gate to parse the
-# canned JSON bodies.
+# canned JSON bodies. The stub covers both `git/ref/tags/*` and
+# `git/ref/heads/*` and can simulate a 404 on the tags endpoint to exercise the
+# branch-ref fallback (I92-A).
 #
 # Assertions are the fixed fail-closed vocabulary plus the exit code
 # (SHA_MISMATCH, PIN_RECORD_MISSING, API_RESOLVE_FAILED, ...). All SHAs and
@@ -44,6 +46,7 @@ printf '{"object":{"sha":"%s","type":"commit"}}\n' "$commit_sha" > "$responses/l
 printf '{"object":{"sha":"%s","type":"tag"}}\n' "$tag_obj_sha" > "$responses/annot_ref.json"
 printf '{"object":{"sha":"%s"}}\n' "$commit_sha" > "$responses/annot_tag.json"
 printf '{"object":{"sha":"%s","type":"commit"}}\n' "$wrong_sha" > "$responses/mismatch_ref.json"
+printf '%s\n' '{"message":"Not Found"}' > "$responses/not_found.json"
 printf '%s\n' 'not json' > "$responses/bad_json.txt"
 
 # --- curl stub: canned body by endpoint plus a caller-selected return code --
@@ -52,7 +55,11 @@ cat > "$stub_bin/curl" <<'STUB'
 # Canned curl replacement for the pin-gate regression (never opens a socket).
 set -u
 url=''
+want_code=0
 for arg in "$@"; do
+  if [ "$arg" = '-w' ]; then
+    want_code=1
+  fi
   url="$arg"
 done
 if [ -n "${STUB_LOG:-}" ]; then
@@ -62,24 +69,33 @@ if [ "${STUB_RC:-0}" != '0' ]; then
   exit "$STUB_RC"
 fi
 case "$url" in
-  */git/tags/*) body="${STUB_TAG_BODY:-}" ;;
-  */git/ref/tags/*) body="${STUB_REF_BODY:-}" ;;
+  */git/tags/*) body="${STUB_TAG_BODY:-}"; code="${STUB_TAG_CODE:-200}" ;;
+  */git/ref/tags/*) body="${STUB_REF_BODY:-}"; code="${STUB_REF_CODE:-200}" ;;
+  */git/ref/heads/*) body="${STUB_HEAD_BODY:-}"; code="${STUB_HEAD_CODE:-200}" ;;
   *)
     printf 'STUB_UNEXPECTED_URL\n' >&2
     exit 22
     ;;
 esac
-if [ -z "$body" ] || [ ! -r "$body" ]; then
-  printf 'STUB_NO_BODY\n' >&2
-  exit 22
+if [ "$code" = '200' ]; then
+  if [ -z "$body" ] || [ ! -r "$body" ]; then
+    printf 'STUB_NO_BODY\n' >&2
+    exit 22
+  fi
+  cat "$body"
+elif [ -n "$body" ] && [ -r "$body" ]; then
+  cat "$body"
 fi
-cat "$body"
+# The gate requests the status with -w; emit it the same way curl does.
+if [ "$want_code" -eq 1 ]; then
+  printf '\n%s' "$code"
+fi
 exit 0
 STUB
 chmod +x "$stub_bin/curl"
 
 # --- mini repositories ------------------------------------------------------
-make_mini() { # dir mode  (mode: record | missing | malformed | empty | main-missing)
+make_mini() { # dir mode  (mode: record | missing | malformed | empty | main-missing | main-record)
   local mini="$1" mode="$2"
   mkdir -p "$mini/ci/scripts" "$mini/.github/workflows"
   cp "$gate" "$mini/ci/scripts/check-workflow-pins.sh"
@@ -102,6 +118,12 @@ make_mini() { # dir mode  (mode: record | missing | malformed | empty | main-mis
         # silently skipped by the old ^vN$-only filter.
         printf '%s\n' '    uses: Seduce0068/workflows/.github/workflows/rust-gates.yml@main'
         ;;
+      main-record)
+        # I92-A: a mutable @main ref with a record. The tags lookup 404s and
+        # the branch endpoint supplies the commit SHA.
+        printf '    # refs/tags/main -> %s\n' "$commit_sha"
+        printf '%s\n' '    uses: Seduce0068/workflows/.github/workflows/rust-gates.yml@main'
+        ;;
     esac
   } > "$mini/.github/workflows/ci.yml"
 }
@@ -111,21 +133,27 @@ mini_missing="$tmp/mini-missing"
 mini_malformed="$tmp/mini-malformed"
 mini_empty="$tmp/mini-empty"
 mini_main_missing="$tmp/mini-main-missing"
+mini_main_record="$tmp/mini-main-record"
 make_mini "$mini_record" record
 make_mini "$mini_missing" missing
 make_mini "$mini_malformed" malformed
 make_mini "$mini_empty" empty
 make_mini "$mini_main_missing" main-missing
+make_mini "$mini_main_record" main-record
 
 # --- harness ----------------------------------------------------------------
-invoke() { # mini ref_body tag_body rc [args...]
-  local mini="$1" ref_body="$2" tag_body="$3" rc="$4"; shift 4
+invoke() { # mini ref_body tag_body rc ref_code head_body head_code [args...]
+  local mini="$1" ref_body="$2" tag_body="$3" rc="$4"
+  local ref_code="$5" head_body="$6" head_code="$7"; shift 7
   env -u GITHUB_TOKEN -u GH_TOKEN \
     PATH="$stub_bin:$PATH" \
     WORKFLOW_PINS_OFFLINE="$pins_offline" \
     STUB_LOG="$curl_log" \
     STUB_REF_BODY="$ref_body" \
     STUB_TAG_BODY="$tag_body" \
+    STUB_REF_CODE="$ref_code" \
+    STUB_HEAD_BODY="${head_body:-$ref_body}" \
+    STUB_HEAD_CODE="$head_code" \
     STUB_RC="$rc" \
     bash "$mini/ci/scripts/check-workflow-pins.sh" "$@"
 }
@@ -133,6 +161,10 @@ invoke() { # mini ref_body tag_body rc [args...]
 check_case() { # id mini ref tag rc expected_exit pattern [absent] [args...]
   local id="$1" mini="$2" ref_body="$3" tag_body="$4" rc="$5"
   local expected_exit="$6" pattern="$7" absent="${8-}"
+  # Per-case stub overrides for the tag -> branch fallback (I92-A). Defaults
+  # keep all pre-existing cases unchanged; callers set them only for a case.
+  local ref_code="${CASE_REF_CODE:-200}" head_body="${CASE_HEAD_BODY:-}"
+  local head_code="${CASE_HEAD_CODE:-200}"
   if [ "$#" -ge 8 ]; then
     shift 8
   else
@@ -140,7 +172,8 @@ check_case() { # id mini ref tag rc expected_exit pattern [absent] [args...]
   fi
   local out code='' problem=''
   : > "$curl_log"
-  if out="$(invoke "$mini" "$ref_body" "$tag_body" "$rc" "$@" 2>&1)"; then
+  if out="$(invoke "$mini" "$ref_body" "$tag_body" "$rc" \
+    "$ref_code" "$head_body" "$head_code" "$@" 2>&1)"; then
     code=0
   else
     code=$?
@@ -192,6 +225,35 @@ check_case 'pin-record-missing' "$mini_missing" \
 # filter silently skipped it and exited 0, so this is the scope regression.
 check_case 'mutable-main-ref-missing' "$mini_main_missing" \
   "$responses/light_ref.json" "$responses/annot_tag.json" 0 1 'PIN_RECORD_MISSING'
+
+# I92-A: @main with a record resolves through the branch endpoint after the
+# tags lookup returns 404; both endpoints must be queried and the SHA matched.
+CASE_REF_CODE=404 CASE_HEAD_BODY="$responses/light_ref.json" \
+  check_case 'branch-main-record-match' "$mini_main_record" \
+    "$responses/not_found.json" "$responses/annot_tag.json" 0 0 '^OK ' 'FAIL'
+unset CASE_REF_CODE CASE_HEAD_BODY
+if grep -q -- '/git/ref/tags/main' "$curl_log" \
+  && grep -q -- '/git/ref/heads/main' "$curl_log"; then
+  printf 'PASS: branch-main-fallback-both-endpoints\n'
+  ok=$((ok+1))
+else
+  printf 'FAIL: branch-main-fallback-both-endpoints\n'
+  bad=$((bad+1))
+fi
+
+# I92-A: @main without a record still fails closed before any API call, even
+# when the tags endpoint is simulated to 404.
+CASE_REF_CODE=404 CASE_HEAD_BODY="$responses/light_ref.json" \
+  check_case 'branch-main-record-missing' "$mini_main_missing" \
+    "$responses/not_found.json" "$responses/annot_tag.json" 0 1 'PIN_RECORD_MISSING'
+unset CASE_REF_CODE CASE_HEAD_BODY
+if [ ! -s "$curl_log" ]; then
+  printf 'PASS: branch-main-record-missing-no-curl\n'
+  ok=$((ok+1))
+else
+  printf 'FAIL: branch-main-record-missing-no-curl\n'
+  bad=$((bad+1))
+fi
 
 # Network-unreachable curl codes degrade to UNVERIFIED, not API_RESOLVE_FAILED.
 check_case 'curl-rc6-unverified' "$mini_record" \
