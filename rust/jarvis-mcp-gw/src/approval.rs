@@ -696,6 +696,71 @@ mod tests {
         );
     }
 
+    /// Poll `base` until a pending approval appears, then approve it as the
+    /// operator. The loop is bounded by `deadline` so a policy endpoint that
+    /// never reports Pending returns `Err(Elapsed)` instead of hanging the
+    /// whole test binary.
+    async fn approve_first_pending(
+        base: &str,
+        token: &str,
+        deadline: Duration,
+    ) -> std::result::Result<(), tokio::time::error::Elapsed> {
+        let http = reqwest::Client::new();
+        tokio::time::timeout(deadline, async {
+            loop {
+                let pending: serde_json::Value = http
+                    .get(format!("{base}/v1/approvals"))
+                    .header("X-Jarvis-Approval-Token", token)
+                    .send()
+                    .await
+                    .expect("list")
+                    .json()
+                    .await
+                    .expect("json");
+                if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
+                    let id = entry["id"].as_str().expect("id").to_owned();
+                    http.post(format!("{base}/v1/approval/{id}/approve"))
+                        .header("X-Jarvis-Approval-Token", token)
+                        .json(&json!({ "approved_by": "koppe" }))
+                        .send()
+                        .await
+                        .expect("approve");
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+    }
+
+    /// Regression: a mock that never reports Pending must hit the deadline
+    /// (fail fast with `Err`) instead of hanging the approver task forever.
+    #[tokio::test]
+    async fn approver_poll_times_out_when_no_pending_ever_appears() {
+        let app = axum::Router::new().route(
+            "/v1/approvals",
+            axum::routing::get(|| async { axum::Json(json!({ "pending": [] })) }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let base = format!("http://{}", listener.local_addr().expect("addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let started = tokio::time::Instant::now();
+        let outcome = approve_first_pending(&base, "any-token", Duration::from_millis(200)).await;
+        assert!(
+            outcome.is_err(),
+            "never-Pending mock must hit the deadline: {outcome:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "bounded approver must fail fast, not hang"
+        );
+    }
+
     /// Cross-crate E2E: the real jarvis-policy router with token auth must
     /// accept a correctly configured gateway client and reject a wrong one.
     #[tokio::test]
@@ -706,31 +771,11 @@ mod tests {
             start_policy_http_with_token("approval-auth-e2e", Some("e2e-token".to_string())).await;
 
         let good = ApprovalClient::new_with_token(base.clone(), Some("e2e-token".into()));
-        let http = reqwest::Client::new();
         let approver_base = base.clone();
         let approver = tokio::spawn(async move {
-            loop {
-                let pending: serde_json::Value = http
-                    .get(format!("{approver_base}/v1/approvals"))
-                    .header("X-Jarvis-Approval-Token", "e2e-token")
-                    .send()
-                    .await
-                    .expect("list")
-                    .json()
-                    .await
-                    .expect("json");
-                if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
-                    let id = entry["id"].as_str().expect("id").to_owned();
-                    http.post(format!("{approver_base}/v1/approval/{id}/approve"))
-                        .header("X-Jarvis-Approval-Token", "e2e-token")
-                        .json(&json!({ "approved_by": "koppe" }))
-                        .send()
-                        .await
-                        .expect("approve");
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            }
+            approve_first_pending(&approver_base, "e2e-token", Duration::from_secs(5))
+                .await
+                .expect("approver must find a pending request within 5s");
         });
         let outcome = good
             .request_approval("opencode", "execute", "tool:shell.execute", &json!({}))
