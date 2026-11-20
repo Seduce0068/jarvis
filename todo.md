@@ -3027,8 +3027,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   R1-ST08,R1-ST10,R1-CF02 / confirmed。ルートに Cargo.toml は無い。
 - [ ] **pre-task フックが未定義サブエージェントを起動** —
   `hooks.json:10-17`, `opencode.jsonc:132-133,190-191` / R1-ST10 / confirmed。
-- [ ] **.gitignore が ui/target/ を無視していない** —
-  `.gitignore:46`, `AGENTS.md:55-57` / R1-ST10 / confirmed。
+- [x] **.gitignore が ui/target/ を無視していない** — 2026-11-21 対応済み: `/ui/target/` を repo ローカルの `.gitignore` へ追加。従前はグローバル gitignore (`~/.config/git/ignore` の `target/`) にのみ依存しており、CI runner 等では誤追跡リスクがあった。`git check-ignore -v ui/target/` が `.gitignore:47` を参照することを確認 / 根拠
+  `.gitignore:47`, `AGENTS.md:55-57` / R1-ST10 / confirmed。
 - [ ] **ADR-0004 がバックアップ保存先を「未解決」と記載したまま** —
   `adr/0004-local-only-no-oci.md:44-47`, `docs/integration/remaining-tasks.md:308` /
   R1-DR01 / confirmed。BK-1 で決着済み。
