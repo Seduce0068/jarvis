@@ -3002,9 +3002,10 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **backup.rs / deploy.rs の unit test がどのゲートからも実行されない** —
   `Makefile:62,164,170,172`, `rust/scripts/backup.rs:423`, `rust/scripts/deploy.rs:647` /
   R2-FG02 / confirmed。
-- [ ] **deploy のヘルスゲートが otelcol の 13133 を検査しない** —
-  `rust/scripts/deploy.rs:20-27,43-44,552-591`, `infra/config/otelcol-config.yaml:7` /
-  R1-ST05,R2-FG02 / confirmed。SERVICES に otelcol が入るのに probe されない。
+- [x] **deploy のヘルスゲートが otelcol の 13133 を検査しない** — 2026-11-21 対応済み: `HEALTH_PORTS` を `[u16; 5] = [8081, 8082, 8083, 8084, 13133]` へ拡張し、コメントも実態（4 required services + otelcol health_check）へ更新。otelcol 停止時も `evaluate_health_checks` が fail-closed で "Deployment completed" を阻止 / 根拠
+  `rust/scripts/deploy.rs:43-45`, `infra/config/otelcol-config.yaml:7` /
+  R1-ST05,R2-FG02 / confirmed。
+  - 検証: `cargo fmt --all --check` exit 0、`rust-script --test deploy.rs` 11 passed / 0 failed、`make secret-scan` exit 0。otelcol の 2xx JSON は degraded マーカー無く Healthy と判定され互換性確認済み。
 - [ ] **非推奨レガシースクリプトが本番デプロイで配布され続ける** —
   `rust/scripts/backup.rs:16-23`, `rust/scripts/restore.rs:15-22`,
   `rust/scripts/deploy.rs:508-528` / R1-ST05 / confirmed。
