@@ -590,6 +590,12 @@ generated:
   `infra/README.md:274-279` / R5-VU3 / 重大度 high / confirmed。
 - [x] **`web.fetch` の宛先ドメイン制限（egress allowlist）が未実装**（2026-11-19 対応済み: `JARVIS_MCP_GW_EGRESS_ALLOWLIST`（カンマ区切り、完全一致と `*.` サフィックス）を追加。未設定時は無制限で互換、設定時は IP リテラルを拒否し初期 URL と全 redirect hop に適用。新規3テスト追加、mcp-gw 68 tests pass） — 根拠
   `docs/integration/tool-matrix.md:162` / R1-ST4 / 重大度 high / confirmed。
+
+  **訂正（2026-11-20 追記・I84-B）**: 上記「未設定時は無制限で互換」は
+  2026-11-19 時点の履歴であり現行ではない。その後 unset/blank は
+  `DenyAll`（全宛先拒否・fail-closed）へ変更済み。現行契約は
+  `docs/integration/tool-matrix.md:171-175` が正
+  （`rust/jarvis-mcp-gw/src/config.rs:92` も no unrestricted fallback を明記）。
 - [x] **`review-run.sh` のランナー契約が OpenCode CLI 形で固定され ADR-0002 と矛盾** — 2026-11-19 対応済み: `JARVIS_REVIEW_RUNNER` と `build_runner_args()` でランナーごとの argv を吸収（dsh: `--profile <name> --json <prompt>`、opencode 他は従来どおり）。既存4契約テスト pass、スタブで dsh 分岐を確認 / `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed
   `ci/scripts/review-run.sh:11-13` / R1-AR4 / 重大度 high / confirmed。
 - [x] **埋め込み失敗を空検索結果に変換して成功を返す**（2026-11-19 対応済み: `query_embedding_outcome()` を新設し endpoint 未設定は明示 skip、設定済み embed() 失敗は `anyhow::Context` 付きで Err 伝播。公開シグネチャ不変、回帰テスト5件追加。full tests / clippy / ci-local exit 0） — 根拠
@@ -2311,3 +2317,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   push、共有 lib の実機配布。
 
 - 親が対応: fmt 差分、全ゲート再検証。
+
+### Round 80（R4 で修正済み）
+
+- [x] CI の checkout をフル SHA 固定、rust-gates.yml@v1 の解決 SHA を記録。
+- [x] qdrant-client を =1.19.0 exact pin、reqwest major 重複の共存理由を
+  Cargo.toml に記録。rust-script の exact pin 方針を Makefile へ記録。
+- [x] verify サマリ ok=43 の単位誤記を訂正（証跡のテスト関数数と区別）、
+  todo.md:591 の egress 記述に「現行は DenyAll」訂正追記。
+- [x] 失敗注入ケースに失敗クラス別の本番境界チェックを復活（restore
+  354→437件）。test-restore-local の LOCK_FILE 隔離と両経路回帰。
+- [x] secret_scan の index クロスチェック主張を「実装変更への回帰ガード」
+  へ限定し、一次防御は repo_root + -C root と明記。
+
+### Round 80 の残り指摘（未対応）
+
+- [ ] `ci/review-gate.yml`（未配線の reference）に actions/checkout@v4 が
+      4箇所残存 — 未配線を理由に明示除外するか別タスクで SHA 固定。
+- [ ] reqwest 0.13 統一は cargo check/test を伴う別タスク（現状は exact pin
+      で解決版を固定、共存理由を記録済み）。
+- [ ] rust-script 各スクリプトのメタブロックを exact pin 化し、rust-script
+      自体のバージョンも固定（Makefile には方針記録済み）。
+- [ ] prod_db scope の同一モジュール内後続 psql は未検出（low・任意）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: restore コピードライバへの module 複製、shellcheck SC2016、
+  全ゲート再検証。
