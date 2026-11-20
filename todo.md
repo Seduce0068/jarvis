@@ -2080,3 +2080,24 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: 3ワークストリームの restore-local.sh 並行編集を統合、
   全ゲート再検証（restore 80件 pass）。
+
+### Round 71（R4 で修正済み）
+
+- [x] Round 69 の新規シナリオ4件に自動テストを追加（verify 25→37、
+  restore 80→105）。7列記述子受理・未知記述子 fail-closed・role 駆動判定を実測。
+- [x] 必須ペイロード検査を manifest 自己申告から実 basename 由来へ復元、
+  role/basename 整合と pg_dump footer 常時検査（truncated dump 拒否）。
+- [x] owner/mode 表を3経路（build / restore / deploy）へ統一、
+  sudo 不在時は opt-in なければ fail-closed。静的ガード8件追加。
+- [x] 記述子ロジックを `infra/scripts/lib/payload-descriptors.sh` へ抽出、
+  verify/restore 両方が source。installer／Makefile も lib を配布。
+- [x] 証跡を実測再生成（backup 31→43）。
+
+### Round 71 の残り指摘（未対応）
+
+- [ ] 共有 lib の配布先（`install-backup-timer.sh` と `Makefile`）は追加したが、
+      既に configured 済みの実機へ反映するには再インストールが必要（ユーザー/
+      実機運用）。
+- 親が対応: TC-R1（role 権威）と I74-B（basename 権威）の矛盾を `*.sql.gz`
+  一般受理で解消、shellcheck SC1091／SC2016／SC2123 の抑止、
+  証跡の実測件数同期。
