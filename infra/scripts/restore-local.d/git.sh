@@ -9,8 +9,10 @@
 # 入力は git archive HEAD の成果物（.git/ 不包含・追跡ファイルのみ）。
 # I75-B: 入力パスは共有ヘルパ resolve_restore_input() が manifest の
 # role/format 記述子から解決する。git-jarvis-head.tar.gz は legacy 3列行の
-# フォールバック名に留まる。git は任意コンポーネントのため「行が無い」場合
-# のみ警告してスキップし、複数一致・不正 role・ファイル不在は fail-closed。
+# フォールバック名に留まる。I78-B: resolver の rc=2（absent／未解決）は
+# 従来の「任意コンポーネントの警告付き成功スキップ」を廃止し fail-closed
+# へ変更。rc=1（不正 role・複数一致・解決先ファイル不在）も同様に拒否し、
+# rc=0 のみ続行する（pre-stop ゲートをすり抜けた場合の防御的二重チェック）。
 
 restore_git() {
   local rc=0
@@ -31,18 +33,19 @@ restore_git() {
     return 1
   fi
   archive="$(resolve_restore_input "${SET_DIR:-}" git git-jarvis-head.tar.gz)" || resolve_rc=$?
-  if [ "$resolve_rc" -eq 2 ]; then
-    log "WARN: git payload が manifest に無いため git 復元をスキップ（任意コンポーネント）"
-    return 0
-  elif [ "$resolve_rc" -ne 0 ]; then
-    fail "git: cannot resolve a unique git payload from manifest (unknown/ambiguous/missing)" || true
+  # I78-B: rc=2（absent／未解決）も rc=1（不正 role／複数一致／解決先ファイル
+  # 不在）も fail-closed。rc=0 のみ続行する。従来の rc=2 警告付き成功スキップは
+  # 古い checkout を残したまま成功扱いになるため廃止。
+  if [ "$resolve_rc" -ne 0 ]; then
+    fail "git: cannot resolve a unique git payload from manifest (unknown/ambiguous/missing/absent; rc=$resolve_rc)" || true
     return 1
   fi
 
-  # 任意コンポーネント: 無ければ警告して成功扱いでスキップ。
+  # resolver rc=0 なら解決先は存在するはず。念のための二重チェックでも
+  # 「無ければ警告付きスキップ」は行わず fail-closed とする。
   if [ ! -f "$archive" ]; then
-    log "WARN: $(basename -- "$archive") が無いため git 復元をスキップ（任意コンポーネント）"
-    return 0
+    fail "git: resolved payload is missing: $(basename -- "$archive")" || true
+    return 1
   fi
 
   # 形式チェックは読み取りのみ。破損アーカイブは fail-closed。

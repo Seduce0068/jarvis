@@ -19,6 +19,9 @@
 #   - I76-A: 未知 role / 同一 role の複数一致 / 解決先ファイル不在の set が
 #     stop_services() より前の resolve_restore_input() ゲートで拒否され、
 #     systemctl.log に stop が1行も出ないことを検証する（モックのみ）。
+#   - I78-B: git モジュール内の resolver rc=2（absent／未解決）の警告付き
+#     成功スキップを廃止し fail-closed にした回帰を、共有 resolver / log / fail
+#     のスタブで pre-stop ゲート通過状態を再現して検証する（モックのみ）。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -1292,7 +1295,9 @@ write_described_manifest "$other_cfg" \
   'config-mcp_allowlist.toml|raw|none|none|other' \
   'git-jarvis-head.tar.gz|gzip|none|none|git' \
   > "$other_cfg/manifest.txt"
-check_exit "I77-A: verifier accepts other-role config row" 0 bash "$verifier" "$other_cfg"
+# I78-A unified role resolution in verify-backup.sh too: both verifier and
+# driver now reject an explicit role that disagrees with its basename.
+check_exit "I78-A: verifier rejects other-role config row" 1 bash "$verifier" "$other_cfg"
 rm -f -- "$tmp/logs"/*.log
 other_cfg_code=0
 other_cfg_out="$(run_driver --backup-set "$other_cfg" --apply 2>&1)" || other_cfg_code=$?
@@ -1338,7 +1343,7 @@ write_described_manifest "$other_git" \
   'config-mcp_allowlist.toml|raw|none|none|config' \
   'git-extra.tar.gz|gzip|none|none|other' \
   > "$other_git/manifest.txt"
-check_exit "I77-A: verifier accepts other-role git row" 0 bash "$verifier" "$other_git"
+check_exit "I78-A: verifier rejects other-role git row" 1 bash "$verifier" "$other_git"
 rm -f -- "$tmp/logs"/*.log
 other_git_code=0
 other_git_out="$(run_driver --backup-set "$other_git" --apply 2>&1)" || other_git_code=$?
@@ -1466,6 +1471,118 @@ for fragment in 'cannot resolve git restore input' 'rc=2' \
 done
 assert_no_log "I77-A: absent git: no service stop/start" "$tmp/logs/systemctl.log"
 assert_no_log "I77-A: absent git: psql never called" "$tmp/logs/psql.log"
+
+# --- 10. I78-B: resolver rc=2 / rc=1 が module 内でも fail-closed -------------
+# 背景: git.sh は resolver の rc=2 (absent / 未解決) を「任意コンポーネントの
+# 警告付き成功スキップ」に扱っていた。pre-stop ゲート (verify_set) が先に失敗
+# するため通常フローでは到達不能だが、防御的二重チェックとして module 側も
+# fail-closed であることを固定する。ゲートを通り抜けた状態は、共有 resolver /
+# log / fail をスタブした隔離シェルで git.sh を source して再現する。
+# 実 DB / 実 Qdrant / 本番パスは一切使わない（既存モックと同じ安全境界）。
+printf '%s\n' '-- I78-B: git module fail-closed on resolver rc=2 / rc=1 --'
+
+git_mod="$repo/infra/scripts/restore-local.d/git.sh"
+if [ ! -f "$git_mod" ]; then
+  fail_case "I78-B: git module not found: $git_mod"
+else
+  # スタブ: resolver は指定 rc を返し、rc=0 のときだけ解決先パスを出力する。
+  # fail() は終了せず呼び出しを記録する（git.sh の `|| true` と return 1 を
+  # 観測可能にするため）。
+  cat > "$tmp/git-resolver-stub.sh" <<'STUB'
+resolve_restore_input() {
+  local rc="${STUB_RESOLVER_RC:-0}"
+  if [ "$rc" -eq 0 ]; then
+    printf '%s\n' "${STUB_RESOLVED_PATH:-}"
+  fi
+  return "$rc"
+}
+log() { printf 'LOG:%s\n' "$*"; }
+fail() { printf 'FAIL_CALLED:%s\n' "$*"; return 0; }
+STUB
+
+  # 隔離プローブ: git.sh だけを source し、resolver rc を外から注入する。
+  # APPLY=0 なので計画経路のみ（tar -t は読み取り専用、書き込みゼロ）。
+  cat > "$tmp/git-rc-probe.sh" <<'PROBE'
+set -uo pipefail
+git_mod="$1"
+stub_file="$2"
+resolved_path="$3"
+stub_rc="$4"
+# shellcheck disable=SC1090
+source "$git_mod"
+# shellcheck disable=SC1090
+source "$stub_file"
+STUB_RESOLVER_RC="$stub_rc"
+STUB_RESOLVED_PATH="$resolved_path"
+SET_DIR="$(dirname -- "$resolved_path")"
+APPLY=0
+CONFIRM=0
+restore_git
+printf 'RETURN:%s\n' "$?"
+PROBE
+
+  git_probe() { # stub_rc
+    bash "$tmp/git-rc-probe.sh" "$git_mod" "$tmp/git-resolver-stub.sh" \
+      "$set_dir/git-jarvis-head.tar.gz" "$1" 2>&1
+  }
+
+  # 10a. rc=2 (absent / 未解決) は fail() を呼び non-zero で戻る。
+  rc2_out="$(git_probe 2)"
+  if has_fragment "$rc2_out" 'FAIL_CALLED:git: cannot resolve a unique git payload'; then
+    pass "I78-B: rc=2 calls fail()"
+  else
+    fail_case "I78-B: rc=2 did not call fail()"
+    printf '%s\n' "$rc2_out" | head -8 >&2
+  fi
+  if has_fragment "$rc2_out" 'rc=2'; then
+    pass "I78-B: rc=2 reported in fail message"
+  else
+    fail_case "I78-B: rc=2 not reported in fail message"
+  fi
+  if has_fragment "$rc2_out" 'RETURN:1'; then
+    pass "I78-B: rc=2 returns non-zero"
+  else
+    fail_case "I78-B: rc=2 did not return non-zero"
+  fi
+  if has_fragment "$rc2_out" 'git payload が manifest に無いため git 復元をスキップ'; then
+    fail_case "I78-B: rc=2 still warn-succeeded"
+  else
+    pass "I78-B: rc=2 no longer warn-succeeds"
+  fi
+
+  # 10b. rc=1 (不正 role / 複数一致 / 解決先ファイル不在) も同様に拒否。
+  rc1_out="$(git_probe 1)"
+  if has_fragment "$rc1_out" 'FAIL_CALLED:git: cannot resolve a unique git payload'; then
+    pass "I78-B: rc=1 calls fail()"
+  else
+    fail_case "I78-B: rc=1 did not call fail()"
+    printf '%s\n' "$rc1_out" | head -8 >&2
+  fi
+  if has_fragment "$rc1_out" 'rc=1'; then
+    pass "I78-B: rc=1 reported in fail message"
+  else
+    fail_case "I78-B: rc=1 not reported in fail message"
+  fi
+  if has_fragment "$rc1_out" 'RETURN:1'; then
+    pass "I78-B: rc=1 returns non-zero"
+  else
+    fail_case "I78-B: rc=1 did not return non-zero"
+  fi
+
+  # 10c. ポジティブ対照: rc=0 のみ続行し、fail() を呼ばず計画経路へ進む。
+  rc0_out="$(git_probe 0)"
+  if has_fragment "$rc0_out" 'RETURN:0' && ! has_fragment "$rc0_out" 'FAIL_CALLED:'; then
+    pass "I78-B: rc=0 continues without fail()"
+  else
+    fail_case "I78-B: rc=0 did not continue"
+    printf '%s\n' "$rc0_out" | head -8 >&2
+  fi
+  if has_fragment "$rc0_out" '計画: git-jarvis-head.tar.gz を読み取り検査'; then
+    pass "I78-B: rc=0 reaches plan path"
+  else
+    fail_case "I78-B: rc=0 did not reach plan path"
+  fi
+fi
 
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"
 [ "$bad" -eq 0 ]

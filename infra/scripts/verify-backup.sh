@@ -74,7 +74,10 @@ on_payload_check() { # event detail
 }
 
 # I74-B helpers (is_*_payload, role_basename_consistent, pg_dump_footer_present)
-# now live in lib/payload-descriptors.sh and are shared with restore-local.sh.
+# and the I77-A single role resolver (resolved_role_for) live in
+# lib/payload-descriptors.sh. They are shared with restore-local.sh's verify_set()
+# and resolve_restore_input() so all three scripts resolve a row's role the same
+# way (I78-A).
 
 # I77-B: register the reporting hook. Without it payload_format_check() fails
 # closed (rc=2) instead of silently discarding a corrupt/truncated payload.
@@ -143,22 +146,24 @@ for set in "${sets[@]}"; do
       fail=$((fail+1))
     fi
 
-    # An explicit role must be in the vocabulary; an empty role marks a legacy
-    # row and is derived from the name below. Unknown values fail closed.
-    case "$role" in
-      ''|postgres|qdrant|config|git|other) ;;
-      *)
-        echo "  FORMAT MISMATCH: $name (unsupported role descriptor: $role)"
-        fail=$((fail+1))
-        continue
-        ;;
-    esac
     resolved="$(resolve_descriptors "$name" "$format" "$encryption" "$signature" "$role")"
     read -r format encryption signature role <<< "$resolved"
-    # I74-B: role is auxiliary. A role claim that the basename does not back is
-    # a fail-closed descriptor error and never counts as a required payload.
-    if ! role_basename_consistent "$name" "$role"; then
-      echo "  FORMAT MISMATCH: $name (role=$role is not consistent with its basename; ROLE MISMATCH)"
+    # I74-B / I77-A / I78-A: ONE role-resolution path, shared with
+    # restore-local.sh's verify_set() and resolve_restore_input(). The resolver
+    # validates the vocabulary (rc=2 unknown), derives a legacy empty role from
+    # the basename, and rejects a role the basename cannot back (rc=1, including
+    # an explicit `other` on config-* / git*.tar.gz). Both non-zero statuses fail
+    # closed here. The old separate role_basename_consistent() gate accepted
+    # `other` on a config/git payload, so it is deliberately not called again.
+    if resolved_role="$(resolved_role_for "$name" "$role")"; then
+      role="$resolved_role"
+    else
+      rr_rc=$?
+      if [ "$rr_rc" -eq 2 ]; then
+        echo "  FORMAT MISMATCH: $name (unsupported role descriptor: $role)"
+      else
+        echo "  FORMAT MISMATCH: $name (role=$role is not consistent with its basename; ROLE MISMATCH)"
+      fi
       fail=$((fail+1))
       continue
     fi

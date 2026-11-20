@@ -365,5 +365,80 @@ check_includes "TC-V5: unknown format reported" 1 \
 check_excludes "TC-V5: no format check for unknown format row" 1 \
   "FORMAT OK: postgres dump" "$unknown_fmt"
 
+# I78-A (role unification): verify-backup.sh must resolve a row's role through
+# the same resolved_role_for() used by restore-local.sh's verify_set() and
+# resolve_restore_input(). Unknown roles and role/basename contradictions must
+# fail closed. Each fixture is byte-identical to the accepted `described` set
+# except for the role column, so only the role verdict can change the result.
+
+# Unknown role vocabulary probe (not a secret or a supported role value).
+unknown_role="$extra/described_unknown_role"
+cp -R -- "$described" "$unknown_role"
+record_described_manifest_entries "$unknown_role" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|bogus' \
+  > "$unknown_role/manifest.txt"
+check "I78-A: unknown role rejected" 1 "$unknown_role"
+check_includes "I78-A: unknown role reported" 1 \
+  "unsupported role descriptor: bogus" "$unknown_role"
+check_excludes "I78-A: no format check for unknown role row" 1 \
+  "FORMAT OK: config-mcp_allowlist.toml" "$unknown_role"
+
+# A role the real basename cannot back (I74-B) must still fail closed.
+role_mismatch="$extra/described_role_mismatch"
+cp -R -- "$described" "$role_mismatch"
+printf 'allow = ["tool.read"]\n' > "$role_mismatch/readme.txt"
+record_described_manifest_entries "$role_mismatch" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'readme.txt|raw|none|none|postgres' \
+  > "$role_mismatch/manifest.txt"
+check "I78-A: role contradicting basename rejected" 1 "$role_mismatch"
+check_includes "I78-A: role/basename mismatch reported" 1 \
+  "ROLE MISMATCH" "$role_mismatch"
+
+# I77-A drift: the old standalone role_basename_consistent() gate accepted
+# `other` on config-*/git*.tar.gz, while the shared resolver rejects it. These
+# two cases pin verify-backup.sh to the shared verdict.
+other_config="$extra/described_other_config"
+cp -R -- "$described" "$other_config"
+record_described_manifest_entries "$other_config" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|other' \
+  > "$other_config/manifest.txt"
+check "I78-A: other on config-* rejected" 1 "$other_config"
+check_includes "I78-A: other/config drift is a role mismatch" 1 \
+  "ROLE MISMATCH" "$other_config"
+
+other_git="$extra/described_other_git"
+cp -R -- "$described" "$other_git"
+mkdir -p "$tmp/other-git-src"
+printf '%s\n' 'HEAD' > "$tmp/other-git-src/HEAD"
+tar -czf "$other_git/git-extra.tar.gz" -C "$tmp/other-git-src" HEAD
+record_described_manifest_entries "$other_git" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-extra.tar.gz|gzip|none|none|other' \
+  > "$other_git/manifest.txt"
+check "I78-A: other on git*.tar.gz rejected" 1 "$other_git"
+check_includes "I78-A: other/git drift is a role mismatch" 1 \
+  "ROLE MISMATCH" "$other_git"
+
+# Positive control: a legacy 3-column git row still derives its role from the
+# basename through the shared resolver, so unification adds no false rejection.
+legacy_git="$extra/legacy_git"
+cp -R -- "$described" "$legacy_git"
+mkdir -p "$tmp/legacy-git-src"
+printf '%s\n' 'HEAD' > "$tmp/legacy-git-src/HEAD"
+tar -czf "$legacy_git/git-extra.tar.gz" -C "$tmp/legacy-git-src" HEAD
+record_manifest_entries "$legacy_git" postgres-jarvis.sql.gz \
+  qdrant-snapshot.bin config-mcp_allowlist.toml git-extra.tar.gz \
+  > "$legacy_git/manifest.txt"
+check "I78-A: legacy git row derives role from basename" 0 "$legacy_git"
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
