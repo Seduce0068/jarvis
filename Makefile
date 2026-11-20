@@ -92,8 +92,10 @@ test-restore-local: ## restore-local.sh の合成フィクスチャ回帰テス�
 install-backup-timer: ## ローカルバックアップ timer を導入（既定は dry-run）
 	@bash infra/scripts/install-backup-timer.sh
 
-install-verify-backup: ## /opt の verify-backup.sh を更新（root 必須・明示呼び出し）
+install-verify-backup: ## /opt の verify-backup.sh と共有 lib を更新（root 必須・明示呼び出し）
 	@install -o root -g root -m 0755 infra/scripts/verify-backup.sh /opt/jarvis/scripts/verify-backup.sh
+	@install -d -o root -g root -m 0755 /opt/jarvis/scripts/lib
+	@install -o root -g root -m 0644 infra/scripts/lib/payload-descriptors.sh /opt/jarvis/scripts/lib/payload-descriptors.sh
 
 verify-backup: ## バックアップの整合性を検証（読み取り専用・作業コピーを使用）
 	@sudo -u postgres bash infra/scripts/verify-backup.sh

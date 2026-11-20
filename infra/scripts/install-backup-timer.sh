@@ -25,6 +25,10 @@ service_dst="/etc/systemd/system/jarvis-backup.service"
 timer_dst="/etc/systemd/system/jarvis-backup.timer"
 script_dst="/opt/jarvis/scripts/backup-local.sh"
 verify_dst="/opt/jarvis/scripts/verify-backup.sh"
+# I74-D: verify-backup.sh sources this shared library at runtime, so it must
+# be installed alongside the verifier (same relative lib/ layout).
+verify_lib_src="$repo/infra/scripts/lib/payload-descriptors.sh"
+verify_lib_dst="/opt/jarvis/scripts/lib/payload-descriptors.sh"
 backup_dir="/var/lib/postgresql/jarvis-backups"
 ts="$(date +%Y%m%d-%H%M%S)"
 
@@ -40,6 +44,7 @@ restore_pairs=(
   "$migrations_unit_dst:$migrations_unit_dst.bak-$ts"
   "$script_dst:$script_dst.bak-$ts"
   "$verify_dst:$verify_dst.bak-$ts"
+  "$verify_lib_dst:$verify_lib_dst.bak-$ts"
 )
 
 backup_configs() {
@@ -161,7 +166,11 @@ install -o root -g root -m 0755 "$script_src" "$script_dst"
 # User=postgres; the repo working copy is 0711 koppe and is not readable by
 # postgres, so the unit used to fail on every run. Installed root:root 0755.
 [ -f "$verify_src" ] || fail "verify-backup.sh working copy is required for daily verification: $verify_src"
+[ -f "$verify_lib_src" ] || fail "shared payload descriptor library is required by verify-backup.sh: $verify_lib_src"
 install -o root -g root -m 0755 "$verify_src" "$verify_dst"
+# I74-D: keep the relative lib/ layout beside the installed verifier.
+install -d -o root -g root -m 0755 "$(dirname -- "$verify_lib_dst")"
+install -o root -g root -m 0644 "$verify_lib_src" "$verify_lib_dst"
 for pair in "$service_src:$service_dst" "$timer_src:$timer_dst" "$migrations_unit_src:$migrations_unit_dst"; do
   src="${pair%%:*}"; dst="${pair##*:}"
   install -o root -g root -m 0644 "$src" "$dst"
