@@ -20,9 +20,14 @@
 # The API comparison is skipped, each entry is reported as UNVERIFIED, and the
 # gate exits 0 so offline/local work is not blocked. CI is expected to have API
 # reachability, so this is an opt-out for offline use, not a CI default.
-# Network-unreachable curl failures (DNS/connect/timeout, rc 6/7/28/35) are
-# also reported as UNVERIFIED and degrade the gate instead of emitting a false
-# API_RESOLVE_FAILED. HTTP errors and malformed responses still fail closed.
+# Network-unreachable curl failures (DNS/connect/timeout, rc 6/7/28/35) during
+# an ONLINE run mark only that single entry UNVERIFIED; there is no sticky
+# unreachable flag, so later entries retry the API independently and full
+# comparison resumes as soon as the runner regains reachability. Only the
+# explicit offline opt-out suppresses API comparison for every entry.
+# Local record checks (PIN_RECORD_MISSING / PIN_RECORD_MALFORMED) are never
+# downgraded by network state in an online run: they always fail closed.
+# HTTP errors and malformed responses still fail closed as API_RESOLVE_FAILED.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -139,7 +144,16 @@ resolve_current_sha() {
 checked=0
 failed=0
 unverified=0
-api_unreachable="$offline"
+
+# Adopted policy (I89-A): per-entry API retry, no run-wide sticky flag.
+# `offline` is the only explicit opt-out (WORKFLOW_PINS_OFFLINE / --offline).
+# `api_unreachable` is scoped to a single pin: it is recomputed from `offline`
+# at the start of every entry and is consulted ONLY to skip that entry's API
+# comparison. It never gates local PIN_RECORD_MISSING / PIN_RECORD_MALFORMED
+# checks, which stay fail closed in an online run regardless of curl results.
+# A transient DNS/connect/timeout failure therefore marks just the current
+# entry UNVERIFIED; the next entry resets the flag and retries the API, so
+# verification resumes automatically once the runner is reachable again.
 
 for wf in "${workflows[@]}"; do
   if [ ! -r "$wf" ]; then
@@ -200,8 +214,14 @@ for wf in "${workflows[@]}"; do
     done
 
     checked=$((checked+1))
+    # Per-entry API availability: recomputed from `offline` for every pin so a
+    # previous entry's network failure can never leak into this one.
+    api_unreachable="$offline"
+
     if [ -z "$expected" ]; then
-      if [ "$api_unreachable" -eq 1 ]; then
+      # Local record check: gated only by the explicit offline opt-out, never
+      # by network state, so an online run always fails closed here.
+      if [ "$offline" -eq 1 ]; then
         echo "WARN UNVERIFIED $location $spec PIN_RECORD_MISSING (API skipped)" >&2
         unverified=$((unverified+1))
       else
@@ -224,7 +244,9 @@ for wf in "${workflows[@]}"; do
         6|7|28|35)
           echo "WARN UNVERIFIED $location $spec network unreachable (rc=$rc); API skipped" >&2
           unverified=$((unverified+1))
-          api_unreachable=1
+          # Per-entry only: never set a run-wide sticky flag. The next entry
+          # recomputes api_unreachable from `offline` and retries the API, so
+          # comparison of later pins resumes once reachability returns.
           ;;
         *)
           echo "FAIL API_RESOLVE_FAILED $location $spec (rc=$rc)" >&2
