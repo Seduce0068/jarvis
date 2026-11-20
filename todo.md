@@ -2051,3 +2051,32 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 親が対応: install の sudo 不在フォールバック、`declare -gA`（source 先の
   関数スコープ回避）、shellcheck SC1091、tamper の notes キーワード保持、
   backup 証跡再生成。
+
+### Round 70（R4 で修正済み）
+
+- [x] **timer が active だが disabled だと停止されない**（confirmed high）→
+  timer は is-active のみで停止対象、stop 後 inactive を確認し dispatch 前に
+  fail-closed。状態付き systemctl モックと2ケース追加（restore 80件）。
+- [x] **復元の実行ユーザー前提が両立しない**（confirmed high）→ root 固定、
+  3種 precondition（backup_dir/psql/systemctl）fail-closed、psql を
+  `sudo -u postgres` ラッパへ集約、runbook の3コマンドを `sudo bash` 化。
+- [x] Persistent timer の失敗時再開を停止維持＋固定 warn、ExecStartPost を
+  /opt の root:root verifier へ変更、配置を手動起動より前に前倒し。
+
+### Round 70 の残り指摘（未対応）
+
+- [ ] Round 69 の新規仕様シナリオ4件（TC-B6 / TC-V5 / TC-R1 / TC-R2）に
+  自動テストが無く証跡がカバレッジを虚偽主張（medium）— 7列 manifest／
+  未知記述子／role 導出の回帰追加＋シナリオ別 pass のゲート化。
+- [ ] 必須ペイロード検査が manifest 自己申告 role へ後退（medium）—
+  Runtime Proof: postgres 欠落／truncated が format=raw role=postgres で
+  exit 0。role と basename の整合強制＋footer 検査を role に紐付け。
+- [ ] owner/mode 表が deploy-mcp-gw-safe.sh 経路を覆っていない（medium）—
+  3経路すべてが共有表を参照する形へ。
+- [ ] install_expected_config の sudo 不在フォールバックが root:root 不変
+  条件を黙って破る（medium）— fail-closed 化＋owner も検証。
+- [ ] 記述子ロジックが verify-backup.sh と restore-local.sh に重複し既に
+  分岐（low）— 共有 lib へ抽出し両スクリプトで source。
+
+- 親が対応: 3ワークストリームの restore-local.sh 並行編集を統合、
+  全ゲート再検証（restore 80件 pass）。
