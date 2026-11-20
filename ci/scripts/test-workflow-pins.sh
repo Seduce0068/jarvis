@@ -79,7 +79,7 @@ STUB
 chmod +x "$stub_bin/curl"
 
 # --- mini repositories ------------------------------------------------------
-make_mini() { # dir mode  (mode: record | missing | malformed | empty)
+make_mini() { # dir mode  (mode: record | missing | malformed | empty | main-missing)
   local mini="$1" mode="$2"
   mkdir -p "$mini/ci/scripts" "$mini/.github/workflows"
   cp "$gate" "$mini/ci/scripts/check-workflow-pins.sh"
@@ -97,6 +97,11 @@ make_mini() { # dir mode  (mode: record | missing | malformed | empty)
       malformed)
         printf '%s\n' '    uses: badspec@v1'
         ;;
+      main-missing)
+        # I91-C: a mutable @main ref with no record must be checked, not
+        # silently skipped by the old ^vN$-only filter.
+        printf '%s\n' '    uses: Seduce0068/workflows/.github/workflows/rust-gates.yml@main'
+        ;;
     esac
   } > "$mini/.github/workflows/ci.yml"
 }
@@ -105,10 +110,12 @@ mini_record="$tmp/mini-record"
 mini_missing="$tmp/mini-missing"
 mini_malformed="$tmp/mini-malformed"
 mini_empty="$tmp/mini-empty"
+mini_main_missing="$tmp/mini-main-missing"
 make_mini "$mini_record" record
 make_mini "$mini_missing" missing
 make_mini "$mini_malformed" malformed
 make_mini "$mini_empty" empty
+make_mini "$mini_main_missing" main-missing
 
 # --- harness ----------------------------------------------------------------
 invoke() { # mini ref_body tag_body rc [args...]
@@ -178,6 +185,12 @@ check_case 'sha-mismatch' "$mini_record" \
 
 # No preceding pin record must fail closed in online mode.
 check_case 'pin-record-missing' "$mini_missing" \
+  "$responses/light_ref.json" "$responses/annot_tag.json" 0 1 'PIN_RECORD_MISSING'
+
+# I91-C: a mutable @main ref is in scope (only full-SHA pins are skipped).
+# With no record it must fire PIN_RECORD_MISSING and exit 1; the old ^vN$
+# filter silently skipped it and exited 0, so this is the scope regression.
+check_case 'mutable-main-ref-missing' "$mini_main_missing" \
   "$responses/light_ref.json" "$responses/annot_tag.json" 0 1 'PIN_RECORD_MISSING'
 
 # Network-unreachable curl codes degrade to UNVERIFIED, not API_RESOLVE_FAILED.

@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # I87-A: workflow pin drift gate.
 #
-# Every `uses: <owner>/<repo>/...`@vN entry in .github/workflows/*.yml is a
-# mutable tag. Its expected commit SHA must be recorded in the nearest
-# preceding comment block as `refs/tags/<ref> -> <40hex>` (see ci.yml). This
+# Every `uses: <owner>/<repo>/...`@<ref> entry in .github/workflows/*.yml whose
+# ref is not an immutable full-SHA pin (exactly 40 hex) is treated as mutable.
+# Its expected commit SHA must be recorded in the nearest preceding comment
+# block as `refs/tags/<ref> -> <40hex>` (see ci.yml); a missing or malformed
+# record fails closed with PIN_RECORD_MISSING / PIN_RECORD_MALFORMED. This
 # gate resolves the current SHA with the read-only GitHub REST API and compares
-# it with that record, so a silently retagged v1 is detected instead of being
+# it with that record, so a silently retagged ref is detected instead of being
 # merely documented in a comment.
 #
 # Fixed fail-closed vocabulary (no dynamic messages on failure paths):
@@ -171,9 +173,16 @@ for wf in "${workflows[@]}"; do
     spec="${BASH_REMATCH[1]}"
     ref="${BASH_REMATCH[2]}"
 
-    # Full-SHA pins are immutable and out of scope; only @vN tag refs are
-    # checked. This skips actions/checkout@<40hex> in review-gate.yml.
-    if [[ ! "$ref" =~ ^v[0-9]+([.][0-9]+)*$ ]]; then
+    # Adopted scope policy (I91-C): the ONLY refs excluded from checking are
+    # immutable full-SHA pins (exactly 40 hex). Every other ref is mutable and
+    # must carry a `refs/tags/<ref> -> <40hex>` record, otherwise the local
+    # checks below fire PIN_RECORD_MISSING / PIN_RECORD_MALFORMED (fail closed).
+    # This covers @main / @master / @v1-beta / @release/* / @v1 and any other
+    # non-full-SHA ref; such refs are no longer silently skipped.
+    # No "acceptable ref" allowlist is used: any non-full-SHA ref is in scope.
+    # (The outer `uses:` expression regex already restricts refs to tokens
+    # without whitespace or '#', so expression forms with spaces cannot match.)
+    if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
       continue
     fi
 
