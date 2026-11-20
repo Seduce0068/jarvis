@@ -25,8 +25,14 @@ if [[ ${ARCH} != "x86_64" ]]; then
 fi
 
 apt-get update
+# I95 task (c): libssl-dev is deliberately NOT installed. CI dropped it when the
+# rationale disappeared: no `openssl-sys` dependency remains in the workspace
+# (no OpenSSL FFI to compile against), and the TLS backend is `aws-lc-sys`,
+# which is self-contained (vendored sources; no system OpenSSL headers needed).
+# Keep this apt list in sync with the shared rust-gates CI apt-dependency input.
+# Ref: todo.md Round 88 ("libssl-dev の根拠消滅" / CI apt dependency cleanup).
 DEBIAN_FRONTEND=noninteractive apt-get install -y \
-  build-essential pkg-config libssl-dev protobuf-compiler \
+  build-essential pkg-config protobuf-compiler \
   postgresql postgresql-client firejail bubblewrap \
   curl unzip jq ca-certificates
 

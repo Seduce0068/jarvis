@@ -372,7 +372,10 @@ if [ "$apply" -eq 1 ]; then
     cp -a /opt/jarvis/bin/jarvis-mcp-gw "/opt/jarvis/bin/jarvis-mcp-gw.prev-$ts" \
       || die "退避コピー失敗: /opt/jarvis/bin/jarvis-mcp-gw.prev-$ts"
   fi
-  install -o root -g root -m 0755 "$bin" /opt/jarvis/bin/jarvis-mcp-gw
+  # I95-A: このスクリプトは -e 無しのため、配置失敗を明示検査しないと
+  # restart/health/diff へ進み "DONE: APPLIED" と誤報告しうる（env 配置と同調）。
+  install -o root -g root -m 0755 "$bin" /opt/jarvis/bin/jarvis-mcp-gw \
+    || die "バイナリ配置失敗: $bin -> /opt/jarvis/bin/jarvis-mcp-gw"
   systemctl restart jarvis-mcp-gw || { echo "再起動に失敗しました" >&2; rollback; }
   for _ in $(seq 1 20); do
     code=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || true)

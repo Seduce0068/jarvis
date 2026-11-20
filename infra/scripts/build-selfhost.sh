@@ -690,7 +690,7 @@ for unit in \
   "${REPO_DIR}"/infra/systemd/code-server.service \
   "${REPO_DIR}"/infra/systemd/otelcol.service; do
   name="$(basename "${unit}")"
-  # R4-D: fail-closed unit-write guard. `tee` follows a mask symlink
+  # R4-D: fail-closed unit-write guard. A naive writer (`tee`/`install`) follows a mask symlink
   # (/etc/systemd/system/<name> -> /dev/null), silently discarding the
   # generated unit while the old one stays masked/stale and the script still
   # reports success. Never write through such a destination: abort loudly.
@@ -721,8 +721,19 @@ for unit in \
     -e "s/^ProtectHome=yes$/ProtectHome=read-only/"
     -e "s|^ExecStart=/usr/bin/op run --env-file=/etc/jarvis/otel.env -- |ExecStart=|"
   )
-  sed "${sed_args[@]}" "${unit}" \
-    | sudo tee "/etc/systemd/system/${name}" >/dev/null
+  # I95-B: use the shared owner/mode policy instead of `sudo tee` (whose owner
+  # and mode depended on umask). Render into STAGE_DIR so the sed transformation
+  # is unchanged and install_expected_config() receives a regular source file;
+  # the mask-symlink guard above still runs before any write.
+  unit_mode="$(expected_config_mode "systemd/${name}")"
+  if [[ -z "${unit_mode}" ]]; then
+    echo "no reviewed mode policy for systemd/${name}; refusing to install unit" >&2
+    exit 1
+  fi
+  unit_rendered="${STAGE_DIR}/${name}.rendered"
+  sed "${sed_args[@]}" "${unit}" > "${unit_rendered}"
+  install_expected_config "${unit_mode}" "${unit_rendered}" "${unit_dst}"
+  rm -f "${unit_rendered}" || true
 done
 
 sudo systemctl daemon-reload

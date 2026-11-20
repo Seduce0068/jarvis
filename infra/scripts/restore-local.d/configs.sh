@@ -32,8 +32,9 @@
 # install_expected_config(); no path may hardcode `install -o root -g root -m`.
 # The six config-<basename> keys below are the reviewed non-secret restore
 # entries (identical to config_dest_for_base() in ../restore-local.sh); all are
-# root:root 0644. The namespaced systemd/<unit> key is a deploy-only artifact
-# used exclusively by path (3) and must never be treated as a restore entry.
+# root:root 0644. The namespaced systemd/<unit> keys are deploy-only artifacts
+# used by path (1) (build-selfhost.sh unit loop) and path (3) (deploy-mcp-gw),
+# and must never be treated as restore entries.
 # Keying by basename prevents an unreviewed name from inheriting a default.
 # mcp_gateway.env is a secret and is deliberately absent here; it stays
 # root:root 0600 (build-selfhost.sh I52-B/I54-B).
@@ -136,9 +137,19 @@ declare -gA EXPECTED_CONFIG_MODE=(
   [casbin_policy.csv]='0644'
   [cedar_schema.cedarschema]='0644'
   [policies.cedar]='0644'
-  # Deploy-only (path 3), NOT a restore config-<basename> entry: the mcp-gw
-  # unit installed by deploy-mcp-gw-safe.sh is also root:root 0644.
+  # Deploy-only (paths 1 and 3), NOT restore config-<basename> entries: units
+  # written under /etc/systemd/system/ are root:root 0644 on both paths.
   [systemd/jarvis-mcp-gw.service]='0644'
+  # I95-B: the remaining units written by build-selfhost.sh's unit loop. Every
+  # generated unit must resolve a reviewed mode or the loop fails closed.
+  [systemd/jarvis-migrations.service]='0644'
+  [systemd/jarvis-policy.service]='0644'
+  [systemd/jarvis-event.service]='0644'
+  [systemd/jarvis-context.service]='0644'
+  [systemd/qdrant.service]='0644'
+  [systemd/opencode.service]='0644'
+  [systemd/code-server.service]='0644'
+  [systemd/otelcol.service]='0644'
 )
 
 # I72-A: read-only accessor so callers never hardcode a mode or reach into the
