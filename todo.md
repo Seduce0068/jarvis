@@ -2474,3 +2474,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （low）。
 
 - 親が対応: 全ゲート再検証（pin 21件、ci-local ok=435）。
+
+### Round 88（R4 で修正済み）
+
+- [x] **RustSec 既知脆弱版38件**（confirmed high）→ patch 版8件を更新
+      （tokio 1.53.3 / rustls 0.23.46 / rustls-webpki 0.103.16 /
+      webpki-roots 1.0.10 / rustix 1.1.6 / pulldown-cmark 0.13.6 /
+      ctutils 0.4.4 / ui heapless 0.9.4）。残り29件は major 更新待ちを
+      実測 ID 付きで `audit.toml` に一時 ignore（再評価 2026-12-20）。
+- [x] cargo audit ゲートを新規作成し ci-local / safety-test / CI extra_gates
+      へ配線。cargo-audit 0.23 が audit.toml を auto-discover しないため
+      `--ignore` を明示渡しするよう修正。
+- [x] **OTel traces filter が全 Rust スパンをドロップ**（confirmed high）→
+      include を実スパン名へ拡張。Grafana Dependencies パネルを実 scrape job
+      5件へ、dead-letter/outbox 4メトリクスのパネルを追加。
+- [x] status_label を jarvis-core へ共有化（503 を専用バケットへ）、
+      aarch64 に cmake 追加・libssl-dev 削除、ui rust-version 1.100 追加。
+- 親が対応: Cargo.lock patch 更新、audit.toml の ID 実測転記、`--ignore`
+  配線、全ゲート再検証。
+
+### Round 88 の残り指摘（未対応）
+
+- [ ] major 更新待ち29件の解消（hickory 0.26 / rsa 0.10 / rmcp 3.9 /
+      旧 rustls 0.22 系統 / libsqlite3-sys）— 再評価 2026-12-20。
+- [ ] CI runner への cargo-audit バージョン固定導入（未導入なら
+      AUDIT_TOOL_MISSING で fail-closed）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。

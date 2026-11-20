@@ -461,6 +461,107 @@ SHA 値自体は診断出力に出してよいが、トークンその他の秘�
 ゲートは通過する。記録は監査用のピンであり、タグ更新の承認を自動化する
 ものではない（共通指示 §5 の「互換更新はタグの付け替え」運用を前提とする）。
 
+## トレーススパン名と otelcol filter の同期（I93-B）
+
+Rust サービスは `#[instrument]` に `name = ...` を指定しておらず、デフォルトの
+スパン名（関数名: `check` / `process_event` / `approve_approval` 等）が OTLP へ
+出力される。`infra/config/otelcol-config.yaml` の
+`processors.filter.spans.include` は実スパン名を列挙した allowlist であり、
+`processors.transform` が付与する `jarvis.correlation_id` はここを通過した
+スパンにしか乗らない。
+
+**スパン名追加時は filter も更新する（同じ変更で行う）。**
+
+- `#[instrument]` の新規追加・関数名の変更、または
+  `instrument(name = "...")` による明示名の付与を行った場合は、
+  include の `span_names` にその名前（正規表現）を追加する。
+- 忘れると新規スパンは黙ってドロップされ、Grafana Cloud の traces が空に
+  見えてもエラーにならない（Round 87 の confirmed high と同型の失敗）。
+- 既存名を削除する場合は include からも外し、古い名前を残さない。
+- 採用方針は include allowlist の維持であり、exclude のみへの切替えは採らない。
+  exclude のみにするとライブラリ／フレームワークのスパンまで Grafana Cloud
+  へ送られ、ボリュームと属性の露出が増えるため。
+- スパン名の確認は `rust/` 配下の `#[instrument]` を検索し、直後の関数名を
+  読み取る。パネル一覧との対応は `infra/grafana/README.md` を参照。
+
+リポジトリのテンプレートを更新しても実行中の collector は変わらない。
+稼働基盤は `/etc/jarvis/otelcol-config.yaml` を読むため、反映は別途デプロイ
+手順に従う（この Runbook では実 otelcol を操作しない）。
+
+## dependency audit ゲート（I93-A）
+
+### dependency audit ゲートの目的
+
+CI / Makefile に既知脆弱性の検出ゲートが無く、`Cargo.lock` に脆弱版が
+混入しても検出されなかった。I93-A はこの欠落を補うゲートである。
+
+[check-dependency-audit.sh](../../ci/scripts/check-dependency-audit.sh) は
+リポジトリルートから `cargo audit --no-fetch --file <lock>` を走らせ、
+`rust/Cargo.lock` と `ui/Cargo.lock` の 2 ファイルを検査する。
+調整はルートの [audit.toml](../../audit.toml) に集約する。`cargo-audit` は
+CWD から `audit.toml` を検出するため、スクリプトは CWD をリポジトリ
+ルートへ固定する。`cargo-audit` が無い場合は `AUDIT_TOOL_MISSING` で
+fail-closed とする（CI はバージョン固定で導入する前提）。
+
+### advisory DB 更新方針（採用方針）
+
+スキャンは常に `--no-fetch` を使い、ネットワークアクセスを行わない。
+同じ advisory 集合で判定したことが常に明確になる利点がある。
+
+| 環境 | 挙動 |
+| --- | --- |
+| ローカル（既定） | DB が無い／14 日より古い場合は `UNVERIFIED AUDIT_DB_UNVERIFIED` / `UNVERIFIED AUDIT_DB_STALE` を出力し、終了コード 0 で「未検証」を明示する（false pass ではない） |
+| CI | `extra_gates` が `DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit` を実行し、`cargo audit fetch`（ネットワーク読み取りのみ）で DB を更新してから `--no-fetch` で走査する。fetch 失敗は `AUDIT_FETCH_FAILED` で fail-closed |
+
+`UNVERIFIED` はローカル作業を止めないための opt-out であり、
+「脆弱性が無い」という意味ではない。CI は API 到達性がある前提で運用し、
+未検証への格下げは行わない。advisory の実検出は fetch 後の CI が担う。
+
+### ignore 運用
+
+[audit.toml](../../audit.toml) の `[advisories].ignore` にのみ記録する。
+スクリプト側には ignore を持たせない。
+
+- patch 版のある 8 件（tokio / rustls / rustls-webpki / webpki-roots /
+  rustix / pulldown-cmark / ctutils / ui heapless）は ignore しない。
+  `Cargo.lock` を patch 版へ更新して解消するのが先決。
+- major 更新待ち（hickory 0.26 / rsa 0.10 / rmcp 3.9）は一時 ignore。
+  各エントリに理由と再評価日（2026-12-20T00:00:00+09:00）をコメントで
+  添える。期限までに major 更新を完了するか、継続理由を更新する。
+  理由の無い ignore は削除する。
+- unmaintained 16 件（主に `ui/Cargo.lock`）は情報警告として扱い、
+  `--deny` を付けない方針で許容する。脆弱性（vulnerability）は引き続き
+  fail-closed で拒否する。
+- `cargo-audit` の `ignore` は RUSTSEC-ID 文字列のみに一致する。現状の
+  `TODO-RUSTSEC-*` トークンは実測 ID へ置換えるためのプレースホルダであり、
+  置換えるまで実 advisory を抑制しない。ID は推測せず、
+  `cargo audit` の実測出力から取得して書き換えること。
+
+### dependency audit の実行
+
+```bash
+# Kubuntu / jarvis リポジトリルートで実行
+echo "== dependency audit（ローカル） =="
+make check-dependency-audit
+echo "== ci-local / safety-test に含まれる =="
+make ci-local
+make safety-test
+echo "== CI 相当（advisory DB を更新してから走査） =="
+DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit
+```
+
+### dependency audit の出力と限界
+
+失敗時は固定語彙（`BAD_USAGE` / `AUDIT_TOOL_MISSING` /
+`AUDIT_CONFIG_MISSING` / `AUDIT_LOCKFILE_MISSING` / `AUDIT_FETCH_FAILED` /
+`AUDIT_VULNERABILITIES_FOUND`）で出力する。`cargo audit` の通常レポートは
+診断用に stdout へ残すが、ゲート自身は値や秘密情報を出力・保存しない。
+
+限界: advisory DB が古いと `--no-fetch` では新規 advisory を検出できない
+（CI は fetch で緩和）。ignore は脆弱性を修正するものではなく、major 更新
+待ちの時間を稼ぐ一時措置である。再評価を怠ると恒久化するため、再評価日を
+守ること。
+
 ## 関連
 
 - [specs/index.md](../../specs/index.md): テスト仕様の索引
