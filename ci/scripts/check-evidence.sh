@@ -43,12 +43,17 @@
 # baseline/grandfather exception remains. No keyword value is emitted; no
 # secret values are read.
 # Round 93 (I103-D) adds a second pinned contract family, marked `# I103-D`
-# inside the gherkin blocks: TC-D3 (410 Gone / APPROVAL_EXPIRED_BODY) and
-# TC-HC1〜3 of event/context/mcp-gw (HEALTH_OK_BODY, each service's degraded
-# BODY, and fail-closed). Those keywords are counted the same strict way. The
-# four evidence `notes` are updated by the parent during regeneration; a
-# spec-writing agent must not edit evidence and must report the required
-# regeneration explicitly.
+# inside the gherkin blocks: TC-D3 (410 Gone / APPROVAL_EXPIRED_BODY), TC-H1 /
+# TC-H2 of policy (/health fixed bodies, including the policy-specific
+# HEALTH_KILL_SWITCH_BODY / HEALTH_NO_POLICY_BODY), TC-U19 of the UI (410 body
+# confirmation), and TC-HC1〜3 of event/context/mcp-gw (each service's degraded
+# BODY and fail-closed). Those keywords are counted the same strict way.
+# I105-D: a marker comment must NOT itself contain a pinned keyword, because
+# marker lines are counted too; duplicating e.g. "fail-closed" in a marker would
+# double the spec-side requirement while notes state it once and fail closed.
+# All six evidence `notes` already spell the pinned keywords at the required
+# counts; a spec edit changes spec_hash, so the parent must regenerate both
+# affected evidence files, their filenames and the indexes and report it.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -106,6 +111,10 @@ CONTRACT_KEYWORDS = {
     "410": r'\b410\b',
     "APPROVAL_EXPIRED_BODY": r'\bAPPROVAL_EXPIRED_BODY\b',
     "HEALTH_OK_BODY": r'\bHEALTH_OK_BODY\b',
+    # I105-D: policy-specific fixed bodies (TC-H1). Exact step-side tokens so
+    # an ordinary prose "kill switch" / "no policy" cannot inflate the count.
+    "HEALTH_KILL_SWITCH_BODY": r'\bHEALTH_KILL_SWITCH_BODY\b',
+    "HEALTH_NO_POLICY_BODY": r'\bHEALTH_NO_POLICY_BODY\b',
     "HEALTH_OPENCODE_UNAVAILABLE_BODY": r'\bHEALTH_OPENCODE_UNAVAILABLE_BODY\b',
     "HEALTH_STORE_UNAVAILABLE_BODY": r'\bHEALTH_STORE_UNAVAILABLE_BODY\b',
     "HEALTH_NO_UPSTREAM_BODY": r'\bHEALTH_NO_UPSTREAM_BODY\b',
@@ -126,6 +135,11 @@ CONTRACT_NOTE_PATTERNS = {
     "410": r'\b410\b|\bGone\b',
     "APPROVAL_EXPIRED_BODY": r'APPROVAL_EXPIRED_BODY|approval\s+request\s+expired',
     "HEALTH_OK_BODY": r'HEALTH_OK_BODY',
+    # I105-D: the notes already spell both policy bodies verbatim. Keep the
+    # note side exact too; only a SHORTFALL against the step count fails, so
+    # extra prose mentions remain harmless and no value is ever emitted.
+    "HEALTH_KILL_SWITCH_BODY": r'HEALTH_KILL_SWITCH_BODY',
+    "HEALTH_NO_POLICY_BODY": r'HEALTH_NO_POLICY_BODY',
     "HEALTH_OPENCODE_UNAVAILABLE_BODY": r'HEALTH_OPENCODE_UNAVAILABLE_BODY|opencode[_\s-]?unavailable',
     "HEALTH_STORE_UNAVAILABLE_BODY": r'HEALTH_STORE_UNAVAILABLE_BODY|store[_\s-]?unavailable',
     "HEALTH_NO_UPSTREAM_BODY": r'HEALTH_NO_UPSTREAM_BODY|no[_\s-]?upstream',
