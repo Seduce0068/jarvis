@@ -63,6 +63,8 @@ status: draft
 | REQ-26 | probe は fail-closed。timeout・接続失敗・読み取り不能本文は active=true とする |
 | REQ-27 | 固定本文との完全バイト一致（trim なし）の healthy 応答のみ active=false とし、latch と pin を解除する |
 | REQ-28 | 409 の停止 latch は racing した healthy probe より優先する |
+| REQ-29 | 410 本文が `APPROVAL_EXPIRED_BODY` の trim 後完全一致なら Expired を返し winner 取得しない |
+| REQ-30 | 410 本文が未知/改変/空/読取不能/409 本文なら fail-closed とし Expired を捏造しない |
 
 トークン関連の REQ-11 / REQ-19 / REQ-20 は
 [policy_client.rs](../ui/src/policy_client.rs) の scope 定数に対応する。
@@ -83,12 +85,19 @@ admin scope を使う。
 余分／重複キー、未知の形状、読み取り不能な本文、`200` / `503` 以外の status
 はすべて不完全 probe として `Err` → `true`（停止側）へ倒れる。
 
+410 の分類も fail-closed である。`jarvis-core` が公開する共有固定本文
+`APPROVAL_EXPIRED_BODY` を **trim 後完全一致**で確認した場合のみ、決定 POST を
+`Decision::Expired`（終局・winner なし）として表示し、status 端点の winner
+取得へ進まない。改変・未知・空・読取不能な本文や 409 固定本文は不一致として
+エラーとし、`Expired` を捏造しない。共有本文は core / policy / UI / mcp-gw の
+pin で片側変更を検出する。
+
 ## Risk & tier
 
 | risk_id | リスク | tier | 完了基準 |
 | --- | --- | --- | --- |
 | R-1 | 決定エラーが refresh で消え利用者が誤解する | T1 | unit >= 0.90 |
-| R-2 | 期限切れ要求を誤って承認する | T1 | unit >= 0.90 |
+| R-2 | 期限切れ要求を誤って承認する / 410 改変本文で Expired を誤表示する | T1 | unit >= 0.90 |
 | R-3 | 承認トークンがリダイレクト先へ漏洩する | T1 | unit >= 0.90 |
 | R-4 | キーボードだけでは承認操作に到達できない | T2 | unit >= 0.80 |
 | R-5 | 引数省略で危険なコマンドが隠れる | T1 | unit >= 0.90 |
@@ -117,7 +126,7 @@ TD3 (test case) の順で導出した。
 
 | 技法 | 29119-4 節 | 適用箇所 |
 | --- | --- | --- |
-| equivalence partitioning | 5.2.1 | 成功/失敗、期限前/後、空/非空キュー |
+| equivalence partitioning | 5.2.1 | 成功/失敗、期限前/後、空/非空キュー、410 本文一致/不一致 |
 | boundary value analysis | 5.2.3 | 3 秒 refresh、timeout、長い引数 |
 | decision table testing | 5.2.6 | 決定結果 x refresh x action_status、scope x トークン設定 |
 | state transition testing | 5.2.8 | 読込 -> 決定 -> 次 poll |
@@ -321,6 +330,21 @@ Scenario: TC-U18 probe の fail-closed と 409 優先
   Then false を返し latch と pin が解除される
 ```
 
+### 期限切れ 410 の本文確認 (REQ-29, REQ-30)
+
+```gherkin
+Scenario: TC-U19 410 の共有本文確認と fail-closed
+  Given approve / deny が 410 Gone を返す
+  And 本文は共有固定本文 APPROVAL_EXPIRED_BODY と trim 後完全一致する
+  When decide_outcome で分類する
+  Then Decision::Expired を返す
+  Then status 端点の winner 取得へ進まずエラー表示も出さない
+  Given 410 本文が改変・未知・空・読取不能または 409 固定本文である
+  When 同じく分類する
+  Then エラーとして fail-closed にし Expired を捏造しない
+  Then status 端点へのアクセスを行わない
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -356,6 +380,8 @@ Scenario: TC-U18 probe の fail-closed と 409 優先
 | TC-U18 | REQ-26 | v5.0.0-V16.5.3 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-U18 | REQ-27 | v5.0.0-V16.5.3 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-U18 | REQ-28 | - | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.8 | T1 |
+| TC-U19 | REQ-29 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-U19 | REQ-30 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.4.1 | T1 |
 
 ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではない)。
 それ以外は ASVS を v5.0.0、SP 800-53 を Release 5.2、CC を
@@ -380,3 +406,28 @@ TC-U15〜TC-U18 は I50-C / I52-A / I54-A / I66-C の回帰テストに対応す
 `approvals.rs` の kill switch pin・409 分類と `policy_client.rs` の
 probe fail-closed・winner 取得が根拠。I66-C では `/health` 本文の前後空白が
 `Err` → 停止側へ倒れる回帰を追加した。実測件数は evidence を参照。
+
+TC-U19 は [policy_client.rs](../ui/src/policy_client.rs) の
+`expired_410_reports_expired_without_winner_fetch` /
+`expired_410_body_confirmation_fails_closed` /
+`expired_410_unreadable_body_is_an_error` /
+`expired_410_rewritten_body_is_an_error` /
+`expired_410_body_pins_wire_contract` に対応する。共有本文の正典は
+`jarvis-core` が持ち、core / policy / UI / mcp-gw の pin が片側変更を検出する。
+
+### エビデンス再生成手順（親が実行）
+
+本仕様の変更で `spec_hash` が変わるため、
+`evidence/test-run-20261120-eb2d4b97ba30.json` は古くなる。
+[再生成 Runbook](../docs/integration/evidence-regeneration.md) の 7 ステップに
+従い、親が以下を実行する（本エージェントは証跡を変更しない）。
+`test-policy-approval.md` の変更に伴う policy 証跡も同時に再生成対象である。
+
+1. `sha256sum specs/test-ui.md` で新ハッシュを取得する。
+2. `cd ui && cargo test --locked` を実測する。
+3. evidence JSON の `spec_hash` と `test_basis_ref.spec_hash` の両方を更新する。
+4. `test_basis_ref.requirements` に REQ-29 / REQ-30 を追加し、`results` /
+   `timestamp` / `notes` を実測へ同期する（既存 REQ-1〜28 は維持）。
+5. ファイル名を `test-run-YYYYMMDD-<新ハッシュ先頭12文字>.json` へ変更する。
+6. `evidence/index.md` の `[run-ui]` リンクと件数を更新する。
+7. `make check-evidence` で `ok=6 errors=0` を確認する。

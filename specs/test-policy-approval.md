@@ -50,13 +50,24 @@ status: draft
 | REQ-13 | API トークンのみの呼び出しは request/list/status で成功し、approve/deny では 401 となり自己承認が拒否される |
 | REQ-14 | admin トークン未設定時は API トークンへフォールバックし、起動時に警告を出す（職務分離は無効） |
 | REQ-15 | コミット中の kill switch 発動時は 200/Approved を返すが、実行は mcp-gw 再判定で fail-closed 拒否 |
+| REQ-16 | 503: kill switch は `HEALTH_KILL_SWITCH_BODY`、policy 不在は `HEALTH_NO_POLICY_BODY`。kill switch 優先 |
+| REQ-17 | 正常時は 200 + `HEALTH_OK_BODY` を返し `reason` キーを含めない |
+| REQ-18 | 未知/前後空白/余分・重複キーの本文は emit せず、監視側は完全一致以外を不完全 probe として fail-closed に倒す |
+
+`/health` の契約は `jarvis-core` の共有固定本文 3 種類に閉じる。emit 側は
+kill switch 発動を `HEALTH_KILL_SWITCH_BODY`、policy source 不在を
+`HEALTH_NO_POLICY_BODY`（いずれも 503）、正常を `HEALTH_OK_BODY`（200）で返す。
+kill switch が policy source 不在より優先する。監視側（UI の probe）は
+**trim なしの完全バイト一致**でのみ分類し、未知本文・前後空白・余分／重複
+キー・読取不能・`200` / `503` 以外の status は不完全 probe として fail-closed
+（`Err`）へ倒す。core / policy / UI の pin が片側変更を検出する。
 
 ## Risk & tier
 
 | risk_id | リスク | tier | 完了基準 |
 | --- | --- | --- | --- |
 | R-1 | 権限なき発動/解除で全自動処理を停止・再開される | T1 | unit >= 0.90, int >= 0.80 |
-| R-2 | 発動中の承認通過で非常停止が無効化される | T1 | unit >= 0.90, int >= 0.80 |
+| R-2 | 発動中の承認通過 / health 本文 drift で非常停止が無効化される | T1 | unit >= 0.90, int >= 0.80 |
 | R-3 | 状態ファイル破損でサイレントに解除される | T1 | unit >= 0.90 |
 | R-4 | トークン欠落/誤値で承認 API が素通しになる | T1 | int >= 0.80 |
 | R-5 | キュー無制限成長と ID 上書きによる決定奪取 | T1 | unit >= 0.90 |
@@ -82,7 +93,7 @@ TD3 (test case) の順で導出した。
 
 | 技法 | 29119-4 節 | 適用箇所 |
 | --- | --- | --- |
-| equivalence partitioning | 5.2.1 | トークン正常/欠落/誤値、kill switch 状態 |
+| equivalence partitioning | 5.2.1 | トークン正常/欠落/誤値、kill switch 状態、health 3 本文 |
 | boundary value analysis | 5.2.3 | pending 0/cap-1/cap/cap+1、timeout 前後 |
 | decision table testing | 5.2.6 | kill switch x トークン x ID 状態、scope(API/admin) x トークン x 決定種別、commit gate x 発動タイミング |
 | state transition testing | 5.2.8 | pending -> approved/denied/expired |
@@ -277,6 +288,7 @@ Scenario: TC-D2 決定の排他とエラー応答
 ```
 
 ```gherkin
+  # I103-D: Round 93 契約マーカー
 Scenario: TC-D3 期限切れ要求の 410 Gone (REQ-10)
   Given 決定期限を過ぎた保留要求 ID=X が pending で残っている
   When 期限切れの ID=X を approve または deny する
@@ -285,6 +297,32 @@ Scenario: TC-D3 期限切れ要求の 410 Gone (REQ-10)
   And 決定はスタンプされず watch 通知も出ず status は pending のまま
   When 期限切れと kill switch 発動が競合する
   Then kill switch の 409 が優先され halt が残留する
+```
+
+### /health の固定本文契約 (REQ-16〜REQ-18)
+
+```gherkin
+Scenario: TC-H1 /health の 200 / 503 固定本文
+  Given policy source と kill switch が通常状態
+  When /health をトークンなしで呼ぶ
+  Then status は 200 で本文は HEALTH_OK_BODY と完全バイト一致し reason キーは無い
+  Given kill switch が発動中
+  When /health を呼ぶ
+  Then status は 503 で本文は HEALTH_KILL_SWITCH_BODY と完全バイト一致する
+  Given kill switch を解除し policy source を読めない
+  When /health を呼ぶ
+  Then status は 503 で本文は HEALTH_NO_POLICY_BODY と完全バイト一致する
+  Given kill switch 発動と policy source 不在が同時に起きる
+  When /health を呼ぶ
+  Then kill switch 本文が優先される
+
+Scenario: TC-H2 未知本文の fail-closed
+  Given /health が前後空白つき、余分／重複キー、または未知の本文を返す
+  When 監視側が probe を分類する
+  Then 完全バイト一致ではないため不完全 probe として fail-closed に倒れる
+  Given 本文が読取不能または status が 200/503 以外
+  When 同じく分類する
+  Then 正常 (active=false) として扱われず停止側 (active=true) へ倒れる
 ```
 
 ## Traceability
@@ -307,6 +345,9 @@ Scenario: TC-D3 期限切れ要求の 410 Gone (REQ-10)
 | TC-D1 | REQ-9 | v5.0.0-V15.4.2 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-D2 | REQ-10 | v5.0.0-V2.3.4 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-D3 | REQ-10 | v5.0.0-V2.3.4 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T2 |
+| TC-H1 | REQ-16 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.6 | T1 |
+| TC-H1 | REQ-17 | v5.0.0-V8.1.1 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.1 | T1 |
+| TC-H2 | REQ-18 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.4.1 | T1 |
 
 未適用列は `-` ではなく、全行に基準 ID を割り当てた。
 ASVS は v5.0.0、SP 800-53 は Release 5.2、CC は ISO/IEC 15408-3:2022
@@ -359,17 +400,32 @@ I46-A (Round 44) の commit_gate 1 回化は
   `approval_expired_body_pins_the_wire_contract`
   — 固定本文 `approval request expired` の正典をピン留め。
 
-### エビデンス再生成手順（親が実行）
+### /health 固定本文の根拠 (TC-H1 / TC-H2 / REQ-16〜REQ-18)
 
-本仕様の変更で `spec_hash` が変わるため、
-`evidence/test-run-20261120-79cf268a2b05.json` は古くなる。
-[再生成 Runbook](../docs/integration/evidence-regeneration.md) の 7 ステップに
-従い、親が以下を実行する（本エージェントは証跡を変更しない）。
+[http.rs](../rust/jarvis-policy/src/http.rs) の `health()` は kill switch →
+policy source 不在 → 正常の順に判定し、3 種類の共有固定本文のみを返す。
+根拠となる既存テストは次のとおりで、新規テスト関数の追加は不要。
 
-1. `sha256sum specs/test-policy-approval.md` で新ハッシュを取得する。
-2. `cd rust && cargo test -p jarvis-policy --lib --locked` を実測する。
-3. evidence JSON の `spec_hash` と `test_basis_ref.spec_hash` の両方を更新する。
-4. `results` / `timestamp` / `notes` を実測へ同期する（REQ 集合は REQ-1〜15 のまま）。
-5. ファイル名を `test-run-YYYYMMDD-<新ハッシュ先頭12文字>.json` へ変更する。
-6. `evidence/index.md` の `[run-policy]` リンクと件数を更新する。
-7. `make check-evidence` で `ok=6 errors=0` を確認する。
+- [http.rs](../rust/jarvis-policy/src/http.rs) の
+  `health_wire_bodies_match_core_constants`
+  — 3 本文が `jarvis-core` の共有定数とバイト単位で一致し、実際の `/health`
+  応答が kill switch / policy 不在 / 正常でそれぞれ固定本文になることを検証。
+- [http.rs](../rust/jarvis-policy/src/http.rs) の
+  `health_wire_vocabulary_matches_core_constants` / `health_reports_ok_without_reason_when_service_is_healthy`
+  — 語彙と正常時 200 の契約を検証。
+- [policy_client.rs](../ui/src/policy_client.rs) の health probe テスト
+  — 完全一致以外（前後空白・未知本文・読取不能）が fail-closed へ倒れることを
+  検証（UI 仕様 REQ-26 / REQ-27 を参照）。
+
+### エビデンス再生成（完了済み）
+
+現行証跡は `evidence/test-run-20261120-f32635cab7e6.json`
+（`spec_hash` `sha256:f32635cab7e689de95b3a77fe9ec2eababff62a8c9bbda0707091d7cc4d48968`）。
+再生成は完了済みであり、存在しない旧ファイル名を「再生成手順」として残さないこと。
+
+本タスクで TC-D3 に `I103-D` 契約マーカーを追加したため、親が
+[再生成 Runbook](../docs/integration/evidence-regeneration.md) に従って
+証跡を再生成する（ファイル名・ハッシュ・`notes` を更新）。REQ-16〜18 の
+`requirements` 同期と `test-ui.md` の UI 証跡再生成も同 Runbook に従う。
+`notes` には 410 Gone / `APPROVAL_EXPIRED_BODY` を明記すること。
+本エージェントは証跡を変更しない。以降の再生成は同 Runbook に従う。

@@ -17,6 +17,12 @@ mod testing;
 use anyhow::Result;
 use std::sync::Arc;
 
+/// Fixed 410 body emitted by `jarvis-policy` when an approval decision window
+/// elapsed. Aliased from `jarvis-core` so the gateway's fail-closed denial
+/// reason cannot drift from the body the policy emits and the approval UI
+/// verifies before surfacing a terminal `Expired` decision.
+const APPROVAL_EXPIRED_BODY: &str = jarvis_core::APPROVAL_EXPIRED_BODY;
+
 /// Build the Cedar authorization context from server-controlled,
 /// allowlist-derived attributes only.
 ///
@@ -193,7 +199,7 @@ impl McpGateway {
                 Ok(ApprovalDecision::Expired) => {
                     return Err(error::McpGatewayError::ApprovalDenied {
                         tool: tool.to_owned(),
-                        reason: "approval request expired".to_owned(),
+                        reason: APPROVAL_EXPIRED_BODY.to_owned(),
                     }
                     .into());
                 }
@@ -296,6 +302,22 @@ mod tests {
                 "requires_approval": true,
             })
         );
+    }
+
+    /// Cross-crate pin: the gateway's expired-approval denial reason stays an
+    /// alias of the shared `jarvis-core` body, never a gateway-local literal.
+    /// The independent wire fixture catches a one-sided wording change in core,
+    /// policy, UI or the gateway instead of silently producing a reason no
+    /// other crate recognizes. The 409 bodies must stay distinct so an expiry
+    /// can never be confused with an already-decided or kill-switch outcome.
+    #[test]
+    fn approval_expired_reason_pins_shared_wire_body() {
+        const EXPIRED_WIRE_BODY: &str = "approval request expired";
+
+        assert_eq!(APPROVAL_EXPIRED_BODY, jarvis_core::APPROVAL_EXPIRED_BODY);
+        assert_eq!(APPROVAL_EXPIRED_BODY, EXPIRED_WIRE_BODY);
+        assert_ne!(APPROVAL_EXPIRED_BODY, jarvis_core::ALREADY_DECIDED_409_BODY);
+        assert_ne!(APPROVAL_EXPIRED_BODY, jarvis_core::KILL_SWITCH_409_BODY);
     }
 
     const APPROVAL_ALLOWLIST: &str = r#"
