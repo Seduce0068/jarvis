@@ -2586,6 +2586,23 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] deploy.rs のヘルスゲートが固定5秒＋1回プローブで低速起動を誤判定
       （中）— 上限付きリトライ（20回×0.5s 等）へ。
 - [ ] drift が casbin_model.conf の内容・owner/mode を未検査（中）。
-- [ ] ui/README.md:39 と remaining-tasks.md:288 の clippy 例に
-      undocumented_unsafe_blocks が欠落（低）。
+- [x] ui/README.md:39 と remaining-tasks.md:288 の clippy 例へ
+      undocumented_unsafe_blocks を追加。
+- [x] policy 仕様へ 410 Gone、3仕様へ /health degraded 契約を反映、
+      4証跡を実測再生成（policy 211 / event 91 / context 181 / mcp 151）。
+- [x] mcp-gw /health を allowlist 推論から登録済みサーバ照合へ、
+      deploy-mcp-gw-safe.sh の degraded rollback、deploy.rs の上限付き
+      リトライ、drift の /health 200 検証。
+- [x] drift が casbin_model.conf の内容・owner/mode を未検査 →
+      追加＋tamper 回帰。
+
+### Round 93 の残り指摘（未対応）
+
+- [ ] mcp-gw approval.rs:712 の approver task が timeout 未適用（低）—
+      成功経路ではハングしないが一貫性のため。
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: tokio::spawn 所有値化、証跡再生成（4件）、index／Runbook の
+  参照同期、全ゲート再検証。
