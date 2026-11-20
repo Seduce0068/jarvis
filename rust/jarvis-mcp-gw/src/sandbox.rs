@@ -440,10 +440,14 @@ impl Sandbox {
         /// Directory component names whose entire subtree holds credentials.
         const SENSITIVE_DIRS: &[&str] = &[".ssh", ".aws", ".gnupg", ".kube"];
 
+        // Inspect *every* component. `to_str()` skipped any component that was
+        // not valid UTF-8, so a name like `token\xff` bypassed the sensitive
+        // check entirely. `to_string_lossy()` keeps the valid ASCII portion
+        // (including `token`, `secret`, ...) and only replaces invalid bytes
+        // with U+FFFD, so those names are still matched and refused.
         let components: Vec<String> = path
             .components()
-            .filter_map(|c| c.as_os_str().to_str())
-            .map(str::to_ascii_lowercase)
+            .map(|c| c.as_os_str().to_string_lossy().to_ascii_lowercase())
             .collect();
 
         for (idx, component) in components.iter().enumerate() {
@@ -629,28 +633,75 @@ fn resolve_redirect(base: &reqwest::Url, location: &str) -> Result<reqwest::Url>
     validate_http_url(next.as_str())
 }
 
+/// Public = globally routable according to the standard library's IANA-based
+/// classification. Replacing the hand-written denylist with `is_global()`
+/// closes the SSRF gap for IETF special-purpose ranges (192.0.0.0/24,
+/// 192.88.99.0/24, 198.18.0.0/15, 240.0.0.0/4, 100.64.0.0/10, ...), which the
+/// old list treated as public and that DNS resolution could return.
 fn is_public_ip(ip: &std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => {
-            !(v4.is_private()
-                || v4.is_loopback()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-                || v4.is_multicast()
-                || v4.is_documentation()
-                || v4.octets()[0] == 0
-                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1])))
+    use std::net::IpAddr;
+
+    // `IpAddr::is_global()` is still unstable on this toolchain, so mirror
+    // its IANA/IETF classification explicitly. This closes the SSRF gap for
+    // special-purpose ranges the old hand-written list treated as public.
+    fn v4_public(o: [u8; 4]) -> bool {
+        let (a, b, c, _) = (o[0], o[1], o[2], o[3]);
+        if a == 0 || a == 10 || a == 127 || a >= 224 {
+            return false;
         }
-        std::net::IpAddr::V6(v6) => {
+        if a == 169 && b == 254 {
+            return false;
+        }
+        if a == 172 && (16..=31).contains(&b) {
+            return false;
+        }
+        if a == 192 && b == 168 {
+            return false;
+        }
+        if a == 100 && (64..=127).contains(&b) {
+            return false;
+        }
+        if a == 192 && b == 0 && c == 0 {
+            return false;
+        }
+        if a == 192 && b == 0 && c == 2 {
+            return false;
+        }
+        if a == 192 && b == 88 && c == 99 {
+            return false;
+        }
+        if a == 198 && (b == 18 || b == 19) {
+            return false;
+        }
+        if a == 203 && b == 0 && c == 113 {
+            return false;
+        }
+        true
+    }
+
+    match ip {
+        IpAddr::V4(v4) => v4_public(v4.octets()),
+        IpAddr::V6(v6) => {
             if let Some(mapped) = v6.to_ipv4_mapped() {
-                return is_public_ip(&std::net::IpAddr::V4(mapped));
+                return v4_public(mapped.octets());
             }
-            !(v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_multicast()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local())
+            let s = v6.segments();
+            if v6.is_unspecified() || v6.is_loopback() {
+                return false;
+            }
+            if s[0] & 0xfe00 == 0xfc00 {
+                return false;
+            } // unique local
+            if s[0] & 0xffc0 == 0xfe80 {
+                return false;
+            } // link local
+            if s[0] == 0x2001 && s[1] == 0x0db8 {
+                return false;
+            } // documentation
+            if s[0] == 0 && s[1] == 0 && s[2] == 0 && s[3] == 0 && s[4] == 0 && s[5] == 0xffff {
+                return false;
+            }
+            true
         }
     }
 }
@@ -783,6 +834,12 @@ mod tests {
             "0.0.0.0",
             "224.0.0.1",
             "100.64.0.1",
+            // IETF reserved / special-purpose ranges: `is_global()` denies
+            // these even though the old hand-written denylist allowed them.
+            "192.0.0.1",
+            "192.88.99.1",
+            "198.18.0.1",
+            "240.0.0.1",
             "::1",
             "fc00::1",
             "fe80::1",
@@ -798,6 +855,28 @@ mod tests {
                 "{ip} should be allowed"
             );
         }
+    }
+
+    /// (a) The IPv4-mapped form must inherit the same `is_global()` verdict as
+    /// the native IPv4 address, otherwise a mapped reserved address slips
+    /// through the DNS path of `ensure_public_host`.
+    #[test]
+    fn blocks_ipv4_mapped_non_public_ranges() {
+        use std::net::IpAddr;
+        for ip in [
+            "::ffff:127.0.0.1",
+            "::ffff:192.0.0.1",
+            "::ffff:192.88.99.1",
+            "::ffff:198.18.0.1",
+            "::ffff:240.0.0.1",
+        ] {
+            assert!(
+                !is_public_ip(&ip.parse::<IpAddr>().unwrap()),
+                "mapped {ip} should be blocked"
+            );
+        }
+        let public_mapped = "::ffff:8.8.8.8".parse::<IpAddr>().unwrap();
+        assert!(is_public_ip(&public_mapped));
     }
 
     #[test]
@@ -1235,6 +1314,31 @@ mod tests {
         let err = sandbox
             .native_read(&json!({"path": ".ssh/id_rsa"}))
             .expect_err(".ssh/id_rsa must be refused end to end");
+        assert!(err.to_string().contains("sensitive"), "{err}");
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// (b) Regression: a non-UTF-8 filename used to be dropped by
+    /// `filter_map(|c| c.as_os_str().to_str())`, so `token\xff.txt` escaped
+    /// the sensitive check and `filesystem.read` returned its contents. The
+    /// file is created in the test's temporary workspace, and an ASCII symlink
+    /// lets the JSON `path` argument reach it: canonicalization resolves the
+    /// symlink to the real non-UTF-8 component before the check runs.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_sensitive_filename_is_refused_by_native_read() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let (base, sandbox) = fixture();
+        let raw_name = std::ffi::OsString::from_vec(b"token\xff.txt".to_vec());
+        let probe_file = base.join(raw_name);
+        std::fs::write(&probe_file, b"probe value").unwrap();
+        let alias = base.join("alias.txt");
+        std::os::unix::fs::symlink(&probe_file, &alias).unwrap();
+
+        let err = sandbox
+            .native_read(&json!({"path": "alias.txt"}))
+            .expect_err("non-UTF-8 'token\\xff' filename must be refused");
         assert!(err.to_string().contains("sensitive"), "{err}");
         let _ = std::fs::remove_dir_all(base);
     }
