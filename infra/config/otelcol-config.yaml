@@ -93,12 +93,28 @@ processors:
           - set(attributes["jarvis.correlation_id"], attributes["correlation_id"]) where attributes["correlation_id"] != nil
           - set(attributes["jarvis.event_source"], attributes["event_source"]) where attributes["event_source"] != nil
 
-  # Filter processor to drop noisy spans
+  # Filter processor to drop noisy spans.
+  # I93-B adopted policy: keep an explicit INCLUDE allowlist and extend it with
+  # the real span names; do NOT switch to exclude-only. Exclude-only would ship
+  # every framework/library span to Grafana Cloud (volume + attribute exposure).
+  # This repo instruments with plain `#[instrument]` (no `name = ...`), so the
+  # emitted span name is the Rust function name (check / process_event /
+  # approve_approval / ...). The four legacy prefixes remain for any future
+  # named spans; the anchored alternation below covers today's defaults.
+  # IMPORTANT: when adding/renaming an instrumented function, update this list
+  # in the SAME change (see docs/integration/evidence-regeneration.md).
+  # Otherwise the new spans are silently dropped and the jarvis.correlation_id
+  # attribute set by `transform` above never reaches Grafana Cloud.
   filter:
     spans:
       include:
         match_type: regexp
-        span_names: ["jarvis.*", "opencode.*", "mcp.*", "policy.*"]
+        span_names:
+          - "jarvis.*"
+          - "opencode.*"
+          - "mcp.*"
+          - "policy.*"
+          - "^(ha_webhook|android_webhook|gmail_webhook|calendar_webhook|process_event|emit_event|build_context|store_memory|search_memory|is_authorized|execute_tool|check|request_approval|approve_approval|deny_approval|approval_status|list_approvals)$"
       exclude:
         match_type: strict
         span_names: ["health.check", "metrics.scrape"]
