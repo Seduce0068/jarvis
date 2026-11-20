@@ -2019,3 +2019,35 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   期待 owner/mode を単一表で定義し install で是正。
 - 親が対応: build-selfhost.sh:402 の sudo install root 所有化（chown 修正の
   残余リスク）、全ゲート再検証。
+
+### Round 69（R4 で修正済み）
+
+- [x] restore_configs の owner/mode 漂移（medium）→ 6設定の期待 owner/mode
+  単一表＋install 経路へ統一、build-selfhost.sh も同表を source。
+- [x] バックアップ manifest に format/encryption/signature/role 記述子を
+  追加（既定 none/none で後方互換）、verify/restore を記述子駆動の単一
+  経路へ統一。未知記述子は fail-closed。spec にシナリオ追加。
+- [x] spec_hash 変更に伴う backup 証跡再生成（31件）。
+
+### Round 69 の残り指摘（未対応）
+
+- [ ] **timer が active だが disabled だと停止されない**（confirmed high）—
+  `inventory_services()` の is-enabled && is-active 前提。timer は is-active
+  のみで停止対象にし、停止後 inactive を確認。
+- [ ] **復元実行ユーザー前提が postgres(0700 backup_dir) と systemctl(root)
+  で両立しない**（confirmed high）— 実行ユーザーを固定し precondition
+  チェック、runbook の3コマンドを権限付き形へ統一。
+- [ ] Persistent=true の timer を失敗経路で無条件 restart すると、壊れた DB の
+  COMPLETE バックアップが作られる（medium）— 失敗時は timer を停止維持。
+- [ ] jarvis-backup.service の ExecStartPost が repo 作業コピー（711 koppe）
+  を参照し postgres から読めない（medium）— /opt の root:root コピーへ変更。
+- [ ] restore-local.d/{pg,qdrant,git,configs}.sh が依然固定名（medium）—
+  記述子から入力名を導出（P1-6 実施時）。
+- [ ] drift の casbin_policy.csv が JARVIS_DRIFT_POLICY_DIR を無視（low）、
+  web.fetch の requires_approval 検査が grep -A8 依存（low）。
+- [ ] dsh.md の「firejail 全面撤去」は過大主張（low）— 実行 fallback のみ撤去、
+  設定値とパッケージは互換のため残存。
+
+- 親が対応: install の sudo 不在フォールバック、`declare -gA`（source 先の
+  関数スコープ回避）、shellcheck SC1091、tamper の notes キーワード保持、
+  backup 証跡再生成。
