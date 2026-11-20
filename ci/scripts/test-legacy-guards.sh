@@ -1663,6 +1663,118 @@ else
   fail=$((fail+1))
 fi
 
+# I101-D: casbin_model.conf is a backup/restore target whose mode is promised by
+# configs.sh (root:root 0644), but the drift check used to skip it in BOTH the
+# content (cmp) pair and the owner/mode pass. Exercise two tamper modes against
+# a throwaway tree only: (1) a missing deployed copy must report
+# "MISSING (deployed)", and (2) a wrong MODE must report E_BAD_OWNER_MODE with a
+# fixed code (no path/owner/mode leak). The mock `stat` only READS metadata; no
+# real deployed file or permission is touched. $tmp is removed by the EXIT trap.
+model_src="$repo/infra/config/policy/casbin_model.conf"
+if [ -f "$model_src" ]; then
+  model_tmp="$tmp/casbin_model_tamper"
+  mkdir -p "$model_tmp/bin" "$model_tmp/policy"
+  cp "$repo/infra/config/mcp_allowlist.toml" "$model_tmp/mcp_allowlist.toml"
+  cp "$repo/infra/config/policy/casbin_policy.csv" \
+     "$repo/infra/config/policy/policies.cedar" \
+     "$repo/infra/config/policy/cedar_schema.cedarschema" \
+     "$model_src" "$model_tmp/policy/"
+  cp "$repo/infra/config/pii_patterns.toml" "$model_tmp/pii_patterns.toml"
+  cp "$repo/infra/systemd/jarvis-mcp-gw.service" "$model_tmp/jarvis-mcp-gw.service"
+  # Minimal env that satisfies check_mcp_env (single absolute BASE_DIR, deny-all).
+  printf '%s\n' \
+    'JARVIS_MCP_GW_BASE_DIR=/opt/jarvis' \
+    'JARVIS_MCP_GW_EGRESS_ALLOWLIST=' \
+    > "$model_tmp/jarvis-mcp-gw.env"
+  # Mock stat echoes fixed metadata by file class. MODEL_MODE_TAMPER=1 flips
+  # ONLY casbin_model.conf to 0666; the control run reports 0644.
+  cat > "$model_tmp/bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+for last in "$@"; do :; done
+case "$last" in
+  *casbin_model.conf)
+    if [ "${MODEL_MODE_TAMPER:-0}" = 1 ]; then
+      printf '%s\n' '0:0 666'
+    else
+      printf '%s\n' '0:0 644'
+    fi
+    ;;
+  *.env) printf '%s\n' '0:0 600' ;;
+  *bin/jarvis-mcp-gw) printf '%s\n' '0:0 755' ;;
+  *) printf '%s\n' '0:0 644' ;;
+esac
+MOCK
+  # Only the throwaway mock is made executable; no deployed file is touched.
+  chmod 0755 -- "$model_tmp/bin/stat"
+
+  drift_model_run() { # tamper_flag -> drift output (stdout+stderr); status passes through
+    local tamper="$1"
+    # PATH is intentionally scoped to this command invocation.
+    # shellcheck disable=SC2031
+    PATH="$model_tmp/bin:$PATH" \
+    MODEL_MODE_TAMPER="$tamper" \
+    JARVIS_DRIFT_ALLOWLIST="$model_tmp/mcp_allowlist.toml" \
+    JARVIS_DRIFT_POLICY_DIR="$model_tmp/policy" \
+    JARVIS_DRIFT_PII="$model_tmp/pii_patterns.toml" \
+    JARVIS_DRIFT_UNIT="$model_tmp/jarvis-mcp-gw.service" \
+    JARVIS_DRIFT_ENV="$model_tmp/jarvis-mcp-gw.env" \
+      bash "$repo/infra/scripts/check-deploy-drift.sh" 2>&1
+  }
+
+  # Static guard: both checks must name the same deployed path, and the owner
+  # mode must match configs.sh (0644). Literal shell fragments are matched.
+  model_drift_src="$repo/infra/scripts/check-deploy-drift.sh"
+  # shellcheck disable=SC2016
+  if grep -Fq '"$deployed_policy_dir/casbin_model.conf|$repo/infra/config/policy/casbin_model.conf"' "$model_drift_src" \
+     && grep -Eq '^check_owner_mode[[:space:]]+"casbin_model"[[:space:]]+"\$deployed_policy_dir/casbin_model[.]conf"[[:space:]]+644' "$model_drift_src"; then
+    echo "  PASS: drift covers casbin_model.conf in cmp pair and owner/mode check"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: drift still skips casbin_model.conf content or owner/mode"
+    fail=$((fail+1))
+  fi
+
+  # Control: the pristine fixture must not be reported as missing or tampered.
+  model_control="$(drift_model_run 0)"
+  if printf '%s' "$model_control" | grep -q 'casbin_model[.]conf.*MISSING' \
+     || printf '%s' "$model_control" | grep -q 'casbin_model.*E_BAD_OWNER_MODE'; then
+    echo "  FAIL: drift flagged a pristine casbin_model.conf"
+    fail=$((fail+1))
+  else
+    echo "  PASS: drift accepts a pristine casbin_model.conf"
+    ok=$((ok+1))
+  fi
+
+  # Tamper 1: remove the deployed copy -> the cmp pair must fail closed.
+  mv -- "$model_tmp/policy/casbin_model.conf" "$model_tmp/policy/casbin_model.conf.removed"
+  model_missing="$(drift_model_run 0)"; code=$?
+  mv -- "$model_tmp/policy/casbin_model.conf.removed" "$model_tmp/policy/casbin_model.conf"
+  if [ "$code" -eq 2 ] \
+     && printf '%s' "$model_missing" | grep -q 'casbin_model[.]conf[[:space:]]\+MISSING (deployed)'; then
+    echo "  PASS: drift flags a missing deployed casbin_model.conf (exit 2)"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: drift missed a missing deployed casbin_model.conf (exit=$code)"
+    fail=$((fail+1))
+  fi
+
+  # Tamper 2: wrong MODE -> owner/mode check must fail with a fixed code only.
+  model_mode="$(drift_model_run 1)"; code=$?
+  if [ "$code" -eq 2 ] \
+     && printf '%s' "$model_mode" | grep -q 'casbin_model.*E_BAD_OWNER_MODE (code only)' \
+     && ! printf '%s' "$model_mode" | grep -F 'E_BAD_OWNER_MODE' \
+          | grep -Eq 'casbin_model[.]conf|0:0|666|casbin_model_tamper'; then
+    echo "  PASS: drift flags a wrong casbin_model.conf mode with a fixed code only (exit 2)"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: drift missed a wrong casbin_model.conf mode or leaked a value (exit=$code)"
+    fail=$((fail+1))
+  fi
+else
+  echo "  FAIL: repo casbin_model.conf missing; cannot run I101-D tamper regressions"
+  fail=$((fail+1))
+fi
+
 # I95-E (b)/(c): generator contract regressions. A stub `cargo` on PATH feeds
 # deterministic --list / --list --ignored counts and a controllable real-run
 # status, so NO real cargo/suite runs and no repository evidence is written.
@@ -2045,16 +2157,25 @@ cat > "$esc_tmp/bin/curl" <<'STUB'
 out=/dev/null
 hdr=
 payload=
+url=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
     -D) hdr="$2"; shift 2 ;;
     -d) payload="$2"; shift 2 ;;
+    -w) shift 2 ;;
+    http*) url="$1"; shift ;;
     *) shift ;;
   esac
 done
 if [ -n "$hdr" ]; then
   printf '%s\n' 'mcp-session-id: stub-session' > "$hdr"
+fi
+# I101-C (b): answer the drift E2E /health probe with a healthy body so this
+# guard keeps exercising the tools/call path it was written for.
+if [[ "$url" == */health ]]; then
+  printf '%s\n%s\n' '{"status":"ok"}' '200'
+  exit 0
 fi
 case "$payload" in
   *filesystem.list*)
@@ -2168,6 +2289,100 @@ RUST_TEST
     echo "  FAIL: deploy health gate accepted a degraded stub"
     fail=$((fail+1))
   fi
+fi
+
+# I101-C (c): the retry budget must be bounded (20 x 0.5s) AND deadline-based,
+# not the old single fixed 5s sleep + one probe. The std-only retry predicate
+# lives inside the marker block so this guard can compile and exercise it.
+if ! printf '%s' "$health_block" | grep -q 'HEALTH_PROBE_ATTEMPTS: u32 = 20' \
+   || ! printf '%s' "$health_block" | grep -q 'HEALTH_PROBE_INTERVAL_MS: u64 = 500' \
+   || ! printf '%s' "$health_block" | grep -q 'fn health_retry_allowed' \
+   || grep -q 'Duration::from_secs(5)' "$deploy_src"; then
+  echo "  FAIL: deploy.rs lost the bounded retry/deadline health gate"
+  fail=$((fail+1))
+elif ! command -v rustc >/dev/null 2>&1; then
+  echo "  PASS: deploy.rs keeps the bounded retry gate (rustc unavailable; static only)"
+  ok=$((ok+1))
+else
+  retry_rs="$tmp/deploy_health_retry.rs"
+  {
+    printf '%s\n' "$health_block"
+    cat <<'RUST_TEST'
+fn main() {
+    assert_eq!(HEALTH_PROBE_ATTEMPTS, 20);
+    assert_eq!(HEALTH_PROBE_INTERVAL_MS, 500);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    assert!(health_retry_allowed(0, deadline));
+    assert!(!health_retry_allowed(HEALTH_PROBE_ATTEMPTS - 1, deadline));
+    let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+    assert!(!health_retry_allowed(0, past));
+}
+RUST_TEST
+  } > "$retry_rs"
+  if rustc --edition 2021 -A dead_code -o "$tmp/deploy_health_retry" "$retry_rs" \
+      >/dev/null 2>&1 && "$tmp/deploy_health_retry" >/dev/null 2>&1; then
+    echo "  PASS: deploy.rs retry budget is bounded (20 x 0.5s) and deadline-based"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: deploy.rs retry predicate rejected a valid bounded probe"
+    fail=$((fail+1))
+  fi
+fi
+
+# I101-C (b): the shell deploy path must read the /health BODY after its retry
+# loop and roll back on a degraded body or a 503, using the same 20 x 0.5s
+# budget as deploy.rs. Static guard only (no service or systemctl is touched).
+post_health="$(sed -n '/^echo "== 5\./,/^echo "== 6\./p' "$deploy_script")"
+if printf '%s' "$post_health" | grep -Fq 'fetch_health' \
+   && printf '%s' "$post_health" | grep -Fq 'health_is_degraded' \
+   && printf '%s' "$post_health" | grep -Fq '"503"' \
+   && printf '%s' "$post_health" | grep -Fq 'rollback' \
+   && grep -Fq 'health_attempts=20' "$deploy_script" \
+   && grep -Fq 'health_interval=0.5' "$deploy_script"; then
+  echo "  PASS: safe deploy rolls back on degraded/503 /health with 20x0.5s budget"
+  ok=$((ok+1))
+else
+  echo "  FAIL: safe deploy lost the degraded/503 health gate"
+  fail=$((fail+1))
+fi
+
+# I101-C (b): drift's runtime E2E must verify /health 200 with a non-degraded
+# body in addition to tools/call. Static guard on the drift source.
+if grep -Fq 'health_check()' "$drift_src" \
+   && grep -Fq 'if health_check; then say "runtime /health"' "$drift_src" \
+   && grep -Fq '"status"[[:space:]]*:[[:space:]]*"degraded"' "$drift_src"; then
+  echo "  PASS: drift E2E verifies /health 200 with a non-degraded body"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift E2E lost the /health 200 gate"
+  fail=$((fail+1))
+fi
+
+# I101-C (b): exercise the REAL drift /health gate with stubbed curl payloads.
+# No service is contacted: curl is a shell function inside a subshell, and the
+# function under test is extracted from the production drift script.
+health_fn="$(sed -n '/^health_check()/,/^}/p' "$drift_src")"
+probe_health_gate() { # body code -> health_check exit status
+  # Distinct names: health_check() declares its own local `body`/`code`, which
+  # would shadow same-named variables via bash dynamic scoping.
+  local stub_body="$1" stub_code="$2"
+  (
+    # shellcheck disable=SC2329
+    curl() { printf '%s\n%s\n' "$stub_body" "$stub_code"; }
+    # shellcheck disable=SC1090,SC2086
+    eval "$health_fn"
+    health_check
+  )
+}
+if probe_health_gate '{"status":"ok"}' 200 \
+   && ! probe_health_gate '{"status":"degraded","reason":"no_upstream"}' 503 \
+   && ! probe_health_gate '{"status":"degraded","reason":"no_upstream"}' 200 \
+   && ! probe_health_gate '{"status":"ok"}' 503; then
+  echo "  PASS: drift /health gate rejects 503 and degraded-200 bodies"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift /health gate accepted a degraded answer"
+  fail=$((fail+1))
 fi
 
 echo "result: ok=$ok fail=$fail"

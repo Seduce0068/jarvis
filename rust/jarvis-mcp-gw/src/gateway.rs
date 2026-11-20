@@ -322,6 +322,34 @@ impl Gateway {
         resolve_target(&servers, tool)?.input_schema.cloned()
     }
 
+    /// Read-only snapshot of the upstream registrations this gateway actually
+    /// holds, with names sorted so callers get a deterministic view.
+    ///
+    /// This is deliberately a *registration* view, not an allowlist inference:
+    /// registering a server never widens the allowlist (see the module docs), so
+    /// an upstream whose tools are absent from `mcp_allowlist.toml` still counts
+    /// as present. Liveness is probed inside the same read lock and a dead
+    /// backing process is reported as absent, so a partial loss among several
+    /// configured upstreams becomes visible instead of hiding behind an
+    /// unrelated any-match. No tool runs and the routing table is not mutated.
+    pub(crate) async fn registered_server_names(&self) -> Vec<String> {
+        let servers = self.servers.read().await;
+        let mut names = Vec::with_capacity(servers.len());
+        for (name, server) in servers.iter() {
+            if !server.liveness.is_dead().await {
+                names.push(name.clone());
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// Count of live registrations, derived from [`Self::registered_server_names`]
+    /// so the count and the names can never disagree.
+    pub(crate) async fn registered_server_count(&self) -> usize {
+        self.registered_server_names().await.len()
+    }
+
     /// Spawn an upstream MCP server and register it with the gateway.
     ///
     /// The command runs as a child process and speaks MCP over stdio.
@@ -976,6 +1004,54 @@ requires_approval = false
             !gateway.servers.read().await.contains_key("mock"),
             "registration removed on probe error"
         );
+    }
+
+    /// I101-C (a): the read-only registration snapshot used by `/health` must
+    /// drop an upstream whose backing process died, so a partial loss among
+    /// several registered upstreams is visible instead of being hidden by an
+    /// unrelated any-match. Distinct tool names keep the duplicate-name guard
+    /// out of this fixture.
+    #[tokio::test]
+    async fn registered_server_names_excludes_dead_upstreams() {
+        let gateway = test_gateway("health-snapshot").await;
+
+        async fn register_named(
+            gateway: &Gateway,
+            name: &str,
+            tool: &str,
+        ) -> Arc<std::sync::atomic::AtomicU8> {
+            let (client_side, server_side) = tokio::io::duplex(8192);
+            let owned_tool = tool.to_string();
+            tokio::spawn(async move {
+                run_mock_mcp_server(server_side, &owned_tool, false).await;
+            });
+            let state = Arc::new(std::sync::atomic::AtomicU8::new(MOCK_LIVENESS_RUNNING));
+            gateway
+                .register_transport_inner(
+                    name,
+                    client_side,
+                    ProcessLiveness::Mock(Arc::clone(&state)),
+                )
+                .await
+                .expect("registration succeeds");
+            state
+        }
+
+        let alive = register_named(&gateway, "alive", "echo").await;
+        let dead = register_named(&gateway, "dead", "ping").await;
+        assert_eq!(
+            gateway.registered_server_names().await,
+            vec!["alive", "dead"]
+        );
+        assert_eq!(gateway.registered_server_count().await, 2);
+
+        dead.store(MOCK_LIVENESS_EXITED, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(gateway.registered_server_names().await, vec!["alive"]);
+        assert_eq!(gateway.registered_server_count().await, 1);
+
+        alive.store(MOCK_LIVENESS_EXITED, std::sync::atomic::Ordering::SeqCst);
+        assert!(gateway.registered_server_names().await.is_empty());
+        assert_eq!(gateway.registered_server_count().await, 0);
     }
 
     #[tokio::test]

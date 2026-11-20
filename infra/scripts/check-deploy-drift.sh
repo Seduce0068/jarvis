@@ -249,12 +249,15 @@ else
     say "policy" "DIFF"; drift=1
   fi
 fi
-# 4b) Cedar policy / schema / PII patterns (P2-12). Missing files are no longer
-# silently skipped (I7-C): a missing deployed file is a DANGER and a missing
-# repo source is flagged too, using the same framework as the allowlist check.
+# 4b) Cedar policy / schema / Casbin model / PII patterns (P2-12, I101-D).
+# Missing files are no longer silently skipped (I7-C): a missing deployed file
+# is a DANGER and a missing repo source is flagged too, using the same framework
+# as the allowlist check. casbin_model.conf is a backup/restore target
+# (configs.sh EXPECTED_CONFIG_MODE) and must be content-checked as well.
 for pair in \
   "$deployed_policy_dir/policies.cedar|$repo/infra/config/policy/policies.cedar" \
   "$deployed_policy_dir/cedar_schema.cedarschema|$repo/infra/config/policy/cedar_schema.cedarschema" \
+  "$deployed_policy_dir/casbin_model.conf|$repo/infra/config/policy/casbin_model.conf" \
   "$deployed_pii|$repo/infra/config/pii_patterns.toml"; do
   deployed="${pair%%|*}"; source="${pair##*|}"
   label="$(basename "$deployed")"
@@ -293,11 +296,12 @@ fi
 # 5d) I95-C / I97-B: owner/mode 照合。パスは上記の内容検査と同じ
 # JARVIS_DRIFT_* オーバーライド（binary は JARVIS_DRIFT_BINARY、Round 71
 # 契約の JARVIS_DRIFT_POLICY_DIR を含む）をそのまま使用し、ラベルは固定語彙のみ。
-# unit/allowlist/policy(pii 含む)=root:root 0644、mcp-gw env=root:root 0600、
+# unit/allowlist/policy(pii, casbin model 含む)=root:root 0644、mcp-gw env=root:root 0600、
 # binary=root:root 0755 を要求する。
 check_owner_mode "binary"       "$deployed_binary"                            755
 check_owner_mode "allowlist"    "$deployed_allowlist"                         644
 check_owner_mode "policy"       "$deployed_policy_dir/casbin_policy.csv"      644
+check_owner_mode "casbin_model" "$deployed_policy_dir/casbin_model.conf"      644
 check_owner_mode "cedar_policy" "$deployed_policy_dir/policies.cedar"         644
 check_owner_mode "cedar_schema" "$deployed_policy_dir/cedar_schema.cedarschema" 644
 check_owner_mode "pii_patterns" "$deployed_pii"                               644
@@ -311,6 +315,31 @@ check_owner_mode "mcp-gw env"   "$deployed_env"                               60
 check_mcp_env
 # 6) 実行時E2E: systemd 配下の実サービスに読み取り系 tools/call を行う。
 #    ProtectHome の取り違えのように「設定一致でも実行不能」な乖離を検出する。
+# I101-C (b): /health も同じ E2E で検証する。200 でも固定 degraded 本文なら
+# DANGER とし、503 も決して OK としない（deploy 両経路と同じ契約）。
+# 理由テキストは出力せず、判定結果のみを固定語彙で返す。
+health_check() { # -> 0 only for 200 with a non-degraded body
+  local mcp_url="${JARVIS_MCP_GW_URL:-http://127.0.0.1:8082}"
+  local raw body code
+  raw="$(curl -q -s -w $'\n%{http_code}' -m 5 "${mcp_url}/health" 2>/dev/null || true)"
+  if [[ "$raw" == *$'\n'* ]]; then
+    body="${raw%$'\n'*}"
+    code="${raw##*$'\n'}"
+  else
+    body=""
+    code=000
+  fi
+  case "$code" in
+    [0-9][0-9][0-9]) ;;
+    *) return 1 ;;
+  esac
+  [ "$code" = "200" ] || return 1
+  if printf '%s' "$body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"degraded"'; then
+    return 1
+  fi
+  return 0
+}
+
 runtime_check() {
   local mcp_url="${JARVIS_MCP_GW_URL:-http://127.0.0.1:8082}"
   local tmp sid code git_payload
@@ -396,6 +425,8 @@ PY
   return "$code"
 }
 if systemctl is-active --quiet jarvis-mcp-gw 2>/dev/null; then
+  # ユニットが active でも /health が 503 / degraded なら合格としない。
+  if health_check; then say "runtime /health" "OK (200, not degraded)"; else say "runtime /health" "DANGER: /health 503 or degraded body"; danger=1; fi
   if runtime_check; then say "runtime tools/call" "OK (tools/call + tools/list)"; else say "runtime tools/call" "DANGER: systemd 配下で実行失敗"; danger=1; fi
 else
   # サービス停止で実行時 E2E が不能な場合も SKIP+OK とせず DANGER（fail-closed）。

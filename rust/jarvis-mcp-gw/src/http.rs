@@ -254,28 +254,31 @@ fn health_response(upstreams_ready: bool) -> axum::response::Response {
 /// A legacy/native-only deployment configures no upstreams and stays healthy.
 /// When upstreams are configured, startup registers them before the listener
 /// starts (`main.rs`); a registration that never happened is therefore a real
-/// degraded state, not a missing capability we can silently ignore. The
-/// registration capture is observable from this transport through
-/// `Gateway::upstream_input_schema`: upstream-owned tools are the only ones
-/// with a captured upstream schema, and native tools keep the hardcoded one.
-/// Per-process liveness pruning lives in `Gateway::execute`; this probe stays
+/// degraded state, not a missing capability we can silently ignore.
+///
+/// I101-C (a): the old probe inferred registration from *allowlisted tool
+/// schemas*. That conflated two distinct states -- an upstream that did
+/// register but whose tools are absent from `mcp_allowlist.toml` (registration
+/// never widens the allowlist, see `gateway.rs`) was reported as permanently
+/// degraded, while an unrelated registered tool could make a missing
+/// configured upstream look healthy via any-match. Compare the gateway's
+/// read-only registration snapshot against `config.upstreams` by name instead:
+/// every configured upstream must have a live registration. The probe stays
 /// read-only and never runs a tool on a health scrape.
 async fn upstreams_registered(gateway: &McpGateway) -> bool {
-    if gateway.config.upstreams.is_empty() {
+    let configured = &gateway.config.upstreams;
+    if configured.is_empty() {
         return true;
     }
-    let principal = gateway.config.mcp_principal.as_str();
-    for tool in gateway.tools_for_principal(principal) {
-        if gateway
-            .gateway
-            .upstream_input_schema(&tool.name)
-            .await
-            .is_some()
-        {
-            return true;
-        }
+    // Fast pre-check from the same snapshot contract: a shortfall already
+    // fails closed before the per-name comparison below.
+    if gateway.gateway.registered_server_count().await < configured.len() {
+        return false;
     }
-    false
+    let registered = gateway.gateway.registered_server_names().await;
+    configured
+        .iter()
+        .all(|upstream| registered.iter().any(|name| name == &upstream.name))
 }
 
 /// 200 `{"status":"ok"}` while the gateway is usable, 503 with a fixed
@@ -1101,6 +1104,124 @@ requires_approval = true
         assert!(!upstreams_registered(&gateway).await);
         let response = health_response(upstreams_registered(&gateway).await);
         assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// I101-C (a): an upstream that IS registered stays healthy even when none
+    /// of its tools appear in the allowlist. Registration never widens the
+    /// allowlist (`gateway.rs`), so inferring registration from allowlisted
+    /// tool schemas produced a permanent false 503 for this state.
+    #[tokio::test]
+    async fn registered_upstream_without_allowlist_entry_is_healthy() {
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-http-health-allowlist-miss");
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist_path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist_path, EXECUTE_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+        let config = McpGatewayConfig {
+            allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            policy_http_addr: "http://127.0.0.1:1".into(),
+            upstreams: vec![crate::config::UpstreamConfig {
+                name: "docs".to_owned(),
+                command: vec!["/nonexistent/mcp-upstream".to_owned()],
+            }],
+            ..Default::default()
+        };
+        let policy = Arc::new(testing::shipped_policy_client("health-allowlist-miss").await);
+        let gateway = McpGateway::new(config, policy)
+            .await
+            .expect("gateway starts");
+
+        // The mock advertises a tool deliberately absent from EXECUTE_ALLOWLIST,
+        // so the old any-match probe saw no upstream schema behind an
+        // allowlisted tool and reported degraded.
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(testing::run_mock_mcp_server(
+            server_side,
+            "upstream.only.tool",
+            false,
+        ));
+        gateway
+            .register_transport("docs", client_side)
+            .await
+            .expect("configured upstream registers");
+
+        assert!(
+            gateway
+                .tools_for_principal(gateway.config.mcp_principal.as_str())
+                .iter()
+                .all(|tool| tool.name != "upstream.only.tool"),
+            "precondition: the upstream tool is not in the allowlist"
+        );
+        assert!(upstreams_registered(&gateway).await);
+        assert_eq!(
+            health_response(upstreams_registered(&gateway).await).status(),
+            reqwest::StatusCode::OK
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// I101-C (a): a configured upstream that never registered must stay
+    /// degraded even when a DIFFERENT registered server advertises an
+    /// allowlisted tool. That is the any-match false negative the old probe
+    /// could not tell apart from the allowlist-miss case above.
+    #[tokio::test]
+    async fn configured_upstream_not_registered_is_degraded_despite_other_server() {
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-http-health-name-mismatch");
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist_path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist_path, EXECUTE_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+        let config = McpGatewayConfig {
+            allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            policy_http_addr: "http://127.0.0.1:1".into(),
+            upstreams: vec![crate::config::UpstreamConfig {
+                name: "expected-upstream".to_owned(),
+                command: vec!["/nonexistent/mcp-upstream".to_owned()],
+            }],
+            ..Default::default()
+        };
+        let policy = Arc::new(testing::shipped_policy_client("health-name-mismatch").await);
+        let gateway = McpGateway::new(config, policy)
+            .await
+            .expect("gateway starts");
+
+        // An unrelated server owns an allowlisted tool, which made the old
+        // any-match probe answer "healthy" for the missing configured server.
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(testing::run_mock_mcp_server(
+            server_side,
+            "filesystem.read",
+            false,
+        ));
+        gateway
+            .register_transport("unrelated", client_side)
+            .await
+            .expect("unrelated upstream registers");
+
+        assert!(
+            gateway
+                .gateway
+                .upstream_input_schema("filesystem.read")
+                .await
+                .is_some(),
+            "precondition: an unrelated allowlisted tool has an upstream schema"
+        );
+        assert!(!upstreams_registered(&gateway).await);
+        assert_eq!(
+            health_response(upstreams_registered(&gateway).await).status(),
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -27,6 +27,43 @@ repo_unit="$repo/infra/systemd/jarvis-mcp-gw.service"
 ts="$(date +%Y%m%d-%H%M%S)"
 die() { echo "ERROR: $*" >&2; exit 1; }
 
+# I101-C (b)/(c): both deploy paths use the same bounded health contract.
+# 20 probes at 0.5s intervals, matching rust/scripts/deploy.rs
+# (HEALTH_PROBE_ATTEMPTS / HEALTH_PROBE_INTERVAL_MS).
+health_attempts=20
+health_interval=0.5
+# Fixed jarvis-core degraded marker. Match the status field only (any
+# service-specific reason still counts), and tolerate pretty-printed JSON.
+health_degraded_pattern='"status"[[:space:]]*:[[:space:]]*"degraded"'
+# Result of the most recent fetch_health call.
+health_code=000
+health_body=
+
+# Fetch /health once into health_code (three digits, or 000 on failure) and
+# health_body. Only the fixed 200/degraded classification is consumed; the body
+# is never echoed verbatim, so an upstream-supplied reason cannot leak to logs.
+fetch_health() {
+  local raw
+  raw="$(curl -q -s -w $'\n%{http_code}' -m 2 http://127.0.0.1:8082/health || true)"
+  if [[ "$raw" == *$'\n'* ]]; then
+    health_body="${raw%$'\n'*}"
+    health_code="${raw##*$'\n'}"
+  else
+    health_body=""
+    health_code=000
+  fi
+  case "$health_code" in
+    [0-9][0-9][0-9]) ;;
+    *) health_code=000; health_body="" ;;
+  esac
+}
+
+# A 503 or a 200 carrying the fixed degraded body is a degraded service.
+health_is_degraded() {
+  [ "$health_code" = "503" ] \
+    || printf '%s' "$health_body" | grep -Eq "$health_degraded_pattern"
+}
+
 # I74-C: this script is the THIRD writer of mcp_allowlist.toml (alongside
 # build-selfhost.sh and restore_configs()). Source the SAME owner/mode module
 # so placement and every rollback restore resolve their mode from the one
@@ -108,12 +145,12 @@ rollback() {
     systemctl daemon-reload || true
   fi
   systemctl restart jarvis-mcp-gw || true
-  for _ in $(seq 1 20); do
-    code=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || true)
-    [ "$code" = "200" ] && break
-    sleep 0.5
+  for _ in $(seq 1 "$health_attempts"); do
+    fetch_health
+    [ "$health_code" = "200" ] && break
+    sleep "$health_interval"
   done
-  echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || echo 000)" >&2
+  echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$health_code" >&2
   # I56-A: ロールバック後の drift 検査は情報表示 (|| true) ではなく強制ゲート。
   # exit 1 (PENDING) はロールバックに伴う通常の差分なので警告に留めるが、
   # exit 2 (DANGER) は「安全な状態へ戻せていない」として明示的に失敗させる。
@@ -384,13 +421,26 @@ if [ "$apply" -eq 1 ]; then
   # event, so there is no restart-order conflict in this script and no ordering
   # change was required (verified, comment-only edit).
   systemctl restart jarvis-mcp-gw || { echo "再起動に失敗しました" >&2; rollback; }
-  for _ in $(seq 1 20); do
-    code=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || true)
-    [ "$code" = "200" ] && break
-    sleep 0.5
+  for _ in $(seq 1 "$health_attempts"); do
+    fetch_health
+    [ "$health_code" = "200" ] && break
+    sleep "$health_interval"
   done
+  # I101-C (b): the loop above only proves that a 200 was observable at some
+  # point. Fetch the BODY once more and fail closed on a fixed degraded body or
+  # a 503 -- `is-active` alone must never let a degraded service be reported
+  # as DONE. The reason text is never printed, only the status code.
+  fetch_health
+  if [ "$health_code" = "503" ] || health_is_degraded; then
+    echo "ヘルスチェックが degraded を検出しました (code=$health_code)" >&2
+    rollback
+  fi
+  if [ "$health_code" != "200" ]; then
+    echo "ヘルスチェックが 200 を返しませんでした (code=$health_code)" >&2
+    rollback
+  fi
   systemctl is-active --quiet jarvis-mcp-gw || { echo "サービスが起動していません" >&2; rollback; }
-  echo "  deployed: $(systemctl is-active jarvis-mcp-gw)"
+  echo "  deployed: $(systemctl is-active jarvis-mcp-gw) / health=200 (not degraded)"
 else
   echo "  DRY: would install $bin -> /opt/jarvis/bin/jarvis-mcp-gw and restart"
 fi

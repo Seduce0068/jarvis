@@ -121,6 +121,22 @@ fn evaluate_health_checks(results: &[(u16, HealthStatus)]) -> Result<(), String>
         ))
     }
 }
+
+/// Bounded retry contract, kept in sync with
+/// `infra/scripts/deploy-mcp-gw-safe.sh` (`health_attempts` /
+/// `health_interval`). A slow start (context migration, Qdrant checks) must
+/// not be misread as a dead service after one fixed 5s sleep, but the wait
+/// must never be unbounded either.
+const HEALTH_PROBE_ATTEMPTS: u32 = 20;
+const HEALTH_PROBE_INTERVAL_MS: u64 = 500;
+/// Absolute deadline: 20 * 0.5s of backoff plus slack for slow ssh/curl.
+const HEALTH_WAIT_DEADLINE_SECS: u64 = 20;
+
+/// Decide whether another probe round is allowed. Pure and std-only so the
+/// legacy guard can compile it with rustc alongside the parser/evaluator.
+fn health_retry_allowed(attempt: u32, deadline: std::time::Instant) -> bool {
+    attempt + 1 < HEALTH_PROBE_ATTEMPTS && std::time::Instant::now() < deadline
+}
 // health-gate-end
 
 /// Environment files copied from infra/config/ that must be readable by the
@@ -514,31 +530,49 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
     if runner.dry_run {
         info!("{DRY_RUN_HEALTH_SKIP_LOG}");
     } else {
-        info!("Waiting for services to be healthy...");
-        std::thread::sleep(std::time::Duration::from_secs(5));
-
+        // I101-C (c): retry with a bounded budget AND an absolute deadline
+        // instead of one fixed 5s sleep plus a single probe. Slow starts now
+        // get up to HEALTH_PROBE_ATTEMPTS probes spaced by
+        // HEALTH_PROBE_INTERVAL_MS; neither cap nor deadline can stretch the
+        // wait forever.
+        info!("Waiting for services to be healthy (up to {HEALTH_PROBE_ATTEMPTS} probes)...");
+        let deadline = std::time::Instant::now()
+            + std::time::Duration::from_secs(HEALTH_WAIT_DEADLINE_SECS);
         let mut results = Vec::with_capacity(HEALTH_PORTS.len());
-        for port in HEALTH_PORTS {
-            let url = format!("http://127.0.0.1:{port}/health");
-            // Deliberately NO `-f`: curl must print the body of a 503 so a
-            // degraded service cannot pass as healthy. `-w` appends the status
-            // code on its own last line for an explicit status check as well.
-            let command = format!("curl -s -w '\\n%{{http_code}}' {url}");
-            let outcome = match runner.ssh_output(&remote_base, &command) {
-                Ok(output) => parse_health_probe(output.success, &output.stdout),
-                Err(err) => HealthStatus::CheckFailed(err.to_string()),
-            };
-            match &outcome {
-                HealthStatus::Healthy => info!("Service on port {port} is healthy"),
-                HealthStatus::NotResponding => warn!("Service on port {port} not responding"),
-                HealthStatus::Degraded(reason) => {
-                    warn!("Service on port {port} is degraded: {reason}")
+        let mut attempt = 0u32;
+        loop {
+            results.clear();
+            for port in HEALTH_PORTS {
+                let url = format!("http://127.0.0.1:{port}/health");
+                // Deliberately NO `-f`: curl must print the body of a 503 so a
+                // degraded service cannot pass as healthy. `-w` appends the
+                // status code on its own last line for an explicit check too.
+                let command = format!("curl -s -w '\\n%{{http_code}}' {url}");
+                let outcome = match runner.ssh_output(&remote_base, &command) {
+                    Ok(output) => parse_health_probe(output.success, &output.stdout),
+                    Err(err) => HealthStatus::CheckFailed(err.to_string()),
+                };
+                match &outcome {
+                    HealthStatus::Healthy => info!("Service on port {port} is healthy"),
+                    HealthStatus::NotResponding => warn!("Service on port {port} not responding"),
+                    HealthStatus::Degraded(reason) => {
+                        warn!("Service on port {port} is degraded: {reason}")
+                    }
+                    HealthStatus::CheckFailed(err) => {
+                        warn!("Health check on port {port} failed: {err}")
+                    }
                 }
-                HealthStatus::CheckFailed(err) => {
-                    warn!("Health check on port {port} failed: {err}")
-                }
+                results.push((port, outcome));
             }
-            results.push((port, outcome));
+            // Stop as soon as every port is healthy, or when either budget is
+            // spent. The final `results` are always evaluated below so every
+            // still-failing port is named in the error.
+            let all_healthy = evaluate_health_checks(&results).is_ok();
+            if all_healthy || !health_retry_allowed(attempt, deadline) {
+                break;
+            }
+            attempt += 1;
+            std::thread::sleep(std::time::Duration::from_millis(HEALTH_PROBE_INTERVAL_MS));
         }
         // A real deploy must not report completion with an unhealthy or
         // degraded service: `?` returns early so "Deployment completed" is
@@ -660,6 +694,25 @@ mod tests {
                 )
             })
             .collect()
+    }
+
+    /// I101-C (c): the retry budget must match the shell deploy path and be
+    /// bounded by BOTH an attempt cap and an absolute deadline.
+    #[test]
+    fn health_retry_budget_is_bounded_and_matches_shell_path() {
+        assert_eq!(HEALTH_PROBE_ATTEMPTS, 20);
+        assert_eq!(HEALTH_PROBE_INTERVAL_MS, 500);
+        assert_eq!(HEALTH_WAIT_DEADLINE_SECS, 20);
+
+        let future = std::time::Instant::now()
+            + std::time::Duration::from_secs(HEALTH_WAIT_DEADLINE_SECS);
+        assert!(health_retry_allowed(0, future));
+        assert!(health_retry_allowed(HEALTH_PROBE_ATTEMPTS - 2, future));
+        // The 20th probe is the last one allowed.
+        assert!(!health_retry_allowed(HEALTH_PROBE_ATTEMPTS - 1, future));
+
+        let past = std::time::Instant::now() - std::time::Duration::from_secs(1);
+        assert!(!health_retry_allowed(0, past));
     }
 
     #[test]
