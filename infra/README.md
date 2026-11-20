@@ -54,7 +54,7 @@ infra/
 │   │   └── opencode.jsonc
 │   ├── otelcol-config.yaml     # OpenTelemetry Collector
 │   ├── policy.env              # Policy Engine env (1Password)
-│   ├── mcp_gateway.env         # MCP GW env テンプレート (op:// refs) -> /etc/jarvis/jarvis-mcp-gw.env
+│   ├── mcp_gateway.env         # MCP GW env テンプレート (op:// 実参照なし・プレースホルダのみ) -> /etc/jarvis/jarvis-mcp-gw.env
 │   ├── event.env               # Event Normalizer env (1Password)
 │   ├── context.env             # Context Builder env (1Password)
 │   ├── otel.env                # OTel Collector env (legacy template, op://)

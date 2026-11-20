@@ -6,11 +6,21 @@
 set -uo pipefail
 bin="${1:-/home/koppe/ドキュメント/作業用/jarvis/jarvis/rust/target/release/jarvis-mcp-gw}"
 mode="${2:-approval}"
+# Fail closed on an unknown mode. Without this guard any other value falls into
+# the `else` branch below and silently skips the approval verification.
+case "$mode" in
+  approval|active) ;;
+  *) echo "FAIL: unknown mode: $mode (expected approval|active)" >&2; exit 2 ;;
+esac
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 port=18082
 grpc=15052
 tmp="$(mktemp -d)"
-trap 'kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -rf "$tmp"' EXIT
+# Initialize before installing the trap: an early exit (missing binary,
+# allowlist failure, port conflict) would otherwise hit an unbound $pid inside
+# the trap under `set -u`.
+pid=""
+trap 'if [ -n "$pid" ]; then kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; fi; rm -rf "$tmp"' EXIT
 [ -x "$bin" ] || { echo "FAIL: binary not found: $bin"; exit 1; }
 # 一時ディレクトリへ cd してから起動するため、相対パスを絶対パスへ解決する
 bin="$(realpath "$bin")"

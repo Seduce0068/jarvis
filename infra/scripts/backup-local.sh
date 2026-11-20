@@ -32,7 +32,10 @@ USAGE
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --backup-dir) backup_dir="$2"; shift 2 ;;
+    --backup-dir)
+      [ "$#" -ge 2 ] || { echo "ERROR: --backup-dir requires a value" >&2; exit 2; }
+      [ -n "$2" ] || { echo "ERROR: --backup-dir requires a non-empty value" >&2; exit 2; }
+      backup_dir="$2"; shift 2 ;;
     --apply) apply=1; shift ;;
     --retain-days)
       [ "$#" -ge 2 ] || { echo "ERROR: --retain-days requires a value" >&2; exit 2; }

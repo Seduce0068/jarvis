@@ -17,7 +17,10 @@ backup_dir="/var/lib/postgresql/jarvis-backups"
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --latest) target="__latest__"; shift ;;
-    --backup-dir) backup_dir="$2"; shift 2 ;;
+    --backup-dir)
+      [ "$#" -ge 2 ] || { echo "ERROR: --backup-dir requires a value" >&2; exit 2; }
+      [ -n "$2" ] || { echo "ERROR: --backup-dir requires a non-empty value" >&2; exit 2; }
+      backup_dir="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) target="$1"; shift ;;
   esac

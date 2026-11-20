@@ -66,5 +66,31 @@ check_case 'TC-B5-negative' 2 EXIT_NOT_2 --retain-days -1
 # blanket rejection of --retain-days cannot satisfy the negative cases above.
 check_case 'TC-B5-valid' 0 EXIT_NOT_0 --retain-days 7
 
+# TC-B7 (I83-B): a bare --backup-dir must be rejected while parsing arguments
+# (exit 2). No argument value is echoed and the pre-existing set is untouched.
+backup_dir_missing_value_guard() { # args...
+  local out code sets
+  out=$(bash "$script" --backup-dir "$backup_dir" --skip-db --skip-qdrant \
+          --skip-git "$@" 2>&1) && code=0 || code=$?
+  [ "$code" -eq 2 ] || return 1
+  case "$out" in
+    *'ERROR: --backup-dir requires a value'*) ;;
+    *) return 1 ;;
+  esac
+  case "$out" in
+    *"$backup_dir"*|*'unbound variable'*) return 1 ;;
+  esac
+  [ -f "$sentinel" ] && [ -f "$backup_dir/$old_set/COMPLETE" ] || return 1
+  sets="$(find "$backup_dir" -mindepth 1 -maxdepth 1 -type d | wc -l)"
+  [ "$sets" -eq 1 ] || return 1
+  return 0
+}
+
+if backup_dir_missing_value_guard --backup-dir; then
+  printf 'PASS: TC-B7-backup-dir-missing\n'; ok=$((ok+1))
+else
+  printf 'FAIL: TC-B7-backup-dir-missing\n'; fail=$((fail+1))
+fi
+
 printf 'result: ok=%d fail=%d\n' "$ok" "$fail"
 [ "$fail" -eq 0 ]

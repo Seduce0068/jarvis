@@ -440,5 +440,25 @@ record_manifest_entries "$legacy_git" postgres-jarvis.sql.gz \
   > "$legacy_git/manifest.txt"
 check "I78-A: legacy git row derives role from basename" 0 "$legacy_git"
 
+# I83-B: a bare --backup-dir must be rejected while parsing arguments (exit 2).
+# The error must not echo an argument value or bash's `unbound variable` crash
+# text, and the read-only verifier must leave an existing good set intact.
+backup_dir_missing_value_guard() {
+  local out code
+  out=$(bash "$script" --backup-dir 2>&1); code=$?
+  [ "$code" -eq 2 ] || return 1
+  case "$out" in
+    *'ERROR: --backup-dir requires a value'*) ;;
+    *) return 1 ;;
+  esac
+  case "$out" in
+    *"$base"*|*'unbound variable'*) return 1 ;;
+  esac
+  [ -f "$base/good/manifest.txt" ] || return 1
+  bash "$script" "$base/good" >/dev/null 2>&1 || return 1
+  return 0
+}
+assert_true "I83-B: --backup-dir missing value guard" backup_dir_missing_value_guard
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
