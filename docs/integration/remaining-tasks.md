@@ -285,7 +285,9 @@ generated:
   `/mcp` が固定 principal を維持することも担保する。
 - 検証コマンド: `cd rust && cargo fmt --all --check`,
   `cargo test -p jarvis-mcp-gw -p jarvis-policy --locked`,
-  `cargo clippy --workspace --locked -- -D warnings`, `make ci-local`。
+  `cargo clippy --workspace --locked -- -D warnings` に
+  `-D clippy::undocumented_unsafe_blocks` を追加（Round 91 訂正）、
+  `make ci-local`。
   ドキュメント更新のみの本タスクでは実行していない（親が検証）。
 
 #### 残る判断（要判断）

@@ -36,7 +36,8 @@ cd ~/ドキュメント/作業用/jarvis/jarvis/ui
 cargo build --locked             # 開発ビルド
 cargo build --release --locked   # リリースビルド
 cargo test --locked              # 件数は固定しない。実測は cargo test --locked の出力で確認する
-cargo clippy --all-targets --locked -- -D warnings
+cargo clippy --all-targets --locked -- \
+  -D warnings -D clippy::undocumented_unsafe_blocks
 ```
 
 テスト件数は機能追加に伴い変わるため、ここには固定値を記載しません。
