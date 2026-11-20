@@ -2157,3 +2157,23 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （low）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push。共有 lib の実機配布（再インストール）。
+
+### Round 74（R4 で修正済み）
+
+- [x] role 解決を共有 `resolved_role_for()` へ集約（verify_set と resolver が
+  同じ role を使用）、role と basename の矛盾／未知 role／absent を fail-closed。
+- [x] 共有 lib の hook を必須登録化、判定を戻り値で伝播（rc 0/1/2）、
+  未登録 hook は rc=2 で拒否。
+- [x] git 展開を `--no-same-owner`＋repo 既存 owner への chown に変更。
+- [x] curl/psql/jq の失敗注入モックを追加し fail-closed 分岐を実測
+  （restore 119→681件、safety 93→655件）。
+- 親が対応: 全ゲート再検証。
+
+### Round 74 の残り指摘（未対応）
+
+- [ ] verify-backup.sh が `resolved_role_for()` をまだ使っていない
+  （担当外だった）— 共有 lib のロール解決を3スクリプトすべてで統一。
+- [ ] git.sh:33-36 の resolver rc=2 が警告付き成功スキップ（pre-stop
+  ゲートが先に失敗するため通常フローでは到達不能だが防御的改善の余地）。
+- ユーザー判断項目は従前どおり（P1-6／P0 ガード／Grafana／Webhook／S9／
+  バックアップ外部化／push／共有 lib の実機配布）。
