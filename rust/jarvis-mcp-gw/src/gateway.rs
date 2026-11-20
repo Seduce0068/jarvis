@@ -33,7 +33,7 @@
 
 use crate::error::McpGatewayError;
 use anyhow::{Context, Result};
-use rmcp::model::CallToolRequestParam;
+use rmcp::model::{CallToolRequestParam, PaginatedRequestParam};
 use rmcp::service::RunningService;
 use rmcp::transport::IntoTransport;
 use rmcp::{RoleClient, ServiceExt};
@@ -45,9 +45,26 @@ use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, RwLock};
 use tracing::info;
 
-/// Upper bound for the MCP `initialize` handshake plus `tools/list`
-/// discovery while registering an upstream server.
+/// Upper bound for the MCP `initialize` handshake while registering an
+/// upstream server. Tool discovery is bounded separately below.
 const SERVER_REGISTRATION_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Upper bound for the `tools/list` discovery phase of registration.
+///
+/// `rmcp` 0.3.2's `Peer::list_all_tools` follows `next_cursor` until the server
+/// stops returning one, so a slow or adversarial upstream can otherwise block
+/// registration indefinitely. Discovery gets its own deadline; expiry aborts
+/// the registration (fail closed) instead of leaving a half-registered server.
+const TOOL_DISCOVERY_TIMEOUT: Duration = SERVER_REGISTRATION_TIMEOUT;
+
+/// Maximum number of `tools/list` pages followed during discovery. A server
+/// that keeps returning a fresh `next_cursor` would otherwise loop forever
+/// (bounded only by the wall-clock timeout) and grow the tool vec without end.
+const MAX_DISCOVERY_PAGES: usize = 64;
+
+/// Maximum number of tools a single upstream may advertise. Bounds memory and
+/// the size of the routing/schema maps even when a server paginates quickly.
+const MAX_DISCOVERED_TOOLS: usize = 4096;
 
 /// Caller-input failures are typed as `McpGatewayError::ClientError` so the
 /// transport adapters keep mapping them to HTTP 400. `ClientError` renders as
@@ -389,11 +406,37 @@ impl Gateway {
             .with_context(|| format!("MCP server '{name}' did not initialize in time"))?
             .with_context(|| format!("MCP server '{name}' initialization failed"))?;
 
-        let tools = client
-            .peer()
-            .list_all_tools()
-            .await
-            .with_context(|| format!("Failed to list tools from MCP server '{name}'"))?;
+        // `list_all_tools()` (rmcp 0.3.2) follows `next_cursor` with no bound,
+        // so a slow upstream or one that keeps changing the cursor could block
+        // registration forever. Drive pagination ourselves with an explicit
+        // deadline plus page/tool caps. Any failure here aborts registration:
+        // `client` is dropped (cancelling its background task and transport)
+        // and `liveness` is dropped, killing the upstream child (fail closed).
+        let peer = client.peer();
+        let tools: Vec<rmcp::model::Tool> = tokio::time::timeout(TOOL_DISCOVERY_TIMEOUT, async {
+            let mut tools: Vec<rmcp::model::Tool> = Vec::new();
+            let mut cursor = None;
+            for page in 0..MAX_DISCOVERY_PAGES {
+                let result = peer
+                    .list_tools(Some(PaginatedRequestParam { cursor }))
+                    .await
+                    .with_context(|| format!("tools/list page {page} failed"))?;
+                tools.extend(result.tools);
+                if tools.len() > MAX_DISCOVERED_TOOLS {
+                    anyhow::bail!("tools/list exceeded {MAX_DISCOVERED_TOOLS} tools");
+                }
+                cursor = result.next_cursor;
+                if cursor.is_none() {
+                    return Ok(tools);
+                }
+            }
+            anyhow::bail!(
+                "tools/list exceeded {MAX_DISCOVERY_PAGES} pages (cursor never terminated)"
+            )
+        })
+        .await
+        .with_context(|| format!("MCP server '{name}' tool discovery timed out"))?
+        .with_context(|| format!("Failed to list tools from MCP server '{name}'"))?;
 
         // Retain both views of the discovery result: names drive routing,
         // duplicate detection and liveness-based cleanup, while the declared
@@ -569,6 +612,59 @@ pub(crate) async fn run_mock_mcp_server_with_schema(
                     "isError": false
                 }
             })),
+            _ => None,
+        };
+        if let Some(response) = response {
+            let mut line = serde_json::to_string(&response).expect("serializable response");
+            line.push('\n');
+            write_half
+                .write_all(line.as_bytes())
+                .await
+                .expect("write response");
+            write_half.flush().await.expect("flush response");
+        }
+    }
+}
+
+/// Test-only MCP server that always returns a fresh `next_cursor` for
+/// `tools/list`. A discovery implementation without a page cap would loop
+/// forever against this fixture.
+#[cfg(test)]
+async fn run_endless_cursor_mock(stream: tokio::io::DuplexStream) {
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read_half).lines();
+    let mut page = 0u64;
+    while let Ok(Some(line)) = lines.next_line().await {
+        let message: Value = serde_json::from_str(&line).expect("valid JSON-RPC line");
+        let method = message["method"].as_str().unwrap_or_default();
+        let id = message.get("id").cloned();
+        let response = match method {
+            "initialize" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "serverInfo": { "name": "endless-mock", "version": "0.1.0" }
+                }
+            })),
+            "notifications/initialized" => None,
+            "tools/list" => {
+                page += 1;
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": {
+                        "tools": [{
+                            "name": format!("tool-{page}"),
+                            "inputSchema": { "type": "object" }
+                        }],
+                        "nextCursor": format!("cursor-{page}")
+                    }
+                }))
+            }
             _ => None,
         };
         if let Some(response) = response {
@@ -891,6 +987,33 @@ requires_approval = false
             .await
             .expect_err("empty command is rejected");
         assert!(error.to_string().contains("must not be empty"));
+    }
+
+    /// (a) Regression: an upstream whose `tools/list` never terminates its
+    /// cursor must be rejected quickly instead of hanging startup forever.
+    /// The page cap (not the 15s wall-clock timeout) is what makes this fast.
+    #[tokio::test]
+    async fn endless_tools_list_cursor_fails_registration() {
+        let gateway = test_gateway("endless-cursor").await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_endless_cursor_mock(server_side));
+
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            gateway.register_transport("endless", client_side),
+        )
+        .await
+        .expect("registration must not hang")
+        .expect_err("an unterminated cursor is rejected");
+        // Alternate Display renders the whole anyhow context chain, including
+        // the root cause added by the bounded-pagination helper.
+        let message = format!("{error:#}");
+        assert!(message.contains("tools/list"), "{message}");
+        assert!(message.contains("pages"), "{message}");
+        assert!(
+            !gateway.servers.read().await.contains_key("endless"),
+            "failed registration is not inserted"
+        );
     }
 
     #[tokio::test]

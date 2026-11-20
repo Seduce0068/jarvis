@@ -11,7 +11,8 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use tokio::process::Command;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 
 /// Maximum bytes returned by a native read/git handler.
 const NATIVE_MAX_OUTPUT: usize = 1024 * 1024;
@@ -49,6 +50,81 @@ where
             .context(context.into())
             .to_string(),
     )
+}
+
+/// Read a child pipe incrementally and keep at most `cap` bytes in memory.
+///
+/// (c) The old code used `Child::output()`, which buffers the *entire* git
+/// stdout/stderr before `NATIVE_MAX_OUTPUT` was checked, so a huge diff could
+/// exhaust memory before the cap was ever enforced. Reading in fixed-size
+/// chunks lets us stop buffering at the cap. We keep draining (discarding)
+/// the remainder up to EOF so the child never blocks on a full pipe and can
+/// still exit cleanly; `truncated` records that the cap was hit.
+async fn read_output_capped<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    cap: usize,
+) -> std::io::Result<(Vec<u8>, bool)> {
+    let mut chunk = [0u8; 8 * 1024];
+    let mut out = Vec::new();
+    let mut truncated = false;
+    loop {
+        let n = reader.read(&mut chunk).await?;
+        if n == 0 {
+            return Ok((out, truncated));
+        }
+        if truncated {
+            continue;
+        }
+        if out.len() + n > cap {
+            let take = cap.saturating_sub(out.len());
+            out.extend_from_slice(&chunk[..take]);
+            truncated = true;
+        } else {
+            out.extend_from_slice(&chunk[..n]);
+        }
+    }
+}
+
+/// Collect a spawned child's output with a hard memory cap and a wall-clock
+/// deadline.
+///
+/// (b) tokio 1.x does not kill a child when its `Child` handle is dropped, so
+/// simply letting `tokio::time::timeout` drop the collection future would
+/// orphan the process and leak its stdio fds. On timeout we explicitly
+/// `start_kill()` *and* `wait()`: that kills the process and reaps it. The
+/// command also sets `kill_on_drop(true)` as a backstop for any other early
+/// return while the child is still alive.
+async fn collect_child_output(
+    child: &mut Child,
+    stdout: &mut ChildStdout,
+    stderr: &mut ChildStderr,
+    timeout: Duration,
+    cap: usize,
+) -> Result<(Vec<u8>, Vec<u8>, std::process::ExitStatus, bool)> {
+    let collect = async {
+        // Both pipes are read concurrently: a git invocation that fills its
+        // stderr pipe while we drain stdout would otherwise deadlock.
+        let (stdout, stderr) = tokio::join!(
+            read_output_capped(stdout, cap),
+            read_output_capped(stderr, cap),
+        );
+        let (stdout, truncated) = stdout?;
+        let (stderr, _) = stderr?;
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((stdout, stderr, status, truncated))
+    };
+
+    // Bind first so the `collect` future (which borrows `child`) is dropped
+    // before the timeout branch uses `child` to kill and reap.
+    let result = tokio::time::timeout(timeout, collect).await;
+    match result {
+        Ok(result) => result.context("wait for git failed"),
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            Err(client_error("git timed out"))
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -301,28 +377,55 @@ impl Sandbox {
         cmd.arg("-C").arg(&path).args(git_args);
         // P0-5: do not leak service secrets (BWS_ACCESS_TOKEN) to children.
         crate::subprocess::apply_minimal_env(&mut cmd);
-        // A timeout follows from the caller's path/tool config, so it is a
-        // client error. A git spawn failure stays an untyped internal error.
-        let output = client_context(
-            tokio::time::timeout(timeout, cmd.output()).await,
-            "git timed out".to_string(),
-        )??;
-        if !output.status.success() {
+        // (b) A dropped `Child` does not terminate its process in tokio 1.x.
+        // Kill-on-drop is a backstop for early returns; the timeout path also
+        // kills and reaps explicitly (see `collect_child_output`).
+        cmd.kill_on_drop(true);
+        let mut child = cmd
+            // `Command::output()` used to set stdin to null; keep that so git
+            // never blocks reading a caller's terminal.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .with_context(|| format!("spawn git {:?}", git_args))?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("git stdout pipe missing"))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("git stderr pipe missing"))?;
+
+        // (c) Stream and cap both pipes instead of buffering the whole output
+        // before checking NATIVE_MAX_OUTPUT. A timeout is a caller-input
+        // failure (client error); a spawn/wait failure stays internal.
+        let (stdout, stderr, status, truncated) = collect_child_output(
+            &mut child,
+            &mut stdout,
+            &mut stderr,
+            timeout,
+            NATIVE_MAX_OUTPUT,
+        )
+        .await?;
+
+        if !status.success() {
             return Err(client_error(format!(
                 "git {:?} failed: {}",
                 git_args,
-                String::from_utf8_lossy(&output.stderr)
+                String::from_utf8_lossy(&stderr)
             )));
         }
-        if output.stdout.len() > NATIVE_MAX_OUTPUT {
+        if truncated || stdout.len() > NATIVE_MAX_OUTPUT {
             return Err(client_error(format!(
                 "git output too large ({} bytes)",
-                output.stdout.len()
+                stdout.len()
             )));
         }
         Ok(json!({
             "path": path.display().to_string(),
-            "stdout": String::from_utf8_lossy(&output.stdout),
+            "stdout": String::from_utf8_lossy(&stdout),
         }))
     }
 
@@ -1032,6 +1135,44 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("no native handler"));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    /// (b) Regression: after a timeout the child must be killed and reaped,
+    /// not left as an orphan holding its stdio fds. Uses `sleep` instead of
+    /// `git` so the test is deterministic and needs no repository; production
+    /// and test share the same `collect_child_output` helper.
+    #[tokio::test]
+    async fn timeout_kills_and_reaps_child() {
+        let mut cmd = Command::new("sleep");
+        crate::subprocess::apply_minimal_env(&mut cmd);
+        cmd.arg("30").kill_on_drop(true);
+        let mut child = cmd
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id().expect("child has a pid");
+        let mut stdout = child.stdout.take().unwrap();
+        let mut stderr = child.stderr.take().unwrap();
+
+        let error = collect_child_output(
+            &mut child,
+            &mut stdout,
+            &mut stderr,
+            Duration::from_millis(100),
+            1024,
+        )
+        .await
+        .expect_err("a still-running child hits the deadline");
+        assert!(error.to_string().contains("timed out"), "{error}");
+
+        // `wait()` in the timeout branch reaped the child; on Linux a killed
+        // and reaped process no longer has a /proc entry.
+        let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+        assert!(
+            !proc_path.exists(),
+            "child {pid} survived the timeout and was not reaped"
+        );
     }
 
     #[test]
