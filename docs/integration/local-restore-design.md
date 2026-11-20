@@ -318,6 +318,13 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
     拡張するか、(2) 主 DB と追加 DB の復元順序と片方失敗時のロールバック、
     (3) 単一 DB セットとの後方互換を verifier のどのゲートで担保するか。
   - 判断後に実装し、S9 の隔離統合テストで両 DB 構成の往復を検証する。
+  - 推奨方針（判断材料）: まず `JARVIS_POLICY_PG_URL` が
+    `JARVIS_CONTEXT_PG_URL` と異なる値で運用される予定があるかを確認する。
+    同一なら現行の主 DB のみの契約で十分であり、設計書へ「単一 DB 契約」と
+    明記して終了する。異なるなら、追加 DB を同じバックアップセット内の別
+    role として扱うのではなく、DB ごとに独立したセットディレクトリへ分ける
+    案を採る。こうすれば「複数 postgres row は ambiguous 拒否」の既存ゲートと
+    衝突せず、主 DB の復元契約も変えずに済む。
 - 本番 PostgreSQL の上書き方式: `DROP/CREATE` か、新規 DB 復元後の alias/接続切替か。
 - 本番 Qdrant の上書き方式: 同一コレクションへの API 復元か、新規コレクション +
   alias 切替か（snapshot の互換性は作成元と同一 minor 以降という制約あり）。
