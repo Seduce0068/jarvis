@@ -317,14 +317,19 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
   - 判断が必要な論点: (1) 追加 DB を別 role で表現するか既存 postgres role を
     拡張するか、(2) 主 DB と追加 DB の復元順序と片方失敗時のロールバック、
     (3) 単一 DB セットとの後方互換を verifier のどのゲートで担保するか。
-  - 判断後に実装し、S9 の隔離統合テストで両 DB 構成の往復を検証する。
-  - 推奨方針（判断材料）: まず `JARVIS_POLICY_PG_URL` が
-    `JARVIS_CONTEXT_PG_URL` と異なる値で運用される予定があるかを確認する。
-    同一なら現行の主 DB のみの契約で十分であり、設計書へ「単一 DB 契約」と
-    明記して終了する。異なるなら、追加 DB を同じバックアップセット内の別
-    role として扱うのではなく、DB ごとに独立したセットディレクトリへ分ける
-    案を採る。こうすれば「複数 postgres row は ambiguous 拒否」の既存ゲートと
-    衝突せず、主 DB の復元契約も変えずに済む。
+  - **決定（2026-11-21）**: `infra/config/context.env:8` と
+    `infra/config/policy.env:52` はともに
+    `op://JARVIS/PostgreSQL/connection_string` を参照しており、現行構成は
+    単一 DB である。したがってバックアップ／復元は主 DB のみを対象とする
+    現在の契約を維持し、追加 DB 用のペイロード拡張は行わない。
+    `jarvis-migrations.service` が `JARVIS_POLICY_PG_URL` も受け取るのは、
+    将来ドリフトした場合にマイグレーション適用を漏らさないための保険であり、
+    DR 対象を増やすことを意味しない。
+  - 将来 `JARVIS_POLICY_PG_URL` が別 DB を指す運用へ変更する場合は、追加 DB を
+    同じバックアップセット内の別 role として扱わず、DB ごとに独立したセット
+    ディレクトリへ分ける案を採る。「複数 postgres row は ambiguous 拒否」の
+    既存ゲートと衝突せず、主 DB の復元契約も変えずに済む。その際は S9 の隔離
+    統合テストで両 DB 構成の往復を検証する。
 - 本番 PostgreSQL の上書き方式: `DROP/CREATE` か、新規 DB 復元後の alias/接続切替か。
 - 本番 Qdrant の上書き方式: 同一コレクションへの API 復元か、新規コレクション +
   alias 切替か（snapshot の互換性は作成元と同一 minor 以降という制約あり）。

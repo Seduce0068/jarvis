@@ -2727,9 +2727,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 /swarm-limited の制限プロファイルでセッション合計起動数（上限40）を超過したため、
 新規サブエージェントの起動を停止した。未完了項目を次回の再開指示まで保持する。
 
-- [ ] 両 DB バックアップギャップ（high）— 設計判断待ち。
-      判断材料は `docs/integration/local-restore-design.md` の「未決定事項」に整備済み。
-      前回の子実装は既存10回帰と矛盾したため差し戻し済み。
+- [x] 両 DB バックアップギャップ（high）→ 2026-11-21 決定: 両 env が同一
+      `op://JARVIS/PostgreSQL/connection_string` を参照し現行は単一 DB。
+      主 DB のみの契約を維持し、追加ペイロード拡張は行わない旨を
+      `docs/integration/local-restore-design.md` に記録。将来別 DB 化する場合の
+      案（独立セット）も同所に明記。
 - [ ] major 更新待ち29件の脆弱性 — 再評価日 2026-12-20。
       patch 版8件は更新済み、残りは hickory / rsa / rmcp 等の major 更新待ち。
 - [ ] ユーザー判断が必要な項目: P1-6 暗号化鍵の注入先、8段階の P0 ガード有効化、
@@ -2744,3 +2746,15 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `cargo fmt` / `check --locked` / `test --locked` / `clippy -D warnings` /
   `make ci-local` / `make safety-test` / `make check-evidence` /
   `make ui-test` / `make check-dependency-audit` / `bash -n` / `shellcheck`。
+
+### Round 102（/swarm-limited・親が判断）
+
+- ユーザーから追加判断が来ていないため共通指示 §14 に従い親が判断。
+- [x] 両 DB ギャップを「単一 DB 契約を維持」として決着（設定確認に基づく）。
+- 親が yomiyasu で本文を検査（変更不要、ゲートは技術用語として残す）。
+
+### Round 102 の残り（未対応）
+
+- [ ] major 更新待ち29件（再評価 2026-12-20）。
+- [ ] ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+      push（「push しない」制約を尊重し未実施）。
