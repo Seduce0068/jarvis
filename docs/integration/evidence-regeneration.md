@@ -309,6 +309,22 @@ verify サマリとは単位が異なる。両者を照合する場合は
 「テストケース」「ペイロード判定呼び出し」「イベント」の
 どの単位で数えたかを明記する。
 
+## secret_scan.py の CWD 非依存性（I84-D / I81-B）
+
+`ci/scripts/secret_scan.py` は呼び出し元の CWD に依存しない。**一次防御は
+`repo_root()` がスクリプト自身のパスから repo root を導出し、以後の
+`git ls-files` を `git -C <root>` で実行すること**である。サブディレクトリや
+別 git repo（franken CWD）から起動しても走査集合が縮まないのは、この
+anchoring による。`ci/scripts/test-legacy-guards.sh` の対応回帰は、
+その性質を各 CWD から実行して固定する。
+
+`tracked_files()` の件数を `index_count()`（`git -C <root> ls-files --cached -z`）
+と照合するチェックは**補助的な回帰ガード**に限られる。
+両者は現行実装では同じ cached index を返すため、この照合は独立した
+CWD 検出器ではない。`tracked_files()` が将来 CWD 依存／フィルタ付きの
+列挙へ変更された場合に fail-closed で検出するためのものであり、
+CWD 非依存を担保する一次防御ではない（混同しないこと）。
+
 ## 関連
 
 - [specs/index.md](../../specs/index.md): テスト仕様の索引

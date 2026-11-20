@@ -14,16 +14,21 @@ Safety properties:
 Usage: python3 ci/scripts/secret_scan.py (runnable from any CWD)
 
 The repo root is derived from this script's own path and `git ls-files` is
-anchored there with `git -C <root>`. Invoking from a subdirectory (or from a
-franken CWD such as another git repo) can no longer shrink the scan set to a
-subset of the tracked files (I81-B). The scan set is cross-checked against the
-root's full cached index count; a mismatch fails closed with fixed vocabulary
-that never contains a path or a credential value.
+anchored there with `git -C <root>`. This anchoring (repo_root() + `-C root`)
+is the PRIMARY defense against CWD-dependent partial scans (I81-B): a
+subdirectory CWD or a franken CWD in another git repo cannot shrink the set.
+
+The index-count check below is only a regression guard on the tracked_files()
+implementation. It compares against a second `git -C <root> ls-files --cached`
+call, which returns the same cached index today, so it is NOT an independent
+detector of CWD-induced shrinking. A mismatch means tracked_files() was changed
+to a different listing (e.g. CWD-relative or filtered); it fails closed with
+fixed vocabulary that never contains a path or a credential value.
 
 Exit 0 only when at least one tracked file exists, no value-like credentials
-are found, every tracked file was read successfully and the scan set matches
-the full index; 1 otherwise (empty set / index mismatch / unreadable files all
-fail closed, I79-C / I81-B).
+are found, every tracked file was read successfully and the set count equals
+the cached-index count; 1 otherwise (empty set / count mismatch / unreadable
+files all fail closed, I79-C / I81-B).
 """
 
 from __future__ import annotations
@@ -105,7 +110,12 @@ def tracked_files(root: str) -> list[str]:
 
 
 def index_count(root: str) -> int:
-    """Independent count of the root's cached index for the I81-B cross-check."""
+    """Cached-index count from the same root, for the tracked_files guard.
+
+    This deliberately reads the same index as tracked_files(); the comparison
+    in main() guards against a future change to that function, not against an
+    independent CWD leak. repo_root() + `-C root` is the primary CWD defense.
+    """
     result = subprocess.run(
         ["git", "-C", root, "ls-files", "--cached", "-z"],
         capture_output=True, text=True, check=True,
@@ -137,9 +147,10 @@ def main() -> int:
         # scan. Report only a fixed error on stderr -- never any value.
         print("ERROR: no tracked files to scan", file=sys.stderr)
         return 1
-    # I81-B defense-in-depth: the set about to be scanned must be the full
-    # index of the repo root. A CWD-anchored or otherwise filtered listing
-    # would otherwise print "OK" after reading only a subset of files.
+    # Regression guard for tracked_files(): both listings are anchored at
+    # `root`, so this detects a future change to that function (e.g. a
+    # CWD-relative or filtered listing), not an independent CWD leak.
+    # CWD independence itself is provided above by repo_root() + `-C root`.
     if len(tracked) != index_count(root):
         print(ERR_INDEX_MISMATCH, file=sys.stderr)
         return 1

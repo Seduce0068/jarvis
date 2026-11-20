@@ -30,6 +30,14 @@
 #     削減を適用するため現行ファイルでの実削減は 363 件。全失敗モードの
 #     非ゼロ exit と固定 fail 語彙は維持し、実 DB / Qdrant / 本番パスは
 #     従来どおりモックのみ（最終 result の fail=0 を維持）。
+#   - I84-C: I80-A の集約で inject_fail() が「非ゼロ exit + 固定 fail 語彙のみ」
+#     に縮小された結果、fail() を出した後も本番 DB/curl を発行したり、
+#     service の enable/disable や qdrant systemd を触る回帰が全ケースを
+#     通過してしまっていた。inject_fail() に失敗クラス（isolated / prod_db /
+#     prod_qdrant）ごとの本番境界チェックを 1 アサーションだけ追加し、
+#     prod_stage() の green --apply 経路にも同じ境界チェックを戻す。
+#     代表ケース 8e の完全検証はそのまま維持し、ケース数を大幅に増やさずに
+#     全失敗モードの「失敗時の本番非接触」を担保する（実 DB/Qdrant はモックのみ）。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -371,6 +379,9 @@ fail_case() {
 run_driver() {
   # 前のケースで stop された状態を持ち越さないよう、呼び出しごとに初期化する。
   # I77-C: jq モックの呼び出し順カウンタもリセットする。
+  # I84-D: LOCK_FILE も $tmp 配下へ固定する。渡さない場合、実機の restore が
+  #        /run/jarvis/restore.lock または /tmp/jarvis-restore.lock を保持して
+  #        いるだけでテストが LOCK_HELD で失敗していた。
   rm -rf -- "$tmp/logs/state"
   rm -f -- "$tmp/logs/jq.calls"
   env \
@@ -382,6 +393,7 @@ run_driver() {
     MOCK_PSQL_MODE="${MOCK_PSQL_MODE:-}" \
     MOCK_CURL_MODE="${MOCK_CURL_MODE:-}" \
     MOCK_JQ_MODE="${MOCK_JQ_MODE:-}" \
+    LOCK_FILE="$tmp/restore.lock" \
     TMPDIR="$tmp/tmp" \
     BACKUP_ROOT="$tmp/backups" \
     VERIFY_SCRIPT="$verifier" \
@@ -497,6 +509,97 @@ for name in "${all_payloads[@]}"; do
     fail_case "manifest size/hash mismatch: $name"
   fi
 done
+
+# --- 0a. I84-D: ロックパスの完全隔離と /run・/tmp 両経路の回帰 ---------------
+# run_driver は LOCK_FILE="$tmp/restore.lock" を渡すため、実機で restore が
+# 走っていても LOCK_HELD にはならない。ここでは (i) 隔離が実際に効いている
+# ことと、(ii) /run 相当の安定パスが使えない場合の /tmp フォールバック枝が
+# WARN 付きで動作することを、どちらも一時領域だけで検証する。
+printf '%s\n' '-- I84-D: lock path isolation and fallback branch --'
+
+# (i) 一時ロックをテスト側で保持すると、ドライバは LOCK_HELD で fail-closed に
+# なる。実 /run / 実 /tmp のロックが使われていればこのアサートは成立しない
+# ため、完全隔離の証拠にもなる。
+if command -v flock >/dev/null 2>&1; then
+  rm -f -- "$tmp/logs"/*.log
+  exec {hold_lock_fd}<>"$tmp/restore.lock"
+  if flock -n "$hold_lock_fd"; then
+    held_code=0
+    held_out="$(run_driver --backup-set "$set_dir" 2>&1)" || held_code=$?
+    if [ "$held_code" -ne 0 ] && has_fragment "$held_out" 'LOCK_HELD'; then
+      pass "I84-D: held isolated lock -> LOCK_HELD fail-closed"
+    else
+      fail_case "I84-D: held lock but no LOCK_HELD (exit=$held_code)"
+      printf '%s\n' "$held_out" | head -8 >&2
+    fi
+    assert_no_log "I84-D: LOCK_HELD: psql never called" "$tmp/logs/psql.log"
+    assert_no_log "I84-D: LOCK_HELD: no service stop/start" "$tmp/logs/systemctl.log"
+  else
+    fail_case "I84-D: could not hold the isolated test lock"
+  fi
+  exec {hold_lock_fd}>&-
+else
+  fail_case "I84-D: flock unavailable; driver lock gate cannot be verified"
+fi
+
+# (ii) フォールバック枝。ドライバのコピーを用意し、
+#   - LOCK_FILE 明示指定の判定を無効化して自動選択を強制、
+#   - /run 相当の安定パスを「一時領域の通常ファイル配下」へ変更（mkdir 失敗）、
+#   - /tmp フォールバック先と LOCK_DIR を一時領域へ変更、
+# する。これで実 /run / 実 /tmp のロックには一切触れずにフォールバック枝を
+# 実行できる。dry-run なのでモジュールの読み込みも発生しない。
+blocker="$tmp/lock-blocker"
+printf 'x\n' > "$blocker"
+# コピー先では SCRIPT_DIR が $tmp になるため、起動時に source される共有
+# ライブラリと module も一時領域へ複製する。verify_set() が
+# resolve_restore_input()（configs.sh 定義）を呼ぶため module も必要。
+mkdir -p -- "$tmp/lib" "$tmp/restore-local.d"
+cp -- "$repo/infra/scripts/lib/payload-descriptors.sh" \
+  "$tmp/lib/payload-descriptors.sh"
+cp -- "$repo/infra/scripts/restore-local.d/configs.sh" \
+  "$tmp/restore-local.d/configs.sh"
+# The ${LOCK_FILE:-} fragment is matched literally in the driver copy.
+# shellcheck disable=SC2016
+if sed \
+    -e 's#if \[ -n "${LOCK_FILE:-}" \]; then#if false; then#' \
+    -e "s#LOCK_FILE=\"/run/jarvis/restore.lock\"#LOCK_FILE=\"$blocker/jarvis/restore.lock\"#" \
+    -e "s#LOCK_FILE=\"/tmp/jarvis-restore.lock\"#LOCK_FILE=\"$tmp/tmp/fallback-restore.lock\"#g" \
+    -e "s#LOCK_DIR=\"/tmp\"#LOCK_DIR=\"$tmp/tmp\"#" \
+    "$driver" > "$tmp/lock-fallback-driver.sh"; then
+  chmod 0755 -- "$tmp/lock-fallback-driver.sh"
+else
+  fail_case "I84-D: could not build the fallback-branch driver copy"
+fi
+rm -f -- "$tmp/logs"/*.log "$tmp/tmp/fallback-restore.lock"
+orig_driver="$driver"
+driver="$tmp/lock-fallback-driver.sh"
+fb_code=0
+fb_out="$(run_driver --backup-set "$set_dir" 2>&1)" || fb_code=$?
+driver="$orig_driver"
+if [ "$fb_code" -eq 0 ]; then
+  pass "I84-D: fallback branch dry-run exit 0"
+else
+  fail_case "I84-D: fallback branch dry-run exit=$fb_code"
+  printf '%s\n' "$fb_out" | head -12 >&2
+fi
+if has_fragment "$fb_out" "lock acquired: $tmp/tmp/fallback-restore.lock"; then
+  pass "I84-D: fallback lock path selected under TMPDIR"
+else
+  fail_case "I84-D: fallback lock path not selected"
+  printf '%s\n' "$fb_out" | head -12 >&2
+fi
+if has_fragment "$fb_out" 'WARN: /run lock path unavailable'; then
+  pass "I84-D: fallback WARN emitted"
+else
+  fail_case "I84-D: fallback WARN missing"
+fi
+if [ -f "$tmp/tmp/fallback-restore.lock" ]; then
+  pass "I84-D: fallback lock file created only under TMPDIR"
+else
+  fail_case "I84-D: fallback lock file not created under TMPDIR"
+fi
+assert_no_log "I84-D: fallback dry-run: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I84-D: fallback dry-run: no service stop/start" "$tmp/logs/systemctl.log"
 
 # --- 1. dry-run（既定。オプション無し）------------------------------------
 printf '%s\n' '-- restore-local.sh dry-run (default, zero writes) --'
@@ -1153,11 +1256,83 @@ assert_service_invariants() { # label [premise-file]
     '^(enable|disable) ' "$tmp/logs/systemctl.log" "$premise"
 }
 
-# inject_fail <curl_mode> <psql_mode> <jq_mode> <confirm> <label> <fragment> [extra...]
+# I84-C: 失敗注入ケースごとの「本番非接触」境界チェック。
+# I80-A で完全検証を 8e（成功経路）へ集約した結果、inject_fail() は
+# 「非ゼロ exit + 固定 fail 語彙」しか見ておらず、fail() の後も本番 DB/curl を
+# 発行したり service の enable/disable や qdrant systemd を触る回帰が
+# すり抜けていた。ここでは 1 ケースにつき 1 アサーションだけを追加し、
+# 失敗クラスごとに「そのクラスで許される本番接触」以外を検出する:
+#   isolated   : 隔離段の失敗（8a/8b）。本番 DB / 本番コレクションの両方を禁止。
+#   prod_db    : PostgreSQL 本番段の失敗（8c）。psql.log の本番パターンのみ許容し、
+#                本番コレクション (curl) / qdrant / enable/disable は禁止。
+#   prod_qdrant: Qdrant 本番段の失敗（8d, --skip-db）。curl の本番パターンのみ
+#                許容し、本番 DB / qdrant / enable/disable は禁止。
+# 前提ログは verify_set 通過後に inventory_services() が必ず生成する
+# systemctl-query.log。空なら vacuous pass を禁止して fail とする（I80-A 踏襲）。
+assert_production_boundary() { # label scope
+  local label="$1" scope="$2" premise="$tmp/logs/systemctl-query.log"
+  local -a violations=()
+  local -a svc_patterns=('qdrant' '^(enable|disable) ')
+  local -a db_patterns=('DROP DATABASE "jarvis"' \
+    '[-]d jarvis([[:space:]]|$)' "datname = 'jarvis'")
+  local -a curl_patterns=('/collections/jarvis_memories([/?]|$)')
+  local pattern file
+
+  if [ ! -s "$premise" ]; then
+    fail_case "$label: production boundary vacuous (premise log missing/empty: ${premise##*/})"
+    return 0
+  fi
+
+  # サービス不変条件は全クラス共通: qdrant は停止対象外、enable/disable は実行しない。
+  file="$tmp/logs/systemctl.log"
+  if [ -f "$file" ]; then
+    for pattern in "${svc_patterns[@]}"; do
+      if grep -E -- "$pattern" "$file" >/dev/null 2>&1; then
+        violations+=("systemctl.log:$pattern")
+      fi
+    done
+  fi
+
+  # 本番 DB パターンは prod_db クラス以外では一切禁止。
+  if [ "$scope" != 'prod_db' ] && [ -f "$tmp/logs/psql.log" ]; then
+    for pattern in "${db_patterns[@]}"; do
+      if grep -E -- "$pattern" "$tmp/logs/psql.log" >/dev/null 2>&1; then
+        violations+=("psql.log:$pattern")
+      fi
+    done
+  fi
+
+  # 本番コレクション パスは prod_qdrant クラス以外では一切禁止。
+  if [ "$scope" != 'prod_qdrant' ] && [ -f "$tmp/logs/curl.log" ]; then
+    for pattern in "${curl_patterns[@]}"; do
+      if grep -E -- "$pattern" "$tmp/logs/curl.log" >/dev/null 2>&1; then
+        violations+=("curl.log:$pattern")
+      fi
+    done
+  fi
+
+  if [ "${#violations[@]}" -eq 0 ]; then
+    pass "$label: production boundary intact (scope=$scope)"
+  else
+    fail_case "$label: production boundary violated (scope=$scope): ${violations[*]}"
+    for file in "$tmp/logs/systemctl.log" "$tmp/logs/psql.log" "$tmp/logs/curl.log"; do
+      if [ -f "$file" ]; then
+        printf '  evidence %s:\n' "${file##*/}" >&2
+        grep -E -e 'qdrant' -e '^(enable|disable) ' \
+          -e 'DROP DATABASE "jarvis"' -e '[-]d jarvis([[:space:]]|$)' \
+          -e "datname = 'jarvis'" -e '/collections/jarvis_memories([/?]|$)' \
+          "$file" | head -5 >&2 || true
+      fi
+    done
+  fi
+}
+
+# inject_fail <curl_mode> <psql_mode> <jq_mode> <confirm> <label> <fragment> <scope> [extra...]
+# I84-C: scope は assert_production_boundary へ渡す失敗クラス。
 inject_fail() {
   local curl_mode="$1" psql_mode="$2" jq_mode="$3" confirm="$4"
-  local label="$5" fragment="$6" code=0 out=""
-  shift 6
+  local label="$5" fragment="$6" scope="$7" code=0 out=""
+  shift 7
   local -a args=(--backup-set "$set_dir" --apply) extra=("$@")
   [ "$confirm" -eq 1 ] && args+=(--confirm)
   args+=("${extra[@]}")
@@ -1178,21 +1353,25 @@ inject_fail() {
     fail_case "$label: fail vocabulary missing: $fragment"
     printf '%s\n' "$out" | head -12 >&2
   fi
+  # I84-C: 全失敗モードで「fail() の前後で本番を触っていない」ことを境界チェック。
+  assert_production_boundary "$label" "$scope"
 }
 
 # both <curl_mode> <psql_mode> <jq_mode> <label> <fragment> [extra...]
 # 隔離段の失敗: --apply / --apply --confirm の双方で同じ fail() に到達する。
-# I80-A: 本番未接触の6アサーションは代表ケース（8e）へ集約したため、ここでは
-# 各失敗モードの fail-closed を非ゼロ exit + 固定 fail 語彙の2点だけで固定する。
+# I80-A: 本番未接触の6アサーションの完全検証は代表ケース（8e）へ集約したため、
+# 各失敗モードの fail-closed は非ゼロ exit + 固定 fail 語彙で固定する。
+# I84-C: 加えて inject_fail() が失敗クラス isolated の本番境界を1件チェックする
+# ため、fail() 後に本番 DB/curl や service 不変条件違反が起きれば検出できる。
 # 失敗注入モード／引数／--confirm の有無は従来どおり全ケースで網羅される。
 both() {
   local curl_mode="$1" psql_mode="$2" jq_mode="$3" label="$4" fragment="$5"
   shift 5
   local -a extra=("$@")
   inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 0 \
-    "$label: --apply" "$fragment" "${extra[@]}"
+    "$label: --apply" "$fragment" isolated "${extra[@]}"
   inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 1 \
-    "$label: --apply --confirm" "$fragment" "${extra[@]}"
+    "$label: --apply --confirm" "$fragment" isolated "${extra[@]}"
 }
 
 # prod_stage <curl_mode> <psql_mode> <jq_mode> <label> <fragment> [extra...]
@@ -1201,10 +1380,17 @@ both() {
 # I80-A: 各ケースでは「--apply が green で本番段に到達しない」と
 # 「--confirm で非ゼロ exit + 固定 fail 語彙」のみを検証する。本番未接触の
 # 完全検証は代表ケース（8e）で1回だけ行い、全失敗モードの fail-closed は維持。
+# I84-C: green --apply 経路にも本番境界チェック（scope=isolated）を戻し、
+# --confirm の失敗経路には失敗クラスに対応する scope を渡す。scope は
+# --skip-db の有無から導出する（8d の Qdrant 本番段は --skip-db を伴う）。
 prod_stage() {
   local curl_mode="$1" psql_mode="$2" jq_mode="$3" label="$4" fragment="$5"
   shift 5
   local -a extra=("$@")
+  local e scope='prod_db'
+  for e in "${extra[@]}"; do
+    [ "$e" = '--skip-db' ] && scope='prod_qdrant'
+  done
   local code=0 out=""
   rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
   MOCK_CURL_MODE="$curl_mode"
@@ -1217,8 +1403,10 @@ prod_stage() {
     fail_case "$label: --apply unexpectedly failed (exit $code)"
     printf '%s\n' "$out" | head -12 >&2
   fi
+  # I84-C: CONFIRM なしの green 経路では本番を一切触らないことを全ケースで担保。
+  assert_production_boundary "$label: --apply" isolated
   inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 1 \
-    "$label: --apply --confirm" "$fragment" "${extra[@]}"
+    "$label: --apply --confirm" "$fragment" "$scope" "${extra[@]}"
 }
 
 # 8a. Qdrant 隔離段（qdrant.sh:63-93）。--skip-db で本番 DB を完全に除外。
