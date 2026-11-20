@@ -26,6 +26,21 @@ unit="/etc/systemd/system/jarvis-mcp-gw.service"
 repo_unit="$repo/infra/systemd/jarvis-mcp-gw.service"
 ts="$(date +%Y%m%d-%H%M%S)"
 die() { echo "ERROR: $*" >&2; exit 1; }
+
+# I74-C: this script is the THIRD writer of mcp_allowlist.toml (alongside
+# build-selfhost.sh and restore_configs()). Source the SAME owner/mode module
+# so placement and every rollback restore resolve their mode from the one
+# shared table instead of hardcoding `install -o root -g root -m 0644`.
+# configs.sh keeps all file-scope statements side-effect-free (definitions
+# only), so sourcing it here is safe. Fail closed if a mode is not reviewed.
+# shellcheck source=restore-local.d/configs.sh
+# shellcheck disable=SC1091
+source "$repo/infra/scripts/restore-local.d/configs.sh"
+allowlist_mode="$(expected_config_mode mcp_allowlist.toml)"
+[ -n "$allowlist_mode" ] || die "共有権限表に mcp_allowlist.toml のモードがありません"
+unit_mode="$(expected_config_mode systemd/jarvis-mcp-gw.service)"
+[ -n "$unit_mode" ] || die "共有権限表に jarvis-mcp-gw.service のモードがありません"
+
 # 適用後の任意の失敗（再起動失敗・事後E2E失敗）で変更を戻す
 rollback() {
   echo "== ロールバック: 変更を戻します ==" >&2
@@ -57,14 +72,18 @@ rollback() {
   # よって復元は逆順(step3 -> step2)が必須。step2 のバックアップが元の内容を保持する。
   if [ "${allowlist_changed:-0}" -eq 1 ]; then
     if [ -f "$allowlist.bak-step3-$ts" ]; then
-      install -o root -g root -m 0644 "$allowlist.bak-step3-$ts" "$allowlist"
+      # I74-C: 共有権限表のモードで復元（ハードコード禁止）。
+      install_expected_config "$allowlist_mode" "$allowlist.bak-step3-$ts" "$allowlist" \
+        || echo "  警告: allowlist 退避(step3)の復元に失敗: $allowlist" >&2
     else
       rm -f "$allowlist" || true
     fi
   fi
   if [ "${allowlist_step2_changed:-0}" -eq 1 ]; then
     if [ -f "$allowlist.bak-step2-$ts" ]; then
-      install -o root -g root -m 0644 "$allowlist.bak-step2-$ts" "$allowlist"
+      # I74-C: 共有権限表のモードで復元（ハードコード禁止）。
+      install_expected_config "$allowlist_mode" "$allowlist.bak-step2-$ts" "$allowlist" \
+        || echo "  警告: allowlist 退避(step2)の復元に失敗: $allowlist" >&2
     else
       rm -f "$allowlist" || true
     fi
@@ -80,7 +99,9 @@ rollback() {
   fi
   if [ "${unit_changed:-0}" -eq 1 ]; then
     if [ -f "$unit.bak-step3-$ts" ]; then
-      install -o root -g root -m 0644 "$unit.bak-step3-$ts" "$unit"
+      # I74-C: unit 退避も共有権限表（systemd/jarvis-mcp-gw.service）経由で復元。
+      install_expected_config "$unit_mode" "$unit.bak-step3-$ts" "$unit" \
+        || echo "  警告: unit 退避の復元に失敗: $unit" >&2
     else
       rm -f "$unit" || true
     fi
@@ -315,11 +336,13 @@ else
 fi
 if [ "$apply" -eq 1 ]; then
   if [ "$unit_changed" -eq 1 ]; then
-    install -o root -g root -m 0644 "$repo_unit" "$unit"
+    # I74-C: 共有権限表（systemd/jarvis-mcp-gw.service）経由で配置。
+    install_expected_config "$unit_mode" "$repo_unit" "$unit"
     systemctl daemon-reload
   fi
   if [ "$allowlist_changed" -eq 1 ]; then
-    install -o root -g root -m 0644 "$repo_allowlist" "$allowlist"
+    # I74-C: allowlist 配置も共有権限表経由（3経路のうち deploy 経路）。
+    install_expected_config "$allowlist_mode" "$repo_allowlist" "$allowlist"
   fi
   if [ "$env_changed" -eq 1 ]; then
     # 同一ディレクトリの一時ファイルへ書いて mv で原子的に置換する。

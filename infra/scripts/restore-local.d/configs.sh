@@ -2,7 +2,8 @@
 # S6: configs component restore for restore-local (ADR-0004, local-only).
 # Sourced by restore-local.sh. The caller defines: SET_DIR, APPLY, CONFIRM,
 # log(), fail(). Functions: restore_configs() plus the I72-A policy helpers
-# (expected_config_mode(), install_expected_config()) shared with build-selfhost.sh.
+# (expected_config_mode(), install_expected_config()), shared with
+# build-selfhost.sh and deploy-mcp-gw-safe.sh (I74-C: 3経路共有).
 #
 # Safety invariants:
 #   - Only the 6 non-secret config-<basename> allowlist entries are ever read
@@ -22,15 +23,24 @@
 #     install_expected_config() with the reviewed owner/mode policy below, so
 #     neither the caller's umask nor its identity can change the result.
 #
-# I72-A: single source of truth for the expected owner/mode of the six
-# reviewed non-secret config-<basename> entries. All six follow the same
-# policy as deploy-mcp-gw-safe.sh:322 (mcp_allowlist.toml): root:root 0644.
-# The mode is keyed by basename so an unreviewed name cannot silently inherit
-# a default. mcp_gateway.env is a secret and is deliberately absent here; it
-# stays root:root 0600 (build-selfhost.sh I52-B/I54-B).
+# I72-A / I74-C: single source of truth for the reviewed owner/mode policy.
+# This ONE table is shared by ALL THREE mcp_allowlist.toml write paths:
+#   (1) build-selfhost.sh                       - fresh deploy of config files
+#   (2) restore-local.d/configs.sh restore_configs() - .bak + restore writes
+#   (3) deploy-mcp-gw-safe.sh                   - step3 placement + rollback
+# Every path must resolve its mode via expected_config_mode() and write via
+# install_expected_config(); no path may hardcode `install -o root -g root -m`.
+# The six config-<basename> keys below are the reviewed non-secret restore
+# entries (identical to config_dest_for_base() in ../restore-local.sh); all are
+# root:root 0644. The namespaced systemd/<unit> key is a deploy-only artifact
+# used exclusively by path (3) and must never be treated as a restore entry.
+# Keying by basename prevents an unreviewed name from inheriting a default.
+# mcp_gateway.env is a secret and is deliberately absent here; it stays
+# root:root 0600 (build-selfhost.sh I52-B/I54-B).
 #
-# NOTE: build-selfhost.sh sources this file to reuse the table. Keep everything
-# at file scope free of side effects (definitions only).
+# NOTE: build-selfhost.sh and deploy-mcp-gw-safe.sh both source this file to
+# reuse the table. Keep everything at file scope free of side effects
+# (definitions only).
 declare -gA EXPECTED_CONFIG_MODE=(
   [mcp_allowlist.toml]='0644'
   [pii_patterns.toml]='0644'
@@ -38,6 +48,9 @@ declare -gA EXPECTED_CONFIG_MODE=(
   [casbin_policy.csv]='0644'
   [cedar_schema.cedarschema]='0644'
   [policies.cedar]='0644'
+  # Deploy-only (path 3), NOT a restore config-<basename> entry: the mcp-gw
+  # unit installed by deploy-mcp-gw-safe.sh is also root:root 0644.
+  [systemd/jarvis-mcp-gw.service]='0644'
 )
 
 # I72-A: read-only accessor so callers never hardcode a mode or reach into the
@@ -46,21 +59,34 @@ expected_config_mode() {
   printf '%s\n' "${EXPECTED_CONFIG_MODE["$1"]:-}"
 }
 
-# I72-A: the only writer for allowlisted configs. Explicit -o/-g/-m makes the
-# result independent of umask and caller; root writes directly, an unprivileged
-# caller goes through sudo so the outcome is identical in both cases.
+# I72-A / I74-C (b): the only writer for reviewed configs. Explicit -o/-g/-m
+# makes the result independent of umask and caller: root writes directly, an
+# unprivileged caller goes through sudo, so ownership is root:root in BOTH
+# production cases. If neither is available, FAIL CLOSED -- a mode-only install
+# would silently leave the file owned by the caller and break the root:root
+# invariant. The legacy mode-only fallback is permitted ONLY with the explicit
+# isolated-test opt-in JARVIS_RESTORE_TEST_MODE=1.
 install_expected_config() {
   local mode="$1" src="$2" dst="$3"
   if [ "$(id -u)" -eq 0 ]; then
     install -o root -g root -m "$mode" -- "$src" "$dst"
-  elif command -v sudo >/dev/null 2>&1; then
-    sudo install -o root -g root -m "$mode" -- "$src" "$dst"
-  else
-    # Isolated regression environments may not provide sudo. Keep the mode
-    # explicit there and let ownership follow the caller; production runs as
-    # root or with sudo, so the reviewed root:root policy still applies.
-    install -m "$mode" -- "$src" "$dst"
+    return $?
   fi
+  if command -v sudo >/dev/null 2>&1; then
+    sudo install -o root -g root -m "$mode" -- "$src" "$dst"
+    return $?
+  fi
+  if [ "${JARVIS_RESTORE_TEST_MODE:-0}" != "1" ]; then
+    printf '%s\n' \
+      "install_expected_config: cannot enforce root:root for ${dst} (no root, no sudo); refusing. Set JARVIS_RESTORE_TEST_MODE=1 only in isolated tests." >&2
+    return 1
+  fi
+  # Isolated regression environments only: keep the legacy mode-only fallback
+  # and state plainly that ownership is NOT enforced on this path.
+  printf '%s\n' \
+    "install_expected_config: TEST MODE fallback for ${dst} (owner left to caller; root:root NOT enforced)" >&2
+  install -m "$mode" -- "$src" "$dst"
+  return $?
 }
 
 restore_configs() {

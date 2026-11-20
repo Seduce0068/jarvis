@@ -1172,5 +1172,154 @@ else
   fail=$((fail+1))
 fi
 
+# I74-C: mcp_allowlist.toml is written by THREE paths. They must all resolve
+# their owner/mode policy from the ONE table in configs.sh. These are static
+# guards only: nothing here installs a file or changes a permission.
+perm_configs="$repo/infra/scripts/restore-local.d/configs.sh"
+perm_build="$repo/infra/scripts/build-selfhost.sh"
+perm_deploy="$repo/infra/scripts/deploy-mcp-gw-safe.sh"
+
+if grep -Fq 'declare -gA EXPECTED_CONFIG_MODE' "$perm_configs" \
+   && grep -Fq 'expected_config_mode()' "$perm_configs" \
+   && grep -Fq 'install_expected_config()' "$perm_configs" \
+   && grep -Fq '[mcp_allowlist.toml]' "$perm_configs" \
+   && grep -Fq 'ALL THREE mcp_allowlist.toml write paths' "$perm_configs"; then
+  echo "  PASS: shared EXPECTED_CONFIG_MODE table documents all 3 paths"
+  ok=$((ok+1))
+else
+  echo "  FAIL: shared owner/mode table missing from configs.sh"
+  fail=$((fail+1))
+fi
+
+# Path 1 (build): sources the shared module and uses it for the allowlist.
+# The ${...} fragments are matched literally in the sourced scripts.
+# shellcheck disable=SC2016
+if grep -Fq 'source "${SELFHOST_SCRIPT_DIR}/restore-local.d/configs.sh"' "$perm_build" \
+   && grep -Fq 'expected_config_mode "${top_config}"' "$perm_build" \
+   && grep -Fq 'install_expected_config "${top_mode}"' "$perm_build"; then
+  echo "  PASS: build path resolves allowlist mode from the shared table"
+  ok=$((ok+1))
+else
+  echo "  FAIL: build path bypassed the shared owner/mode table"
+  fail=$((fail+1))
+fi
+
+# Path 2 (restore): the .bak and the restored file use the shared helper.
+# shellcheck disable=SC2016
+if grep -Fq 'install_expected_config "$mode" "$dest" "${dest}.bak-${ts}"' "$perm_configs" \
+   && grep -Fq 'install_expected_config "$mode" "$tmp_dir/$name" "$dest"' "$perm_configs"; then
+  echo "  PASS: restore path uses shared helper for backup and restore writes"
+  ok=$((ok+1))
+else
+  echo "  FAIL: restore path lost shared-helper writes"
+  fail=$((fail+1))
+fi
+
+# Path 3 (deploy): must source the same module, resolve both modes from the
+# table, route placement AND every rollback restore through the helper, and
+# retain no hardcoded root:root 0644 allowlist/unit install.
+# shellcheck disable=SC2016
+if grep -Fq 'source "$repo/infra/scripts/restore-local.d/configs.sh"' "$perm_deploy" \
+   && grep -Fq 'expected_config_mode mcp_allowlist.toml' "$perm_deploy" \
+   && grep -Fq 'expected_config_mode systemd/jarvis-mcp-gw.service' "$perm_deploy" \
+   && grep -Fq 'install_expected_config "$allowlist_mode" "$repo_allowlist" "$allowlist"' "$perm_deploy" \
+   && grep -Fq 'install_expected_config "$allowlist_mode" "$allowlist.bak-step3-$ts" "$allowlist"' "$perm_deploy" \
+   && grep -Fq 'install_expected_config "$allowlist_mode" "$allowlist.bak-step2-$ts" "$allowlist"' "$perm_deploy" \
+   && grep -Fq 'install_expected_config "$unit_mode" "$unit.bak-step3-$ts" "$unit"' "$perm_deploy" \
+   && ! grep -Fq 'install -o root -g root -m 0644 "$repo_allowlist" "$allowlist"' "$perm_deploy" \
+   && ! grep -Fq 'install -o root -g root -m 0644 "$allowlist.bak-' "$perm_deploy" \
+   && ! grep -Fq 'install -o root -g root -m 0644 "$unit.bak-' "$perm_deploy" \
+   && ! grep -Fq 'install -o root -g root -m 0644 "$repo_unit" "$unit"' "$perm_deploy"; then
+  echo "  PASS: deploy path shares the table for placement and rollback restores"
+  ok=$((ok+1))
+else
+  echo "  FAIL: deploy path still hardcodes allowlist/unit permissions"
+  fail=$((fail+1))
+fi
+
+# I74-C (b): fail-closed when neither root nor sudo is available. The legacy
+# mode-only fallback is allowed ONLY by the explicit isolated-test opt-in.
+# Owner/mode arguments are observed with shell-function stubs inside a
+# subshell: no real install/chown/sudo runs and no permission is changed.
+perm_probe_dir="$tmp/config_perm_probe"
+mkdir -p "$perm_probe_dir/empty_bin"
+perm_probe() { # stub_uid with_sudo test_mode -> PROBE_RC / PROBE_ARGS / PROBE_ERR
+  local stub_uid="$1" with_sudo="$2" test_mode="$3"
+  local capture="$perm_probe_dir/capture.$stub_uid.$with_sudo.$test_mode"
+  local errfile="$perm_probe_dir/stderr.$stub_uid.$with_sudo.$test_mode"
+  : > "$capture"
+  (
+    # Intentionally empty PATH: this stub reproduces a host without sudo.
+    # shellcheck disable=SC2123
+    PATH="$perm_probe_dir/empty_bin"
+    export PATH
+    # shellcheck disable=SC2329
+    id() { printf '%s\n' "$stub_uid"; }
+    # shellcheck disable=SC2329
+    install() { printf 'install %s\n' "$*" >> "$capture"; return 0; }
+    if [ "$with_sudo" = 1 ]; then
+      # shellcheck disable=SC2329
+      sudo() { printf 'sudo %s\n' "$*" >> "$capture"; return 0; }
+    else
+      unset -f sudo 2>/dev/null || true
+    fi
+    if [ "$test_mode" = 1 ]; then
+      JARVIS_RESTORE_TEST_MODE=1
+      export JARVIS_RESTORE_TEST_MODE
+    else
+      unset JARVIS_RESTORE_TEST_MODE
+    fi
+    # shellcheck disable=SC1090
+    source "$perm_configs"
+    install_expected_config 0644 /fake/src /fake/dst
+  ) 2>"$errfile"
+  PROBE_RC=$?
+  PROBE_ARGS="$(< "$capture")"
+  PROBE_ERR="$(< "$errfile")"
+}
+
+# Explicit owner (-o root -g root) AND mode (-m 0644) must be passed on both
+# production paths; this is the "owner も検証" regression for finding (b).
+perm_probe 0 0 0
+if [ "$PROBE_RC" -eq 0 ] \
+   && printf '%s' "$PROBE_ARGS" | grep -Fq 'install -o root -g root -m 0644 -- /fake/src /fake/dst'; then
+  echo "  PASS: root path passes explicit root:root owner and 0644 mode"
+  ok=$((ok+1))
+else
+  echo "  FAIL: root path lost explicit owner/mode (rc=$PROBE_RC)"
+  fail=$((fail+1))
+fi
+
+perm_probe 1000 1 0
+if [ "$PROBE_RC" -eq 0 ] \
+   && printf '%s' "$PROBE_ARGS" | grep -Fq 'sudo install -o root -g root -m 0644 -- /fake/src /fake/dst'; then
+  echo "  PASS: sudo path passes explicit root:root owner and 0644 mode"
+  ok=$((ok+1))
+else
+  echo "  FAIL: sudo path lost explicit owner/mode (rc=$PROBE_RC)"
+  fail=$((fail+1))
+fi
+
+perm_probe 1000 0 0
+if [ "$PROBE_RC" -ne 0 ] \
+   && printf '%s' "$PROBE_ERR" | grep -Fq 'JARVIS_RESTORE_TEST_MODE'; then
+  echo "  PASS: no root/sudo fails closed without the explicit opt-in"
+  ok=$((ok+1))
+else
+  echo "  FAIL: no root/sudo silently degraded to mode-only install (rc=$PROBE_RC)"
+  fail=$((fail+1))
+fi
+
+perm_probe 1000 0 1
+if [ "$PROBE_RC" -eq 0 ] \
+   && printf '%s' "$PROBE_ARGS" | grep -Fq 'install -m 0644 -- /fake/src /fake/dst' \
+   && ! printf '%s' "$PROBE_ARGS" | grep -Fq 'root -g root'; then
+  echo "  PASS: isolated-test opt-in permits the documented mode-only fallback"
+  ok=$((ok+1))
+else
+  echo "  FAIL: test opt-in did not permit the legacy fallback (rc=$PROBE_RC)"
+  fail=$((fail+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

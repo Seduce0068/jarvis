@@ -10,11 +10,13 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$HOME/jarvis}"
 JARVIS_USER="${JARVIS_USER:-$(id -un)}"
 
-# I72-A: reuse the single authoritative owner/mode table from the restore
-# component instead of duplicating a second policy here. configs.sh keeps all
-# file-scope statements side-effect-free (definitions only), so sourcing it is
-# safe. Its helper routes writes through sudo when this script runs as the
-# JARVIS user, so the per-file root:root mode is identical to the restore path.
+# I72-A / I74-C: reuse the single authoritative owner/mode table from the
+# restore component instead of duplicating a second policy here. That table in
+# configs.sh is now shared by THREE paths (build-selfhost, restore_configs and
+# deploy-mcp-gw-safe) for mcp_allowlist.toml; configs.sh keeps all file-scope
+# statements side-effect-free (definitions only), so sourcing it is safe. Its
+# helper routes writes through sudo when this script runs as the JARVIS user,
+# so the per-file root:root mode is identical to the other two paths.
 SELFHOST_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 # shellcheck source=restore-local.d/configs.sh
 # Resolved at runtime via BASH_SOURCE.
