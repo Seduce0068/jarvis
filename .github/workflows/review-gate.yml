@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: review-gate-${{ github.event.inputs.pr_number }}
@@ -38,12 +39,24 @@ jobs:
         # 更新時は refs/tags/v4 の解決 SHA を再確認し、このコメントも更新する。
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          # Review the PR head, not the default branch (manual dispatch only).
+          ref: refs/pull/${{ github.event.inputs.pr_number }}/head
           fetch-depth: 0
       - name: Confirm target PR exists (read-only)
         env:
           PR_NUMBER: ${{ github.event.inputs.pr_number }}
           GH_TOKEN: ${{ github.token }}
         run: gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json number,title,state
+      - name: Install cargo-audit (pinned 0.23.0)
+        # ci-local runs check-dependency-audit.sh (Makefile:73), which fails
+        # closed with AUDIT_TOOL_MISSING when cargo-audit is absent on the
+        # runner. Mirror the pinned install in .github/workflows/ci.yml:101-113.
+        # The version probe keeps this idempotent on reused runners; --locked
+        # freezes the installer's transitive dependencies.
+        run: |
+          if ! cargo audit --version 2>/dev/null | grep -Eq '0\.23\.0([^0-9]|$)'; then
+            cargo install cargo-audit --version 0.23.0 --locked
+          fi
       - name: Run repository gates locally
         # Use the repo's own verified gate suite instead of opencode/CLI.
         # This avoids OpenCode credentials entirely while still checking
