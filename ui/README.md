@@ -33,28 +33,28 @@ CI の aarch64 クロスビルドを壊さないための独立クレートで�
 
 ```bash
 cd ~/ドキュメント/作業用/jarvis/jarvis/ui
-cargo build            # 開発ビルド
-cargo build --release  # リリースビルド
-cargo test             # 件数は固定しない。実測は cargo test の出力で確認する
-cargo clippy --all-targets -- -D warnings
+cargo build --locked             # 開発ビルド
+cargo build --release --locked   # リリースビルド
+cargo test --locked              # 件数は固定しない。実測は cargo test --locked の出力で確認する
+cargo clippy --all-targets --locked -- -D warnings
 ```
 
 テスト件数は機能追加に伴い変わるため、ここには固定値を記載しません。
-実際の件数は `cargo test`（または `make ui-test`）の出力で確認してください。
+実際の件数は `cargo test --locked`（または `make ui-test`）の出力で確認してください。
 仕様書側のテスト件数はエビデンス生成時点のスナップショットです。
 
 ## 起動
 
 ```bash
 cd ~/ドキュメント/作業用/jarvis/jarvis/ui
-cargo run
+cargo run --locked
 ```
 
 既定で `http://127.0.0.1:8081`（jarvis-policy の HTTP エンドポイント）へ
 接続します。変更する場合は環境変数を指定します。
 
 ```bash
-JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
+JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run --locked
 ```
 
 トークン認証を有効にする場合は、`JARVIS_POLICY_APPROVAL_API_TOKEN`
@@ -126,7 +126,7 @@ body="$body,\"resource\":\"tool:filesystem.read\",\"context\":{\"path\":\"README
 body="$body,\"requested_at\":$now,\"expires_at\":$exp}"
 curl -s -X POST "$base" -H 'content-type: application/json' -d "$body" &
 # コンソール起動（保留一覧を3秒ごとに取得）
-JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run
+JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run --locked
 # 検証後は必ず片付ける（pending を 0 に戻す）
 curl -s -X POST "http://127.0.0.1:8081/v1/approval/$id/deny" \
   -H 'content-type: application/json' -d '{"reason":"E2E test cleanup"}'

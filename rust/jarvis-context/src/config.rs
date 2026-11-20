@@ -724,14 +724,19 @@ impl ContextConfig {
     }
 }
 
-/// Redacted `Debug`: a derived implementation would print `admin_token` into
-/// any config dump. Both transports must never emit the token value to logs.
+/// Redacted `Debug`: a derived implementation would print `admin_token` and a
+/// userinfo-bearing `pg_url` into any config dump. Neither secret may reach
+/// logs; `pg_url()` still returns the unredacted URL for real connections.
 impl std::fmt::Debug for ContextConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ContextConfig")
             .field("grpc_addr", &self.grpc_addr)
             .field("http_addr", &self.http_addr)
-            .field("pg_url", &self.pg_url)
+            // I86-B (b): pg_url may carry userinfo (user:credential@host) and
+            // the loader deliberately accepts such URLs for real connections.
+            // Redact the whole field here so `format!("{config:?}")` cannot
+            // leak an embedded password into logs; `pg_url()` is unchanged.
+            .field("pg_url", &"<redacted>")
             .field("qdrant_url", &self.qdrant_url)
             .field("qdrant_api_key", &"<redacted>")
             .field("collection_name", &self.collection_name)
@@ -871,6 +876,27 @@ max_context_tokens = 8000
         let rendered = format!("{config:?}");
         assert!(!rendered.contains("super-secret"));
         assert!(rendered.contains("admin_token: \"<redacted>\""));
+    }
+
+    /// I86-B: a configured `pg_url` may embed userinfo, and the loader accepts
+    /// it verbatim for real connections. The manual `Debug` must redact the
+    /// whole field so a config dump cannot leak the password, while `pg_url()`
+    /// stays unchanged on the connection path.
+    #[test]
+    fn debug_output_never_contains_the_pg_url_password() {
+        let embedded = "dummy-password-42";
+        let url = format!("postgres://jarvis:{embedded}@db.internal:5432/jarvis");
+        let config = ContextConfig {
+            pg_url: url.clone(),
+            ..Default::default()
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains(embedded),
+            "pg_url userinfo/password must not appear in Debug output"
+        );
+        assert!(rendered.contains("pg_url: \"<redacted>\""));
+        assert_eq!(config.pg_url(), url, "real connection URL stays intact");
     }
 
     /// The compiled-in default must never embed a password. Auth is delegated

@@ -31,13 +31,16 @@ EOF
 }
 
 target="${1:-}"
+# I86-B (a): every cargo invocation below (--list, --list --ignored and the
+# real run) uses the committed Cargo.lock, so derived counts cannot drift with
+# a freshly resolved dependency graph. Keep --locked on every target.
 case "$target" in
-  policy)  workdir=rust; cargo_args=(test -p jarvis-policy --lib) ;;
-  mcp)     workdir=rust; cargo_args=(test -p jarvis-mcp-gw --lib) ;;
-  context) workdir=rust; cargo_args=(test -p jarvis-context --lib) ;;
-  event)   workdir=rust; cargo_args=(test -p jarvis-event --lib) ;;
-  core)    workdir=rust; cargo_args=(test -p jarvis-core --features http --lib) ;;
-  ui)      workdir=ui;   cargo_args=(test) ;;
+  policy)  workdir=rust; cargo_args=(test --locked -p jarvis-policy --lib) ;;
+  mcp)     workdir=rust; cargo_args=(test --locked -p jarvis-mcp-gw --lib) ;;
+  context) workdir=rust; cargo_args=(test --locked -p jarvis-context --lib) ;;
+  event)   workdir=rust; cargo_args=(test --locked -p jarvis-event --lib) ;;
+  core)    workdir=rust; cargo_args=(test --locked -p jarvis-core --features http --lib) ;;
+  ui)      workdir=ui;   cargo_args=(test --locked) ;;
   *) usage; exit 2 ;;
 esac
 

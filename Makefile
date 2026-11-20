@@ -150,7 +150,7 @@ lint: ## Rust script の整形・起動確認
 	@rust-script config/shell-locale.rs >/dev/null
 
 test: ## Rust workspace と rust-script のテスト
-	@cd rust && cargo test --workspace
+	@cd rust && cargo test --workspace --locked
 	@rust-script --test rust/scripts/restore.rs
 	@TERMUX_VERSION=test rust-script scripts/bootstrap/bootstrap.rs --target termux --dry-run --skip-android-mcp --source-root . --root "$(JARVIS_ROOT)"
 
