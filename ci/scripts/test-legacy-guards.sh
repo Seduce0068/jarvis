@@ -230,9 +230,17 @@ elif mode in ('scenario_shortfall', 'skipped_inflated'):
     data['results']['passed'] = short
     data['results']['failed'] = 0
     data['results']['skipped'] = skipped
-    data['notes'] = ('実測結果 ' + str(short) + ' 件。' + str(skipped) + ' ignored。'
-                     if mode == 'skipped_inflated'
-                     else '実測結果 ' + str(short) + ' 件。')
+    # Keep the original contract keywords: replacing notes wholesale would
+    # make SCENARIO_STEP_UNCOVERED fire first and mask the scenario/skip gate
+    # this tamper mode is meant to isolate.
+    notes = data['notes']
+    notes = re.sub(r'\d+([ \t]*件)', str(short) + r'\1', notes)
+    notes = re.sub(r'\d+([ \t]*passed)', str(short) + r'\1', notes)
+    if mode == 'skipped_inflated':
+        notes = re.sub(r'\d+([ \t]*ignored)', str(skipped) + r'\1', notes)
+        if 'ignored' not in notes:
+            notes += ' ' + str(skipped) + ' ignored。'
+    data['notes'] = notes
     if not index_dst:
         raise SystemExit(mode + ' needs index_dst')
     rewrite_index_passed(index_dst, os.path.basename(src), short)

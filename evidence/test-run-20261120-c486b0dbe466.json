@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:2275f47174ed04672367b6fbe9bf65255bb5508dfcbf8be6b228b0b27776234c",
-  "timestamp": "2026-11-20T01:16:33+09:00",
+  "spec_hash": "sha256:c486b0dbe466da0d69bcf7b89ba38afb1c1584a96dd3fba754fc2d87ee98997c",
+  "timestamp": "2026-11-20T09:16:28+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "GNU make + bash (make test-verify-backup + make test-backup-args)",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-backup.md",
-    "spec_hash": "sha256:2275f47174ed04672367b6fbe9bf65255bb5508dfcbf8be6b228b0b27776234c",
+    "spec_hash": "sha256:c486b0dbe466da0d69bcf7b89ba38afb1c1584a96dd3fba754fc2d87ee98997c",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -41,7 +41,10 @@
       "REQ-15",
       "REQ-16",
       "REQ-17",
-      "REQ-18"
+      "REQ-18",
+      "REQ-19",
+      "REQ-20",
+      "REQ-21"
     ]
   },
   "techniques": [
