@@ -301,6 +301,23 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
 
 ## 未決定事項
 
+- **複数 PostgreSQL DB のバックアップ／復元（Round 87 発掘、Round 95 差し戻し）**
+  - 現状: `jarvis-migrations.service` は `JARVIS_CONTEXT_PG_URL` と
+    `JARVIS_POLICY_PG_URL` の両方へ同一 migration set を適用するが、
+    `backup-local.sh` は `pg_dump -d jarvis` のみ、`restore-local.d/pg.sh` も
+    主 DB 一つしか扱わない。両 URL が意図的に別 DB を指す構成では、
+    承認履歴（`approval_requests`）と監査証跡（`audit_log` / `kill_switch`）が
+    DR 時に失われる。
+  - 現行テンプレートは同一シークレットを参照するため通常は単一 DB であり、
+    本ギャップは「コードが支持する一方で未検証の構成」でのみ顕在化する。
+  - 却下した実装（Round 95）: 追加 DB を `postgres-extra-<db>.sql.gz` /
+    `role=other` で manifest に記録し `pg.sh` で列挙する方式は、既存の
+    「複数 postgres row は ambiguous 拒否」回帰と dry-run 出力契約
+    （本番 DB 名の表示）の2点で矛盾し、10 件の回帰が失敗したため差し戻した。
+  - 判断が必要な論点: (1) 追加 DB を別 role で表現するか既存 postgres role を
+    拡張するか、(2) 主 DB と追加 DB の復元順序と片方失敗時のロールバック、
+    (3) 単一 DB セットとの後方互換を verifier のどのゲートで担保するか。
+  - 判断後に実装し、S9 の隔離統合テストで両 DB 構成の往復を検証する。
 - 本番 PostgreSQL の上書き方式: `DROP/CREATE` か、新規 DB 復元後の alias/接続切替か。
 - 本番 Qdrant の上書き方式: 同一コレクションへの API 復元か、新規コレクション +
   alias 切替か（snapshot の互換性は作成元と同一 minor 以降という制約あり）。
