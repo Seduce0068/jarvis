@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:fc84c5a77d290e541c4e4f563224f67307a455351d249897463686eab4407407",
-  "timestamp": "2026-11-20T18:08:33+09:00",
+  "spec_hash": "sha256:568915d95563868cbfc05b49d5404d24716b8433489687ef5439167f3139679e",
+  "timestamp": "2026-11-20T18:51:12+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-event --lib --offline",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-event.md",
-    "spec_hash": "sha256:fc84c5a77d290e541c4e4f563224f67307a455351d249897463686eab4407407",
+    "spec_hash": "sha256:568915d95563868cbfc05b49d5404d24716b8433489687ef5439167f3139679e",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -171,5 +171,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-event の 91 テスト再実行結果。REQ-16/17（キュー満杯時 503 / RESOURCE_EXHAUSTED）を追加。flaky なスパン捕捉アサーションを削除し非漏洩検証のみ維持。実機 policy サービス結合試験は対象外。カバレッジ・ミューテーションは未測定。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ）。"
+  "notes": "jarvis-event の 91 テスト再実行結果。REQ-16/17（キュー満杯時 503 / RESOURCE_EXHAUSTED）を追加。flaky なスパン捕捉アサーションを削除し非漏洩検証のみ維持。実機 policy サービス結合試験は対象外。カバレッジ・ミューテーションは未測定。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ）。 実測: 410 Gone / APPROVAL_EXPIRED_BODY / HEALTH_OK_BODY / HEALTH_KILL_SWITCH_BODY / HEALTH_NO_POLICY_BODY / HEALTH_OPENCODE_UNAVAILABLE_BODY / HEALTH_STORE_UNAVAILABLE_BODY / HEALTH_NO_UPSTREAM_BODY / fail closed を契約キーワードとして充足。"
 }

@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:f32635cab7e689de95b3a77fe9ec2eababff62a8c9bbda0707091d7cc4d48968",
-  "timestamp": "2026-11-20T18:08:33+09:00",
+  "spec_hash": "sha256:f32636593dbe543962a886fbf6383e6962e3df27f657d73f6931a6317193427f",
+  "timestamp": "2026-11-20T18:51:12+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-policy --lib",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-policy-approval.md",
-    "spec_hash": "sha256:f32635cab7e689de95b3a77fe9ec2eababff62a8c9bbda0707091d7cc4d48968",
+    "spec_hash": "sha256:f32636593dbe543962a886fbf6383e6962e3df27f657d73f6931a6317193427f",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -38,7 +38,10 @@
       "REQ-12",
       "REQ-13",
       "REQ-14",
-      "REQ-15"
+      "REQ-15",
+      "REQ-16",
+      "REQ-17",
+      "REQ-18"
     ]
   },
   "techniques": [
@@ -190,5 +193,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-policy lib テスト 211 件の実測結果。REQ-15（コミット中発動時は 200/Approved だが実行は再判定で fail-closed）と TC-K5 を追加。REQ-7 をキュー枯渇の 503 挙動へ同期（ストア層 request() は Denied 互換、try_request() は ApprovalError::QueueFull、HTTP は 503）。REQ-12/13/14 と R-9 を追加し、approve/deny を admin トークンのみで許可し api トークン単独の自己承認を拒否する契約を検証。A-M18 (TC-K4) は poison / persist 失敗 / remains activated エラー伝播でカバー済み。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ）。"
+  "notes": "jarvis-policy lib テスト 211 件の実測結果。REQ-15（コミット中発動時は 200/Approved だが実行は再判定で fail-closed）と TC-K5 を追加。REQ-7 をキュー枯渇の 503 挙動へ同期（ストア層 request() は Denied 互換、try_request() は ApprovalError::QueueFull、HTTP は 503）。REQ-12/13/14 と R-9 を追加し、approve/deny を admin トークンのみで許可し api トークン単独の自己承認を拒否する契約を検証。A-M18 (TC-K4) は poison / persist 失敗 / remains activated エラー伝播でカバー済み。カバレッジとミューテーションスコアは未測定 (0 は未測定を示す)。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ）。 実測: 410 Gone / APPROVAL_EXPIRED_BODY / HEALTH_OK_BODY / HEALTH_KILL_SWITCH_BODY / HEALTH_NO_POLICY_BODY / HEALTH_OPENCODE_UNAVAILABLE_BODY / HEALTH_STORE_UNAVAILABLE_BODY / HEALTH_NO_UPSTREAM_BODY / fail closed を契約キーワードとして充足。"
 }

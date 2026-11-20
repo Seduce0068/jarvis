@@ -2606,3 +2606,25 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: tokio::spawn 所有値化、証跡再生成（4件）、index／Runbook の
   参照同期、全ゲート再検証。
+
+### Round 94（R4 で修正済み）
+
+- [x] approval.rs:712 の approver task へ5sデッドライン＋タイムアウト回帰。
+- [x] mcp-gw の期限切れ理由を共有定数 APPROVAL_EXPIRED_BODY へ、UI 仕様へ
+      410 契約、policy 仕様へ /health 503 degraded 契約を追加。
+- [x] 第3のデプロイ経路 install-mcp-gateway.sh へ上限付きリトライ＋degraded
+      検出＋drift 強制ゲート、静的ガード追加。
+- [x] deploy.rs の curl へ --max-time 2、degraded 判定を whitespace-tolerant
+      化、pretty-printed 回帰を Rust/shell 双方へ追加。
+- [x] check-evidence に新契約キーワード、event の未閉鎖 gherkin 修正、
+      specs/index／local-operations-runbook を現行 unit へ同期。
+- [x] 5証跡を実測再生成（policy 211 / event 91 / context 181 / mcp 153 /
+      ui 85）、REQ と notes キーワードを同期。
+
+### Round 94 の残り指摘（未対応）
+
+- [ ] major 更新待ち29件（再評価 2026-12-20）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: 5証跡再生成、Runbook 参照同期、全ゲート再検証。
