@@ -31,20 +31,39 @@ generated:
 [backup-local.sh](../../infra/scripts/backup-local.sh) の成果物を直接入力とし、
 OCI / rclone / `op` に依存しない。設計と決定理由は
 [ローカル復元設計](local-restore-design.md) に記載（本 Runbook と相互リンク）。
-後述の手順 1〜3 はレガシー手順としてそのまま保持する。
+後述の手順 1〜3 はレガシー手順としてそのまま保持する（実行ユーザーの扱いの違いは下記を参照）。
+
+**実行ユーザーは root に固定する。** バックアップ dir は `postgres:postgres 0700`
+（[install-backup-timer.sh:163-165](../../infra/scripts/install-backup-timer.sh)）であり、
+一般ユーザー（`koppe` 等）は manifest を読めない。逆に `sudo -u postgres` で
+スクリプト全体を起動すると polkit により `systemctl stop` が拒否される。
+したがって下記 3 コマンドはすべて `sudo bash ...`（root）で実行する。
+DB 接続はスクリプト内の `psql()` ラッパーが
+`sudo -u postgres psql` へ集約するため、利用者が `sudo -u postgres` を
+明示する必要はない（[pg.sh](../../infra/scripts/restore-local.d/pg.sh) の
+`psql` 呼び出しも export された同ラッパー経由になる）。
 
 ### 三段の安全レベル（dry-run → 隔離 → 本番）
 
 ```bash
 # 1) dry-run: 検証と計画のみ。ファイル書き込み・サービス停止なし。
-bash infra/scripts/restore-local.sh --latest          # restore-local --latest
+sudo bash infra/scripts/restore-local.sh --latest
 
 # 2) --apply: 検証ゲート通過後に隔離先へ復元（本番データは触らない）。
-bash infra/scripts/restore-local.sh --latest --apply
+sudo bash infra/scripts/restore-local.sh --latest --apply
 
 # 3) --apply --confirm: 本番上書き（破壊的）。実行前にユーザー承認が必要。
-bash infra/scripts/restore-local.sh --latest --apply --confirm
+sudo bash infra/scripts/restore-local.sh --latest --apply --confirm
 ```
+
+**起動時 precondition（fail-closed）。** 書き込みの前に以下を検査し、不足時は
+`[restore-local] PRECONDITION FAIL: <code>: ...` を出して終了する（終了コード 1、書き込みゼロ）。
+
+| code | 検査内容 |
+| --- | --- |
+| `BACKUP_DIR_UNREADABLE` | `BACKUP_ROOT`（既定 `/var/lib/postgresql/jarvis-backups`）が読める・辿れる |
+| `PSQL_UNAVAILABLE` | `psql` が見つかり、root 時は postgres OS ロールで接続できる |
+| `SYSTEMCTL_STOP_DENIED` | `systemctl` が使え、root または非対話 sudo で stop 権限がある |
 
 **`jarvis-backup.timer` の停止は必須前提**: `jarvis-backup.timer` は
 `OnCalendar=daily` + `Persistent=true`
@@ -91,6 +110,10 @@ Qdrant は**停止せず HTTP API で復元**する。`restore-local.sh` は Qdr
 # 一覧（postgres ユーザーで実行）
 sudo -u postgres bash /opt/jarvis/scripts/verify-backup.sh
 ```
+
+ここでの `sudo -u postgres` は**読み取り専用の verify-backup.sh に限る**。
+復元ドライバの推奨経路は前述のとおり root（`sudo bash ...`）であり、
+`sudo -u postgres bash infra/scripts/restore-local.sh` は stop 権限の点で成立しない。
 
 最新 set のパスを確認し、以降の手順で `$SET` に設定する。
 
@@ -206,7 +229,10 @@ rm -rf "$TMP"
       （下記「jarvis-migrations.service の配置・有効化・検証」を参照）
 
 本番 `jarvis` DB への上書きは、`jarvis_restore_test` での検証が成功した
-場合のみ、明示的に `psql -d jarvis` を実行して行う。
+場合のみ、明示的に `sudo -u postgres psql -d jarvis` を実行して行う。
+`sudo bash infra/scripts/restore-local.sh --apply --confirm` を使う場合は
+内部の `psql()` ラッパーが同じ postgres OS ロール接続を行うため、
+手動の psql 実行は不要である。
 
 ## 補足: make verify-backup の扱い（2026-11-18 更新）
 
@@ -317,8 +343,8 @@ systemctl is-active jarvis-policy
 curl -fsS http://127.0.0.1:8081/health
 ```
 
-- 復元後の再起動（`restore-local.sh --apply --confirm` の後）にもこの確認を
-  適用する。`bws.env` が無いと migration unit は起動できないため、
+- 復元後の再起動（`sudo bash infra/scripts/restore-local.sh --apply --confirm`
+  の後）にもこの確認を適用する。`bws.env` が無いと migration unit は起動できないため、
   「本番反映」チェックリストの `bws.env` 項目と併せて確認する。
 - `failed` の場合は `journalctl -u jarvis-migrations -n 50 --no-pager` で
   原因を確認する。S9 演習・BK-2 timer 再適用の手順とは独立に実行できるが、
