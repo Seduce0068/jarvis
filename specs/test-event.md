@@ -52,6 +52,11 @@ status: draft
 | REQ-15 | HA WebSocket の state_changed を解析し、非 event は無視する |
 | REQ-16 | `/v1/events` はキュー満杯時に WARN を出し 503 を返す |
 | REQ-17 | gRPC `EmitEvent` はキュー満杯時に WARN を出し RESOURCE_EXHAUSTED を返す |
+| REQ-18 | `/health` は HEALTH_OK_BODY(200) または HEALTH_OPENCODE_UNAVAILABLE_BODY(503) のみを返し、未知本文は fail-closed |
+
+REQ-18 の固定本文は共通の `HEALTH_OK_BODY` と本サービス固有の
+`HEALTH_OPENCODE_UNAVAILABLE_BODY` の 2 種類に閉じる。監視側はこの 2 本文への
+完全一致以外を不完全 probe として fail-closed に倒す。
 
 ## Risk & tier
 
@@ -65,6 +70,7 @@ status: draft
 | R-6 | 停止時の closed channel で panic する | T2 | unit >= 0.80 |
 | R-7 | policy 到達不能時に自動応答が fail-open する | T1 | unit >= 0.90 |
 | R-8 | source/correlation 欠落で追跡性が失われる | T3 | unit >= 0.60 |
+| R-9 | /health 本文が改変・未知形状になり下流停止が見逃される | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -87,6 +93,7 @@ TD3 (test case) の順で導出した。
 | state transition testing | 5.2.8 | open -> full -> closed |
 | scenario testing | 5.2.9 | webhook -> emit -> policy gate |
 | error guessing | 5.4.1 | 空 payload、closed receiver、未知 source |
+| contract testing | 5.2.12 | /health の固定本文と OpenCode 連動 degraded 契約 |
 
 カバレッジ測定は 29119-4:2021 Clause 6 に従い、等価クラス・境界値・
 分岐を記録する。ミューテーションスコアは本スライスでは未測定。
@@ -208,6 +215,32 @@ Scenario: TC-E1（policy 到達不可 fail-closed）と TC-E2
 回帰テストを追加しカバー済み（24 テスト）。
 実機 policy サービスを用いた結合試験は対象外。
 
+### /health 契約 (REQ-18)
+
+```gherkin
+Scenario: TC-HC1 /health healthy の固定本文
+  Given OpenCode への到達性 probe が成功する
+  When GET /health を呼ぶ
+  Then status は 200 で本文は HEALTH_OK_BODY と完全バイト一致する
+  Then Content-Type は application/json で reason キーは無い
+```
+
+```gherkin
+Scenario: TC-HC2 /health degraded の固定本文
+  Given OpenCode が到達不可または probe がタイムアウトする
+  When GET /health を呼ぶ
+  Then status は 503 で本文は HEALTH_OPENCODE_UNAVAILABLE_BODY と完全バイト一致する
+  Then reason は opencode_unavailable 固定で入力や接続情報を本文に出さない
+```
+
+```gherkin
+Scenario: TC-HC3 未知本文の fail-closed 拒否
+  Given 中継が本文を書き換える（余分/重複キー、未知 reason、前後空白）または status を改変する
+  When 監視側がその probe を既知 2 本文へ照合する
+  Then 完全一致しない本文は OK と分類せず fail-closed（停止側）へ倒す
+  Then event の /health は既知 2 本文以外を生成せず、未知本文を返さない
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -231,7 +264,42 @@ Scenario: TC-E1（policy 到達不可 fail-closed）と TC-E2
 | TC-E1 | REQ-13 | v5.0.0-V8.3.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-E2 | REQ-14 | v5.0.0-V16.2.4 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T3 |
 | TC-E3 | REQ-15 | - | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.9 | T2 |
+| TC-HC1 | REQ-18 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.12 | T1 |
+| TC-HC2 | REQ-18 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.12 | T1 |
+| TC-HC3 | REQ-18 | v5.0.0-V16.5.1 | SP800-53r5.2/SI-4 | ATE_COV.2 | 5.4.1 | T1 |
 
 ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではない)。
 REQ-1〜REQ-15 と TC-W1〜W4 / TC-B1〜B4 / TC-E1〜E3 を網羅する。
 REQ-16 / REQ-17 と TC-B5 / TC-B6 は満杯時の API 拒否契約を網羅する。
+REQ-18 と TC-HC1〜TC-HC3 は `/health` の固定本文契約を網羅する。
+
+## 既存テストとの対応
+
+`/health` 契約は [http.rs](../rust/jarvis-event/src/http.rs) の
+`health_response` / `health` / `opencode_reachable` が実装する。根拠となる
+テスト関数は `health_uses_core_ok_body_and_fixed_503_degraded_body`
+（200 は `HEALTH_OK_BODY`、503 は `HEALTH_OPENCODE_UNAVAILABLE_BODY` の
+バイト一致と `application/json` を pin）、
+`opencode_probe_flags_a_released_loopback_port`、
+`opencode_probe_accepts_a_local_listener_stub`、
+`health_probe_url_comes_from_config_not_direct_env` である。
+
+固定 BODY 定数は [jarvis-core/src/lib.rs](../rust/jarvis-core/src/lib.rs) の
+`HEALTH_OK_BODY` が共通で、degraded 側は本サービスの
+`HEALTH_OPENCODE_UNAVAILABLE_BODY` が `HEALTH_STATUS_DEGRADED` 語彙と
+reason `opencode_unavailable` を保持する。core 側の pin は
+`health_wire_bodies_pin_the_wire_contract` と
+`health_status_vocabulary_pins_the_wire_contract` が担う。
+
+未知本文の fail-closed は共有の分類機構で担保する。
+[policy_client.rs](../ui/src/policy_client.rs) の
+`health_probe_unexpected_200_body_fails_closed` /
+`health_probe_unexpected_503_body_fails_closed` /
+`health_probe_duplicate_key_body_fails_closed` /
+`health_probe_extra_key_body_fails_closed` /
+`health_probe_unknown_shape_fails_closed` /
+`health_probe_padded_body_fails_closed` が、既知本文への完全一致以外を
+停止側へ倒すことを検証する。policy 専用の health 契約
+（`specs/test-ui.md:80-84`）は変更しない。
+
+spec_hash の変更に伴う証跡再生成は親が行う。本エージェントは証跡を変更しない。

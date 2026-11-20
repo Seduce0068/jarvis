@@ -44,7 +44,7 @@ status: draft
 | REQ-7 | `max_pending` 超過はストア層で Denied 互換、HTTP では 503 を返す |
 | REQ-8 | 上限境界は cap-1 受付、cap 受付、cap+1 拒否 |
 | REQ-9 | 同一 ID の再登録は元の保留を守り Denied する |
-| REQ-10 | 二重決定 409、未知名 404、不正 UUID 400、競合は決定優先 |
+| REQ-10 | 二重決定 409、未知名 404、不正 UUID 400、期限切れは 410 Gone + 固定本文 `APPROVAL_EXPIRED_BODY`、競合は決定優先 |
 | REQ-11 | RwLock poison / persist 失敗で arm し、解除失敗を返す |
 | REQ-12 | 承認トークンは API scope と admin scope に分離され、approve/deny は admin トークンでのみ成功する |
 | REQ-13 | API トークンのみの呼び出しは request/list/status で成功し、approve/deny では 401 となり自己承認が拒否される |
@@ -276,6 +276,17 @@ Scenario: TC-D2 決定の排他とエラー応答
   Then 決定値が Expired より優先される
 ```
 
+```gherkin
+Scenario: TC-D3 期限切れ要求の 410 Gone (REQ-10)
+  Given 決定期限を過ぎた保留要求 ID=X が pending で残っている
+  When 期限切れの ID=X を approve または deny する
+  Then 409 ではなく 410 Gone を返す
+  And 本文は固定本文 APPROVAL_EXPIRED_BODY (`approval request expired`) で 409 本文と一致しない
+  And 決定はスタンプされず watch 通知も出ず status は pending のまま
+  When 期限切れと kill switch 発動が競合する
+  Then kill switch の 409 が優先され halt が残留する
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -295,6 +306,7 @@ Scenario: TC-D2 決定の排他とエラー応答
 | TC-Q2 | REQ-8 | v5.0.0-V2.3.2 | SP800-53r5.2/SC-5 | ATE_COV.2 | 5.2.3 | T2 |
 | TC-D1 | REQ-9 | v5.0.0-V15.4.2 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T1 |
 | TC-D2 | REQ-10 | v5.0.0-V2.3.4 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T2 |
+| TC-D3 | REQ-10 | v5.0.0-V2.3.4 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.2.8 | T2 |
 
 未適用列は `-` ではなく、全行に基準 ID を割り当てた。
 ASVS は v5.0.0、SP 800-53 は Release 5.2、CC は ISO/IEC 15408-3:2022
@@ -329,3 +341,35 @@ I46-A (Round 44) の commit_gate 1 回化は
 エビデンス生成時点のスナップショットであり、現時点の実測値ではない。
 実測は `cargo test` の出力で確認し、エビデンス JSON の再生成は
 本タスクの範囲外（別途実施）とする。
+
+### 期限切れ 410 の根拠 (TC-D3 / REQ-10)
+
+既存 TC-D2（REQ-10、決定エラー応答）の分岐として、期限切れを 410 Gone
+（固定本文 `APPROVAL_EXPIRED_BODY`）に分離する TC-D3 を追加した。
+根拠となる既存テスト関数は次のとおりで、新規テスト関数の追加は不要。
+
+- [http.rs](../rust/jarvis-policy/src/http.rs) の
+  `expired_approval_maps_to_gone_without_reusing_409_bodies`
+  — `ApprovalError::Expired` が 410 Gone へ写像され、固定本文が
+  `ALREADY_DECIDED` / `KILL_SWITCH` の 409 本文と不一致であることを検証。
+- [approval.rs](../rust/jarvis-policy/src/approval.rs) の
+  `expired_decide_reports_expired_without_stamping_or_committing`
+  — 期限切れ決定がスタンプ・永続化・watch 通知を行わないことを検証。
+- [jarvis-core/src/lib.rs](../rust/jarvis-core/src/lib.rs) の
+  `approval_expired_body_pins_the_wire_contract`
+  — 固定本文 `approval request expired` の正典をピン留め。
+
+### エビデンス再生成手順（親が実行）
+
+本仕様の変更で `spec_hash` が変わるため、
+`evidence/test-run-20261120-79cf268a2b05.json` は古くなる。
+[再生成 Runbook](../docs/integration/evidence-regeneration.md) の 7 ステップに
+従い、親が以下を実行する（本エージェントは証跡を変更しない）。
+
+1. `sha256sum specs/test-policy-approval.md` で新ハッシュを取得する。
+2. `cd rust && cargo test -p jarvis-policy --lib --locked` を実測する。
+3. evidence JSON の `spec_hash` と `test_basis_ref.spec_hash` の両方を更新する。
+4. `results` / `timestamp` / `notes` を実測へ同期する（REQ 集合は REQ-1〜15 のまま）。
+5. ファイル名を `test-run-YYYYMMDD-<新ハッシュ先頭12文字>.json` へ変更する。
+6. `evidence/index.md` の `[run-policy]` リンクと件数を更新する。
+7. `make check-evidence` で `ok=6 errors=0` を確認する。

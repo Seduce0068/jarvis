@@ -49,9 +49,14 @@ status: draft
 | REQ-12 | `attach_scores` が Qdrant のスコアを `MemoryEntry.score` へ付与し、順序変更後も id とスコアが対応する |
 | REQ-13 | スコア 0 は `Some(0.0)`、ランク外は `None` とし、両者を区別する |
 | REQ-14 | 同梱 TOML が `PiiConfig` スキーマに適合し、14 パターンで AWS/GitHub/JWT を redact する |
+| REQ-15 | `/health` は HEALTH_OK_BODY(200) または HEALTH_STORE_UNAVAILABLE_BODY(503) のみを返し、未知本文は fail-closed |
 
 `MemoryEntry.score` は `Option<f32>` で serde default を持ち、
 legacy JSON からスコアが欠落しても後方互換で読める。
+
+REQ-15 の固定本文は共通の `HEALTH_OK_BODY` と本サービス固有の
+`HEALTH_STORE_UNAVAILABLE_BODY` の 2 種類に閉じる。監視側はこの 2 本文への
+完全一致以外を不完全 probe として fail-closed に倒す。
 
 ## Risk & tier
 
@@ -66,6 +71,7 @@ legacy JSON からスコアが欠落しても後方互換で読める。
 | R-7 | 予算超過で必要な event データまで失われる | T3 | unit >= 0.60 |
 | R-8 | refetch でスコアが失われ関連度が壊れる / 0 と欠落が混同される | T2 | unit >= 0.80 |
 | R-9 | 設定スキーマ不整合で同梱 14 パターンが黙って失われる | T1 | unit >= 0.90 |
+| R-10 | /health 本文が改変・未知形状になりストア停止が見逃される | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -88,7 +94,7 @@ TD3 (test case) の順で導出した。
 | metamorphic testing | 5.2.11 | PG 行順を変えても reorder 結果は不変 |
 | scenario testing | 5.2.9 | build_context の組み立て〜truncate |
 | error guessing | 5.4.1 | 不正 TOML、欠損行、余分な行 |
-| contract testing | 5.2.12 | 同梱 TOML のキー構造と `PiiConfig` の一致 |
+| contract testing | 5.2.12 | 同梱 TOML のキー構造と `PiiConfig` の一致、`/health` 固定本文 |
 
 カバレッジ測定は 29119-4:2021 Clause 6 に従い、等価クラス・境界値・
 分岐を記録する。ミューテーションスコアは本スライスでは未測定。
@@ -222,6 +228,32 @@ Scenario: TC-C2 トークン予算の境界
   Then memories/recent は空配列になり event は残る
 ```
 
+### /health 契約 (REQ-15)
+
+```gherkin
+Scenario: TC-HC1 /health healthy の固定本文
+  Given PostgreSQL と Qdrant がともに到達可能である
+  When GET /health を呼ぶ
+  Then status は 200 で本文は HEALTH_OK_BODY と完全バイト一致する
+  Then Content-Type は application/json で reason キーは無い
+```
+
+```gherkin
+Scenario: TC-HC2 /health degraded の固定本文
+  Given いずれかのストアが到達不可である
+  When GET /health を呼ぶ
+  Then status は 503 で本文は HEALTH_STORE_UNAVAILABLE_BODY と完全バイト一致する
+  Then reason は store_unavailable 固定で接続情報やエラー文を本文に出さない
+```
+
+```gherkin
+Scenario: TC-HC3 未知本文の fail-closed 拒否
+  Given 中継が本文を書き換える（余分/重複キー、未知 reason、前後空白）または status を改変する
+  When 監視側がその probe を既知 2 本文へ照合する
+  Then 完全一致しない本文は OK と分類せず fail-closed（停止側）へ倒す
+  Then context の /health は既知 2 本文以外を生成せず、未知本文を返さない
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -241,10 +273,14 @@ Scenario: TC-C2 トークン予算の境界
 | TC-S2 | REQ-13 | - | - | ATE_COV.2 | 5.2.3 | T2 |
 | TC-C | REQ-10 | v5.0.0-V14.2.4 | SP800-53r5.2/SC-28 | ATE_FUN.1 | 5.2.9 | T1 |
 | TC-C2 | REQ-11 | - | - | ATE_FUN.1 | 5.2.3 | T3 |
+| TC-HC1 | REQ-15 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.12 | T1 |
+| TC-HC2 | REQ-15 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.12 | T1 |
+| TC-HC3 | REQ-15 | v5.0.0-V16.5.1 | SP800-53r5.2/SI-4 | ATE_COV.2 | 5.4.1 | T1 |
 
 順序保持は機能的正確性の要件であり、ASVS / SP 800-53 に直接対応する
 要件がない行は `-` とした (空欄ではない)。それ以外は ASVS を v5.0.0、
 SP 800-53 を Release 5.2、CC を ISO/IEC 15408-3:2022 の構成要素 ID とする。
+REQ-15 と TC-HC1〜TC-HC3 は `/health` の固定本文契約を網羅する。
 
 ## 既存テストとの対応
 
@@ -260,3 +296,30 @@ redact の回帰を 2 件追加した。実行結果は親が再生成する証�
 TC-S1 / TC-S2 は `builder.rs` の純粋テスト（Qdrant/PostgreSQL 接続なし）で
 カバー済み。TC-P3 の `[X]` はテスト用 replacement を Given で明示した。
 実機 DB/Qdrant を用いる結合試験は対象外として未検証のままとする。
+
+`/health` 契約は [http.rs](../rust/jarvis-context/src/http.rs) の
+`health_response` / `health` と `MemoryBackend::downstream_available` が実装する。
+根拠となるテスト関数は `health_uses_core_ok_body_and_fixed_503_degraded_body`
+（200 は `HEALTH_OK_BODY`、503 は `HEALTH_STORE_UNAVAILABLE_BODY` のバイト一致
+と `application/json` を pin）と `health_handler_fails_closed_for_unavailable_backend`
+（到達不可 backend でハンドラが 503 固定本文を返すことを確認）である。
+
+固定 BODY 定数は [jarvis-core/src/lib.rs](../rust/jarvis-core/src/lib.rs) の
+`HEALTH_OK_BODY` が共通で、degraded 側は本サービスの
+`HEALTH_STORE_UNAVAILABLE_BODY` が `HEALTH_STATUS_DEGRADED` 語彙と
+reason `store_unavailable` を保持する。core 側の pin は
+`health_wire_bodies_pin_the_wire_contract` と
+`health_status_vocabulary_pins_the_wire_contract` が担う。
+
+未知本文の fail-closed は共有の分類機構で担保する。
+[policy_client.rs](../ui/src/policy_client.rs) の
+`health_probe_unexpected_200_body_fails_closed` /
+`health_probe_unexpected_503_body_fails_closed` /
+`health_probe_duplicate_key_body_fails_closed` /
+`health_probe_extra_key_body_fails_closed` /
+`health_probe_unknown_shape_fails_closed` /
+`health_probe_padded_body_fails_closed` が、既知本文への完全一致以外を
+停止側へ倒すことを検証する。policy 専用の health 契約
+（`specs/test-ui.md:80-84`）は変更しない。
+
+spec_hash の変更に伴う証跡再生成は親が行う。本エージェントは証跡を変更しない。

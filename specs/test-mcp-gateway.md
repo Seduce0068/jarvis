@@ -56,6 +56,11 @@ status: draft
 | REQ-19 | 設定済み `[[upstreams]]` はリスナ起動前に登録し、1件でも失敗すれば起動を中止する |
 | REQ-20 | 終了シグナルでリスナを即時停止し、in-flight を drain せず正常完了と主張しない |
 | REQ-21 | 全 exit 経路（早期 return を含む）で tracer を shutdown する |
+| REQ-22 | `/health` は HEALTH_OK_BODY(200) または HEALTH_NO_UPSTREAM_BODY(503) のみを返し、未知本文は fail-closed |
+
+REQ-22 の固定本文は共通の `HEALTH_OK_BODY` と本サービス固有の
+`HEALTH_NO_UPSTREAM_BODY` の 2 種類に閉じる。監視側はこの 2 本文への
+完全一致以外を不完全 probe として fail-closed に倒す。
 
 ## Risk & tier
 
@@ -73,6 +78,7 @@ status: draft
 | R-10 | admin token 比較がタイミング依存/空値通過し制御面が乗っ取られる | T1 | unit >= 0.90 |
 | R-11 | upstream 登録失敗を無視し機能欠落のまま起動する | T2 | unit >= 0.80 |
 | R-12 | 終了時に in-flight を正常完了と誤主張 / tracer が未 shutdown | T2 | unit >= 0.80 |
+| R-13 | /health 本文が改変・未知形状になり upstream 未登録が見逃される | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -96,6 +102,7 @@ TD3 (test case) の順で導出した。
 | state transition testing | 5.2.8 | 承認待ち -> Approved/Denied/Expired |
 | scenario testing | 5.2.9 | HTTP/MCP 入口から実行までの往復 |
 | error guessing | 5.4.1 | allowlist 破損、kill switch 割込み |
+| contract testing | 5.2.12 | /health の固定本文と upstream 連動 degraded 契約 |
 
 カバレッジ測定は 29119-4:2021 Clause 6 に従い、等価クラス・境界値・
 分岐を記録する。ミューテーションスコアは本スライスでは未測定。
@@ -300,6 +307,32 @@ Scenario: TC-E4 即時停止と tracer 完了
   Then すべての exit 経路で tracer が shutdown される
 ```
 
+### /health 契約 (REQ-22)
+
+```gherkin
+Scenario: TC-HC1 /health healthy の固定本文
+  Given upstream 未設定（native-only）または設定済み upstream が起動前に登録済み
+  When GET /health を呼ぶ
+  Then status は 200 で本文は HEALTH_OK_BODY と完全バイト一致する
+  Then Content-Type は application/json で reason キーは無い
+```
+
+```gherkin
+Scenario: TC-HC2 /health degraded の固定本文
+  Given 設定済み upstream がリスナ起動前に登録されていない
+  When GET /health を呼ぶ
+  Then status は 503 で本文は HEALTH_NO_UPSTREAM_BODY と完全バイト一致する
+  Then reason は no_upstream 固定で upstream 出力や要求データを本文に出さない
+```
+
+```gherkin
+Scenario: TC-HC3 未知本文の fail-closed 拒否
+  Given 中継が本文を書き換える（余分/重複キー、未知 reason、前後空白）または status を改変する
+  When 監視側がその probe を既知 2 本文へ照合する
+  Then 完全一致しない本文は OK と分類せず fail-closed（停止側）へ倒す
+  Then gateway の /health は既知 2 本文以外を生成せず、tool を実行しない
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -326,10 +359,14 @@ Scenario: TC-E4 即時停止と tracer 完了
 | TC-E3 | REQ-19 | v5.0.0-V16.5.3 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-E4 | REQ-20 | v5.0.0-V16.5.1 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T2 |
 | TC-E4 | REQ-21 | v5.0.0-V16.5.1 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T2 |
+| TC-HC1 | REQ-22 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.12 | T1 |
+| TC-HC2 | REQ-22 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.2.12 | T1 |
+| TC-HC3 | REQ-22 | v5.0.0-V16.5.1 | SP800-53r5.2/SI-4 | ATE_COV.2 | 5.4.1 | T1 |
 
 未適用列は `-` ではなく、全行に基準 ID を割り当てた。
 ASVS は v5.0.0、SP 800-53 は Release 5.2、CC は ISO/IEC 15408-3:2022
-の構成要素 ID を使用する。
+の構成要素 ID を使用する。REQ-22 と TC-HC1〜TC-HC3 は `/health` の
+固定本文契約を網羅する。
 
 ## 既存テストとの対応
 
@@ -345,3 +382,31 @@ TC-E1〜TC-E4 は [sandbox.rs](../rust/jarvis-mcp-gw/src/sandbox.rs)、
 [config.rs](../rust/jarvis-mcp-gw/src/config.rs)、
 [main.rs](../rust/jarvis-mcp-gw/src/main.rs) の回帰テストに対応する。
 実測件数は `evidence/` の test-run JSON を参照（仕様更新後は再実行が必要）。
+
+`/health` 契約は [http.rs](../rust/jarvis-mcp-gw/src/http.rs) の
+`health_response` / `health` / `upstreams_registered` が実装する。根拠となる
+テスト関数は `health_uses_core_ok_body_and_fixed_503_degraded_body`
+（200 は `HEALTH_OK_BODY`、503 は `HEALTH_NO_UPSTREAM_BODY` のバイト一致と
+`application/json` を pin）、`native_only_gateway_has_no_upstream_degradation`、
+`configured_upstream_without_registration_is_degraded`、
+`admin_token_gate_exempts_health_and_metrics` である。
+
+固定 BODY 定数は [jarvis-core/src/lib.rs](../rust/jarvis-core/src/lib.rs) の
+`HEALTH_OK_BODY` が共通で、degraded 側は本サービスの
+`HEALTH_NO_UPSTREAM_BODY` が `HEALTH_STATUS_DEGRADED` 語彙と
+reason `no_upstream` を保持する。core 側の pin は
+`health_wire_bodies_pin_the_wire_contract` と
+`health_status_vocabulary_pins_the_wire_contract` が担う。
+
+未知本文の fail-closed は共有の分類機構で担保する。
+[policy_client.rs](../ui/src/policy_client.rs) の
+`health_probe_unexpected_200_body_fails_closed` /
+`health_probe_unexpected_503_body_fails_closed` /
+`health_probe_duplicate_key_body_fails_closed` /
+`health_probe_extra_key_body_fails_closed` /
+`health_probe_unknown_shape_fails_closed` /
+`health_probe_padded_body_fails_closed` が、既知本文への完全一致以外を
+停止側へ倒すことを検証する。policy 専用の health 契約
+（`specs/test-ui.md:80-84`）は変更しない。
+
+spec_hash の変更に伴う証跡再生成は親が行う。本エージェントは証跡を変更しない。

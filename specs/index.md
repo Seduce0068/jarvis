@@ -6,7 +6,7 @@ JARVIS のテスト仕様の索引です。
 ## 仕様一覧
 
 - [test-policy-approval.md](test-policy-approval.md)
-  — jarvis-policy 承認フロー テスト仕様。kill switch / トークン認証 / キュー上限 / 重複 ID の動的試験設計。
+  — jarvis-policy 承認フロー テスト仕様。kill switch / トークン認証 / キュー上限 / 重複 ID / 期限切れ 410 の動的試験設計。
 - [test-mcp-gateway.md](test-mcp-gateway.md)
   — jarvis-mcp-gw 実行経路 テスト仕様。
   policy-first / allowlist / 引数上限 / 承認トークン / kill switch 再検査。
