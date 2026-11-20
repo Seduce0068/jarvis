@@ -2447,8 +2447,30 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 86 の残り指摘（未対応）
 
-- [ ] pin ゲートのブランチ ref（`@main` 等）は記録があっても API 解決が
-  `git/ref/tags/<ref>` のため API_RESOLVE_FAILED になり得る（low）—
-  `git/ref/heads/<ref>` 切替は curl スタブ改修を伴う別タスク。
+- [x] pin ゲートのブランチ ref（low）→ タグ優先・404 で heads フォールバック、
+  curl スタブと回帰を拡張（pin 17→21件）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
+
+### Round 87 の残り指摘（未対応・次ラウンド優先）
+
+- [ ] **RustSec 既知脆弱版38件**（confirmed high）— `cargo audit --no-fetch`
+  実測。patch 版あり: tokio 1.53.3 / rustls 0.23.46 / rustls-webpki 0.103.16 /
+  webpki-roots 1.0.10 / rustix 1.1.6 / pulldown-cmark 0.13.6 / ctutils 0.4.4 /
+  ui heapless 0.9.4。major 更新要: hickory 0.26 / rsa 0.10 / rmcp 3.9。
+- [ ] CI / Makefile に cargo audit ゲートが無い（medium）— 両 lock を対象に
+  extra_gates / ci-local へ追加、advisory DB 更新方針と ignore 運用を決定。
+- [ ] **OTel traces filter が全 Rust スパンをドロップ**（confirmed high）—
+  `otelcol-config.yaml:99-104` の include（`jarvis.*` 等）が実スパン名
+  （`check` / `process_event` / `approve_approval`）と不一致。include 拡張または
+  スパン名変更＋E2E 検証。
+- [ ] Grafana Dependencies パネルが未スクレイプの4 job を参照（medium）、
+  dead-letter/outbox 4メトリクスにパネルが無い（low）。
+- [ ] status_label が4サービスで個別定義で 503 バケットが不一致（low）—
+  jarvis-core へ共有化。
+- [ ] ui/Cargo.toml に rust-version が無く README の MSRV 主張が裏付けなし
+  （medium）。
+- [ ] aarch64 クロスゲートで cmake 未宣言（medium）、libssl-dev の根拠消滅
+  （low）。
+
+- 親が対応: 全ゲート再検証（pin 21件、ci-local ok=435）。
