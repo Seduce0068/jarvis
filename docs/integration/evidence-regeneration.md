@@ -85,8 +85,12 @@ Traceability の Req 列集合の両方と一致させる。要件の追加・�
 - 仕様へ契約 step（`BareJson` / `415` / `413` / `400` / no-leak /
   `error_kind=invalid_input` / `field=body`）を追加・変更した場合は、
   対応テストの実測に基づき同じキーワードを `notes` にも明記する。
-  仕様だけを更新してキーワードが無い場合は `SCENARIO_STEP_UNCOVERED` で
-  拒否される（詳細は「契約 step のカバレッジ」を参照）。
+  Round 93 の `I103-D` マーカー（`410` / `APPROVAL_EXPIRED_BODY` /
+  `HEALTH_OK_BODY` / 各サービスの degraded BODY / `fail-closed`）も同じく
+  `notes` へ明記する。仕様だけを更新してキーワードが無い場合は
+  `SCENARIO_STEP_UNCOVERED` で拒否される（詳細は
+  「契約 step のカバレッジ」を参照）。仕様を書いたエージェントではなく
+  **親が** 4 証跡の `notes` を更新する。
 - `results.skipped`: 正の値にする場合は `notes` へ数値付きの `N ignored` が必要。
   ただしスキップは実行済みに数えず、Scenario カバレッジの分子には入らない
   （mcp-gw の `skipped=1` は `notes` の `1 ignored` と `passed=126` で
@@ -154,7 +158,7 @@ make check-evidence
 | `results.skipped` | 正の値は `notes` に数値付き `N ignored`（`N` = `results.skipped`）が必要（`SKIPPED_TESTS`） |
 | `notes` | 文字列型（`BAD_NOTES_TYPE`）。`passed` / `failed` / `ignored` / `skipped` と見出し件数が `results` と一致（`NOTES_*_MISMATCH`, `NOTES_COUNT_MISMATCH`） |
 | `Scenario` | 仕様の `Scenario:` が1以上で、実行合計（passed + failed のみ、skipped は除外）がその数以上（`SCENARIO_COUNT_MISMATCH`）。`ignored` 明記済みのスキップでもカバレッジは満たせない |
-| 契約 step | strict モード。契約マーカー以降の step に現れるキーワードが証跡 `notes` にもあること（baseline 例外なし）。未同期なら `SCENARIO_STEP_UNCOVERED` |
+| 契約 step | strict モード。`I61-A` と `I103-D`（Round 93: 410 / `/health` 固定本文 / fail-closed）の各マーカー以降の step に現れるキーワードが証跡 `notes` にもあること（baseline 例外なし）。未同期なら `SCENARIO_STEP_UNCOVERED` |
 | index | 両 index が全成果物をリンクし、リンク切れなし。未解決エントリ／孤立参照定義は `INDEX_UNRESOLVED_ENTRY`、spec リンク先の不一致は `INDEX_SPEC_MISMATCH` |
 | index のエントリ | 参照定義・インラインリンクを等価に解決し、`N passed` / `N failed` が必須（欠落は `INDEX_RESULT_MISSING`） |
 | index の件数 | 見出し件数は参照 JSON の `results` と一致（`INDEX_RESULT_MISMATCH`） |
@@ -173,12 +177,20 @@ make check-evidence
 `SCENARIO_STEP_UNCOVERED` で fail-closed にする**方針を採用する。
 「新規 step 追加時に Scenario を新設して件数ゲートを上げる運用」は採らない。
 
-検出対象は gherkin ブロック内の契約マーカー（`# I61-A: BareJson ...`）以降の
-step に現れる `BareJson` / `415` / `413` / `400` / no-leak /
-`error_kind=invalid_input` / `field=body`。契約グループ外で status に言及する
-通常 step（例: `Then 400 と ... が返る`）は誤検知を避けるため対象外とする。
-`Counter` で出現回数を数えるため、既存 step の重複追記も新規 step と
-みなされ、notes 未同期なら拒否される。
+検出対象は gherkin ブロック内の契約マーカー（`# I61-A: BareJson ...`、
+Round 93 は `# I103-D: Round 93 契約マーカー`）以降の step に現れる
+`BareJson` / `415` / `413` / `400` / no-leak /
+`error_kind=invalid_input` / `field=body`。I103-D ではさらに
+`410` / `APPROVAL_EXPIRED_BODY`（policy の TC-D3）と
+`HEALTH_OK_BODY` / `HEALTH_OPENCODE_UNAVAILABLE_BODY` /
+`HEALTH_STORE_UNAVAILABLE_BODY` / `HEALTH_NO_UPSTREAM_BODY` /
+`fail-closed`（event / context / mcp-gw の TC-HC1〜3）を検出する。
+契約グループ外で status に言及する通常 step（例: `Then 400 と ... が返る`）
+や、Scenario 見出しの「fail-closed」「410」はマーカーではないため対象外とする。
+step 側は定数名のみを一致させ（reason 語彙での過剰計上を避ける）、notes 側は
+permissive なパターン（例: `410 Gone`、`approval request expired`、
+`fail closed`、`停止側`）も受け付ける。`Counter` で出現回数を数えるため、
+既存 step の重複追記も新規 step とみなされ、notes 未同期なら拒否される。
 
 ### strict モード（Round 61 baseline は廃止）
 
@@ -189,6 +201,9 @@ Round 61 で 4 仕様へ追記された契約 step のキーワード（`BareJso
 strict モードである。仕様の契約 step に現れるキーワードは、重複追記を
 含め当該証跡の `notes` に同じキーワードが無ければ
 `SCENARIO_STEP_UNCOVERED` で fail-closed に拒否される。
+Round 93 の I103-D 契約キーワードについても、仕様担当エージェントは
+証跡を編集せず、**親が再生成時に 4 証跡の `notes` へ同期する**ことを
+必須とする（未同期のままゲートを通してはならない）。
 
 `ci/scripts/test-legacy-guards.sh` の tamper 回帰は、コピーした仕様へ契約
 step を追記し、かつコピーした証跡の `notes` から当該キーワードを外すことで、
@@ -281,7 +296,7 @@ echo "== 2. 実測実行 =="
 (cd rust && cargo test -p jarvis-context --lib --locked)
 echo "== 3. 既存証跡との照合（値は出力しない） =="
 bash ci/scripts/generate-evidence.sh context --check \
-  evidence/test-run-20261120-1fd8edfa3ae1.json
+  evidence/test-run-20261120-4eb0d21232f5.json
 ```
 
 `--check` に渡せるのは `evidence/` 直下の

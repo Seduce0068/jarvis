@@ -310,6 +310,7 @@ Scenario: TC-E4 即時停止と tracer 完了
 ### /health 契約 (REQ-22)
 
 ```gherkin
+  # I103-D: Round 93 契約マーカー
 Scenario: TC-HC1 /health healthy の固定本文
   Given upstream 未設定（native-only）または設定済み upstream が起動前に登録済み
   When GET /health を呼ぶ
@@ -318,6 +319,7 @@ Scenario: TC-HC1 /health healthy の固定本文
 ```
 
 ```gherkin
+  # I103-D: Round 93 契約マーカー
 Scenario: TC-HC2 /health degraded の固定本文
   Given 設定済み upstream がリスナ起動前に登録されていない
   When GET /health を呼ぶ
@@ -326,6 +328,7 @@ Scenario: TC-HC2 /health degraded の固定本文
 ```
 
 ```gherkin
+  # I103-D: Round 93 契約マーカー
 Scenario: TC-HC3 未知本文の fail-closed 拒否
   Given 中継が本文を書き換える（余分/重複キー、未知 reason、前後空白）または status を改変する
   When 監視側がその probe を既知 2 本文へ照合する
@@ -409,4 +412,7 @@ reason `no_upstream` を保持する。core 側の pin は
 停止側へ倒すことを検証する。policy 専用の health 契約
 （`specs/test-ui.md:80-84`）は変更しない。
 
-spec_hash の変更に伴う証跡再生成は親が行う。本エージェントは証跡を変更しない。
+本タスクで `I103-D` 契約マーカー（TC-HC1〜HC3）を追加したため
+`spec_hash` が変わる。証跡再生成と、`notes` への
+`HEALTH_OK_BODY` / `HEALTH_NO_UPSTREAM_BODY` / `fail-closed` の明記は
+親が行う。本エージェントは証跡を変更しない。

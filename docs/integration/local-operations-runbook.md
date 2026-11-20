@@ -29,33 +29,57 @@ Tailscale 経由）。
 
 ## サービス構成と依存関係
 
-| サービス | health ポート | 起動時の依存 |
-| --- | --- | --- |
-| `jarvis-policy` | 8081 | `postgresql`, `qdrant` |
-| `jarvis-mcp-gw` | 8082 | `jarvis-policy` |
-| `jarvis-event` | 8083 | `jarvis-policy`, `jarvis-mcp-gw`, `jarvis-context` |
-| `jarvis-context` | 8084 | `postgresql`, `qdrant`, `jarvis-policy` |
+現行 unit の `[Unit]` セクション（Round 91 の systemd 依存追加後）に同期した表。
+依存は各 unit の `After=` / `Wants=` の両方に列挙されたものを記載する。
 
-`qdrant` / `postgresql` は共有の基盤サービスなので、コア4サービスの
-停止・再起動時に毎回止める必要はない。
+| サービス | health ポート | 起動時の依存（`After=` / `Wants=`） |
+| --- | --- | --- |
+| `postgresql.service`, `qdrant.service` | —（基盤） | 外部 unit（`qdrant.service` は `After=network.target`） |
+| `jarvis-migrations.service` | —（oneshot / `RemainAfterExit`） | `postgresql` |
+| `jarvis-policy.service` | 8081 | `postgresql`, `qdrant`, `jarvis-migrations` |
+| `jarvis-mcp-gw.service` | 8082 | `jarvis-policy` |
+| `jarvis-context.service` | 8084 | `postgresql`, `qdrant`, `jarvis-policy`, `jarvis-migrations` |
+| `opencode.service` | 49374（HTTP） | `jarvis-policy`, `jarvis-mcp-gw` |
+| `jarvis-event.service` | 8083 | `jarvis-policy`, `jarvis-mcp-gw`, `jarvis-context`, `opencode` |
+
+`qdrant` / `postgresql` は共有の基盤サービスなので、コアサービスの
+停止・再起動時に毎回止める必要はない。`jarvis-migrations.service` は
+共有マイグレーション（001〜005）を適用する oneshot で、
+`jarvis-context.service` がバイナリ埋込の sqlx migrate で最終適用する。
+`jarvis-policy.service` は `jarvis-context.service` への依存を持たない
+（context が policy に依存するため、相互依存で cycle になるのを避ける）。
+
+**`Wants=` は弱依存**: 依存先の起動失敗や手動停止があっても systemd は
+依存元を自動で停止せず、起動自体も続行する。順序自体は明示的な `After=` が
+担保するが、依存先が落ちた状態では policy 照会やツール実行が fail-closed
+になるため、以下の手動起動・停止順を守ること（逆順の途中停止はイベントや
+ツール呼び出しの取りこぼしにつながる）。
 
 ## 起動 → 検証 → 停止
 
 ### 起動
 
-依存関係の順（基盤 → policy → gateway/context → event）で起動する。
+依存関係の順（基盤 → migrations → policy → mcp-gw/context → opencode →
+event）で起動する。`enable --now` を使う場合は systemd が `After=` に従うが、
+手動 `start` でも同じ順を守る。
 
 ```bash
 echo "== 1. 基盤サービス =="
 sudo systemctl start postgresql.service qdrant.service
 
-echo "== 2. policy =="
+echo "== 2. migrations（oneshot / RemainAfterExit） =="
+sudo systemctl start jarvis-migrations.service
+
+echo "== 3. policy =="
 sudo systemctl start jarvis-policy.service
 
-echo "== 3. gateway / context =="
+echo "== 4. mcp-gw / context =="
 sudo systemctl start jarvis-mcp-gw.service jarvis-context.service
 
-echo "== 4. event =="
+echo "== 5. opencode =="
+sudo systemctl start opencode.service
+
+echo "== 6. event =="
 sudo systemctl start jarvis-event.service
 ```
 
@@ -68,8 +92,9 @@ sudo systemctl start jarvis-event.service
 不整合はログに出るため、直近のジャーナルも確認する。
 
 ```bash
-echo "== 状態 =="
-systemctl is-active jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context
+echo "== 状態（migrations は active (exited) が正常） =="
+systemctl is-active jarvis-migrations jarvis-policy jarvis-mcp-gw \
+  jarvis-context opencode jarvis-event
 
 echo "== health (期待値: すべて 200) =="
 for port in 8081 8082 8083 8084; do
@@ -79,35 +104,46 @@ for port in 8081 8082 8083 8084; do
 done
 
 echo "== 直近ログ =="
-journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event \
-  -u jarvis-context -n 50 --no-pager
+journalctl -u jarvis-migrations -u jarvis-policy -u jarvis-mcp-gw \
+  -u jarvis-context -u opencode -u jarvis-event -n 50 --no-pager
 ```
 
-合格条件: 4サービスすべて `active`、4ポートすべて `http=200`、
-ジャーナルに起動失敗や fail-closed による連続拒否がないこと。
+`opencode.service` は 49374 で HTTP を待ち受けるが `/health` 契約の対象外
+なので、health ループには入れず `is-active` で確認する。
+
+合格条件: 6 unit すべて `active`（migrations のみ `active (exited)`）、
+4ポートすべて `http=200`、ジャーナルに起動失敗や fail-closed による
+連続拒否がないこと。
 
 ### 停止
 
-依存関係の逆順（event → gateway/context → policy）で停止する。
-`jarvis-policy` を先に止めると承認フローが fail-closed になるため、
-gateway を先に停止する順序を守る。
+起動順の逆順（event → opencode → mcp-gw/context → policy → migrations →
+基盤）で停止する。`jarvis-policy` を先に止めると承認フローが fail-closed
+になり、`opencode` を先に止めると event のイベント消費者が先に消えるため、
+この順序を守る。
 
 ```bash
 echo "== 1. event =="
 sudo systemctl stop jarvis-event.service
 
-echo "== 2. gateway / context =="
+echo "== 2. opencode =="
+sudo systemctl stop opencode.service
+
+echo "== 3. mcp-gw / context =="
 sudo systemctl stop jarvis-mcp-gw.service jarvis-context.service
 
-echo "== 3. policy =="
+echo "== 4. policy =="
 sudo systemctl stop jarvis-policy.service
+
+echo "== 5. migrations（必要な場合のみ / oneshot） =="
+sudo systemctl stop jarvis-migrations.service
 ```
 
 基盤サービスまで止める場合は、上記の後に明示的に実行する（他サービスへも
 影響するため、通常は止めない）。
 
 ```bash
-echo "== 4. 基盤（必要な場合のみ） =="
+echo "== 6. 基盤（必要な場合のみ） =="
 sudo systemctl stop qdrant.service postgresql.service
 ```
 

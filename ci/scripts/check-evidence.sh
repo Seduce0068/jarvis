@@ -42,6 +42,13 @@
 # are prose and may repeat a keyword, so extra mentions are harmless. No
 # baseline/grandfather exception remains. No keyword value is emitted; no
 # secret values are read.
+# Round 93 (I103-D) adds a second pinned contract family, marked `# I103-D`
+# inside the gherkin blocks: TC-D3 (410 Gone / APPROVAL_EXPIRED_BODY) and
+# TC-HC1〜3 of event/context/mcp-gw (HEALTH_OK_BODY, each service's degraded
+# BODY, and fail-closed). Those keywords are counted the same strict way. The
+# four evidence `notes` are updated by the parent during regeneration; a
+# spec-writing agent must not edit evidence and must report the required
+# regeneration explicitly.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$repo"
@@ -93,6 +100,16 @@ CONTRACT_KEYWORDS = {
     "no-leak": r'rejection\s*文と入力本文バイトを[^\n]*出さない|no-?leak|非漏洩',
     "invalid_input": r'error_kind\s*=\s*invalid_input',
     "field=body": r'field\s*=\s*body',
+    # I103-D (Round 93): 410 Gone and the /health fixed-body contracts.
+    # Step-side patterns stay exact so a reason string such as
+    # `opencode_unavailable` cannot inflate the degraded-BODY count.
+    "410": r'\b410\b',
+    "APPROVAL_EXPIRED_BODY": r'\bAPPROVAL_EXPIRED_BODY\b',
+    "HEALTH_OK_BODY": r'\bHEALTH_OK_BODY\b',
+    "HEALTH_OPENCODE_UNAVAILABLE_BODY": r'\bHEALTH_OPENCODE_UNAVAILABLE_BODY\b',
+    "HEALTH_STORE_UNAVAILABLE_BODY": r'\bHEALTH_STORE_UNAVAILABLE_BODY\b',
+    "HEALTH_NO_UPSTREAM_BODY": r'\bHEALTH_NO_UPSTREAM_BODY\b',
+    "fail-closed": r'fail-?closed',
 }
 # Notes are prose: accept the same keyword or a close human spelling. This only
 # decides whether a step is covered; the value itself is never emitted.
@@ -104,6 +121,15 @@ CONTRACT_NOTE_PATTERNS = {
     "no-leak": r'no-?leak|非漏洩|漏洩しな|rejection\s*文',
     "invalid_input": r'invalid[_-]?input',
     "field=body": r'field\s*[=:]\s*body',
+    # I103-D: permissive prose spellings. Over-counting is harmless because
+    # only a SHORTFALL against the spec's step count fails closed.
+    "410": r'\b410\b|\bGone\b',
+    "APPROVAL_EXPIRED_BODY": r'APPROVAL_EXPIRED_BODY|approval\s+request\s+expired',
+    "HEALTH_OK_BODY": r'HEALTH_OK_BODY',
+    "HEALTH_OPENCODE_UNAVAILABLE_BODY": r'HEALTH_OPENCODE_UNAVAILABLE_BODY|opencode[_\s-]?unavailable',
+    "HEALTH_STORE_UNAVAILABLE_BODY": r'HEALTH_STORE_UNAVAILABLE_BODY|store[_\s-]?unavailable',
+    "HEALTH_NO_UPSTREAM_BODY": r'HEALTH_NO_UPSTREAM_BODY|no[_\s-]?upstream',
+    "fail-closed": r'fail-?closed|fail\s+closed|停止側',
 }
 
 def contract_keywords(spec_text):
@@ -112,11 +138,15 @@ def contract_keywords(spec_text):
     Scoping to the marker and to its following steps keeps ordinary gherkin
     steps that merely mention a status code (e.g. "Then 400 ...") from being
     mistaken for contract steps. A new contract group in a new gherkin block
-    is still detected because the block carries its own marker.
+    is still detected because the block carries its own marker: `I61-A` for
+    Round 61 and `I103-D` for Round 93. Only the pinned marker tokens (plus
+    the legacy BareJson-style markers) start a group, so a Scenario title
+    containing "fail-closed" or "410" outside a contract group cannot create
+    a phantom keyword requirement.
     """
     found = []
     marker = re.compile(
-        r'I61-A|BareJson|error_kind\s*=\s*invalid_input|'
+        r'I61-A|I103-D|BareJson|error_kind\s*=\s*invalid_input|'
         r'field\s*=\s*body|rejection\s*文と入力本文バイト', re.IGNORECASE)
     step = re.compile(r'^[ \t]*(?:Given|When|Then|And|But)\b')
     blocks = []
@@ -315,7 +345,9 @@ for f in evidence_files:
     # Scenario count unchanged, so the executed total alone cannot detect a
     # spec-only edit. In strict mode EVERY detected keyword needs at least as
     # many note mentions as there are spec steps; the Round 61
-    # baseline/grandfather list has been removed. Both sides are Counters:
+    # baseline/grandfather list has been removed. This also covers the I103-D
+    # 410 / /health contract groups; their notes are refreshed by the parent.
+    # Both sides are Counters:
     # iterating keys alone discarded the spec count, so a duplicated step
     # (detected=2) hidden behind one note mention previously passed. Compare
     # the counts and fail closed on any shortfall. No keyword is emitted.

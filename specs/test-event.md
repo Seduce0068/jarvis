@@ -209,15 +209,17 @@ Scenario: TC-B6 gRPC の満杯時 RESOURCE_EXHAUSTED
 
 ### 異常系・入口 (REQ-13〜REQ-15)
 
-```gherkin
-Scenario: TC-E1（policy 到達不可 fail-closed）と TC-E2
+TC-E1（policy 到達不可 fail-closed）と TC-E2
 （/v1/events の source 正規化・correlation 生成）は 2026-11-18 に
 回帰テストを追加しカバー済み（24 テスト）。
 実機 policy サービスを用いた結合試験は対象外。
+なお TC-E1 / TC-E2 は回帰テストの説明であり、個別の gherkin Scenario
+としては宣言しない（Traceability の行は既存テストとの対応を示す）。
 
 ### /health 契約 (REQ-18)
 
 ```gherkin
+  # I103-D: Round 93 契約マーカー
 Scenario: TC-HC1 /health healthy の固定本文
   Given OpenCode への到達性 probe が成功する
   When GET /health を呼ぶ
@@ -226,6 +228,7 @@ Scenario: TC-HC1 /health healthy の固定本文
 ```
 
 ```gherkin
+  # I103-D: Round 93 契約マーカー
 Scenario: TC-HC2 /health degraded の固定本文
   Given OpenCode が到達不可または probe がタイムアウトする
   When GET /health を呼ぶ
@@ -234,6 +237,7 @@ Scenario: TC-HC2 /health degraded の固定本文
 ```
 
 ```gherkin
+  # I103-D: Round 93 契約マーカー
 Scenario: TC-HC3 未知本文の fail-closed 拒否
   Given 中継が本文を書き換える（余分/重複キー、未知 reason、前後空白）または status を改変する
   When 監視側がその probe を既知 2 本文へ照合する
@@ -302,4 +306,8 @@ reason `opencode_unavailable` を保持する。core 側の pin は
 停止側へ倒すことを検証する。policy 専用の health 契約
 （`specs/test-ui.md:80-84`）は変更しない。
 
-spec_hash の変更に伴う証跡再生成は親が行う。本エージェントは証跡を変更しない。
+本タスクで `I103-D` 契約マーカー（TC-HC1〜HC3）を追加し、上記の未閉鎖
+gherkin ブロックを本文へ戻したため `Scenario:` 宣言は 14 → 13 行になった。
+`spec_hash` の変更に伴う証跡再生成と、`notes` への
+`HEALTH_OK_BODY` / `HEALTH_OPENCODE_UNAVAILABLE_BODY` / `fail-closed` の
+明記は親が行う。本エージェントは証跡を変更しない。

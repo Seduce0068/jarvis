@@ -7,18 +7,22 @@ JARVIS のテスト仕様の索引です。
 
 - [test-policy-approval.md](test-policy-approval.md)
   — jarvis-policy 承認フロー テスト仕様。kill switch / トークン認証 / キュー上限 / 重複 ID / 期限切れ 410 の動的試験設計。
+  /health 固定本文契約（REQ-16〜18）と期限切れ 410 Gone の固定本文 `APPROVAL_EXPIRED_BODY`（TC-D3）も網羅。
 - [test-mcp-gateway.md](test-mcp-gateway.md)
   — jarvis-mcp-gw 実行経路 テスト仕様。
   policy-first / allowlist / 引数上限 / 承認トークン / kill switch 再検査。
+  /health 固定本文契約（REQ-22: `HEALTH_OK_BODY` / `HEALTH_NO_UPSTREAM_BODY`、未知本文は fail-closed）。
 - [test-context.md](test-context.md)
   — jarvis-context PII フィルタ・検索順序 テスト仕様。
   再帰的 redact / enabled=false / 不正パターン / reorder_by_ids。
   スコア保持（REQ-12/13: attach_scores / スコア0 とランク外の区別）。
+  /health 固定本文契約（REQ-15: `HEALTH_OK_BODY` / `HEALTH_STORE_UNAVAILABLE_BODY`、未知本文は fail-closed）。
 - [test-backup.md](test-backup.md)
   — ローカルバックアップ テスト仕様。
   backup-local.sh / verify-backup.sh / install-backup-timer.sh。
 - [test-event.md](test-event.md)
   — jarvis-event Webhook・Backpressure テスト仕様。webhook ペイロード変換と bounded channel の動的試験設計。
+  /health 固定本文契約（REQ-18: `HEALTH_OK_BODY` / `HEALTH_OPENCODE_UNAVAILABLE_BODY`、未知本文は fail-closed）。
 - [test-ui.md](test-ui.md)
   — 承認コンソール UI テスト仕様。エラー保持 / 期限切れ強調 /
   トークンリダイレクト防止 / キーボード a11y / full args / タイムアウト。
