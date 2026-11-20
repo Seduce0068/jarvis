@@ -2157,8 +2157,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   形骸化（medium）— 本番 ENV_PREFIX 定数を参照する contract テストへ。
 - [ ] infra/README.md の MCP Gateway 節が旧挙動（承認ツール非表示、
   upstream メモリのみ）のまま（medium）。
-- [ ] check-evidence のファイル名ハッシュ照合が空サフィックスでスキップ
-  （low）— fail-closed 化＋tamper ケース。
+- [x] check-evidence のファイル名ハッシュ照合が空サフィックスでスキップ — 2026-11-21 対応済み: 空サフィックスを `HASH_FILENAME_MISSING` で拒否し、tamper ケース `empty_suffix` を追加。`check-evidence` ok=6 errors=0、`test-legacy-guards` ok=102 fail=0、`ci-local` exit 0（low）— fail-closed 化＋tamper ケース。
 - [ ] mcp_allowlist.toml の shell.execute timeout 参照先コメントが誤り
   （low）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
@@ -2758,3 +2757,18 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
 - [ ] ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
       push（「push しない」制約を尊重し未実施）。
+
+### Round 103（/swarm-limited・制限プロファイル）
+
+- R1 は3担当（sec / test / ops）で未完了164件を分類した。
+- 却下: P0-3 の principal 自己申告は opt-in ガード
+  `require_server_side_principal` が `rust/jarvis-mcp-gw/src/lib.rs:101-109`
+  に実装済みで、既定値の反転のみが本番運用判断として残る。
+  子の「新規実装が必要」という指摘は現行コードと矛盾するため採用しない。
+- 解消済み（記録のみ古い）: PII パターン設定は
+  `infra/config/pii_patterns.toml:16` の `[patterns]` と
+  `pii.rs:373-441` の回帰で対応済み。`source` の VARCHAR(100) は
+  `rust/migrations/006_memories_source_text.sql` で TEXT 化済み。
+- 採用: check-evidence.sh の空サフィックス fail-open を R2 で修正。
+- 確認: config 4テンプレートの主要キーは実装側と一致し、追加作業なし。
+

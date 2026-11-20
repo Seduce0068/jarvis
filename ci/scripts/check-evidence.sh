@@ -2,7 +2,9 @@
 # Verify test specification evidence is complete, hash-matched and traceable
 # to its declared spec (P1-9). Every evidence/test-run-*.json must declare a
 # spec_hash matching the sha256 of its test_basis_ref.spec_path, record zero
-# failed tests, and every tracked specs/test-*.md must have evidence.
+# failed tests, and every tracked specs/test-*.md must have evidence. An
+# evidence filename must carry a non-empty hash suffix (HASH_FILENAME_MISSING
+# rejects e.g. test-run-.json) equal to the declared hash prefix.
 # Also verify specs/index.md and evidence/index.md link every artifact and
 # contain no broken local links (cross-review arch #3). Reference-style link
 # definitions such as "[run-ui]: test-run-*.json" are parsed as well.
@@ -258,8 +260,13 @@ for f in evidence_files:
         errors.append(f"{f}: BAD_HASH_FORMAT"); continue
     # The filename suffix must match the declared hash prefix; this keeps
     # evidence files traceable even though the value itself is never printed.
+    # A bare "test-run-.json" used to slip through the old truthiness guard:
+    # an empty suffix is now an explicit, distinct fail-closed error so it
+    # cannot be confused with a non-empty but mismatched prefix.
     prefix = os.path.basename(f).rsplit("-", 1)[-1].removesuffix(".json")
-    if prefix and prefix != top[len("sha256:"):][:12]:
+    if not prefix:
+        errors.append(f"{f}: HASH_FILENAME_MISSING"); continue
+    if prefix != top[len("sha256:"):][:12]:
         errors.append(f"{f}: HASH_FILENAME_MISMATCH"); continue
     r = d["results"]
     # bool is a subclass of int in Python: False == 0 and True == 1 would

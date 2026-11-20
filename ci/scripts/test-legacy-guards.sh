@@ -271,6 +271,13 @@ elif mode == 'req_removed':
     if not isinstance(reqs, list) or len(reqs) < 2:
         raise SystemExit('requirements array too short for tamper')
     reqs.pop()
+elif mode == 'empty_suffix':
+    # The empty hash suffix is a FILENAME defect, not a JSON defect: a gate
+    # that guards it only with a truthiness check would silently skip the file.
+    # Keep the content pristine so only the filename gate can reject this copy;
+    # the caller supplies a dst whose basename is exactly "test-run-.json".
+    # The re-dump below still runs so this mode follows the same write path.
+    pass
 elif mode in ('spec_outside_glob', 'spec_dotdot', 'spec_absolute'):
     # I64-A (b): name a spec outside specs/test-*.md, or escape the specs/
     # tree. requirements=[] reproduces the original forgery; only the
@@ -344,8 +351,18 @@ else
   # notes_* modes add a second, conflicting count to otherwise valid notes:
   # they verify that the gate validates every count match, not only the first.
   for mode in hash failed empty_passed timestamp calendar failed_bool passed_bool \
-              notes_count_conflict notes_passed_conflict req_removed; do
-    if ! tamper_evidence "$source_json" "$evidence_copy" "$mode"; then
+              notes_count_conflict notes_passed_conflict req_removed empty_suffix; do
+    # empty_suffix is a filename defect: write to a copy named test-run-.json
+    # and restore the pristine JSON first so no earlier tamper's error masks
+    # the HASH_FILENAME_MISSING gate this mode isolates.
+    if [ "$mode" = empty_suffix ]; then
+      cp "$source_json" "$evidence_copy"
+      mode_copy="$evidence_tmp/evidence/test-run-.json"
+      rm -f -- "$mode_copy"
+    else
+      mode_copy="$evidence_copy"
+    fi
+    if ! tamper_evidence "$source_json" "$mode_copy" "$mode"; then
       echo "  FAIL: could not prepare tampered evidence ($mode)"
       fail=$((fail+1))
       continue
@@ -364,6 +381,9 @@ else
       notes_count_conflict) pattern='NOTES_COUNT_MISMATCH' ;;
       notes_passed_conflict) pattern='NOTES_PASSED_MISMATCH' ;;
       req_removed) pattern='REQ_SET_MISMATCH' ;;
+      # An empty filename suffix (test-run-.json) must be rejected with the
+      # dedicated code, never silently skipped nor reported as a mismatch.
+      empty_suffix) pattern='HASH_FILENAME_MISSING' ;;
     esac
     if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q -- "$pattern"; then
       echo "  PASS: check-evidence.sh rejects tampered $mode"
