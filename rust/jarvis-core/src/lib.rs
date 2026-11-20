@@ -18,6 +18,18 @@ use uuid::Uuid;
 /// The wire name itself is stable and must not change.
 pub const JARVIS_CONTEXT_TOKEN_HEADER: &str = "x-jarvis-context-token";
 
+/// Fixed caller-visible text for a gateway-side failure, shared by all three
+/// MCP gateway transports (HTTP `/v1/execute`, gRPC and the MCP `/mcp` surface).
+///
+/// Internal causes (absolute sandbox paths, tokens, egress hosts, upstream
+/// text, anyhow chains) are written to the server-side `tracing` log only.
+/// Every transport aliases this constant instead of keeping a private literal:
+/// a one-sided rewording would otherwise make two adapters disagree about the
+/// same contract and could accidentally reintroduce detail into a response.
+/// The wire text is stable: changing it requires updating the caller-visible
+/// contract pins in each transport crate.
+pub const INTERNAL_GATEWAY_ERROR_MESSAGE: &str = "internal gateway error";
+
 /// Fixed HTTP 409 body emitted by `jarvis-policy` when the emergency stop
 /// (kill switch) blocks an approval decision.
 ///
@@ -389,6 +401,15 @@ mod tests {
     #[test]
     fn context_token_header_pins_the_wire_contract() {
         assert_eq!(JARVIS_CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    }
+
+    /// Single canonical pin of the gateway's fixed internal-failure wording.
+    /// HTTP, gRPC and the MCP surface alias this constant, so this pin is the
+    /// one place a wording change becomes observable before any transport
+    /// contract test runs.
+    #[test]
+    fn internal_gateway_error_message_pins_the_wire_contract() {
+        assert_eq!(INTERNAL_GATEWAY_ERROR_MESSAGE, "internal gateway error");
     }
 
     /// The shared JSON rejection vocabulary must stay byte-identical to the

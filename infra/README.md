@@ -33,16 +33,29 @@ infra/
 │   ├── jarvis-backup.service
 │   └── jarvis-backup.timer
 ├── scripts/                     # Operational scripts
+│   ├── backup-local.sh         # Local-only backup (PostgreSQL/Qdrant/config)
+│   ├── backup-preflight.sh     # Read-only backup preflight (make backup-preflight)
 │   ├── backup.sh               # Launcher -> rust/scripts/backup.rs
 │   ├── build-selfhost.sh       # Build/deploy Rust sidecars (self-hosted)
 │   ├── check-deploy-drift.sh   # Read-only drift/runtime check (jarvis-mcp-gw)
 │   ├── decommission-oci.sh     # Legacy OCI decommission (dry-run default)
 │   ├── deploy-mcp-gw-safe.sh   # Safe jarvis-mcp-gw deploy (dry-run default)
 │   ├── deploy.sh               # Launcher -> rust/scripts/deploy.rs (legacy)
+│   ├── install-backup-timer.sh # Install/refresh local backup timer (dry-run default)
 │   ├── install-mcp-gateway.sh  # Install jarvis-mcp-gw binary and restart
+│   ├── restore-local.sh        # Local-only restore dispatcher (dry-run default)
 │   ├── restore.sh              # Launcher -> rust/scripts/restore.rs
 │   ├── setup-selfhost.sh       # Self-hosted host setup (Ubuntu/Debian)
-│   └── smoke-mcp-gw.sh         # Pre-deploy smoke test (jarvis-mcp-gw)
+│   ├── smoke-mcp-gw.sh         # Pre-deploy smoke test (jarvis-mcp-gw)
+│   ├── test-restore-local.sh   # Synthetic-fixture restore regression (no production I/O)
+│   ├── verify-backup.sh        # Read-only backup integrity verification
+│   ├── lib/                    # Shared shell helpers
+│   │   └── payload-descriptors.sh
+│   └── restore-local.d/        # Local restore payload handlers
+│       ├── configs.sh
+│       ├── git.sh
+│       ├── pg.sh
+│       └── qdrant.sh
 ├── config/                      # Configuration files
 │   ├── pii_patterns.toml       # PII detection patterns
 │   ├── mcp_allowlist.toml      # MCP tool allowlist
@@ -53,17 +66,23 @@ infra/
 │   ├── opencode/               # OpenCode V2 config
 │   │   └── opencode.jsonc
 │   ├── otelcol-config.yaml     # OpenTelemetry Collector
-│   ├── policy.env              # Policy Engine env (1Password)
+│   ├── policy.env              # Policy Engine env テンプレート (op:// は値なし参照、実秘密は bws run)
 │   ├── mcp_gateway.env         # MCP GW env テンプレート (op:// 実参照なし・プレースホルダのみ) -> /etc/jarvis/jarvis-mcp-gw.env
-│   ├── event.env               # Event Normalizer env (1Password)
-│   ├── context.env             # Context Builder env (1Password)
-│   ├── otel.env                # OTel Collector env (legacy template, op://)
-│   └── code_server.env         # code-server env (1Password)
+│   ├── event.env               # Event Normalizer env テンプレート (op:// は値なし参照、実秘密は bws run)
+│   ├── context.env             # Context Builder env テンプレート (op:// は値なし参照、実秘密は bws run)
+│   ├── otel.env                # OTel Collector env (legacy template, op://; 起動経路では未使用)
+│   └── code_server.env         # code-server env テンプレート (op:// 実参照なし、実秘密は bws run)
 ├── grafana/                     # Importable Grafana dashboards
 │   ├── README.md
 │   └── dashboards/jarvis-overview.json
 └── cloud-init.yaml             # 未使用レガシー: OCI instance initialization
 ```
+
+> `config/*.env` は参照用テンプレートです。現行の秘密情報注入は 1Password CLI
+> (`op run`) ではなく、Bitwarden Secrets Manager の `bws run` +
+> `/etc/jarvis/bws.env` 経由です（`mcp_gateway.env` は
+> `deploy-mcp-gw-safe.sh` の配置元という例外があります。詳細は後述
+> 「Secret Management」および「MCP Gateway の環境ファイル（I50-A）」）。
 
 ## Self-host setup note
 

@@ -15,19 +15,23 @@ use gpui::{App, Bounds, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_platform::application;
 
 use approvals::ApprovalsView;
-use policy_client::tokens_from_env;
+use policy_client::{
+    DEFAULT_POLICY_HTTP_URL, ENV_APPROVAL_API_TOKEN, ENV_LEGACY_APPROVAL_TOKEN,
+    ENV_POLICY_HTTP_URL, tokens_from_env,
+};
 
 fn main() {
-    let base_url = std::env::var("JARVIS_POLICY_HTTP_URL")
-        .unwrap_or_else(|_| "http://127.0.0.1:8081".to_string());
+    let base_url =
+        std::env::var(ENV_POLICY_HTTP_URL).unwrap_or_else(|_| DEFAULT_POLICY_HTTP_URL.to_string());
     let tokens = tokens_from_env();
     if tokens.legacy_api_env_used() {
         // Names only — never log, echo, or embed the token value itself.
-        eprintln!(
-            "warning: JARVIS_POLICY_APPROVAL_TOKEN is deprecated; \
-             set JARVIS_POLICY_APPROVAL_API_TOKEN instead \
+        let warning = format!(
+            "warning: {ENV_LEGACY_APPROVAL_TOKEN} is deprecated; \
+             set {ENV_APPROVAL_API_TOKEN} instead \
              (the legacy name is honoured temporarily)"
         );
+        eprintln!("{warning}");
     }
     // `ApprovalsView::new` exposes a single Option<String> channel; the bundle
     // carries both scopes through it without changing that out-of-scope file.

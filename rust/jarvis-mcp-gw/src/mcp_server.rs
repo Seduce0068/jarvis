@@ -23,6 +23,7 @@
 //! the backend that will actually run the call.
 
 use crate::McpGateway;
+use jarvis_core::INTERNAL_GATEWAY_ERROR_MESSAGE as INTERNAL_ERROR_MESSAGE;
 use rmcp::model::{
     CallToolRequestParam, CallToolResult, Content, Implementation, ListToolsResult,
     PaginatedRequestParam, ServerCapabilities, ServerInfo, Tool,
@@ -157,12 +158,9 @@ fn tool_input_schema(name: &str) -> serde_json::Map<String, serde_json::Value> {
     native_input_schema(name).unwrap_or_else(generic_input_schema)
 }
 
-/// Only phrase an MCP client ever sees for a gateway-side failure.
-///
-/// Mirrors `grpc::INTERNAL_ERROR_MESSAGE`: the full error chain (sandbox
-/// paths, upstream bodies, rmcp internals) stays in the server-side
-/// `tracing::error!` log and is never serialized into a tool result.
-const INTERNAL_ERROR_MESSAGE: &str = "internal gateway error";
+// `INTERNAL_ERROR_MESSAGE` is aliased from `jarvis-core`, the same definition
+// the HTTP and gRPC adapters use. Sandbox paths, upstream bodies and rmcp
+// internals stay in the server-side `tracing::error!` log, never in a result.
 
 /// Phrase used if a backend unexpectedly hands us an `is_error` result
 /// instead of routing it through the safe-summary error path.

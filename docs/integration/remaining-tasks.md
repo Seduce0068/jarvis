@@ -33,7 +33,7 @@ generated:
   **backup 43 passed / 0 failed（テスト関数数;
   Round 71 で実測再生成: backup 31→43）** であり、verify サマリの
   `ok=<n> fail=<n>` ではない（単位定義は
-  [evidence-regeneration.md](evidence-regeneration.md) の 298-310 行を参照）。
+  [evidence-regeneration.md の「verify サマリの件数単位（I81-D (c)）」節](evidence-regeneration.md#verify-サマリの件数単位i81-d-c)を参照）。
   ただし repo 側で `--repo-dir` 追加と
   `ProtectHome=read-only` 変更を行ったため、**修正済み unit の実機再適用は未**
   （root 必須・ユーザー実行待ち）。
@@ -119,7 +119,8 @@ generated:
   定義済み。ただし参照は migration 内のみで、書き込みコードはない。
 - [approvals.rs](../../ui/src/approvals.rs):19-29 は `pending` キューと
   `status` のみを保持。決定済み履歴や CSV / JSON export はない。
-- [ui/README.md](../../ui/README.md):80-90 は `approved_by` 固定値の送信と、
+- [ui/README.md の「決定者の識別 (`approved_by`) — P0-3 関連の設計判断」節](../../ui/README.md#決定者の識別-approved_by--p0-3-関連の設計判断)は
+  `approved_by` 固定値の送信と、
   P0-1 / P0-3 対応で認証 Identity へ紐付ける方針を記録（値は記載しない）。
 - [dsh.md](dsh.md) の「現状更新」は、承認 UI と監査永続化を実装済み、
   通知を実装見送りと整理。[todo.md](../../todo.md) の P3-9 は
@@ -172,7 +173,7 @@ generated:
 - 渡された principal は [lib.rs](../../rust/jarvis-mcp-gw/src/lib.rs):63-104 で
   policy の `is_allowed` と allowlist の principal チェックに使われる。
   呼び出し側が許可済み principal を名乗る余地がある。
-- 承認決定側も自己申告。[ui/README.md](../../ui/README.md):80-90 が
+- 承認決定側も自己申告。[ui/README.md の「決定者の識別 (`approved_by`) — P0-3 関連の設計判断」節](../../ui/README.md#決定者の識別-approved_by--p0-3-関連の設計判断)が
   `approved_by` の固定値送信を P0-1 / P0-3 関連の未移行事項として明記
   （[approvals.rs](../../ui/src/approvals.rs):127、値は記録しない）。
 
@@ -231,7 +232,7 @@ generated:
   loopback + Tailscale の信頼境界を前提とした defense-in-depth であり、
   認証 Identity からの導出（P0-1 と同じ設計判断）は別途必要。
 - 承認側の `approved_by` は依然としてボディ由来
-  （[ui/README.md](../../ui/README.md):80-90）で、本フラグの範囲外。
+  （[ui/README.md の「決定者の識別 (`approved_by`) — P0-3 関連の設計判断」節](../../ui/README.md#決定者の識別-approved_by--p0-3-関連の設計判断)）で、本フラグの範囲外。
 
 #### opt-in フラグの実装（require_server_side_principal / 既定 false）
 
@@ -383,7 +384,7 @@ owner/mode 表の3経路統一、記述子ロジックの共有 lib 抽出、
   現行の検証証跡は **backup 43 passed / 0 failed（テスト関数数;
   Round 71 で実測再生成: backup 31→43）** であり、verify サマリの
   `ok=<n> fail=<n>` ではない（単位定義は
-  [evidence-regeneration.md](evidence-regeneration.md) の 298-310 行を参照）。
+  [evidence-regeneration.md の「verify サマリの件数単位（I81-D (c)）」節](evidence-regeneration.md#verify-サマリの件数単位i81-d-c)を参照）。
   ただし repo 側 unit 変更の実機再適用は未実施（後述の実行手順を参照）。
 
 - **レガシー backup.sh / restore.sh は fail-closed 化済み**: `--dry-run` でも

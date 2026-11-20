@@ -20,6 +20,11 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::time::Duration;
 
+/// Env var for the policy service's loopback HTTP base URL.
+pub const ENV_POLICY_HTTP_URL: &str = "JARVIS_POLICY_HTTP_URL";
+/// Base URL used when [`ENV_POLICY_HTTP_URL`] is unset.
+pub const DEFAULT_POLICY_HTTP_URL: &str = "http://127.0.0.1:8081";
+
 /// Canonical env var for the gateway-facing approval API token (list/request/status).
 pub const ENV_APPROVAL_API_TOKEN: &str = "JARVIS_POLICY_APPROVAL_API_TOKEN";
 /// Deprecated alias, honoured temporarily with a startup warning.
@@ -892,6 +897,16 @@ mod tests {
     fn base_url_trailing_slash_is_normalized() {
         let client = PolicyClient::new("http://127.0.0.1:8081/");
         assert_eq!(client.base_url, "http://127.0.0.1:8081");
+    }
+
+    /// `main.rs` reads these names through the constants, so a single pin here
+    /// catches a one-sided edit of either the env name or the default URL.
+    #[test]
+    fn startup_env_names_and_default_url_are_pinned() {
+        assert_eq!(ENV_POLICY_HTTP_URL, "JARVIS_POLICY_HTTP_URL");
+        assert_eq!(DEFAULT_POLICY_HTTP_URL, "http://127.0.0.1:8081");
+        assert_eq!(ENV_LEGACY_APPROVAL_TOKEN, "JARVIS_POLICY_APPROVAL_TOKEN");
+        assert_eq!(ENV_APPROVAL_API_TOKEN, "JARVIS_POLICY_APPROVAL_API_TOKEN");
     }
 
     #[test]
