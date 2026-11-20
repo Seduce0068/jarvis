@@ -1,7 +1,8 @@
 # 個人リポジトリ共通の再利用可能ワークフロー
 # （Seduce0068/workflows の rust-gates.yml）へ委譲する。Rust ワーク
 # スペースは rust/ 配下にあるため working_directory で指定する。
-# native-tls と protoc（prost-build）用に apt パッケージを導入する。
+# protoc（prost-build）と rustls/ring 用に apt パッケージを導入する。
+# native-tls / openssl-sys は両ロックファイルに不在のため libssl-dev は不要。
 name: CI
 
 on:
@@ -34,8 +35,9 @@ jobs:
     # §5 の方針に従い `uses:` 自体は SHA 固定にせず v1 タグを維持する。
     uses: Seduce0068/workflows/.github/workflows/rust-gates.yml@v1
     with:
+      # aws-lc-sys（rustls の aws-lc-rs バックエンドが依存）のビルドに cmake が必要。
       apt_packages: |
-        libssl-dev
+        cmake
         protobuf-compiler
         gcc-aarch64-linux-gnu
         pkg-config
@@ -69,7 +71,8 @@ jobs:
         Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
         EOF
         sudo apt-get update
-        sudo apt-get install -y libssl-dev:arm64 libc6-dev-arm64-cross
+        # libssl-dev:arm64 は不要（openssl-sys 不在、aws-lc-sys は自己完結型）。
+        sudo apt-get install -y libc6-dev-arm64-cross
         rustup target add aarch64-unknown-linux-gnu
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         export PKG_CONFIG_ALLOW_CROSS=1
@@ -89,6 +92,13 @@ jobs:
         make check-shell
         make check-workflow-pins
         make check-toml
+        # I93-A: dependency advisory audit for rust/ and ui/ Cargo.lock.
+        # Precondition: cargo-audit is installed at a pinned version on the
+        # runner; the gate fails closed with AUDIT_TOOL_MISSING otherwise.
+        # The scan itself always uses --no-fetch; CI opts into refreshing the
+        # advisory DB first (network READ only). A failed fetch or any advisory
+        # finding fails closed; no repository data is transmitted.
+        DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit
         make check-evidence
         make secret-scan
         make safety-test

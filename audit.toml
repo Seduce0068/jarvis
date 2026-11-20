@@ -1,0 +1,67 @@
+# I93-A: cargo-audit configuration (repo root).
+#
+# Discovered by `cargo audit --no-fetch` from the repository root. The gate
+# (ci/scripts/check-dependency-audit.sh) scans rust/Cargo.lock and
+# ui/Cargo.lock with `--no-fetch`, so every suppression here is explicit and
+# version-controlled. No values, tokens, or host-specific paths are stored.
+#
+# 一時 ignore の根拠（Round 87/88 実測）:
+#   patch 版が無い major 更新待ちのため、アップグレード完了まで抑制する。
+#   patch 版のある 8 件（tokio / rustls 0.23 / rustls-webpki 0.103 /
+#   webpki-roots 1.0 / rustix / pulldown-cmark / ctutils / ui heapless）は
+#   Cargo.lock を更新済みのため ignore しない。
+#   全 ID は `cargo audit --no-fetch --file rust/Cargo.lock --json` の
+#   実測出力から転記した（推測していない）。
+#
+# 再評価日: 2026-12-20T00:00:00+09:00（全エントリ共通）。
+# 期限までに major 更新（hickory 0.26 / rsa 0.10 / rmcp 3.9）を完了するか、
+# 抑制を継続する理由を更新すること。理由の無い ignore は削除する。
+[advisories]
+ignore = [
+  # hickory-proto/resolver 0.25.2: DNSSEC 検証系 17 件。0.26 系（hickory-net
+  # へ検証ロジック移動）への major 更新が必要。patch 版なし。
+  "RUSTSEC-2026-0118",
+  "RUSTSEC-2026-0119",
+  "RUSTSEC-2026-0487",
+  "RUSTSEC-2026-0489",
+  "RUSTSEC-2026-0490",
+  "RUSTSEC-2026-0491",
+  "RUSTSEC-2026-0504",
+  "RUSTSEC-2026-0505",
+  "RUSTSEC-2026-0511",
+  "RUSTSEC-2026-0512",
+  "RUSTSEC-2026-0514",
+  "RUSTSEC-2026-0530",
+  "RUSTSEC-2026-0531",
+  "RUSTSEC-2026-0532",
+  "RUSTSEC-2026-0549",
+  "RUSTSEC-2026-0550",
+  "RUSTSEC-2026-0551",
+
+  # rsa 0.9.10: timing 系。0.10 への major 更新で解消見込み。
+  "RUSTSEC-2023-0071",
+
+  # rmcp 0.3.2: DNS rebinding（8.8）と無制限レスポンスバッファ（6.5）。
+  # 3.9 への major 更新で解消見込み。移行完了まで一時抑制。
+  "RUSTSEC-2026-0189",
+  "RUSTSEC-2026-0462",
+
+  # 旧 rustls 0.22.4 / rustls-webpki 0.102.8: 推移依存として残存。
+  # 新しい 0.23.46 / 0.103.16 へは更新済みだが、古い系統を保持する
+  # 上流クレート（axum 0.7 系統）の解消を待つ。
+  "RUSTSEC-2026-0346",
+  "RUSTSEC-2026-0349",
+  "RUSTSEC-2026-0049",
+  "RUSTSEC-2026-0098",
+  "RUSTSEC-2026-0099",
+  "RUSTSEC-2026-0104",
+  "RUSTSEC-2026-0382",
+  "RUSTSEC-2026-0383",
+
+  # libsqlite3-sys 0.30.1: patch 版が無く major 更新待ち。
+  "RUSTSEC-2026-0459",
+]
+
+# unmaintained / unsound / notice は情報警告として扱い、既定では終了コードを
+# 変えない（--deny を付けない）。ui 側の allowed warnings はこの方針で許容する。
+# セキュリティ上の脆弱性（vulnerability）は引き続き fail-closed で拒否する。

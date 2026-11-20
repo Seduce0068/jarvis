@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-evidence init-config
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit check-evidence init-config
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -70,6 +70,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@bash ci/scripts/check-workflow-pins.sh
 	@bash ci/scripts/test-workflow-pins.sh
 	@bash ci/scripts/check-toml.sh
+	@bash ci/scripts/check-dependency-audit.sh
 	@bash ci/scripts/check-evidence.sh
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-review-run.sh
@@ -83,6 +84,7 @@ secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は�
 
 safety-test: ## レガシー fail-closed とバックアップ検証ロジックを検証
 	@bash ci/scripts/test-legacy-guards.sh
+	@bash ci/scripts/check-dependency-audit.sh
 	@bash ci/scripts/test-workflow-pins.sh
 	@bash ci/scripts/test-verify-backup.sh
 	@bash ci/scripts/test-backup-args.sh
@@ -110,6 +112,9 @@ test-workflow-pins: ## ピン照合ゲートの回帰（mini workflow と疑似 
 
 check-toml: ## 全 tracked *.toml の構文検証（tomllib/tomli、値は出力しない・fail-closed）
 	@bash ci/scripts/check-toml.sh
+
+check-dependency-audit: ## rust/ui 両 Cargo.lock の既知脆弱性を監査（cargo-audit 必須・fail-closed）
+	@bash ci/scripts/check-dependency-audit.sh
 
 test-verify-backup: ## verify-backup.sh の合成データ回帰テスト
 	@bash ci/scripts/test-verify-backup.sh
