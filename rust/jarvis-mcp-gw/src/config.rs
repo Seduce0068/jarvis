@@ -733,6 +733,42 @@ mcp_principal = "opencode"
         }
     }
 
+    /// Build a dotted host whose labels are all within the 63-char limit, so
+    /// only the 253-char whole-host cap decides the boundary outcome.
+    fn host_with_last_label(last_label_len: usize) -> String {
+        let mut host = String::new();
+        for len in [63, 63, 63, last_label_len] {
+            if !host.is_empty() {
+                host.push('.');
+            }
+            host.push_str(&"a".repeat(len));
+        }
+        host
+    }
+
+    /// Length boundaries: 253/63 accepted, 254/64 rejected. Each pair differs
+    /// by exactly one character, so an off-by-one cannot hide.
+    #[test]
+    fn egress_allowlist_length_boundaries_flip_at_one_character() {
+        let host_253 = host_with_last_label(61);
+        let host_254 = host_with_last_label(62);
+        assert_eq!(host_253.len(), 253);
+        assert_eq!(host_254.len(), 254);
+        assert_eq!(
+            parse_egress_allowlist(&host_253),
+            Some(vec![host_253.clone()])
+        );
+        assert_eq!(parse_egress_allowlist(&host_254), None);
+
+        let label_63 = "a".repeat(63);
+        let label_64 = "a".repeat(64);
+        assert_eq!(
+            parse_egress_allowlist(&label_63),
+            Some(vec![label_63.clone()])
+        );
+        assert_eq!(parse_egress_allowlist(&label_64), None);
+    }
+
     #[test]
     fn egress_allowlist_normalizes_case_and_dedupes() {
         assert_eq!(

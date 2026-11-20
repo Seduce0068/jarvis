@@ -123,13 +123,21 @@ impl PolicyConfig {
     /// Parse a config from an explicit TOML path. Split out from [`Self::load`]
     /// so path selection is testable without touching the process environment.
     fn load_from_path(path: &str) -> Result<Self> {
+        Self::load_from_path_with(path, Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+    }
+
+    /// Same parse + startup-validation chain as [`Self::load_from_path`], with
+    /// the override provider injected. Tests merge a `Serialized` value after
+    /// the env provider so an ambient `JARVIS_POLICY_*` value cannot turn the
+    /// fail-closed assertions into a vacuous pass, without mutating env vars.
+    fn load_from_path_with<P: figment::Provider>(path: &str, overrides: P) -> Result<Self> {
         let config: PolicyConfig = Figment::new()
             .merge(Toml::file(path))
             // Flat snake_case fields: do NOT use figment's Env split, which
             // would turn JARVIS_POLICY_GRPC_ADDR into the nested key `grpc.addr`.
             // The config-path variable only selects the file, so keep it out
             // of the field provider as well.
-            .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+            .merge(overrides)
             .extract()?;
         // I8-E fail-closed guard: enforce at load time so the real binary
         // aborts before any service starts when a durable state path is
@@ -1100,25 +1108,27 @@ default_deny = true
         validate_startup(&configured).expect("startup chain passes");
     }
 
-    /// The guard is wired into `load_from_path`: a config file with a blank
-    /// token aborts startup before any service is constructed.
+    /// The guard is wired into the `load_from_path` chain: a blank token aborts
+    /// startup before any service is constructed. The `Serialized` override is
+    /// merged after the env provider, so an ambient `JARVIS_POLICY_*` value
+    /// injected by CI cannot turn this into a vacuous pass.
     #[test]
     fn load_from_path_rejects_blank_approval_token() {
         for (key, env_key) in [
             ("approval_api_token", "JARVIS_POLICY_APPROVAL_API_TOKEN"),
             ("approval_admin_token", "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN"),
         ] {
-            // Ambient env overrides are merged on top of TOML by
-            // `load_from_path`; skip when the runner injects this token.
-            if std::env::var_os(env_key).is_some() {
-                continue;
-            }
             let toml = format!("{}\n{key} = \"\"\n", base_toml());
             let file_name = format!("jarvis-policy-r4a-{key}.toml");
             let path = std::env::temp_dir().join(&file_name);
             std::fs::write(&path, &toml).expect("write temp config");
-            let error = PolicyConfig::load_from_path(path.to_str().expect("utf8 temp path"))
-                .expect_err("blank approval token must abort startup");
+            let overrides = Figment::from(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+                .merge(Serialized::default(key, ""));
+            let loaded = PolicyConfig::load_from_path_with(
+                path.to_str().expect("utf8 temp path"),
+                overrides,
+            );
+            let error = loaded.expect_err("blank approval token must abort startup");
             assert!(
                 error.to_string().contains(env_key),
                 "error names the env override: {error}"

@@ -198,13 +198,21 @@ impl EventConfig {
     /// Parse a config from an explicit TOML path. Split out from [`Self::load`]
     /// so path selection is testable without touching the process environment.
     fn load_from_path(path: &str) -> Result<Self> {
+        Self::load_from_path_with(path, Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+    }
+
+    /// Same parse + publish chain as [`Self::load_from_path`], with the
+    /// override provider injected. Tests merge a `Serialized` value after the
+    /// env provider so an ambient `JARVIS_EVENT_ADMIN_TOKEN` cannot mask the
+    /// value under test, without mutating process-wide env vars.
+    fn load_from_path_with<P: figment::Provider>(path: &str, overrides: P) -> Result<Self> {
         // Flat snake_case fields: do NOT use figment's Env split, which would
         // turn JARVIS_EVENT_GRPC_ADDR into the nested key `grpc.addr`.
         // The config-path variable only selects the file, so keep it out of
         // the field provider as well.
         let config: EventConfig = Figment::new()
             .merge(Toml::file(path))
-            .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+            .merge(overrides)
             .extract()?;
         publish_admin_token(config.admin_token().map(str::to_owned));
         Ok(config)
@@ -381,14 +389,12 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         reset_admin_token_for_test();
     }
 
-    /// One-shot check of the real `load_from_path()` publish route. An ambient
-    /// `JARVIS_EVENT_ADMIN_TOKEN` would override the TOML value, so skip
-    /// there; first-wins itself is covered by the test above.
+    /// One-shot check of the real `load_from_path` publish route. The
+    /// `Serialized` override is merged after the env provider, so an ambient
+    /// `JARVIS_EVENT_ADMIN_TOKEN` injected by CI cannot turn this into a
+    /// vacuous pass; first-wins itself is covered by the test above.
     #[test]
     fn load_from_path_publishes_admin_token() {
-        if std::env::var_os(ADMIN_TOKEN_ENV_KEY).is_some() {
-            return;
-        }
         let _guard = match TOKEN_SNAPSHOT_TEST_LOCK.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -399,7 +405,9 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         let path = std::env::temp_dir().join("jarvis-event-i81d-admin-token.toml");
         std::fs::write(&path, &toml).expect("write temp config");
         let path_str = path.to_str().expect("utf8 temp path");
-        let config = EventConfig::load_from_path(path_str).expect("config loads");
+        let overrides = Figment::from(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+            .merge(Serialized::default("admin_token", "load-secret"));
+        let config = EventConfig::load_from_path_with(path_str, overrides).expect("config loads");
         assert_eq!(config.admin_token(), Some("load-secret"));
         assert_eq!(ingress_admin_token().as_deref(), Some("load-secret"));
 
