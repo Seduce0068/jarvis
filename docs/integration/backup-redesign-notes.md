@@ -240,9 +240,14 @@ restore 手順は [backup-restore-runbook.md](backup-restore-runbook.md) に文�
 読み取り専用で、破壊操作は一切行わない。
 
 実バックアップ2セットに対して実行した **2026-11-17 時点の履歴値は
-ok=16 fail=0**（1セット目はディレクトリ hash 修正前に作られたため
-config-policy.tar が manifest に無いが、記録済みファイルはすべて整合）。
-現行値は **ok=43 fail=0**（Round 71 で証跡を実測再生成: backup 31→43）。
+ok=16 fail=0**（verify-backup.sh のペイロード／呼び出し単位の判定数。
+1セット目はディレクトリ hash 修正前に作られたため config-policy.tar が
+manifest に無いが、記録済みファイルはすべて整合）。
+現行の検証証跡は **backup 43 passed / 0 failed（テスト関数数;
+Round 71 の実測再生成で backup 31→43）** であり、verify-backup.sh の
+サマリ `ok=<n> fail=<n>` ではない。単位の定義は
+[evidence-regeneration.md](evidence-regeneration.md) の
+「verify サマリの件数単位（I81-D (c)）」（298-310 行）を参照。
 SHA-256 照合に加え、gzip/tar のフォーマット可読性も検査する
 （**復元は行わず**、構造のみ確認）。
 PostgreSQL dump は gzip 整合性に加え `pg_dump` 完了フッター

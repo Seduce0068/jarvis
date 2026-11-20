@@ -28,8 +28,13 @@ generated:
   （[backup-redesign-notes.md](backup-redesign-notes.md)）。
   2026-11-19 にユーザーが `sudo -n bash infra/scripts/install-backup-timer.sh --apply`
   を実行し、timer は**実機で active / enabled**、手動バックアップの整合性検証は
-  ok=30 fail=0（2026-11-19 の手動実行時点）。現行の検証証跡は ok=43 fail=0
-  （Round 71 で実測再生成: backup 31→43）。ただし repo 側で `--repo-dir` 追加と
+  ok=30 fail=0（2026-11-19 の手動実行時点・verify-backup.sh の
+  ペイロード／呼び出し単位の判定数）。現行の検証証跡は
+  **backup 43 passed / 0 failed（テスト関数数;
+  Round 71 で実測再生成: backup 31→43）** であり、verify サマリの
+  `ok=<n> fail=<n>` ではない（単位定義は
+  [evidence-regeneration.md](evidence-regeneration.md) の 298-310 行を参照）。
+  ただし repo 側で `--repo-dir` 追加と
   `ProtectHome=read-only` 変更を行ったため、**修正済み unit の実機再適用は未**
   （root 必須・ユーザー実行待ち）。
 - **復元（S9）**: `infra/scripts/test-restore-local.sh` を追加し、
@@ -371,7 +376,11 @@ owner/mode 表の3経路統一、記述子ロジックの共有 lib 抽出、
 - **timer の実機有効化は 2026-11-19 完了**: ユーザーが
   `sudo -n bash infra/scripts/install-backup-timer.sh --apply` を実行し
   exit 0、active / enabled、手動バックアップ整合性検証 ok=30 fail=0
-  （2026-11-19 時点。現行の検証証跡は Round 71 再生成の ok=43 fail=0）。
+  （2026-11-19 時点・verify-backup.sh のペイロード／呼び出し単位の判定数）。
+  現行の検証証跡は **backup 43 passed / 0 failed（テスト関数数;
+  Round 71 で実測再生成: backup 31→43）** であり、verify サマリの
+  `ok=<n> fail=<n>` ではない（単位定義は
+  [evidence-regeneration.md](evidence-regeneration.md) の 298-310 行を参照）。
   ただし repo 側 unit 変更の実機再適用は未実施（後述の実行手順を参照）。
 
 - **レガシー backup.sh / restore.sh は fail-closed 化済み**: `--dry-run` でも
