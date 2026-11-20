@@ -28,8 +28,10 @@ generated:
   （[backup-redesign-notes.md](backup-redesign-notes.md)）。
   2026-11-19 にユーザーが `sudo -n bash infra/scripts/install-backup-timer.sh --apply`
   を実行し、timer は**実機で active / enabled**、手動バックアップの整合性検証は
-  ok=30 fail=0。ただし repo 側で `--repo-dir` 追加と `ProtectHome=read-only` 変更を
-  行ったため、**修正済み unit の実機再適用は未**（root 必須・ユーザー実行待ち）。
+  ok=30 fail=0（2026-11-19 の手動実行時点）。現行の検証証跡は ok=43 fail=0
+  （Round 71 で実測再生成: backup 31→43）。ただし repo 側で `--repo-dir` 追加と
+  `ProtectHome=read-only` 変更を行ったため、**修正済み unit の実機再適用は未**
+  （root 必須・ユーザー実行待ち）。
 - **復元（S9）**: `infra/scripts/test-restore-local.sh` を追加し、
   合成フィクスチャで dry-run / apply 経路を自動検証（**47 tests pass**、
   本番リソース非接触を多重ガード）。**実機の隔離先復元演習は承認待ち**。
@@ -293,7 +295,7 @@ generated:
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| BK-1 | バックアップ保存先の再決定と実装更新 | **2026-11-17 実装済み**: 保存先を `/var/lib/postgresql/jarvis-backups`（ローカル、postgres:postgres 0700）と決定。[backup-local.sh](../../infra/scripts/backup-local.sh) が PostgreSQL dump + Qdrant snapshot + 非 secret 設定 + SHA-256 manifest を生成。実バックアップ1回成功、[verify-backup.sh](../../infra/scripts/verify-backup.sh) で整合性・完全性を検証（合成テスト6件）。旧実装は OCI/rclone/op 前提のレガシーで、ランチャーは fail-closed 化済み。 | 保存先の外部化（NAS/別ホスト）・暗号化は要件が出た時点で別途対応。現在はローカル保存で ADR-0004 に準拠。 |
+| BK-1 | バックアップ保存先の再決定と実装更新 | **2026-11-17 実装済み**: 保存先を `/var/lib/postgresql/jarvis-backups`（ローカル、postgres:postgres 0700）と決定。[backup-local.sh](../../infra/scripts/backup-local.sh) が PostgreSQL dump + Qdrant snapshot + 非 secret 設定 + SHA-256 manifest を生成。実バックアップ1回成功、[verify-backup.sh](../../infra/scripts/verify-backup.sh) で整合性・完全性を検証（Round 71 で verify 25→37 / restore 80→105 に拡張）。旧実装は OCI/rclone/op 前提のレガシーで、ランチャーは fail-closed 化済み。 | 保存先の外部化（NAS/別ホスト）は要件が出た時点で別途対応。暗号化・署名は manifest の format/encryption/signature/role 記述子と verify/restore の記述子駆動化が Round 69–71 で対応済み（既定 none/none、実暗号化の有効化は P1-6 として残る）。ペイロード名・形式ハードコードと restore_configs の owner/mode 漂移も Round 71 で解消済み。現在はローカル保存で ADR-0004 に準拠。 |
 | BK-2 | バックアップ timer/service のローカル運用化 | **2026-11-17 repo 側完了**: unit を現行化（`User=postgres`、OCI/rclone/op 依存撤去、`ProtectSystem=strict` + `ReadWritePaths`）。`install-backup-timer.sh`（dry-run 既定・rollback 付き・適用後に手動実行＋整合性検証まで実施）を追加。`systemd-analyze verify` 成功。**実機は active / enabled（2026-11-19 ユーザー適用済み）**。ただし repo 側 unit 変更（`--repo-dir` 追加）の再適用は未。 | 「承認待ち実機タスクの実行手順」節の BK-2 に従い、確認 → 修正 → 再確認を実施。 |
 | BK-3 | OpenTofu/OCI 後始末資産の扱い決定 | [infra/opentofu/](../../infra/opentofu/) は未使用レガシー（[infra/opentofu/README.md](../../infra/opentofu/README.md)）。後始末用に [infra/scripts/decommission-oci.sh](../../infra/scripts/decommission-oci.sh) あり（既定は dry-run、`--apply` で destroy 実行。`tofu`/OCI CLI 設定/`infra/opentofu/environments/prod` の init/state 等が前提。実行時は `tofu init`・`state list`・最終 state バックアップ（`$HOME/jarvis-oci-state-<ts>.json`）・`destroy` plan 作成を行う）。2026-11-15 確認: `infra/opentofu/environments/prod/.terraform/terraform.tfstate` がローカルに存在（内容は未確認）。 | 「保持」「削除」「OCI リソース削除実行」の方針決定。**実行判断/実行前の確認例（read-only・dry-run優先）**: (1) `tofu`/OCI CLI/認証情報・対象 tenancy/region・`terraform.tfvars` 等の前提を確認し、state の所在・鮮度・バックアップ（別保管含む）を確保する。(2) OCI コンソール/CLI で実リソース有無・保護すべきデータ（Object Storage/Block Volume 等）の残存を確認し、未追跡リソースや state 不整合がないか点検する（A1 Free 枠再取得不可等の影響も考慮）。(3) まず dry-run（既定）で `state list` と destroy plan の対象を確認し、出力を保存/レビューしてから `--apply` の要否を判断する。(4) 実削除時のロールバック困難性・Tailscale 管理画面の後処理等を手順化し、必要な承認/権限のもとで実施する（実削除/OCI 操作は別判断・手順）。 |
 | BK-4 | レガシー設定テンプレートの整理 | 全6テンプレートを棚卸し（2026-11-17）。`policy/context/event/otel.env` は既に legacy 注記済み。`code_server.env` / `mcp_gateway.env` に残っていた「Populated by 1Password CLI at runtime」注記を、実機の `bws run` + `/etc/jarvis/bws.env` 前提へ訂正。値の変更・削除は行わず、secret scan もクリーン。 | ファイル単位の廃止/削除は実機設定の確定後に別判断（現状は参照テンプレートとして維持）。 |
@@ -302,6 +304,10 @@ generated:
 `restore-local.sh` と `test-restore-local.sh`（47 tests pass）を追加した。
 timer は実機で active / enabled だが、repo 側 unit 変更の再適用は未実施。
 S9 の実機復元演習とバックアップ外部化（P1-4）は承認待ち。
+
+**Round 71 対応済み**: 必須ペイロード検査の実 basename 由来化（role/basename 整合）、
+owner/mode 表の3経路統一、記述子ロジックの共有 lib 抽出、
+新規シナリオ4件の自動テスト追加、証跡の実測再生成（backup 31→43）。
 
 ### レガシー op:// テンプレートの判断記録（P3-5 一部、2026-11-18）
 
@@ -361,7 +367,7 @@ S9 の実機復元演習とバックアップ外部化（P1-4）は承認待ち�
 - **timer の実機有効化は 2026-11-19 完了**: ユーザーが
   `sudo -n bash infra/scripts/install-backup-timer.sh --apply` を実行し
   exit 0、active / enabled、手動バックアップ整合性検証 ok=30 fail=0
-  （[backup-redesign-notes.md](backup-redesign-notes.md) 参照）。
+  （2026-11-19 時点。現行の検証証跡は Round 71 再生成の ok=43 fail=0）。
   ただし repo 側 unit 変更の実機再適用は未実施（後述の実行手順を参照）。
 
 - **レガシー backup.sh / restore.sh は fail-closed 化済み**: `--dry-run` でも
@@ -376,9 +382,14 @@ S9 の実機復元演習とバックアップ外部化（P1-4）は承認待ち�
 - **BK-1/BK-2/SEC-2 の安全ゲート実装済み**: [backup-preflight.sh](../../infra/scripts/backup-preflight.sh)
   （`make backup-preflight`）で、サービス状態・ツール有無・設定ファイル列挙（secret 値は読まない）・
   `op://` テンプレート数・timer 状態を読み取り専用で検査。実機 run は fail=0 / warn=2。
-- **しかし保存先・認証/暗号化方式・復旧検証手順は未決定**のため、バックアップ本体の
-  再実装と timer 有効化は行っていない（[backup-redesign-notes.md](backup-redesign-notes.md) の
-  「仍未解決（ブロッカー）」を維持）。OCI は ADR-0004 で除外。
+- **2026-11-16 時点の履歴**: 保存先・認証/暗号化方式・復旧検証手順は未決定だった。
+  **現行は同期済み**: 保存先はローカル `/var/lib/postgresql/jarvis-backups` へ決定し、
+  バックアップ本体は実装済み、timer は 2026-11-19 に実機 active / enabled。
+  復旧検証手順は [backup-restore-runbook.md](backup-restore-runbook.md) /
+  [local-restore-design.md](local-restore-design.md) に文書化済み。
+  暗号化・署名は manifest 記述子と verify/restore の記述子駆動化を
+  Round 69–71 で整備済みだが、実暗号化の有効化は P1-6 として残る。
+  OCI は ADR-0004 で除外。
 - **BK-3**: OCI リソース削除は「ociは使わない」方針のもと実行しない（後始末スクリプトは参照用に保留）。
 - **BK-4 / SEC-2**: `op://` 参照4ファイルと `bws.env` の扱いは、現行の秘密管理方式を
   確定した上で判断する（実機 secret の内容は確認していない）。

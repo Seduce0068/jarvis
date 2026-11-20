@@ -239,13 +239,21 @@ restore 手順は [backup-restore-runbook.md](backup-restore-runbook.md) に文�
 で、manifest.txt に記録されたサイズと SHA-256 を実ファイルと照合する。
 読み取り専用で、破壊操作は一切行わない。
 
-実バックアップ2セットに対して実行し **ok=16 fail=0** を確認（1セット目は
-ディレクトリ hash 修正前に作られたため config-policy.tar が manifest に無いが、
-記録済みファイルはすべて整合）。SHA-256 照合に加え、gzip/tar の
-フォーマット可読性も検査する（**復元は行わず**、構造のみ確認）。
+実バックアップ2セットに対して実行した **2026-11-17 時点の履歴値は
+ok=16 fail=0**（1セット目はディレクトリ hash 修正前に作られたため
+config-policy.tar が manifest に無いが、記録済みファイルはすべて整合）。
+現行値は **ok=43 fail=0**（Round 71 で証跡を実測再生成: backup 31→43）。
+SHA-256 照合に加え、gzip/tar のフォーマット可読性も検査する
+（**復元は行わず**、構造のみ確認）。
 PostgreSQL dump は gzip 整合性に加え `pg_dump` 完了フッター
 （`PostgreSQL database dump complete`）の有無も確認し、
-途中で切れたダンプを検出する。さらに完全なセットには `COMPLETE`
-マーカーを書き、途中失敗で一部だけ書き込まれたセットを検証時に
-検出する（マーカー導入前のレガシーセットは manifest に `created_at`
-が無いことで識別し、後方互換として許容）。
+途中で切れたダンプを検出する。完全なセットには `COMPLETE`
+マーカーを書くが、**現行契約では `COMPLETE` の有無にかかわらず
+主要データコンポーネント（PostgreSQL dump / Qdrant snapshot の
+いずれか）の実在が必須**である。マーカー導入前のレガシーセットを
+後方互換として無条件に許容せず、`created_at` のみでペイロードが
+無いセット、必須ペイロード欠落、role と basename の不整合、
+`pg_dump` フッター欠落は fail-closed で exit 1 となる
+（`COMPLETE` 欠落セットは `--allow-legacy` の明示指定が必要。
+[local-restore-design.md](local-restore-design.md) の
+「必須コンポーネントの定義」を参照）。

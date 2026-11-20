@@ -2101,3 +2101,27 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 親が対応: TC-R1（role 権威）と I74-B（basename 権威）の矛盾を `*.sql.gz`
   一般受理で解消、shellcheck SC1091／SC2016／SC2123 の抑止、
   証跡の実測件数同期。
+
+### Round 72（R4 で修正済み）
+
+- [x] drift の casbin パスが JARVIS_DRIFT_POLICY_DIR を無視（low）→ 環境変数
+  経路へ統一。web.fetch の requires_approval 検査を tomllib 厳密パースへ
+  変更（grep -A8 の行距離依存を解消）、回帰2件。
+- [x] restore-local.d/*.sh の固定名参照を共有 `resolve_restore_input()`
+  による記述子導出へ変更（legacy は後方互換）。改名ペイロード復元の
+  回帰追加（restore 105→119件）。
+- [x] UTF-8 バイト境界テスト3件、AllowList の空名／空 principal 起動時拒否。
+- [x] dsh.md の firejail「全面撤去」を範囲限定、backup-redesign-notes.md
+  の legacy 許容、remaining-tasks.md の解消済み記述を現行へ同期。
+
+### Round 72 の残り指摘（未対応）
+
+- [ ] restore-local の module 内 fail-closed は dispatch 後（stop_services 後）
+  に発動。verify_set 前に解決ゲートを組み込んで stop 前に拒否したい場合は
+  `resolve_restore_input()` を verify_set() から呼ぶ必要がある（low）。
+- [ ] 共有 lib の実機配布（再インストール）と、ユーザー判断項目:
+  P1-6 暗号化鍵注入先、P0 ガード有効化、Grafana、Webhook、S9、
+  バックアップ外部化、push。
+
+- 親が対応: fmt 差分、AllowList の `#[derive(Debug)]`（expect_err 要件）、
+  全ゲート再検証。

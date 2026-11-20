@@ -48,8 +48,12 @@ generated:
   - `tools/list` = 7ツール（filesystem.list/read, git.diff/status, homeassistant.get_state, web.fetch/search）
   - `filesystem.list` / `filesystem.read` / `git.status` の **tools/call 成功**
 - 未実装（明確なエラーを返す）: `web.*` / `homeassistant.*` は**上流MCPサーバー登録**で対応予定。
-  firejail 等のレガシー実行経路は [ADR-0002](../../adr/0002-runtime-agnostic.md) で
-  撤去済み。未実装ツールは明示的エラーを返す fail-closed 挙動であり、
+  `opencode` CLI 依存の**実行 fallback は撤去済み**
+  （2026-11-15 実装、[ADR-0002](../../adr/0002-runtime-agnostic.md) の Consequences）。
+  ただし設定値 `SandboxType::Firejail`（`JARVIS_MCP_GW_SANDBOX_TYPE` のパース）と
+  firejail パッケージ（[setup-selfhost.sh](../../infra/scripts/setup-selfhost.sh) の
+  `apt-get install`）は**互換のため残存**し、実行経路には影響しない。
+  未実装ツールは明示的エラーを返す fail-closed 挙動であり、
   レガシー経路へフォールバックしない。承認必須ツールは jarvis-policy の
   承認フローへ転送される（後述「承認フロー」節）。
 
@@ -102,6 +106,10 @@ initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の�
 
 - 症状: `filesystem.*` / `git.*` は `canonicalize base /home/koppe: Permission denied`、
   `web.search` / `homeassistant.get_state` は firejail フォールバック失敗。
+  注: この「firejail フォールバック失敗」は 2026-11-15 時点の履歴記録であり、
+  現行に firejail 実行経路が存在する根拠ではない（前述
+  「更新（2026-11-09）: ネイティブハンドラ実装」節の fallback 撤去と
+  設定値残存の説明を参照）。
 - 原因: unit の `ProtectHome=yes` と基準ディレクトリ既定値 `/home/koppe` の不整合。
 - 修正: unit を `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=/home/koppe` に変更し、
   未実装ツールを承認必須化（**当時は `tools/list` 非表示**。現行は表示＋呼び出し時承認）。
