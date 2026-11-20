@@ -434,24 +434,6 @@ impl EgressAllowlist {
         }
     }
 
-    /// Legacy helper retained for the direct pattern-matching unit tests. It
-    /// keeps the historical "blank means unrestricted" semantics; the
-    /// production path uses [`Self::from_config`] instead.
-    #[cfg(test)]
-    fn parse(raw: &str) -> Self {
-        let hosts: Vec<String> = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|entry| !entry.is_empty())
-            .map(str::to_ascii_lowercase)
-            .collect();
-        if hosts.is_empty() {
-            Self::Unrestricted
-        } else {
-            Self::Hosts(hosts)
-        }
-    }
-
     fn allows(&self, host: &str) -> bool {
         match self {
             Self::Unrestricted => true,
@@ -801,12 +783,15 @@ mod tests {
 
     #[test]
     fn egress_allowlist_parse_and_match() {
-        // Unset/blank (also whitespace or empty entries) means unrestricted.
-        for raw in ["", "   ", ","] {
-            assert!(EgressAllowlist::parse(raw).allows("anything.example"));
+        // The production config path is fail-closed: unset/blank, whitespace,
+        // empty entries and malformed patterns all become `DenyAll`, so no
+        // destination is allowed.
+        for raw in ["", "   ", ",", "http://example.com", "bad host", "*."] {
+            let list = EgressAllowlist::from_config(raw);
+            assert!(!list.allows("anything.example"), "{raw}");
         }
 
-        let list = EgressAllowlist::parse(" example.com , *.trusted.org ");
+        let list = EgressAllowlist::from_config(" example.com , *.trusted.org ");
         // Exact match, case-insensitive on both sides, without suffix confusion.
         assert!(list.allows("example.com"));
         assert!(list.allows("EXAMPLE.COM"));
@@ -822,7 +807,7 @@ mod tests {
 
     #[test]
     fn egress_allowlist_allows_and_rejects_urls() {
-        let list = EgressAllowlist::parse("example.com,*.trusted.org");
+        let list = EgressAllowlist::from_config("example.com,*.trusted.org");
         let sub = validate_http_url("https://api.trusted.org/resource").unwrap();
         assert!(ensure_host_allowed(&sub, &list).is_ok());
         let exact = validate_http_url("https://example.com/").unwrap();
@@ -839,15 +824,17 @@ mod tests {
         let v6 = validate_http_url("https://[2001:4860:4860::8888]/").unwrap();
         assert!(ensure_host_allowed(&v6, &list).is_err());
 
-        // With no allowlist the same destinations stay unrestricted.
-        let unrestricted = EgressAllowlist::parse("");
-        assert!(ensure_host_allowed(&denied, &unrestricted).is_ok());
-        assert!(ensure_host_allowed(&v4, &unrestricted).is_ok());
+        // An empty config is `DenyAll`, not a bypass: the same destinations
+        // are refused instead of being silently allowed.
+        let deny_all = EgressAllowlist::from_config("");
+        assert!(ensure_host_allowed(&denied, &deny_all).is_err());
+        assert!(ensure_host_allowed(&exact, &deny_all).is_err());
+        assert!(ensure_host_allowed(&v4, &deny_all).is_err());
     }
 
     #[test]
     fn redirect_target_is_checked_against_allowlist() {
-        let list = EgressAllowlist::parse("example.com");
+        let list = EgressAllowlist::from_config("example.com");
         let base = validate_http_url("https://example.com/a").unwrap();
         // A relative redirect stays on the allowed host.
         let inside = resolve_redirect(&base, "../b").unwrap();
