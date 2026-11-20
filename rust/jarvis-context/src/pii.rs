@@ -136,7 +136,15 @@ impl PiiFilter {
     fn redact_string(&self, s: &str) -> String {
         let mut out = s.to_owned();
         for (_, re) in &self.patterns {
-            out = re.replace_all(&out, &self.replacement).into_owned();
+            // I91-A: `Replacer for &str` interprets `$0`/`$1`/`$name` as
+            // capture references. A config value of `redact_replacement =
+            // "$0"` would therefore reinsert the matched PII verbatim and
+            // turn fail-closed redaction into fail-open disclosure.
+            // `NoExpand` forces literal replacement (available since regex
+            // 1.0; resolved here as 1.13.1 per Cargo.lock).
+            out = re
+                .replace_all(&out, regex::NoExpand(self.replacement.as_str()))
+                .into_owned();
         }
         out
     }
@@ -718,6 +726,51 @@ email = "[a-z]+@[a-z]+"
         assert_eq!(
             values,
             vec!["alice-payload", "bob-payload", "reserved-value"]
+        );
+    }
+
+    /// I91-A regression: the replacement is inserted literally. With the old
+    /// `&str` Replacer, `redact_replacement = "$0"` expands to the whole match
+    /// and restores the PII (fail-open to the LLM). `NoExpand` must keep `$0`
+    /// as text so no e-mail or API key survives redaction.
+    #[test]
+    fn dollar_significant_replacement_does_not_restore_pii() {
+        let mut patterns = HashMap::new();
+        patterns.insert(
+            "email".into(),
+            r#"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}"#.into(),
+        );
+        patterns.insert(
+            "api_key".into(),
+            r#"(?i)(api[_-]?key|secret|token|password)\s*[:=]\s*["']?([a-zA-Z0-9_\-]{20,})["']?"#
+                .into(),
+        );
+        let filter = PiiFilter::from_config(PiiConfig {
+            patterns,
+            redact_replacement: "$0".into(),
+            enabled: true,
+        });
+
+        let probe_value = "X".repeat(24);
+        let input = json!({
+            "email": "mail me at user@example.com",
+            "probe_key": format!("{} = {}", concat!("api_", "key"), probe_value),
+        });
+        let out = filter.filter(input).expect("filter runs");
+
+        // Literal "$0", not the captured match, must be written out.
+        assert_eq!(out["email"], "mail me at $0");
+        assert_eq!(out["probe_key"], "$0");
+
+        // Defense in depth: no raw PII may survive anywhere in the output.
+        let rendered = out.to_string();
+        assert!(
+            !rendered.contains("user@example.com"),
+            "email leaked: {rendered}"
+        );
+        assert!(
+            !rendered.contains(&probe_value),
+            "sensitive token leaked: {rendered}"
         );
     }
 }

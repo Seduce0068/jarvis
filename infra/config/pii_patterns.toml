@@ -9,7 +9,8 @@
 # Enable PII filtering
 enabled = true
 
-# Redaction replacement
+# Redaction replacement. Inserted literally (regex::NoExpand): "$0"/"$1" are
+# NOT capture references, so do not use them here expecting expansion.
 redact_replacement = "[REDACTED]"
 
 [patterns]
