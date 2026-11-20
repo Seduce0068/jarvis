@@ -12,7 +12,13 @@ use tracing::warn;
 /// built trees from exhausting the stack.
 const MAX_DEPTH: usize = 128;
 
+/// Reject mistyped keys instead of letting `toml::from_str` silently ignore
+/// them. Without this, a typo such as `patern` instead of `patterns` parses
+/// successfully and quietly drops the intended PII patterns; the caller then
+/// sees a "valid" but weakened filter. Unknown keys now fail parsing, which
+/// routes through the warn + fail-closed default-pattern path in `new()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PiiConfig {
     pub patterns: HashMap<String, String>,
     pub redact_replacement: String,
@@ -424,6 +430,69 @@ mod tests {
         assert_eq!(out["aws"], "[REDACTED]");
         assert_eq!(out["github"], "[REDACTED]");
         assert_eq!(out["jwt"], "[REDACTED]");
+    }
+
+    /// I88-B: an unknown top-level key (e.g. the `patern` typo of `patterns`)
+    /// must make TOML deserialization fail instead of being silently ignored.
+    /// The failed parse must warn and fall back to the fail-closed shipped
+    /// defaults, so a mistyped config cannot silently drop PII patterns.
+    #[test]
+    fn unknown_config_key_fails_closed_to_default_patterns() {
+        const PROBE: &str = "pii-config-unknown-key-probe";
+        const TYPO_TOML: &str = r#"
+enabled = true
+redact_replacement = "[REDACTED]"
+patern = { email = "[a-z]+@[a-z]+" }
+[patterns]
+email = "[a-z]+@[a-z]+"
+"#;
+
+        // All three known fields are present and valid; only the extra
+        // `patern` key is unknown. Without `deny_unknown_fields` this parses.
+        let parsed = toml::from_str::<PiiConfig>(TYPO_TOML);
+        assert!(parsed.is_err(), "unknown key must fail deserialization");
+
+        let dir = std::env::temp_dir().join("jarvis-context-pii-unknown-key");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let config_path = dir.join("typo.toml");
+        std::fs::write(&config_path, TYPO_TOML).expect("write typo config");
+
+        let config = crate::config::ContextConfig {
+            pii_patterns_path: config_path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        let (filter, logs) = capture_warns(async {
+            let loaded = PiiFilter::new(&config).await.expect("parse is not fatal");
+            tracing::warn!(probe = PROBE, "capture control event");
+            loaded
+        });
+
+        std::fs::remove_dir_all(&dir).expect("clean temp dir");
+
+        assert!(
+            logs.contains(PROBE),
+            "capture must observe WARN events: {logs}"
+        );
+        assert!(
+            logs.contains("Failed to parse PII pattern config file"),
+            "unknown-key parse failure must warn: {logs}"
+        );
+
+        // Fail-closed: redaction stays enabled with the six default patterns,
+        // not an empty set and not the partly typo'd on-disk config.
+        assert!(filter.enabled, "filter stays enabled after fallback");
+        assert_eq!(filter.replacement, "[REDACTED]");
+        assert_eq!(
+            filter.patterns.len(),
+            PiiFilter::default_patterns().len(),
+            "fallback must use the shipped default patterns"
+        );
+        let out = filter
+            .filter(json!({ "text": "mail me at user@example.com" }))
+            .expect("filter runs");
+        assert_eq!(out["text"], "mail me at [REDACTED]");
     }
 
     /// I12-E: ordinary object keys are preserved unchanged; only string
