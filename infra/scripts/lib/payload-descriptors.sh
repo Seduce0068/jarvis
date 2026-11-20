@@ -13,10 +13,17 @@
 # PAYLOAD_DESCRIPTORS_LIB=1 so a caller can assert the source actually happened.
 # Callers MUST override on_payload_check AFTER sourcing AND register it through
 # install_payload_check_hook(); the classification itself lives only here and is
-# ALSO returned as the exit status of payload_format_check(). The hook is
-# reporting only (log line + counters) -- a lost/never-installed hook can no
-# longer turn a corrupt gzip/tar, an unsupported descriptor or a truncated
-# pg_dump into a silent success (I77-B fail-closed).
+# ALSO returned as the exit status of payload_format_check().
+#
+# Adopted accounting contract (I79-A, fail-closed): the reporting hook is LOG
+# ONLY -- it emits the caller's FORMAT OK/MISMATCH line but MUST NOT touch any
+# counter. The caller owns ALL accounting and derives it solely from the return
+# code of payload_format_check(): 0 = ok, 1 = verdict mismatch (unsupported
+# descriptor / corrupt gzip-tar / truncated pg_dump), 2 = hook not installed.
+# Any rc >= 1 is a failure. Counting only rc==2 (or trusting the hook to have
+# counted rc==1) is a fail-open: a future rc==1 branch with a lost hook record
+# would let corrupt data through. A lost/never-installed hook still fails closed
+# via rc==2 (I77-B).
 
 # Consumed by the sourcing scripts as a load assertion (SC2034 when checked
 # standalone).
@@ -160,18 +167,21 @@ payload_label() { # name role -> human-readable label used in reports
 }
 
 # --- I77-B: mandatory hook installation guard --------------------------------
-# Adopted policy: payload_format_check() owns the classification and returns it
-# as its exit status (0 = ok, 1 = verdict mismatch, 2 = hook not installed).
-# on_payload_check is *reporting only*: it emits the caller's FORMAT OK/MISMATCH
-# line and updates the caller's counters. Because a no-op hook used to swallow
-# every verdict (fail-open), a caller must replace the placeholder below and
-# register it with install_payload_check_hook() before the first format check.
-# An unregistered hook makes payload_format_check() fail closed with rc=2.
+# Adopted policy (I79-A): payload_format_check() owns the classification and
+# returns it as its exit status (0 = ok, 1 = verdict mismatch, 2 = hook not
+# installed). on_payload_check is *reporting only* -- it emits the caller's
+# FORMAT OK/MISMATCH line and MUST NOT update counters; the caller counts from
+# the return code instead (any rc >= 1 is a failure). Because a no-op hook used
+# to swallow every verdict (fail-open), a caller must replace the placeholder
+# below and register it with install_payload_check_hook() before the first
+# format check. An unregistered hook makes payload_format_check() fail closed
+# with rc=2.
 PAYLOAD_CHECK_HOOK_INSTALLED=0
 
 # on_payload_check <event> <detail>
 # Placeholder no-op. Each caller overrides this after sourcing to map the shared
-# verdict to its own output and counters. Events:
+# verdict to its own log output (counters are owned by the caller's rc handling).
+# Events:
 #   FORMAT_OK | FORMAT_MISMATCH | COMPLETE_OK | COMPLETE_MISMATCH
 on_payload_check() { :; }
 
@@ -206,13 +216,15 @@ assert_payload_check_hook() {
 
 # payload_format_check <path> <name> <format> <encryption> <signature> <role>
 # Descriptor gate + read-only structural probe. Every outcome is delivered via
-# on_payload_check (reporting only) AND reflected in the exit status:
+# on_payload_check (log only) AND reflected in the exit status:
 #   0 = every probed aspect ok / no verdict needed
 #   1 = at least one mismatch (unsupported descriptor, corrupt gzip/tar,
 #       missing pg_dump footer)
 #   2 = reporting hook not installed -> fail closed, no classification attempted
-# verify-backup.sh and restore-local.sh therefore classify a payload identically
-# and can enforce the verdict from the return value even if accounting is lost.
+# Callers MUST treat any rc >= 1 as a failure and do ALL failure accounting from
+# this return code; the hook never touches counters. verify-backup.sh and
+# restore-local.sh therefore classify a payload identically and enforce the
+# verdict from the return value even if the hook's log line is lost.
 payload_format_check() {
   assert_payload_check_hook || {
     printf '%s\n' 'ERROR: payload_format_check called with no installed on_payload_check hook' >&2

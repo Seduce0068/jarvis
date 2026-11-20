@@ -57,18 +57,16 @@ source "$SCRIPT_DIR/lib/payload-descriptors.sh"
   exit 1
 }
 
-# Map the shared verdict to this script's output/counters. The classification
-# itself lives only in the shared library.
+# I79-A adopted accounting policy: this hook is LOG ONLY. It emits the shared
+# verdict line but MUST NOT touch ok/fail -- all accounting is done by the caller
+# from payload_format_check()'s return code below (any rc >= 1 is a failure).
+# Counting rc==1 in the hook as well would double-count it; relying on the hook
+# alone is fail-open if a future lib branch forgets to emit an event.
 on_payload_check() { # event detail
   local event="$1" detail="$2"
   case "$event" in
-    FORMAT_OK|COMPLETE_OK)
+    FORMAT_OK|COMPLETE_OK|FORMAT_MISMATCH|COMPLETE_MISMATCH)
       echo "  ${event//_/ }: $detail"
-      ok=$((ok+1))
-      ;;
-    FORMAT_MISMATCH|COMPLETE_MISMATCH)
-      echo "  ${event//_/ }: $detail"
-      fail=$((fail+1))
       ;;
   esac
 }
@@ -179,15 +177,17 @@ for set in "${sets[@]}"; do
       has_config=1
     fi
     # Format-level check: the shared function owns the classification and
-    # returns it as rc (0 ok / 1 mismatch / 2 hook missing). on_payload_check
-    # only emits the FORMAT OK/MISMATCH line and increments ok/fail above.
+    # returns it as rc (0 ok / 1 mismatch / 2 hook missing). I79-A: the hook is
+    # log-only; THIS is the single accounting point -- any rc >= 1 fails closed.
     format_rc=0
     payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role" || format_rc=$?
-    if [ "$format_rc" -eq 2 ]; then
-      # No hook recorded this verdict; force the gate closed. rc=1 mismatches
-      # are already counted by on_payload_check -- no double counting here.
-      echo "  ERROR: payload format check hook not installed; refusing to verify"
+    if [ "$format_rc" -ge 1 ]; then
+      if [ "$format_rc" -eq 2 ]; then
+        echo "  ERROR: payload format check hook not installed; refusing to verify"
+      fi
       fail=$((fail+1))
+    else
+      ok=$((ok+1))
     fi
   done < "$manifest"
 

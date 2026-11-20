@@ -40,6 +40,11 @@ LATEST=0
 VERIFY_SCRIPT="${VERIFY_SCRIPT:-}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MODULE_DIR="$SCRIPT_DIR/restore-local.d"
+# I79-B (a): dedicated mutual-exclusion lock path. Overridable for isolated test
+# runs; the default is a single, well-known path under /tmp.
+LOCK_FILE="${LOCK_FILE:-/tmp/jarvis-restore.lock}"
+LOCK_FAIL_TAG='[restore-local] LOCK FAIL:'
+LOCK_FD=""
 
 # Qdrant is deliberately absent from this list. Restore uses its HTTP API, so
 # the process must keep listening; "stop then HTTP upload" is never produced.
@@ -162,7 +167,7 @@ Usage: restore-local.sh [--backup-set DIR | --latest] [--apply] [--confirm]
   -h, --help        show this help.
 
   Verification is mandatory even in dry-run; a failed gate means zero writes.
-  Test-only environment overrides: BACKUP_ROOT, VERIFY_SCRIPT.
+  Test-only environment overrides: BACKUP_ROOT, VERIFY_SCRIPT, LOCK_FILE.
 USAGE
 }
 
@@ -233,17 +238,16 @@ source "$SCRIPT_DIR/lib/payload-descriptors.sh"
   exit 1
 }
 
-# Map the shared verdict to this script's logging/counters. The classification
-# itself lives only in the shared library.
+# I79-A adopted accounting policy: this hook is LOG ONLY. It emits the shared
+# verdict line but MUST NOT touch DESCRIPTOR_FAILURES -- all accounting is done
+# by the caller from payload_format_check()'s return code below (any rc >= 1 is
+# a failure). Counting rc==1 here as well would double-count it; relying on the
+# hook alone is fail-open if a future lib branch forgets to emit an event.
 on_payload_check() { # event detail
   local event="$1" detail="$2"
   case "$event" in
-    FORMAT_OK|COMPLETE_OK)
+    FORMAT_OK|COMPLETE_OK|FORMAT_MISMATCH|COMPLETE_MISMATCH)
       log "${event//_/ }: $detail"
-      ;;
-    FORMAT_MISMATCH|COMPLETE_MISMATCH)
-      log "${event//_/ }: $detail"
-      DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
       ;;
   esac
 }
@@ -413,14 +417,15 @@ verify_set() {
       has_git=1
     fi
     # Format checks (read-only): the shared function owns the classification
-    # and returns it as rc (0 ok / 1 mismatch / 2 hook missing); the hook only
-    # logs and feeds DESCRIPTOR_FAILURES above.
+    # and returns it as rc (0 ok / 1 mismatch / 2 hook missing). I79-A: the hook
+    # is log-only; THIS is the single accounting point -- any rc >= 1 fails
+    # closed by feeding DESCRIPTOR_FAILURES.
     format_rc=0
     payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role" || format_rc=$?
-    if [ "$format_rc" -eq 2 ]; then
-      # No hook recorded this verdict; force the gate closed. rc=1 mismatches
-      # are already counted by on_payload_check -- no double counting here.
-      log "ERROR: payload format check hook not installed; refusing to verify"
+    if [ "$format_rc" -ge 1 ]; then
+      if [ "$format_rc" -eq 2 ]; then
+        log "ERROR: payload format check hook not installed; refusing to verify"
+      fi
       DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
     fi
   done < "$manifest"
@@ -744,9 +749,50 @@ dispatch_restore() {
 }
 
 # ---------------------------------------------------------------------------
+# I79-B (a): single-execution lock (main() entry gate).
+#
+# jarvis-backup.timer (OnCalendar=daily + Persistent=true) can fire while a
+# manual `--apply --confirm` is inside pg.sh's DROP/CREATE window. One
+# non-blocking exclusive flock held for the whole process keeps the two from
+# interleaving. Acquisition failure is fail-closed with the fixed vocabulary
+# above, before verification, inventory, service stop or any write.
+#
+# Dry-run also takes the lock: it only opens a /tmp file and never calls
+# systemctl or stop_services(), so the existing "dry-run does not touch the
+# timer" contract is unchanged. The lock file is deliberately NOT unlinked -
+# removing it while another process holds a fd on the old inode would let a
+# third process lock a new inode and break mutual exclusion.
+# ---------------------------------------------------------------------------
+acquire_restore_lock() {
+  if ! command -v flock >/dev/null 2>&1; then
+    printf '%s %s: %s\n' "$LOCK_FAIL_TAG" FLOCK_UNAVAILABLE \
+      'flock not found in PATH' >&2
+    return 1
+  fi
+  # `exec` with a failing redirection terminates a non-interactive shell, so
+  # prove the path is usable first and emit our own fixed-vocabulary line.
+  if ! : >>"$LOCK_FILE"; then
+    printf '%s %s: %s\n' "$LOCK_FAIL_TAG" LOCK_FILE_UNUSABLE \
+      "cannot open lock file: $LOCK_FILE" >&2
+    return 1
+  fi
+  exec {LOCK_FD}<>"$LOCK_FILE"
+  if ! flock -n "$LOCK_FD"; then
+    printf '%s %s: %s\n' "$LOCK_FAIL_TAG" LOCK_HELD \
+      "another restore holds $LOCK_FILE; refusing to run" >&2
+    return 1
+  fi
+  log "lock acquired: $LOCK_FILE"
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Main flow
 # ---------------------------------------------------------------------------
 main() {
+  if ! acquire_restore_lock; then
+    exit 1
+  fi
   check_preconditions
   resolve_set
 
