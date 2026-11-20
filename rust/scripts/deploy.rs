@@ -67,10 +67,11 @@ enum HealthStatus {
 /// correct as individual services add their own downstream reasons.
 const HEALTH_DEGRADED_MARKER: &str = r#""status":"degraded""#;
 
-/// Parse the output of `curl -s -w '\n%{http_code}' <url>`: the last line is the
-/// three-digit status, everything before it is the body. A non-success HTTP
-/// status, a degraded body, a malformed response and a failed command are all
-/// fail-closed; only a 2xx with a non-degraded body is `Healthy`.
+/// Parse the output of `curl -s --max-time <secs> -w '\n%{http_code}' <url>`:
+/// the last line is the three-digit status, everything before it is the body.
+/// A non-success HTTP status, a degraded body, a malformed response and a
+/// failed command are all fail-closed; only a 2xx with a non-degraded body is
+/// `Healthy`.
 fn parse_health_probe(command_succeeded: bool, stdout: &str) -> HealthStatus {
     if !command_succeeded {
         return HealthStatus::CheckFailed("health probe command exited non-zero".to_owned());
@@ -83,7 +84,11 @@ fn parse_health_probe(command_succeeded: bool, stdout: &str) -> HealthStatus {
         return HealthStatus::NotResponding;
     }
     let body = body.trim();
-    let degraded = body.contains(HEALTH_DEGRADED_MARKER);
+    // Whitespace-tolerant match: a pretty-printed body (`"status": "degraded"`)
+    // must be classified exactly like the compact contract form. Otherwise a
+    // relay that re-serializes the JSON could turn degradation into fail-open.
+    let compact: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+    let degraded = compact.contains(HEALTH_DEGRADED_MARKER);
     if code.starts_with('2') {
         return if degraded {
             HealthStatus::Degraded(body.to_owned())
@@ -131,6 +136,10 @@ const HEALTH_PROBE_ATTEMPTS: u32 = 20;
 const HEALTH_PROBE_INTERVAL_MS: u64 = 500;
 /// Absolute deadline: 20 * 0.5s of backoff plus slack for slow ssh/curl.
 const HEALTH_WAIT_DEADLINE_SECS: u64 = 20;
+/// Per-probe curl timeout (matches `-m 2` in the shell deploy/drift paths).
+/// Without it a single hung probe would defeat HEALTH_WAIT_DEADLINE_SECS: the
+/// absolute deadline is only checked between probe rounds, not mid-curl.
+const HEALTH_PROBE_TIMEOUT_SECS: u64 = 2;
 
 /// Decide whether another probe round is allowed. Pure and std-only so the
 /// legacy guard can compile it with rustc alongside the parser/evaluator.
@@ -547,7 +556,9 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
                 // Deliberately NO `-f`: curl must print the body of a 503 so a
                 // degraded service cannot pass as healthy. `-w` appends the
                 // status code on its own last line for an explicit check too.
-                let command = format!("curl -s -w '\\n%{{http_code}}' {url}");
+                let command = format!(
+                    "curl -s --max-time {HEALTH_PROBE_TIMEOUT_SECS} -w '\\n%{{http_code}}' {url}"
+                );
                 let outcome = match runner.ssh_output(&remote_base, &command) {
                     Ok(output) => parse_health_probe(output.success, &output.stdout),
                     Err(err) => HealthStatus::CheckFailed(err.to_string()),
@@ -703,6 +714,9 @@ mod tests {
         assert_eq!(HEALTH_PROBE_ATTEMPTS, 20);
         assert_eq!(HEALTH_PROBE_INTERVAL_MS, 500);
         assert_eq!(HEALTH_WAIT_DEADLINE_SECS, 20);
+        // I103-C (a): each probe is bounded too, so one hung curl cannot eat
+        // the whole absolute deadline. Matches `-m 2` in the shell paths.
+        assert_eq!(HEALTH_PROBE_TIMEOUT_SECS, 2);
 
         let future = std::time::Instant::now()
             + std::time::Duration::from_secs(HEALTH_WAIT_DEADLINE_SECS);
@@ -809,5 +823,25 @@ mod tests {
             parse_health_probe(false, ""),
             HealthStatus::CheckFailed("health probe command exited non-zero".to_owned())
         );
+    }
+
+    /// I103-C (b): a pretty-printed degraded body must be classified as
+    /// degraded for both a real 503 and a rewritten 200. `matches!` keeps the
+    /// stub body/reason out of any assertion failure output.
+    #[test]
+    fn parse_health_probe_detects_pretty_printed_degraded_body() {
+        let pretty_degraded_503_body =
+            "{\n  \"status\": \"degraded\",\n  \"reason\": \"no_upstream\"\n}\n503";
+        assert!(matches!(
+            parse_health_probe(true, pretty_degraded_503_body),
+            HealthStatus::Degraded(_)
+        ));
+
+        let pretty_degraded_200_body =
+            "{\n  \"status\": \"degraded\",\n  \"reason\": \"store_unavailable\"\n}\n200";
+        assert!(matches!(
+            parse_health_probe(true, pretty_degraded_200_body),
+            HealthStatus::Degraded(_)
+        ));
     }
 }

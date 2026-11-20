@@ -2244,6 +2244,7 @@ health_block="$(sed -n '/^\/\/ health-gate-begin$/,/^\/\/ health-gate-end$/p' "$
 if [ -z "$health_block" ] \
    || ! printf '%s' "$health_block" | grep -q 'HEALTH_DEGRADED_MARKER' \
    || ! printf '%s' "$health_block" | grep -q 'code == "503"' \
+   || ! printf '%s' "$health_block" | grep -q 'is_whitespace' \
    || grep -q 'curl -sf' "$deploy_src"; then
   echo "  FAIL: deploy.rs lost the degraded/503 health gate"
   fail=$((fail+1))
@@ -2272,6 +2273,21 @@ fn main() {
     );
     assert!(matches!(degraded_200, HealthStatus::Degraded(_)));
 
+    // I103-C (b): a pretty-printed degraded body must fail closed too, for
+    // both a real 503 and a rewritten 200. matches!() keeps the stub
+    // body/reason out of assertion failure output.
+    let degraded_503_pretty = parse_health_probe(
+        true,
+        "{\n  \"status\": \"degraded\",\n  \"reason\": \"no_upstream\"\n}\n503",
+    );
+    assert!(matches!(degraded_503_pretty, HealthStatus::Degraded(_)));
+
+    let degraded_200_pretty = parse_health_probe(
+        true,
+        "{\n  \"status\": \"degraded\",\n  \"reason\": \"store_unavailable\"\n}\n200",
+    );
+    assert!(matches!(degraded_200_pretty, HealthStatus::Degraded(_)));
+
     let all_ok = vec![(8081u16, HealthStatus::Healthy)];
     assert!(evaluate_health_checks(&all_ok).is_ok());
 
@@ -2283,7 +2299,7 @@ RUST_TEST
   } > "$gate_rs"
   if rustc --edition 2021 -A dead_code -o "$tmp/deploy_health_gate" "$gate_rs" \
       >/dev/null 2>&1 && "$tmp/deploy_health_gate" >/dev/null 2>&1; then
-    echo "  PASS: deploy health gate rejects stubbed 503 and degraded-200 bodies"
+    echo "  PASS: deploy health gate rejects stubbed 503/degraded-200 and pretty-printed bodies"
     ok=$((ok+1))
   else
     echo "  FAIL: deploy health gate accepted a degraded stub"
@@ -2292,16 +2308,20 @@ RUST_TEST
 fi
 
 # I101-C (c): the retry budget must be bounded (20 x 0.5s) AND deadline-based,
-# not the old single fixed 5s sleep + one probe. The std-only retry predicate
-# lives inside the marker block so this guard can compile and exercise it.
+# not the old single fixed 5s sleep + one probe. I103-C (a): each probe also
+# needs a per-probe --max-time, otherwise one hung curl can erase the absolute
+# deadline between rounds. The std-only retry predicate and the timeout
+# constant live inside the marker block so this guard can compile them.
 if ! printf '%s' "$health_block" | grep -q 'HEALTH_PROBE_ATTEMPTS: u32 = 20' \
    || ! printf '%s' "$health_block" | grep -q 'HEALTH_PROBE_INTERVAL_MS: u64 = 500' \
    || ! printf '%s' "$health_block" | grep -q 'fn health_retry_allowed' \
+   || ! printf '%s' "$health_block" | grep -q 'HEALTH_PROBE_TIMEOUT_SECS: u64 = 2' \
+   || ! grep -Fq -- '--max-time {HEALTH_PROBE_TIMEOUT_SECS}' "$deploy_src" \
    || grep -q 'Duration::from_secs(5)' "$deploy_src"; then
-  echo "  FAIL: deploy.rs lost the bounded retry/deadline health gate"
+  echo "  FAIL: deploy.rs lost the bounded retry/deadline/timeout health gate"
   fail=$((fail+1))
 elif ! command -v rustc >/dev/null 2>&1; then
-  echo "  PASS: deploy.rs keeps the bounded retry gate (rustc unavailable; static only)"
+  echo "  PASS: deploy.rs keeps the bounded retry/timeout gate (rustc unavailable; static only)"
   ok=$((ok+1))
 else
   retry_rs="$tmp/deploy_health_retry.rs"
@@ -2311,6 +2331,7 @@ else
 fn main() {
     assert_eq!(HEALTH_PROBE_ATTEMPTS, 20);
     assert_eq!(HEALTH_PROBE_INTERVAL_MS, 500);
+    assert_eq!(HEALTH_PROBE_TIMEOUT_SECS, 2);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     assert!(health_retry_allowed(0, deadline));
     assert!(!health_retry_allowed(HEALTH_PROBE_ATTEMPTS - 1, deadline));
@@ -2321,7 +2342,7 @@ RUST_TEST
   } > "$retry_rs"
   if rustc --edition 2021 -A dead_code -o "$tmp/deploy_health_retry" "$retry_rs" \
       >/dev/null 2>&1 && "$tmp/deploy_health_retry" >/dev/null 2>&1; then
-    echo "  PASS: deploy.rs retry budget is bounded (20 x 0.5s) and deadline-based"
+    echo "  PASS: deploy.rs retry budget is bounded (20 x 0.5s), deadline-based, timeout-guarded"
     ok=$((ok+1))
   else
     echo "  FAIL: deploy.rs retry predicate rejected a valid bounded probe"
@@ -2382,6 +2403,25 @@ if probe_health_gate '{"status":"ok"}' 200 \
   ok=$((ok+1))
 else
   echo "  FAIL: drift /health gate accepted a degraded answer"
+  fail=$((fail+1))
+fi
+
+# I103-B: install-mcp-gateway.sh is the third deploy path. It must use the same
+# bounded health contract as deploy-mcp-gw-safe.sh / deploy.rs (20 probes at
+# 0.5s, degraded-body detection, no fixed 2-second sleep), and must run the
+# post-rollback drift check as a gate. Static guard only: no service is touched.
+install_gw_script="$repo/infra/scripts/install-mcp-gateway.sh"
+if grep -Fq 'health_attempts=20' "$install_gw_script" \
+   && grep -Fq 'health_interval=0.5' "$install_gw_script" \
+   && grep -Fq '"status"[[:space:]]*:[[:space:]]*"degraded"' "$install_gw_script" \
+   && grep -Fq "curl -s -w '\\n%{http_code}'" "$install_gw_script" \
+   && grep -Fq 'health_is_degraded' "$install_gw_script" \
+   && grep -Fq 'check-deploy-drift.sh' "$install_gw_script" \
+   && ! grep -Eq 'sleep[[:space:]]+2([^0-9]|$)' "$install_gw_script"; then
+  echo "  PASS: install-mcp-gateway.sh uses bounded retry with degraded detection"
+  ok=$((ok+1))
+else
+  echo "  FAIL: install-mcp-gateway.sh lost the bounded/degraded health gate"
   fail=$((fail+1))
 fi
 
