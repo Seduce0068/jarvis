@@ -11,6 +11,20 @@ SHELL := $(shell command -v bash 2>/dev/null || echo /bin/sh)
 help: ## ヘルプ表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
+# I84-A: rust-script 依存の exact pin 方針（記録のみ・メタブロックは担当外）
+# 下記ターゲットが呼ぶ rust-script は、各 .rs 先頭の `/// ```cargo` メタブロックに
+# `anyhow = "1.0"` 等の semver 下限だけを書き、Cargo.lock に相当する固定が無い。
+# bootstrap / doctor / deploy / backup / restore は特権・本番接触の可能性がある
+# ため、再現性と監査性の観点から各メタブロックの直接依存を `=x.y.z` の exact pin
+# へ統一する方針とする（推移依存まで固定する場合は rust-script 側のロック運用を
+# 別途調査して採用する）。
+# 例外 / 現状: 本次（I84-A）は Makefile への方針記録のみを行い、各スクリプトの
+# メタブロックは担当外のため未編集。pin 化は別タスクで実施する。
+# 補足: `make ci-local` は rust-script を実行せず（cargo ゲート + シェル/
+# Python ゲートのみ）、また `rust-script` 自体のインストールバージョンも未固定
+# なので、この drift は現状 CI ではなく手動の特権操作経路に留まる。
+# 更新時はこのコメントと各スクリプトのメタブロックを同時に見直すこと。
+
 bootstrap-server: ## サーバー(Linux/VPS)をブートストラップ
 	@rust-script scripts/bootstrap/bootstrap.rs --target server --source-root . --root $(JARVIS_ROOT)
 

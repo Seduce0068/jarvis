@@ -105,7 +105,22 @@ deadpool-postgres = "0.14"
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-1", "with-chrono-0_4"] }
 
 # Vector DB
-qdrant-client = { version = "1.10", features = ["reqwest", "uuid"] }
+# I84-A: `version = "1.10"` (^1.10) は 1.19.0 へ解決し、reqwest 0.13.5 を推移的に
+# 混入させていた（Cargo.lock:3242-3263）。再現性・監査性のため exact pin
+# (`=1.19.0`) を採用した。lock 上の解決版は既に 1.19.0 なので Cargo.lock の
+# 差分は無く、`cargo check/test --locked` の整合も変わらない。
+# reqwest major 重複の共存理由と影響（axum 共存メモ :65-79 と同形式）:
+# - 0.12.28 は workspace 直接依存（default-features = false, json + rustls-tls）。
+#   0.13.5 は qdrant-client 1.19.0 が内部で要求する推移依存（Cargo.lock:3531 / :3578）。
+# - 直接依存する 4 crate（jarvis-event / jarvis-policy / jarvis-context /
+#   jarvis-mcp-gw）はすべて `reqwest = { workspace = true }`。0.12 -> 0.13 への
+#   統一は breaking change を伴い、http / sandbox / egress の実装と lock の
+#   再解決を要する。本作業は manifest/lock のみが担当範囲のため、型整合を検証
+#   できないため、低コストで安全な exact pin を選択した（方針として記録）。
+# - 影響: base 0.22.1/0.23.1、wasm-streams 0.4.2/0.5.0、
+#   rustls-platform-verifier（0.13 側のみ）等が重複し、バイナリサイズ・
+#   コンパイル時間が増加する。実測値は未確認（axum メモと同様）。
+qdrant-client = { version = "=1.19.0", features = ["reqwest", "uuid"] }
 
 # Object Storage
 

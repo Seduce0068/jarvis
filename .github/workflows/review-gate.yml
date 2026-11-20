@@ -31,7 +31,12 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # I84-A: 可変タグ @v4 をフル SHA へ固定し、バージョンをコメント併記する。
+        # 11d5960a326750d5838078e36cf38b85af677262 = actions/checkout v4
+        #   (refs/tags/v4 を 2026-11-20 に解決, commit
+        #   "backport fixes to releases-v4 (#2524)", 2026-07-16)
+        # 更新時は refs/tags/v4 の解決 SHA を再確認し、このコメントも更新する。
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Confirm target PR exists (read-only)
