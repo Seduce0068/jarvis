@@ -98,6 +98,39 @@ check_mcp_env() {
   fi
 }
 
+# I75-A (b): strictly resolve web.fetch's requires_approval from the [[tools]]
+# array with tomllib, instead of a line-distance-dependent `grep -A8`. Returns
+# 0 ONLY when exactly one web.fetch entry exists, the key is present, and its
+# value is boolean true. Any parse error, missing/duplicate entry, missing key,
+# non-bool value, absent python3 or absent tomllib returns non-zero so the
+# caller fails closed (DANGER). No values are printed (fail-closed, code only).
+webfetch_approval_ok() { # allowlist_path -> 0 = approval required, !0 = DANGER
+  command -v python3 >/dev/null 2>&1 || return 2
+  python3 - "$1" <<'PY'
+import sys
+
+try:
+    import tomllib  # stdlib since Python 3.11
+except ImportError:
+    sys.exit(1)  # no strict TOML parser available -> unverifiable
+
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        doc = tomllib.load(fh)
+except Exception:
+    sys.exit(1)
+
+tools = doc.get('tools')
+if not isinstance(tools, list):
+    sys.exit(1)
+matches = [t for t in tools if isinstance(t, dict) and t.get('name') == 'web.fetch']
+# Exactly one entry, an explicit key, and a strict boolean true are required.
+if len(matches) != 1 or 'requires_approval' not in matches[0]:
+    sys.exit(1)
+sys.exit(0 if matches[0]['requires_approval'] is True else 1)
+PY
+}
+
 echo "== deploy drift =="
 if [ "$env_only" -eq 1 ]; then
   check_mcp_env
@@ -130,24 +163,26 @@ else
   else
     say "allowlist" "DIFF"; drift=1
   fi
-  # 3) web.fetch の承認設定（配備版）
-  if grep -A8 'name = "web.fetch"' "$deployed_allowlist" 2>/dev/null | grep -q 'requires_approval = false'; then
-    say "web.fetch approval" "DANGER: false -> active on deploy"; danger=1
-  else
+  # 3) web.fetch の承認設定（配備版）。I75-A (b): grep -A8 の行距離依存を廃止し、
+  # tomllib で [[tools]] の name == "web.fetch" の requires_approval を厳密取得。
+  # キー欠落・false・非 bool・エントリ欠落/重複・python3/tomllib 不在はすべて DANGER。
+  if webfetch_approval_ok "$deployed_allowlist"; then
     say "web.fetch approval" "OK (requires approval)"
+  else
+    say "web.fetch approval" "DANGER: requires_approval false/missing/invalid -> active on deploy"; danger=1
   fi
 fi
 # 4) policy. A file present on only one side must no longer be silently
 # skipped (I7-C): a missing deployed file is a DANGER (same framework as the
 # allowlist check) and a missing repo source is flagged too.
-if [ ! -f /etc/jarvis/policy/casbin_policy.csv ]; then
+if [ ! -f "$deployed_policy_dir/casbin_policy.csv" ]; then
   say "policy" "MISSING (deployed)"
   danger=1
 elif [ ! -f "$repo/infra/config/policy/casbin_policy.csv" ]; then
   say "policy" "MISSING (repo)"
   danger=1
 else
-  if cmp -s /etc/jarvis/policy/casbin_policy.csv "$repo/infra/config/policy/casbin_policy.csv"; then
+  if cmp -s "$deployed_policy_dir/casbin_policy.csv" "$repo/infra/config/policy/casbin_policy.csv"; then
     say "policy" "OK (same)"
   else
     say "policy" "DIFF"; drift=1

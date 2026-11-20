@@ -91,6 +91,76 @@ else
   fail=$((fail+1))
 fi
 
+# I75-A (a): the casbin_policy.csv check must honour JARVIS_DRIFT_POLICY_DIR.
+# A stale casbin file in the overridden dir must surface as a policy DIFF;
+# before the fix the hardcoded /etc/jarvis/policy path made the override a
+# no-op and this drift went undetected. The casbin check reports under the
+# "policy" label, so match that line specifically.
+casbin_drift="$tmp/casbin_drift"
+mkdir -p "$casbin_drift/policy"
+cp "$repo/infra/config/policy/policies.cedar" "$casbin_drift/policy/"
+cp "$repo/infra/config/policy/cedar_schema.cedarschema" "$casbin_drift/policy/"
+printf 'g, stale, role:observer\n' > "$casbin_drift/policy/casbin_policy.csv"
+out=$(JARVIS_DRIFT_POLICY_DIR="$casbin_drift/policy" \
+      JARVIS_DRIFT_PII="$repo/infra/config/pii_patterns.toml" \
+      JARVIS_DRIFT_ALLOWLIST=/nonexistent \
+      bash "$repo/infra/scripts/check-deploy-drift.sh" 2>&1)
+if printf '%s' "$out" | grep -qE '^policy[[:space:]]+DIFF'; then
+  echo "  PASS: drift detects stale casbin via JARVIS_DRIFT_POLICY_DIR"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift ignored JARVIS_DRIFT_POLICY_DIR for casbin"
+  fail=$((fail+1))
+fi
+
+# I75-A (b): web.fetch requires_approval must be resolved from the TOML table,
+# not by line distance. Build a fixture whose web.fetch entry carries padding
+# comments plus an extra key so name->requires_approval exceeds the old
+# grep -A8 window, and set the value to false; tomllib must still flag DANGER.
+webfetch_fixture="$tmp/webfetch_comment_allowlist.toml"
+if python3 - "$repo/infra/config/mcp_allowlist.toml" "$webfetch_fixture" <<'PY'
+import sys
+
+src, dst = sys.argv[1:3]
+with open(src, encoding='utf-8') as fh:
+    lines = fh.readlines()
+start = next((i for i, l in enumerate(lines)
+              if l.strip() == 'name = "web.fetch"'), None)
+if start is None:
+    raise SystemExit('web.fetch entry not found')
+end = next((j for j in range(start + 1, len(lines))
+            if lines[j].strip().startswith('[[tools]]')), len(lines))
+approval = next((k for k in range(start, end)
+                 if 'requires_approval' in lines[k]), None)
+if approval is None:
+    raise SystemExit('requires_approval not found in web.fetch entry')
+lines[approval] = 'requires_approval = false\n'
+padding = [
+    '# I75-A regression: padding comments push the approval key\n',
+    '# beyond the old grep -A8 window; tomllib must still see false.\n',
+    '# padding comment 3\n',
+    '# padding comment 4\n',
+    'extra_padding_key = "still inside the web.fetch table"\n',
+]
+lines[start + 1:start + 1] = padding
+with open(dst, 'w', encoding='utf-8') as fh:
+    fh.writelines(lines)
+PY
+then
+  out=$(JARVIS_DRIFT_ALLOWLIST="$webfetch_fixture" \
+        bash "$repo/infra/scripts/check-deploy-drift.sh" 2>&1)
+  if printf '%s' "$out" | grep -q 'web.fetch approval.*DANGER'; then
+    echo "  PASS: drift detects web.fetch requires_approval=false past grep window"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: drift missed web.fetch false with padding comments"
+    fail=$((fail+1))
+  fi
+else
+  echo "  FAIL: could not prepare web.fetch padding fixture"
+  fail=$((fail+1))
+fi
+
 # P1-9: the evidence gate must reject both a stale spec_hash and a failed test
 # count. Run a copy of the gate from a temporary repo layout so the real
 # specs/ and evidence/ files are never modified. The temp tree is removed by
