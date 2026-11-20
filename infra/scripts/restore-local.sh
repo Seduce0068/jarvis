@@ -43,7 +43,14 @@ MODULE_DIR="$SCRIPT_DIR/restore-local.d"
 
 # Qdrant is deliberately absent from this list. Restore uses its HTTP API, so
 # the process must keep listening; "stop then HTTP upload" is never produced.
-SERVICE_INVENTORY=(jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol)
+# jarvis-backup.timer IS a stop target: OnCalendar=daily + Persistent=true
+# (infra/systemd/jarvis-backup.timer) can fire while pg.sh drops/recreates the
+# production DB (restore-local.d/pg.sh:119-144), yielding a failed pg_dump or a
+# COMPLETE set that still contains the old DB. It goes through the same
+# inventory -> stop_services -> on_exit restart path as every other unit; stop
+# leaves the enablement bit untouched, so start in on_exit restores both active
+# and enabled state. Dry-run never calls stop_services, so the timer is untouched.
+SERVICE_INVENTORY=(jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol jarvis-backup.timer)
 SERVICES_TO_STOP=()
 STOPPED_SERVICES=()
 
@@ -362,6 +369,10 @@ cleanup_isolated_db() {
 
 on_exit() {
   trap - EXIT
+  # STOPPED_SERVICES can include jarvis-backup.timer (see SERVICE_INVENTORY).
+  # The earlier `systemctl stop` did not change its enablement bit, and the
+  # `systemctl start` below restores its active state, so this same loop
+  # recovers the original active/enabled state without a timer-specific branch.
   if [ "${#STOPPED_SERVICES[@]}" -gt 0 ]; then
     log "restarting stopped services in reverse order"
     local i unit

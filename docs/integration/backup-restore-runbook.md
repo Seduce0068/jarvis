@@ -46,6 +46,17 @@ bash infra/scripts/restore-local.sh --latest --apply
 bash infra/scripts/restore-local.sh --latest --apply --confirm
 ```
 
+**`jarvis-backup.timer` の停止は必須前提**: `jarvis-backup.timer` は
+`OnCalendar=daily` + `Persistent=true`
+（[unit](../../infra/systemd/jarvis-backup.timer)）のため、`pg.sh` が本番
+`jarvis` DB を DROP/CREATE する窓
+（[pg.sh:119-144](../../infra/scripts/restore-local.d/pg.sh)）に発動すると、
+pg_dump の失敗、または「旧 DB を含む set が COMPLETE 付きで残る」事象を起こす。
+[restore-local.sh](../../infra/scripts/restore-local.sh) は `--apply` 時に
+`SERVICE_INVENTORY` 経由で timer を停止し、EXIT trap で元の active/enabled 状態へ
+復元する（dry-run では停止しない）。手動で本番反映する場合は、
+後述「本番反映（要判断・破壊的）」の timer 停止チェックを必ず実施する。
+
 **本番実行の承認**: 手順 3（`--apply --confirm`）は本番データを上書きする破壊的操作である。
 実行には事前に**ユーザーの明示的な承認**が必要で、エージェントの単独判断では実行しない。
 承認後も後述「本番反映（要判断・破壊的）」のチェックリストをすべて満たすこと。
@@ -182,6 +193,12 @@ rm -rf "$TMP"
 
 - [ ] `make verify-backup` が fail=0
 - [ ] 隔離先での復元検証が成功
+- [ ] `jarvis-backup.timer` が停止済みであること（**必須**）。
+      `Persistent=true` の daily backup が DROP/CREATE 窓に発動するのを防ぐ。
+      手動停止は `sudo systemctl stop jarvis-backup.timer`、
+      復元後に `sudo systemctl start jarvis-backup.timer` で元の状態へ戻す。
+      `restore-local.sh --apply` を使う場合はスクリプトが自動停止/復元するため、
+      停止されていることを確認する（dry-run では停止しない）。
 - [ ] 関連サービス（`jarvis-context` 等）の停止予定を関係者と共有
 - [ ] 旧データの退避先を確保
 - [ ] `bws.env` の再配置方法を確認（バックアップには含まれない）
