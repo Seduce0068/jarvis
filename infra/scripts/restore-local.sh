@@ -271,6 +271,63 @@ config_dest_for_base() {
   esac
 }
 
+# I76-A: resolve_restore_input() lives in restore-local.d/configs.sh, which
+# load_modules() only sources AFTER verify_set() (and after stop_services() in
+# apply mode). Load it here so the pre-stop gate calls the very same resolver
+# the four restore modules use; the two can never disagree about a payload's
+# role. configs.sh is definition-only at file scope, so an early source has no
+# side effects and load_modules() re-sourcing it later is a harmless
+# redefinition. A missing/unloadable resolver fails closed here.
+load_restore_resolver() {
+  if ! declare -F resolve_restore_input >/dev/null 2>&1; then
+    local resolver_file="$MODULE_DIR/configs.sh"
+    if [ ! -f "$resolver_file" ]; then
+      log "FAIL: shared restore input resolver unavailable ($resolver_file missing)"
+      return 1
+    fi
+    # shellcheck disable=SC1090
+    source "$resolver_file" || {
+      log "FAIL: failed to source shared restore input resolver"
+      return 1
+    }
+  fi
+  if ! declare -F resolve_restore_input >/dev/null 2>&1; then
+    log "FAIL: shared restore input resolver unavailable after source"
+    return 1
+  fi
+  return 0
+}
+
+# I76-A: pre-stop resolution of one restore input. Read-only (no service or
+# payload access); every verdict is accounted through DESCRIPTOR_FAILURES so the
+# existing "verification FAILED; no writes performed" path owns the fail-closed
+# decision before stop_services() is ever reached.
+#   verify_restore_input <label> <role> <legacy_name> <one|all> <required 0|1>
+# rc 2 (no role match) is a warning for optional components (configs / git) and
+# a failure for a required one; rc 1 (unknown / ambiguous / resolved file
+# missing) always fails closed. The module-side checks stay as a second net.
+verify_restore_input() {
+  local label="$1" role="$2" legacy_name="$3" mode="$4" required="$5"
+  local input_path rc=0
+
+  # The `||` both keeps `set -e` from aborting and captures the resolver's
+  # exact status: 0 resolved, 1 invalid/ambiguous/resolved-file-missing,
+  # 2 no role match (absent). Testing `$?` after a bare assignment must be
+  # avoided here because `set -e` would abort before the test runs.
+  input_path="$(resolve_restore_input "$SET_DIR" "$role" "$legacy_name" "$mode")" || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    log "RESOLVED: $label input = $input_path"
+    return 0
+  fi
+  if [ "$rc" -eq 2 ] && [ "$required" -eq 0 ]; then
+    log "WARN: $label payload absent from manifest; nothing to resolve"
+    return 0
+  fi
+  log "FAIL: cannot resolve $label restore input from manifest (rc=$rc; unknown/ambiguous/missing)"
+  DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+  return 0
+}
+
 verify_set() {
   local manifest="$SET_DIR/manifest.txt"
   local name expected_bytes expected_sha format encryption signature role
@@ -349,7 +406,8 @@ verify_set() {
     # on_payload_check, which feeds DESCRIPTOR_FAILURES above.
     payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role"
   done < "$manifest"
-  failures=$((failures + DESCRIPTOR_FAILURES))
+  # I76-A: DESCRIPTOR_FAILURES is also fed by the pre-stop resolver gate below,
+  # so fold it into `failures` once, after that gate has run.
 
   # config-* allowlist: the authoritative "before any write" gate. It runs
   # unconditionally (also with --skip-configs), because a set carrying a
@@ -368,6 +426,41 @@ verify_set() {
       failures=$((failures + 1))
     fi
   done < "$manifest"
+
+  # I76-A: pre-stop restore-input resolution gate. This sits in the same
+  # "before any write" section as the config allowlist, well ahead of
+  # inventory_services()/stop_services()/dispatch_restore(). The modules only
+  # resolve their input inside dispatch_restore() (AFTER services are stopped),
+  # so an unknown role, multiple matches for a role, or a resolved file that is
+  # absent would otherwise abort the restore with services already down.
+  # Calling the shared resolver here rejects the set while the host is still
+  # untouched. The module-side fail-closed checks remain as a defense-in-depth
+  # double check; they are deliberately not removed.
+  # SKIP_* semantics are preserved: a skipped REQUIRED component (--skip-db /
+  # --skip-qdrant) is not resolved at all and its absence stays acceptable,
+  # just as the has_pg/has_qdrant gates below stay conditional. configs / git
+  # remain optional (rc 2 = nothing to do) and are resolved unconditionally,
+  # like the allowlist gate above, so a malformed config/git entry cannot slip
+  # past the pre-stop gate.
+  if ! load_restore_resolver; then
+    DESCRIPTOR_FAILURES=$((DESCRIPTOR_FAILURES + 1))
+  else
+    if [ "$SKIP_DB" -eq 0 ]; then
+      verify_restore_input postgres postgres postgres-jarvis.sql.gz one 1
+    else
+      log "RESOLVE SKIP: postgres (--skip-db)"
+    fi
+    if [ "$SKIP_QDRANT" -eq 0 ]; then
+      verify_restore_input qdrant qdrant qdrant-snapshot.bin one 1
+    else
+      log "RESOLVE SKIP: qdrant (--skip-qdrant)"
+    fi
+    # config / git are optional in the backup format; an absent payload (rc 2)
+    # is only a warning. Unknown/ambiguous/missing files still fail closed.
+    verify_restore_input configs config '' all 0
+    verify_restore_input git git git-jarvis-head.tar.gz one 0
+  fi
+  failures=$((failures + DESCRIPTOR_FAILURES))
 
   # Stricter than verify-backup.sh: at least one main data component, and every
   # selected primary component must be recorded (no silent skip). Presence is

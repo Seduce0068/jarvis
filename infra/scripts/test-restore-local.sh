@@ -16,6 +16,9 @@
 #   - I73-A: 状態付き systemctl モックで「active だが disabled」な backup timer
 #     が停止対象に入ること／停止後 inactive を確認できなければ dispatch 前に
 #     abort することを検証する（既定実行でもモックのみなので実環境に触れない）。
+#   - I76-A: 未知 role / 同一 role の複数一致 / 解決先ファイル不在の set が
+#     stop_services() より前の resolve_restore_input() ゲートで拒否され、
+#     systemctl.log に stop が1行も出ないことを検証する（モックのみ）。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -846,6 +849,151 @@ if manifest_matches "$renamed" "pg-data.sql.gz"; then
   pass "I75-B: manifest unchanged for pg-data.sql.gz"
 else
   fail_case "I75-B: manifest changed for pg-data.sql.gz"
+fi
+
+# --- 7. I76-A: 入力解決ゲートが stop_services() より前に発火すること ---------
+# Round 72 で 4 モジュールの入力は共有 resolve_restore_input() に統一されたが、
+# その fail-closed は dispatch_restore() 内（stop_services() 後）にしか無い。
+# 未知 role / 複数一致 / 解決先不在の set が --apply でも停止前に拒否され、
+# systemctl.log に stop が出ないことを既存モックだけで証明する。
+printf '%s\n' '-- I76-A: pre-stop restore-input resolution gate --'
+
+# 7a. 未知 role (oracledb)。記述子ループが先に拒否するが、解決ゲートも同じ
+#     セットを止め、サービスが一切触られないことを合わせて確認する。
+unknown_role="$tmp/described_unknown_role"
+cp -R -- "$set_dir" "$unknown_role" || exit 1
+write_described_manifest "$unknown_role" \
+  'postgres-jarvis.sql.gz|gzip|none|none|oracledb' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$unknown_role/manifest.txt"
+check_exit "I76-A: verifier rejects unknown role" 1 bash "$verifier" "$unknown_role"
+rm -f -- "$tmp/logs"/*.log
+unknown_role_code=0
+unknown_role_out="$(run_driver --backup-set "$unknown_role" --apply 2>&1)" || unknown_role_code=$?
+if [ "$unknown_role_code" -ne 0 ]; then
+  pass "I76-A: unknown role rejected with --apply (exit $unknown_role_code)"
+else
+  fail_case "I76-A: unknown role accepted with --apply"
+fi
+for fragment in 'unsupported role descriptor: oracledb' \
+                'cannot resolve postgres restore input' \
+                'verification FAILED' 'no writes performed'; do
+  if has_fragment "$unknown_role_out" "$fragment"; then
+    pass "I76-A: unknown role output: $fragment"
+  else
+    fail_case "I76-A: unknown role output missing: $fragment"
+    printf '%s\n' "$unknown_role_out" | head -12 >&2
+  fi
+done
+assert_no_log "I76-A: unknown role: no service stop/start" "$tmp/logs/systemctl.log"
+assert_no_log "I76-A: unknown role: no systemctl query (gate precedes inventory)" \
+  "$tmp/logs/systemctl-query.log"
+assert_no_log "I76-A: unknown role: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I76-A: unknown role: curl never called" "$tmp/logs/curl.log"
+if has_fragment "$unknown_role_out" 'stopping service:'; then
+  fail_case "I76-A: unknown role: stop_services ran before the gate"
+else
+  pass "I76-A: unknown role: stop_services never reached"
+fi
+if has_fragment "$unknown_role_out" 'dispatch: restore_pg'; then
+  fail_case "I76-A: unknown role: dispatch ran before the gate"
+else
+  pass "I76-A: unknown role: no module dispatch before the gate"
+fi
+
+# 7b. 同一 role=postgres が 2 行。両ファイルは有効な pg ダンプなので従来の
+#     整合性/書式ゲートと外部 verifier は通過する。one モードの resolver だけが
+#     ambiguous (rc=1) を検出し、stop 前に拒否できたことを証明する关键点。
+multi="$tmp/described_multi_pg"
+cp -R -- "$set_dir" "$multi" || exit 1
+{
+  printf '%s\n' '-- PostgreSQL database dump' \
+    'CREATE TABLE t2 (id integer);' \
+    '-- PostgreSQL database dump complete'
+} | gzip > "$multi/pg-extra.sql.gz"
+write_described_manifest "$multi" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'pg-extra.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$multi/manifest.txt"
+check_exit "I76-A: verifier accepts two valid postgres rows" 0 bash "$verifier" "$multi"
+rm -f -- "$tmp/logs"/*.log
+multi_code=0
+multi_out="$(run_driver --backup-set "$multi" --apply 2>&1)" || multi_code=$?
+if [ "$multi_code" -ne 0 ]; then
+  pass "I76-A: multiple postgres matches rejected (exit $multi_code)"
+else
+  fail_case "I76-A: multiple postgres matches accepted"
+fi
+for fragment in 'cannot resolve postgres restore input' 'rc=1' 'ambiguous' \
+                'verification FAILED' 'no writes performed'; do
+  if has_fragment "$multi_out" "$fragment"; then
+    pass "I76-A: multiple matches output: $fragment"
+  else
+    fail_case "I76-A: multiple matches output missing: $fragment"
+    printf '%s\n' "$multi_out" | head -12 >&2
+  fi
+done
+assert_no_log "I76-A: multiple matches: no service stop/start" "$tmp/logs/systemctl.log"
+assert_no_log "I76-A: multiple matches: no systemctl query (gate precedes inventory)" \
+  "$tmp/logs/systemctl-query.log"
+assert_no_log "I76-A: multiple matches: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I76-A: multiple matches: curl never called" "$tmp/logs/curl.log"
+if has_fragment "$multi_out" 'stopping service:'; then
+  fail_case "I76-A: multiple matches: stop_services ran before the gate"
+else
+  pass "I76-A: multiple matches: stop_services never reached"
+fi
+if has_fragment "$multi_out" 'dispatch: restore_pg'; then
+  fail_case "I76-A: multiple matches: dispatch ran before the gate"
+else
+  pass "I76-A: multiple matches: no module dispatch before the gate"
+fi
+
+# 7c. 改名済み pg に role=other を付けたケース。basename だけで必須判定する
+#     従来ゲートは通過するが、resolver は role 一致も legacy 名も見つけられず
+#     rc=2（必須 postgres の入力解決不能）を返す。これも stop 前に拒否される。
+orphan="$tmp/described_orphan_pg"
+cp -R -- "$set_dir" "$orphan" || exit 1
+mv -- "$orphan/postgres-jarvis.sql.gz" "$orphan/pg-orphan.sql.gz"
+write_described_manifest "$orphan" \
+  'pg-orphan.sql.gz|gzip|none|none|other' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$orphan/manifest.txt"
+check_exit "I76-A: verifier accepts orphan pg row (basename-driven presence)" 0 \
+  bash "$verifier" "$orphan"
+rm -f -- "$tmp/logs"/*.log
+orphan_code=0
+orphan_out="$(run_driver --backup-set "$orphan" --apply 2>&1)" || orphan_code=$?
+if [ "$orphan_code" -ne 0 ]; then
+  pass "I76-A: unresolvable required input rejected (exit $orphan_code)"
+else
+  fail_case "I76-A: unresolvable required input accepted"
+fi
+for fragment in 'cannot resolve postgres restore input' 'rc=2' \
+                'verification FAILED' 'no writes performed'; do
+  if has_fragment "$orphan_out" "$fragment"; then
+    pass "I76-A: unresolvable input output: $fragment"
+  else
+    fail_case "I76-A: unresolvable input output missing: $fragment"
+    printf '%s\n' "$orphan_out" | head -12 >&2
+  fi
+done
+assert_no_log "I76-A: unresolvable input: no service stop/start" "$tmp/logs/systemctl.log"
+assert_no_log "I76-A: unresolvable input: no systemctl query (gate precedes inventory)" \
+  "$tmp/logs/systemctl-query.log"
+assert_no_log "I76-A: unresolvable input: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I76-A: unresolvable input: curl never called" "$tmp/logs/curl.log"
+if has_fragment "$orphan_out" 'stopping service:'; then
+  fail_case "I76-A: unresolvable input: stop_services ran before the gate"
+else
+  pass "I76-A: unresolvable input: stop_services never reached"
 fi
 
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"
