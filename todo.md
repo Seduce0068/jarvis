@@ -2670,7 +2670,23 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [ ] 両 DB バックアップギャップ（high）— 子実装は既存回帰と矛盾したため
       差し戻し済み。manifest role と verify/restore を整合させた再設計が必要。
-- [ ] reconcile_pending の同時実行制御、mcp_allowlist.toml の行番号陳腐化、
-      CONTEXT_TOKEN_HEADER 重複、major 更新待ち29件（再評価 2026-12-20）。
+- [x] reconcile_pending の同時実行制御（low）→ mark_failed を条件付き UPDATE
+      （`attempts <= $2`）へ、古いスナップショットの上書きを防止。
+- [x] mcp_allowlist.toml の行番号陳腐化 → 関数名参照へ変更。
+- [x] CONTEXT_TOKEN_HEADER 重複 → jarvis-core 定数の alias へ集約。
+- [ ] major 更新待ち29件（再評価 2026-12-20）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+### Round 97（/swarm-limited・親が直接対応）
+
+- 新規サブエージェント起動数 0（セッション合計上限40を超過中）。
+- 親が上記3件を直接修正、全ゲート再検証。
+
+### Round 97 の残り指摘（未対応）
+
+- [ ] 両 DB バックアップギャップ（high）— manifest role と verify/restore を
+      整合させた再設計が必要（前回の子実装は既存回帰と矛盾し差し戻し済み）。
+- [ ] major 更新待ち29件（再評価 2026-12-20）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。

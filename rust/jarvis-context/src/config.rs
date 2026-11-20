@@ -17,13 +17,6 @@ pub const CONFIG_PATH_ENV: &str = "JARVIS_CONTEXT_CONFIG_PATH";
 
 const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
 
-/// HTTP header and gRPC metadata key carrying the shared admin token.
-///
-/// The HTTP middleware in `http.rs` uses the same literal. Keeping it here lets
-/// the gRPC ingress gate reference one canonical name without reaching into a
-/// sibling module's private constant.
-pub(crate) const CONTEXT_TOKEN_HEADER: &str = "x-jarvis-context-token";
-
 /// Select the TOML path from an optional environment override. Kept pure so
 /// both branches are testable without mutating the process environment
 /// (edition 2024 makes `set_var` unsafe and parallel tests racy).
@@ -946,7 +939,10 @@ max_context_tokens = 8000
     /// otherwise the two transports would enforce different secrets.
     #[test]
     fn context_token_header_is_the_shared_header_name() {
-        assert_eq!(CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+        assert_eq!(
+            jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER,
+            "x-jarvis-context-token"
+        );
     }
 
     #[test]

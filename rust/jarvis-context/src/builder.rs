@@ -555,7 +555,11 @@ impl PendingStore for PgPendingStore {
         let client = self.pool.get().await?;
         client
             .execute(
-                "UPDATE pending_embeddings SET attempts = $2, next_retry_at = $3 WHERE id = $1",
+                // Compare-and-set: a concurrent reconciler may have bumped
+                // `attempts` already. Never overwrite it with a stale snapshot,
+                // otherwise the exponential backoff loses its guarantee.
+                "UPDATE pending_embeddings SET attempts = $2, next_retry_at = $3
+                 WHERE id = $1 AND attempts <= $2",
                 &[&id, &attempts, &next_retry_at],
             )
             .await?;

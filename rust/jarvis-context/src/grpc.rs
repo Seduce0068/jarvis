@@ -1,11 +1,13 @@
 //! gRPC service for Context Builder
 
 use crate::ContextBuilder;
+use crate::config::token_matches;
 use crate::config::validation::{self, InvalidInput};
-use crate::config::{CONTEXT_TOKEN_HEADER, token_matches};
 use crate::error::ContextError;
 use chrono::{DateTime, Utc};
-use jarvis_core::{EventSource, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
+use jarvis_core::{
+    EventSource, JARVIS_CONTEXT_TOKEN_HEADER as CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent,
+};
 use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
@@ -102,7 +104,7 @@ impl GrpcContextService {
 fn authorize<T>(request: &Request<T>, expected: Option<&str>) -> Result<(), Status> {
     let provided = request
         .metadata()
-        .get(JARVIS_CONTEXT_TOKEN_HEADER)
+        .get(CONTEXT_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok());
     if token_matches(expected, provided) {
         Ok(())

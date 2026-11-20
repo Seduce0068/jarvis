@@ -6,11 +6,12 @@
 # the configuration fail to parse.
 #
 # NOTE: the clamp to 1_000..=15_000 applies ONLY to the web.fetch native
-# handler (native_web_fetch, sandbox.rs:147); a value above 15000 has no effect
+# handler (`native_web_fetch` in sandbox.rs); a value above 15000 has no effect
 # on that route, so web.fetch stays at 15000. Other execution routes use the
-# raw timeout_ms value with no clamp: shell.execute (sandbox.rs:299),
-# github.create_pr and web.search (gateway.rs:498). Those are kept at 30000 so
-# legitimate long-running calls are not cut off.
+# raw timeout_ms value with no clamp: `execute_tool`'s generic upstream path
+# in gateway.rs (github.create_pr / web.search / shell.execute). Those are kept
+# at 30000 so legitimate long-running calls are not cut off. Line numbers are
+# intentionally omitted to avoid drifting when the implementation moves.
 
 # Principals allowed to use MCP Gateway
 principals = ["jarvis", "opencode", "user"]
