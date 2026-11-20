@@ -101,12 +101,18 @@ impl ChildHandle {
         }
     }
 
-    /// Best-effort synchronous kill for the drop/replacement paths, where an
-    /// async lock cannot be awaited. If the lock is briefly contended, the
-    /// final `Drop` still performs the kill once the probe releases it.
+    /// Best-effort synchronous kill-and-reap for the drop/replacement paths,
+    /// where an async lock cannot be awaited. `start_kill()` signals the OS
+    /// process and `try_wait()` reaps it if it has already exited, so a failed
+    /// or replaced registration does not leave a zombie. The command is
+    /// spawned with `kill_on_drop(true)`: it covers the residual window in
+    /// which `try_wait()` still reports `Ok(None)` (tokio reaps the child via
+    /// its orphan queue once the `Child` is dropped). If the lock is briefly
+    /// contended, the final `Drop` retries the kill once the probe releases it.
     fn kill(&self) {
         if let Ok(mut child) = self.child.try_lock() {
             let _ = child.start_kill();
+            let _ = child.try_wait();
         }
     }
 }
@@ -343,6 +349,13 @@ impl Gateway {
         // BWS_ACCESS_TOKEN from `bws run`) to an upstream MCP child. Keep
         // only the variables required to locate/run a normal subprocess.
         crate::subprocess::apply_minimal_env(&mut cmd);
+        // Fail-closed backstop: tokio 1.x does not kill a child when its
+        // `Child` handle is dropped. If registration aborts before the child
+        // is stored (missing stdio pipes, handshake/discovery failure), the
+        // synchronous `ChildHandle::kill()` reaps the common case via
+        // `try_wait()`; `kill_on_drop(true)` covers the residual window where
+        // the child has not exited yet, so no orphan is left behind.
+        cmd.kill_on_drop(true);
 
         // Spawn the child ourselves so we retain a `Child` for `try_wait()`
         // liveness checks. `rmcp` does not expose the child held by its
@@ -358,7 +371,19 @@ impl Gateway {
         let (stdin, stdout) = match (child.stdin.take(), child.stdout.take()) {
             (Some(stdin), Some(stdout)) => (stdin, stdout),
             _ => {
-                let _ = child.start_kill();
+                // Fail closed: without both pipes no stdio transport can be
+                // built. Inspect the kill result (never discard it) and reap
+                // with `try_wait()`; if signalling itself fails, surface that
+                // too so a surviving child is never silent. Dropping `child`
+                // afterwards is safe because the command has
+                // `kill_on_drop(true)` as the residual-race backstop.
+                if let Err(err) = child.start_kill() {
+                    return Err(anyhow::anyhow!(
+                        "MCP server '{name}' ({program}) did not expose stdio pipes; \
+                         additionally failed to kill spawned child: {err}"
+                    ));
+                }
+                let _ = child.try_wait();
                 return Err(anyhow::anyhow!(
                     "MCP server '{name}' ({program}) did not expose stdio pipes"
                 ));
@@ -421,10 +446,14 @@ impl Gateway {
                     .list_tools(Some(PaginatedRequestParam { cursor }))
                     .await
                     .with_context(|| format!("tools/list page {page} failed"))?;
-                tools.extend(result.tools);
-                if tools.len() > MAX_DISCOVERED_TOOLS {
+                // Check the incoming page against the cap *before* extending
+                // `tools`: a single adversarial page with 4097+ tools must be
+                // rejected without first allocating/copying the excess into
+                // the accumulator (fail before the memory is committed).
+                if tools.len().saturating_add(result.tools.len()) > MAX_DISCOVERED_TOOLS {
                     anyhow::bail!("tools/list exceeded {MAX_DISCOVERED_TOOLS} tools");
                 }
+                tools.extend(result.tools);
                 cursor = result.next_cursor;
                 if cursor.is_none() {
                     return Ok(tools);
@@ -491,8 +520,11 @@ impl Gateway {
         );
 
         if let Some(previous) = previous {
-            // Replace semantics: kill the old child (if any) and drop the old
-            // client to cancel its background task before it can be routed to.
+            // Replace semantics: kill and reap the old child (if any), then
+            // drop the old client to cancel its background task before it can
+            // be routed to. `ProcessLiveness::kill` delegates to
+            // `ChildHandle::kill`, which signals with `start_kill()` and reaps
+            // with `try_wait()` so a replaced registration leaves no orphan.
             previous.liveness.kill();
             drop(previous);
             info!(server = name, "Replaced existing MCP server registration");
@@ -663,6 +695,70 @@ async fn run_endless_cursor_mock(stream: tokio::io::DuplexStream) {
                         }],
                         "nextCursor": format!("cursor-{page}")
                     }
+                }))
+            }
+            _ => None,
+        };
+        if let Some(response) = response {
+            let mut line = serde_json::to_string(&response).expect("serializable response");
+            line.push('\n');
+            write_half
+                .write_all(line.as_bytes())
+                .await
+                .expect("write response");
+            write_half.flush().await.expect("flush response");
+        }
+    }
+}
+
+/// Test-only MCP server that advertises a caller-chosen number of tools,
+/// paginated in fixed-size pages. Used by the `MAX_DISCOVERED_TOOLS` boundary
+/// regressions (exactly 4096 accepted, 4097 rejected). Paging keeps each
+/// JSON-RPC line small enough for the in-memory duplex buffer.
+#[cfg(test)]
+async fn run_bulk_tools_mock(stream: tokio::io::DuplexStream, count: usize) {
+    use serde_json::json;
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    const PAGE_SIZE: usize = 512;
+    let (read_half, mut write_half) = tokio::io::split(stream);
+    let mut lines = BufReader::new(read_half).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let message: Value = serde_json::from_str(&line).expect("valid JSON-RPC line");
+        let method = message["method"].as_str().unwrap_or_default();
+        let id = message.get("id").cloned();
+        let response = match method {
+            "initialize" => Some(json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "result": {
+                    "protocolVersion": "2025-03-26",
+                    "capabilities": {},
+                    "serverInfo": { "name": "bulk-mock", "version": "0.1.0" }
+                }
+            })),
+            "notifications/initialized" => None,
+            "tools/list" => {
+                let offset: usize = message["params"]["cursor"]
+                    .as_str()
+                    .and_then(|cursor| cursor.parse().ok())
+                    .unwrap_or(0);
+                let end = offset.saturating_add(PAGE_SIZE).min(count);
+                let tools: Vec<Value> = (offset..end)
+                    .map(|i| {
+                        json!({
+                            "name": format!("bulk.tool.{i}"),
+                            "inputSchema": { "type": "object" }
+                        })
+                    })
+                    .collect();
+                let mut result = json!({ "tools": tools });
+                if end < count {
+                    result["nextCursor"] = json!(end.to_string());
+                }
+                Some(json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "result": result
                 }))
             }
             _ => None,
@@ -1133,5 +1229,89 @@ requires_approval = false
         let gateway = Gateway::new(config, allowlist, sandbox).await.unwrap();
 
         assert!(gateway.servers.read().await.is_empty());
+    }
+
+    /// (a) Regression: the cleanup a failed registration performs on its
+    /// `liveness` handle must kill AND reap the spawned child, never leave an
+    /// orphan/zombie. This drives the same `ChildHandle::kill()` synchronous
+    /// helper that `Drop` and the replacement path call, with a real process,
+    /// and checks the Linux `/proc` entry disappears (mirroring the sandbox
+    /// `timeout_kills_and_reaps_child` regression).
+    #[tokio::test]
+    async fn registration_failure_child_is_killed_and_reaped() {
+        let mut cmd = Command::new("sleep");
+        crate::subprocess::apply_minimal_env(&mut cmd);
+        cmd.arg("30").kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn sleep");
+        let pid = child.id().expect("child has a pid");
+        let handle = ChildHandle::new(child);
+        let proc_path = std::path::PathBuf::from(format!("/proc/{pid}"));
+        assert!(
+            proc_path.exists(),
+            "child {pid} must be alive before cleanup"
+        );
+
+        // This is exactly what a failed registration does with `liveness`:
+        // the synchronous kill+reap helper runs (from Drop / replacement).
+        handle.kill();
+
+        // `start_kill()` is asynchronous, so re-drive the same `try_wait()`
+        // the helper uses (via the liveness probe) until the killed child is
+        // reaped and vanishes from /proc. Bounded so an orphan fails fast
+        // instead of hanging the suite.
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while proc_path.exists() && std::time::Instant::now() < deadline {
+            let _ = handle.is_dead().await;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        drop(handle);
+
+        assert!(
+            !proc_path.exists(),
+            "child {pid} survived the failed-registration cleanup and was not reaped"
+        );
+    }
+
+    /// (b) Boundary regression: a single upstream advertising exactly
+    /// `MAX_DISCOVERED_TOOLS` (4096) tools must still register successfully.
+    #[tokio::test]
+    async fn discovery_accepts_exactly_max_discovered_tools() {
+        let gateway = test_gateway("tools-4096").await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_bulk_tools_mock(server_side, MAX_DISCOVERED_TOOLS));
+
+        gateway
+            .register_transport("bulk", client_side)
+            .await
+            .expect("exactly 4096 tools is within the cap");
+
+        let servers = gateway.servers.read().await;
+        let server = servers.get("bulk").expect("server registered");
+        assert_eq!(server.tools.len(), MAX_DISCOVERED_TOOLS);
+    }
+
+    /// (b) Boundary regression: 4097 tools must be rejected before they are
+    /// copied into the accumulator, and the failed registration must not be
+    /// inserted into the routing table.
+    #[tokio::test]
+    async fn discovery_rejects_more_than_max_discovered_tools() {
+        let gateway = test_gateway("tools-4097").await;
+        let (client_side, server_side) = tokio::io::duplex(8192);
+        tokio::spawn(run_bulk_tools_mock(server_side, MAX_DISCOVERED_TOOLS + 1));
+
+        let error = gateway
+            .register_transport("bulk", client_side)
+            .await
+            .expect_err("4097 tools exceeds the cap");
+        let message = format!("{error:#}");
+        assert!(message.contains("tools/list"), "{message}");
+        assert!(
+            message.contains(&MAX_DISCOVERED_TOOLS.to_string()),
+            "names the cap: {message}"
+        );
+        assert!(
+            !gateway.servers.read().await.contains_key("bulk"),
+            "failed registration is not inserted"
+        );
     }
 }
