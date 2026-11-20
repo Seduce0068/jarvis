@@ -1996,3 +1996,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   build-selfhost.sh:47 参照などの古い記述（low 4件）。
 
 - 親が対応: 全ゲート再検証（restore 60件 pass）。
+
+### Round 68（R4 で修正済み）
+
+- [x] **backup timer が復元中の本番 DB と競合**（confirmed high）→
+  SERVICE_INVENTORY へ jarvis-backup.timer 追加、apply 前 stop／on_exit
+  復元、runbook へ必須ステップ追加。
+- [x] **setup-selfhost.sh の chown -R が root 所有を劣化**（confirmed high）
+  → データ系ディレクトリへ限定、bin/scripts は毎回 root:root を再適用。
+  併せて build-selfhost.sh:402 の install も sudo root 所有化。
+- [x] **smoke-mcp-gw.sh が旧 schema 契約を固定**（high）→ filesystem.read は
+  optional path（既定 '.'）＋required 無しを検証。デプロイ中止を解消。
+- [x] generate-evidence.sh の failed=0 を予測値と明示し --check で実 run を
+  要求。dsh.md / remaining-tasks.md の古い記述4件を現行実装へ同期。
+
+### Round 68 の残り指摘（未対応）
+
+- [ ] P1-6 暗号化導入時に verify/restore のペイロード名・形式ハードコードが
+  ゲートを停止（medium）— manifest に format/encryption/signature 記述子。
+  過去のラウンドから継続、ユーザー判断（暗号化鍵の注入先）を含む。
+- [ ] restore_configs の owner/mode 方針漂移（medium）— allowlist6対象の
+  期待 owner/mode を単一表で定義し install で是正。
+- 親が対応: build-selfhost.sh:402 の sudo install root 所有化（chown 修正の
+  残余リスク）、全ゲート再検証。
