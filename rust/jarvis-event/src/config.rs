@@ -389,27 +389,57 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         reset_admin_token_for_test();
     }
 
-    /// One-shot check of the real `load_from_path` publish route. The
-    /// `Serialized` override is merged after the env provider, so an ambient
-    /// `JARVIS_EVENT_ADMIN_TOKEN` injected by CI cannot turn this into a
-    /// vacuous pass; first-wins itself is covered by the test above.
+    /// One-shot check of the real `load_from_path` publish route with TOML as
+    /// the sole authority: no env provider is injected, so the token can only
+    /// come from `Toml::file(path)`. Both the parsed config and the value
+    /// published to ingress are asserted, so dropping the TOML merge (or
+    /// relying on `ingress_admin_token()`'s env fallback) fails this test.
+    /// First-wins itself is covered by the test above.
     #[test]
-    fn load_from_path_publishes_admin_token() {
+    fn load_from_path_publishes_admin_token_from_toml() {
         let _guard = match TOKEN_SNAPSHOT_TEST_LOCK.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         reset_admin_token_for_test();
 
-        let toml = format!("{LEGACY_TOML}\nadmin_token = \"load-secret\"\n");
-        let path = std::env::temp_dir().join("jarvis-event-i81d-admin-token.toml");
+        let toml = format!("{LEGACY_TOML}\nadmin_token = \"from-toml\"\n");
+        let path = std::env::temp_dir().join("jarvis-event-i81d-admin-token-file.toml");
+        std::fs::write(&path, &toml).expect("write temp config");
+        let path_str = path.to_str().expect("utf8 temp path");
+        let overrides = Figment::new();
+        let config = EventConfig::load_from_path_with(path_str, overrides).expect("config loads");
+        assert_eq!(config.admin_token(), Some("from-toml"));
+        assert_eq!(ingress_admin_token().as_deref(), Some("from-toml"));
+
+        std::fs::remove_file(&path).expect("clean temp config");
+        reset_admin_token_for_test();
+    }
+
+    /// Env-override path, kept separate from the TOML-authority test above: a
+    /// different value supplied through the override provider replaces the
+    /// file's token and is the one published to ingress. The snapshot is reset
+    /// first, so the ingress assertion cannot pass via `ingress_admin_token()`'s
+    /// env fallback (the "early return" on env presence). `Serialized` is
+    /// merged after the env provider so ambient CI vars cannot decide the
+    /// outcome.
+    #[test]
+    fn load_from_path_env_override_publishes_admin_token() {
+        let _guard = match TOKEN_SNAPSHOT_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        reset_admin_token_for_test();
+
+        let toml = format!("{LEGACY_TOML}\nadmin_token = \"from-toml\"\n");
+        let path = std::env::temp_dir().join("jarvis-event-i81d-admin-token-env.toml");
         std::fs::write(&path, &toml).expect("write temp config");
         let path_str = path.to_str().expect("utf8 temp path");
         let overrides = Figment::from(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
-            .merge(Serialized::default("admin_token", "load-secret"));
+            .merge(Serialized::default("admin_token", "from-env"));
         let config = EventConfig::load_from_path_with(path_str, overrides).expect("config loads");
-        assert_eq!(config.admin_token(), Some("load-secret"));
-        assert_eq!(ingress_admin_token().as_deref(), Some("load-secret"));
+        assert_eq!(config.admin_token(), Some("from-env"));
+        assert_eq!(ingress_admin_token().as_deref(), Some("from-env"));
 
         std::fs::remove_file(&path).expect("clean temp config");
         reset_admin_token_for_test();

@@ -2417,11 +2417,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 84 の残り指摘（未対応）
 
-- [ ] workflow pin ゲートの `api_unreachable` が `PIN_RECORD_MISSING` まで
-      UNVERIFIED に格下げする fail-open（medium）— ローカル検出は常に fail-closed。
-- [ ] workflow pin ゲート自体に自動回帰が無い（medium）— mini workflow と
-      疑似 API レスポンスで全分岐を検証する test-workflow-pins.sh を追加。
-- [ ] 起動検証テストが TOML を読まず Serialized 上書きで置換している
-      （medium）— TOML 権威のテストと env 上書きのテストを分離。
-- 親が対応: secret_scan の GITHUB_TOKEN 誤検出（`${VAR-}` 形式へ変更）、
-  全ゲート再検証。
+- [x] workflow pin ゲートの `api_unreachable` fail-open（medium）→ per-entry
+  リセット方式へ変更。`PIN_RECORD_MISSING` / `PIN_RECORD_MALFORMED` は常に
+  fail-closed、到達性失敗は当該エントリのみ UNVERIFIED。
+- [x] workflow pin ゲートの自動回帰 `ci/scripts/test-workflow-pins.sh` を
+  追加（13分岐・16件、safety-test / ci-local へ配線）。
+- [x] 起動検証テストを TOML 権威と env 上書きに分離（vacuous pass 解消、
+  policy / event 各+1テスト）。
+- 親が対応: 全ゲート再検証（pin 16件、safety 435件）。
+
+### Round 85 の残り指摘（未対応）
+
+- 自動修正可能な既知指摘はすべて解消済み。残るのはユーザー判断:
+  P1-6 暗号化鍵の注入先、8段階の P0 ガード有効化、Grafana Cloud 認証、
+  Webhook 公開範囲、S9 実機復元演習、バックアップ外部化、push（446+ commits）。

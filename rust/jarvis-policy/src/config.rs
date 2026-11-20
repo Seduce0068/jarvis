@@ -1108,18 +1108,51 @@ default_deny = true
         validate_startup(&configured).expect("startup chain passes");
     }
 
-    /// The guard is wired into the `load_from_path` chain: a blank token aborts
-    /// startup before any service is constructed. The `Serialized` override is
-    /// merged after the env provider, so an ambient `JARVIS_POLICY_*` value
-    /// injected by CI cannot turn this into a vacuous pass.
+    /// TOML-authority check: no env provider is injected, so the blank token
+    /// can only come from `Toml::file(path)`. If that merge disappears from
+    /// `load_from_path_with`, the guard no longer fires and this test fails
+    /// instead of passing vacuously. Ambient `JARVIS_POLICY_*` vars are
+    /// irrelevant here because no env provider participates in the parse.
     #[test]
-    fn load_from_path_rejects_blank_approval_token() {
+    fn load_from_path_rejects_blank_approval_token_from_toml() {
         for (key, env_key) in [
             ("approval_api_token", "JARVIS_POLICY_APPROVAL_API_TOKEN"),
             ("approval_admin_token", "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN"),
         ] {
             let toml = format!("{}\n{key} = \"\"\n", base_toml());
-            let file_name = format!("jarvis-policy-r4a-{key}.toml");
+            let file_name = format!("jarvis-policy-r4a-{key}-toml.toml");
+            let path = std::env::temp_dir().join(&file_name);
+            std::fs::write(&path, &toml).expect("write temp config");
+            // Empty provider: the blank value under test is read from the file.
+            let overrides = Figment::new();
+            let loaded = PolicyConfig::load_from_path_with(
+                path.to_str().expect("utf8 temp path"),
+                overrides,
+            );
+            let error = loaded.expect_err("blank TOML token must abort startup");
+            assert!(
+                error.to_string().contains(env_key),
+                "error names the env override: {error}"
+            );
+            std::fs::remove_file(&path).expect("clean temp config");
+        }
+    }
+
+    /// Env-override path, kept separate from the TOML-authority test above: a
+    /// valid file value is replaced by a blank override, and startup still
+    /// fails closed. This proves the injected provider is merged (no early
+    /// return on env presence) and validation is not skipped. `Serialized` is
+    /// merged after the env provider so ambient CI vars cannot decide the
+    /// outcome; the file value stays non-blank so the error can only come from
+    /// the override.
+    #[test]
+    fn load_from_path_env_override_rejects_blank_token_without_skipping_validation() {
+        for (key, env_key) in [
+            ("approval_api_token", "JARVIS_POLICY_APPROVAL_API_TOKEN"),
+            ("approval_admin_token", "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN"),
+        ] {
+            let toml = format!("{}\n{key} = \"from-toml\"\n", base_toml());
+            let file_name = format!("jarvis-policy-r4a-{key}-env.toml");
             let path = std::env::temp_dir().join(&file_name);
             std::fs::write(&path, &toml).expect("write temp config");
             let overrides = Figment::from(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
@@ -1128,7 +1161,7 @@ default_deny = true
                 path.to_str().expect("utf8 temp path"),
                 overrides,
             );
-            let error = loaded.expect_err("blank approval token must abort startup");
+            let error = loaded.expect_err("blank env override must abort startup");
             assert!(
                 error.to_string().contains(env_key),
                 "error names the env override: {error}"
