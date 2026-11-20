@@ -37,99 +37,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Payload descriptors: the single derivation path for mandatory roles and
-# format checks. The row contract is defined in backup-local.sh.
-# Legacy manifests record only "name size sha256"; those rows are accepted by
-# defaulting the descriptors to the historical extension/name mapping. A
-# descriptor that is explicitly present but unknown is rejected (fail-closed).
+# Payload descriptors and format checks: one shared implementation.
+# The row contract is defined in backup-local.sh; legacy 3-column rows default
+# their descriptors to the historical name/extension mapping and explicit
+# unknown descriptors fail closed. Both this script and restore-local.sh call
+# the SAME functions from lib/payload-descriptors.sh, so their verdicts cannot
+# diverge and P1-6 encryption needs one update point only.
+# Deploy note: install-backup-timer.sh and `make install-verify-backup` copy this
+# file alone to /opt/jarvis/scripts; they must also install the lib/ directory
+# next to it, or the installed verifier fails closed with a clear error.
 # ---------------------------------------------------------------------------
-legacy_format_for() { # name -> format
-  case "$1" in
-    *.gz) printf 'gzip\n' ;;
-    *.tar|*.bin) printf 'tar\n' ;;
-    *) printf 'raw\n' ;;
-  esac
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=lib/payload-descriptors.sh
+# Resolved at runtime relative to the script location.
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/lib/payload-descriptors.sh"
+[ "${PAYLOAD_DESCRIPTORS_LIB:-}" = 1 ] || {
+  echo "ERROR: shared payload descriptor library not loaded" >&2
+  exit 1
 }
 
-legacy_role_for() { # name -> role
-  case "$1" in
-    postgres-jarvis.sql.gz) printf 'postgres\n' ;;
-    qdrant-snapshot.bin) printf 'qdrant\n' ;;
-    config-*) printf 'config\n' ;;
-    git-jarvis-head.tar.gz) printf 'git\n' ;;
-    *) printf 'other\n' ;;
-  esac
-}
-
-resolve_descriptors() { # name format encryption signature role -> "fmt enc sig role"
-  local name="$1" format="$2" encryption="$3" signature="$4" role="$5"
-  [ -n "$format" ] || format="$(legacy_format_for "$name")"
-  [ -n "$encryption" ] || encryption=none
-  [ -n "$signature" ] || signature=none
-  [ -n "$role" ] || role="$(legacy_role_for "$name")"
-  printf '%s %s %s %s\n' "$format" "$encryption" "$signature" "$role"
-}
-
-descriptor_supported() { # format encryption signature -> 0/1
-  local format="$1" encryption="$2" signature="$3"
-  case "$format" in gzip|tar|raw) ;; *) return 1 ;; esac
-  # P1-6: encryption/signature wiring (key injection point, decrypt timing) is
-  # a user decision and is intentionally not implemented. Anything other than
-  # the current none/none default is rejected here. Future support connects
-  # here: "将来 P1-6 で暗号化を適用する時にここへ接続する".
-  [ "$encryption" = none ] && [ "$signature" = none ]
-}
-
-check_payload_format() { # set name format encryption signature role
-  local set="$1" name="$2" format="$3" encryption="$4" signature="$5" role="$6"
-  local path="$set/$name" label="$name"
-  if ! descriptor_supported "$format" "$encryption" "$signature"; then
-    echo "  FORMAT MISMATCH: $name (unsupported descriptor format=$format encryption=$encryption signature=$signature)"
-    fail=$((fail+1))
-    return 0
-  fi
-  [ -f "$path" ] || return 0
-  case "$role" in
-    postgres) label="postgres dump" ;;
-    qdrant) label="qdrant snapshot" ;;
-  esac
-  case "$format" in
-    gzip)
-      if gzip -t "$path" 2>/dev/null; then
-        echo "  FORMAT OK: $label (gzip readable)"
-        ok=$((ok+1))
-        if [ "$role" = postgres ]; then
-          # A truncated dump can still pass gzip -t. Check the pg_dump footer
-          # written on a clean completion (no data values are read).
-          if gzip -cd "$path" 2>/dev/null | tail -5 | grep -q "PostgreSQL database dump complete"; then
-            echo "  COMPLETE OK: postgres dump has pg_dump footer"
-            ok=$((ok+1))
-          else
-            echo "  COMPLETE MISMATCH: postgres dump missing footer (truncated?)"
-            fail=$((fail+1))
-          fi
-        fi
-      else
-        echo "  FORMAT MISMATCH: $label gzip corrupt"
-        fail=$((fail+1))
-      fi
-      ;;
-    tar)
-      if tar -tf "$path" >/dev/null 2>&1; then
-        echo "  FORMAT OK: $label (tar readable)"
-        ok=$((ok+1))
-      else
-        echo "  FORMAT MISMATCH: $label unreadable"
-        fail=$((fail+1))
-      fi
-      ;;
-    raw)
-      # Presence, size and SHA-256 were checked by the manifest loop below.
-      echo "  FORMAT OK: $name (raw payload present)"
+# Map the shared verdict to this script's output/counters. The classification
+# itself lives only in the shared library.
+on_payload_check() { # event detail
+  local event="$1" detail="$2"
+  case "$event" in
+    FORMAT_OK|COMPLETE_OK)
+      echo "  ${event//_/ }: $detail"
       ok=$((ok+1))
       ;;
+    FORMAT_MISMATCH|COMPLETE_MISMATCH)
+      echo "  ${event//_/ }: $detail"
+      fail=$((fail+1))
+      ;;
   esac
 }
+
+# I74-B helpers (is_*_payload, role_basename_consistent, pg_dump_footer_present)
+# now live in lib/payload-descriptors.sh and are shared with restore-local.sh.
 
 fail=0; ok=0
 for set in "${sets[@]}"; do
@@ -168,8 +113,10 @@ for set in "${sets[@]}"; do
   # marker, so a manifest-only directory (no created_at, no payloads) was
   # reported as an accepted legacy set and exited 0. Requiring the payloads
   # unconditionally limits the legacy exemption to sets that actually carry
-  # postgres / qdrant / config-*. Roles and formats are now derived from the
-  # manifest descriptors by the single path below, not from fixed filenames.
+  # postgres / qdrant / config-*. The manifest role is auxiliary metadata:
+  # presence comes from the real basename, so a self-declared role=postgres on
+  # an unrelated file (or a truncated dump relabelled format=raw) can no
+  # longer satisfy a mandatory component.
   has_pg=0; has_qdrant=0; has_config=0
   while read -r name expected_bytes expected_sha format encryption signature role; do
     case "$name" in ''|\#*) continue ;; esac
@@ -201,14 +148,27 @@ for set in "${sets[@]}"; do
     esac
     resolved="$(resolve_descriptors "$name" "$format" "$encryption" "$signature" "$role")"
     read -r format encryption signature role <<< "$resolved"
-    case "$role" in
-      postgres) has_pg=1 ;;
-      qdrant) has_qdrant=1 ;;
-      config) has_config=1 ;;
-    esac
-    # Format-level check: prove the payload is structurally readable without
-    # restoring or touching production data. Dispatch is descriptor-driven.
-    check_payload_format "$set" "$name" "$format" "$encryption" "$signature" "$role"
+    # I74-B: role is auxiliary. A role claim that the basename does not back is
+    # a fail-closed descriptor error and never counts as a required payload.
+    if ! role_basename_consistent "$name" "$role"; then
+      echo "  FORMAT MISMATCH: $name (role=$role is not consistent with its basename; ROLE MISMATCH)"
+      fail=$((fail+1))
+      continue
+    fi
+    # Mandatory presence comes from the real filename, not from the manifest's
+    # self-declared role (I69-B "required payload really exists" contract).
+    if is_pg_payload "$name"; then
+      has_pg=1
+    fi
+    if is_qdrant_payload "$name"; then
+      has_qdrant=1
+    fi
+    if is_config_payload "$name"; then
+      has_config=1
+    fi
+    # Format-level check: the shared implementation classifies the payload and
+    # routes the verdict through on_payload_check (ok/fail accounting above).
+    payload_format_check "$path" "$name" "$format" "$encryption" "$signature" "$role"
   done < "$manifest"
 
   if [ "$has_pg" -eq 0 ]; then
