@@ -2206,3 +2206,24 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: I78-A で verifier も role 矛盾を拒否するようになり、I77-A の
   「verifier は受理」期待値を更新、全ゲート再検証。
+
+### Round 76（R4 で修正済み）
+
+- [x] 共有 lib の verdict 契約を実装へ整合: 両呼び出し側で `format_rc -ge 1`
+  を失敗加算、hook はログ専用（二重カウントを構造的に排除）。
+- [x] restore-local.sh に `flock -n` 排他ロックを追加（同時実行を fail-closed
+  で拒否）、設計書のスキップセマンティクスを CLI help と一致。
+- [x] secret_scan.py が追跡ファイル0件で fail-open → exit 1、空 repo 回帰追加。
+- [x] ドキュメント3箇所（PASSWORD_FILE 参照／自動スクリプト未実装）を現行
+  実装へ同期、test-review-run.sh に既定 opencode 分岐の実検証を追加。
+
+### Round 76 の残り指摘（未対応）
+
+- [ ] 681件中約270件が同一の本番未接触アサーションで、ログ不在時に
+  無条件 pass（low）— 代表ケースへ集約し前提ログを必須化。
+- [ ] jq モックの empty／prod_empty モードが未使用（low）— qdrant.sh の
+  `case ''` 分岐の回帰を追加。
+- ユーザー判断: P1-6 暗号化鍵、P0 ガード、Grafana、Webhook、S9、
+  バックアップ外部化、push、共有 lib の実機配布（再インストール）。
+
+- 親が対応: 全ゲート再検証（restore 690件、safety 664件）。
