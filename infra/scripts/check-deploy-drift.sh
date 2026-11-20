@@ -12,6 +12,34 @@ deployed_pii="${JARVIS_DRIFT_PII:-/etc/jarvis/pii_patterns.toml}"
 deployed_env="${JARVIS_DRIFT_ENV:-/etc/jarvis/jarvis-mcp-gw.env}"
 drift=0; danger=0
 say() { printf '%-32s %s\n' "$1" "$2"; }
+# I95-C: stat-based owner/mode verification. EXPECTED_CONFIG_MODE in
+# restore-local.d/configs.sh promises root:root for deployed configs, but the
+# content-only drift check could not detect a post-deploy chown/chmod.
+# `stat` is invoked BY NAME (never an absolute path) so isolated regression
+# tests can stub it through PATH; this helper only READS metadata (no chmod).
+# On mismatch -- or when stat is unavailable / the file is unreadable -- fail
+# closed with a FIXED code only. Never print the path, owner name, uid/gid or
+# mode value (data minimization; same rule as the env/unit checks above).
+check_owner_mode() { # label path expected_mode
+  local label="$1" path="$2" expected="$3" observed
+  # Absent files are already flagged by the corresponding content check;
+  # do not double-report them here.
+  [ -e "$path" ] || return 0
+  if ! command -v stat >/dev/null 2>&1; then
+    say "$label" "DANGER: E_BAD_OWNER_MODE (code only)"
+    danger=1
+    return 0
+  fi
+  observed="$(stat -c '%u:%g %a' -- "$path" 2>/dev/null)" || {
+    say "$label" "DANGER: E_BAD_OWNER_MODE (code only)"
+    danger=1
+    return 0
+  }
+  if [ "$observed" != "0:0 $expected" ]; then
+    say "$label" "DANGER: E_BAD_OWNER_MODE (code only)"
+    danger=1
+  fi
+}
 # I54-B: --env-only は mcp-gw env の形式検査のみを行い、binary/unit/policy/
 # runtime E2E 等の他検査をスキップする。build-selfhost.sh が env 配置直後に
 # 即時検証するためのモード（サービス未起動でも env 自体の正当性は検証できる）。
@@ -229,6 +257,18 @@ elif grep -Eq '^[[:space:]]*Environment=.*[$][{]' "$unit_sys"; then
 else
   say "systemd env expansion" "OK (no unexpanded variable in Environment=)"
 fi
+# 5d) I95-C: owner/mode 照合。パスは上記の内容検査と同じ JARVIS_DRIFT_*
+# オーバーライド（Round 71 契約の JARVIS_DRIFT_POLICY_DIR を含む）をそのまま
+# 使用し、ラベルは固定語彙のみ。unit/allowlist/policy(pii 含む)=root:root 0644、
+# mcp-gw env=root:root 0600、binary=root:root 0755 を要求する。
+check_owner_mode "binary"       /opt/jarvis/bin/jarvis-mcp-gw                 755
+check_owner_mode "allowlist"    "$deployed_allowlist"                         644
+check_owner_mode "policy"       "$deployed_policy_dir/casbin_policy.csv"      644
+check_owner_mode "cedar_policy" "$deployed_policy_dir/policies.cedar"         644
+check_owner_mode "cedar_schema" "$deployed_policy_dir/cedar_schema.cedarschema" 644
+check_owner_mode "pii_patterns" "$deployed_pii"                               644
+check_owner_mode "systemd unit" "$unit_sys"                                   644
+check_owner_mode "mcp-gw env"   "$deployed_env"                               600
 # 5c) I50-A / I52-B / I54-B: host override env の存在と必須キーを fail-closed で
 # 検証する。これが欠けると unit のリテラル既定値（開発用 BASE_DIR と
 # egress=example.com）が実効になり、filesystem.* 全失敗＋「deny-all のつもりが

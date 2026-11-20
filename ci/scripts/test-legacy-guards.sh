@@ -1425,7 +1425,7 @@ perm_probe() { # stub_uid with_sudo test_mode -> PROBE_RC / PROBE_ARGS / PROBE_E
   : > "$capture"
   (
     # Intentionally empty PATH: this stub reproduces a host without sudo.
-    # shellcheck disable=SC2123
+    # shellcheck disable=SC2123,SC2030
     PATH="$perm_probe_dir/empty_bin"
     export PATH
     # shellcheck disable=SC2329
@@ -1495,6 +1495,379 @@ else
   echo "  FAIL: test opt-in did not permit the legacy fallback (rc=$PROBE_RC)"
   fail=$((fail+1))
 fi
+
+# I95-C: owner/mode tamper regression for check-deploy-drift.sh. The old drift
+# check compared file CONTENT only, so a post-deploy chown/chmod was invisible
+# even though EXPECTED_CONFIG_MODE promises root:root. A mock `stat` in a temp
+# dir reports tampered metadata for the env fixture only; every drift path is
+# redirected into the same temp tree. No real deployed permission is changed,
+# and the throwaway tree is removed by the existing EXIT trap on $tmp.
+owner_tmp="$tmp/owner_mode_tamper"
+mkdir -p "$owner_tmp/bin" "$owner_tmp/policy"
+cp "$repo/infra/config/mcp_allowlist.toml" "$owner_tmp/mcp_allowlist.toml"
+cp "$repo/infra/config/policy/casbin_policy.csv" "$owner_tmp/policy/"
+cp "$repo/infra/config/policy/policies.cedar" "$owner_tmp/policy/"
+cp "$repo/infra/config/policy/cedar_schema.cedarschema" "$owner_tmp/policy/"
+cp "$repo/infra/config/pii_patterns.toml" "$owner_tmp/pii_patterns.toml"
+cp "$repo/infra/systemd/jarvis-mcp-gw.service" "$owner_tmp/jarvis-mcp-gw.service"
+# Minimal env that satisfies check_mcp_env (single absolute BASE_DIR, deny-all).
+printf '%s\n' \
+  'JARVIS_MCP_GW_BASE_DIR=/opt/jarvis' \
+  'JARVIS_MCP_GW_EGRESS_ALLOWLIST=' \
+  > "$owner_tmp/jarvis-mcp-gw.env"
+# Mock stat echoes fixed metadata by file class. OWNER_TAMPER=1 flips only the
+# env to a non-root owner + 0666; the control run reports the expected values.
+cat > "$owner_tmp/bin/stat" <<'MOCK'
+#!/usr/bin/env bash
+for last in "$@"; do :; done
+case "$last" in
+  *.env)
+    if [ "${OWNER_TAMPER:-0}" = 1 ]; then
+      printf '%s\n' '1000:1000 666'
+    else
+      printf '%s\n' '0:0 600'
+    fi
+    ;;
+  *bin/jarvis-mcp-gw) printf '%s\n' '0:0 755' ;;
+  *) printf '%s\n' '0:0 644' ;;
+esac
+MOCK
+# Only the throwaway mock is made executable; no deployed file is touched.
+chmod 0755 -- "$owner_tmp/bin/stat"
+
+drift_owner_run() { # tamper_flag -> drift output (stdout+stderr); status passes through
+  local tamper="$1"
+  # PATH is intentionally scoped to this command invocation.
+  # shellcheck disable=SC2031
+  PATH="$owner_tmp/bin:$PATH" \
+  OWNER_TAMPER="$tamper" \
+  JARVIS_DRIFT_ALLOWLIST="$owner_tmp/mcp_allowlist.toml" \
+  JARVIS_DRIFT_POLICY_DIR="$owner_tmp/policy" \
+  JARVIS_DRIFT_PII="$owner_tmp/pii_patterns.toml" \
+  JARVIS_DRIFT_UNIT="$owner_tmp/jarvis-mcp-gw.service" \
+  JARVIS_DRIFT_ENV="$owner_tmp/jarvis-mcp-gw.env" \
+    bash "$repo/infra/scripts/check-deploy-drift.sh" 2>&1
+}
+
+control_out="$(drift_owner_run 0)"
+if printf '%s' "$control_out" | grep -q 'E_BAD_OWNER_MODE'; then
+  echo "  FAIL: drift reported E_BAD_OWNER_MODE for a correct root:root owner/mode"
+  fail=$((fail+1))
+else
+  echo "  PASS: drift accepts correct root:root owner/mode"
+  ok=$((ok+1))
+fi
+
+tamper_out="$(drift_owner_run 1)"; code=$?
+# Fixed vocabulary only: the DANGER lines must contain neither the temp path,
+# nor the mocked owner (1000) nor the mocked mode (666).
+if [ "$code" -eq 2 ] \
+   && printf '%s' "$tamper_out" | grep -q 'mcp-gw env.*E_BAD_OWNER_MODE (code only)' \
+   && ! printf '%s' "$tamper_out" | grep -F 'E_BAD_OWNER_MODE' \
+        | grep -Eq '1000|666|owner_mode_tamper|jarvis-mcp-gw[.]env'; then
+  echo "  PASS: drift flags tampered owner/mode with a fixed code only (exit 2)"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift missed owner/mode tamper or leaked a value (exit=$code)"
+  fail=$((fail+1))
+fi
+
+# I95-E (b)/(c): generator contract regressions. A stub `cargo` on PATH feeds
+# deterministic --list / --list --ignored counts and a controllable real-run
+# status, so NO real cargo/suite runs and no repository evidence is written.
+gen_script="$repo/ci/scripts/generate-evidence.sh"
+gen_tmp="$tmp/generator_contract"
+mkdir -p "$gen_tmp/repo/ci/scripts" "$gen_tmp/repo/rust" "$gen_tmp/repo/ui" \
+         "$gen_tmp/repo/evidence" "$gen_tmp/bin"
+cp "$gen_script" "$gen_tmp/repo/ci/scripts/generate-evidence.sh"
+: > "$gen_tmp/cargo.log"
+cat > "$gen_tmp/bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+# Deterministic cargo stub: never invokes a real toolchain.
+mode=run
+for arg in "$@"; do
+  case "$arg" in
+    --list) mode=list ;;
+    --ignored) mode=ignored ;;
+  esac
+done
+printf '%s\n' "$mode" >> "$CARGO_STUB_LOG"
+case "$mode" in
+  list)    printf '12 tests, 0 benchmarks\n' ;;
+  ignored) printf '2 tests, 0 benchmarks\n' ;;
+  run)
+    if [ "${CARGO_STUB_FAIL:-0}" = 1 ]; then
+      printf 'stub run failed\n' >&2
+      exit 101
+    fi
+    printf 'stub run ok\n'
+    ;;
+esac
+exit 0
+STUB
+chmod +x "$gen_tmp/bin/cargo"
+export CARGO_STUB_LOG="$gen_tmp/cargo.log"
+
+gen_invoke() { # args... -> GEN_RC / GEN_OUT / GEN_ERR
+  local rc=0
+  : > "$CARGO_STUB_LOG"
+  # PATH is intentionally scoped to the generator process only.
+  # shellcheck disable=SC2031
+  GEN_OUT="$(PATH="$gen_tmp/bin:$PATH" bash "$gen_tmp/repo/ci/scripts/generate-evidence.sh" "$@" 2>"$gen_tmp/stderr")" || rc=$?
+  GEN_ERR="$(< "$gen_tmp/stderr")"
+  GEN_RC=$rc
+}
+
+# All six target arms must carry --locked on every cargo invocation. Static
+# guard on a COPY of the source; no cargo is invoked here.
+if python3 - "$gen_script" <<'PY'
+import re, sys
+
+with open(sys.argv[1], encoding='utf-8') as fh:
+    src = fh.read()
+expect = {
+    'policy':  ('rust', 'jarvis-policy'),
+    'mcp':     ('rust', 'jarvis-mcp-gw'),
+    'context': ('rust', 'jarvis-context'),
+    'event':   ('rust', 'jarvis-event'),
+    'core':    ('rust', 'jarvis-core'),
+    'ui':      ('ui', None),
+}
+for target, (workdir, package) in expect.items():
+    arm = re.search(
+        r'^\s*' + target + r'\)\s+workdir=([A-Za-z]+);\s*cargo_args=\(([^)]*)\)\s*;;',
+        src, re.MULTILINE)
+    if arm is None:
+        sys.exit('MISSING_TARGET:' + target)
+    args = arm.group(2).split()
+    if arm.group(1) != workdir or '--locked' not in args:
+        sys.exit('NO_LOCKED:' + target)
+    if package is not None:
+        if '-p' not in args or args[args.index('-p') + 1] != package:
+            sys.exit('WRONG_PACKAGE:' + target)
+PY
+then
+  echo "  PASS: generator uses --locked for all six targets"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator lost --locked on one or more targets"
+  fail=$((fail+1))
+fi
+
+# Path contract: nested paths and any ".." must be rejected with exit 2 BEFORE
+# cargo is invoked; a well-shaped but absent path stays exit 1.
+gen_invoke context --check evidence/test-run-../../nonexistent.json
+if [ "$GEN_RC" -eq 2 ] && printf '%s' "$GEN_ERR" | grep -q 'FAIL: BadEvidencePath' \
+   && [ ! -s "$CARGO_STUB_LOG" ]; then
+  echo "  PASS: generator rejects dotdot evidence path with exit 2"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator accepted a dotdot evidence path (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+gen_invoke context --check evidence/nested/test-run-de83a4552e45.json
+if [ "$GEN_RC" -eq 2 ] && printf '%s' "$GEN_ERR" | grep -q 'FAIL: BadEvidencePath' \
+   && [ ! -s "$CARGO_STUB_LOG" ]; then
+  echo "  PASS: generator rejects nested evidence path with exit 2"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator accepted a nested evidence path (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+gen_invoke context --check evidence/test-run-DEADBEEFDEAD.json
+if [ "$GEN_RC" -eq 2 ] && printf '%s' "$GEN_ERR" | grep -q 'FAIL: BadEvidencePath'; then
+  echo "  PASS: generator rejects non-12-hex evidence filename with exit 2"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator accepted a malformed evidence filename (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+gen_invoke context --check evidence/test-run-000000000000.json
+if [ "$GEN_RC" -eq 1 ] && printf '%s' "$GEN_ERR" | grep -q 'FAIL: EvidenceFileNotFound'; then
+  echo "  PASS: generator reports a missing well-shaped evidence file with exit 1"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator misreported a missing evidence file (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+# Synthetic evidence in the temp repo only: passed=10 matches the stub counts,
+# skipped=2 matches the ignored list; the other file forces MISMATCH.
+printf '{"results":{"passed":10,"failed":0,"skipped":2}}\n' \
+  > "$gen_tmp/repo/evidence/test-run-de83a4552e45.json"
+printf '{"results":{"passed":9,"failed":0,"skipped":2}}\n' \
+  > "$gen_tmp/repo/evidence/test-run-000000000001.json"
+
+# Generation mode must still emit the labelled fragment (12 - 2 = 10 passed).
+gen_invoke context
+if [ "$GEN_RC" -eq 0 ] \
+   && printf '%s' "$GEN_OUT" | grep -Fq 'LABEL: failed=0' \
+   && printf '%s' "$GEN_OUT" | grep -Fq 'results: {"passed": 10, "failed": 0, "skipped": 2}' \
+   && printf '%s' "$GEN_OUT" | grep -Fq 'notes  : 10 passed / 0 failed / 2 ignored' \
+   && grep -qx 'list' "$CARGO_STUB_LOG" \
+   && grep -qx 'ignored' "$CARGO_STUB_LOG" \
+   && ! grep -qx 'run' "$CARGO_STUB_LOG"; then
+  echo "  PASS: generator emits the derived results fragment in generation mode"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator generation-mode contract regressed (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+# --check MATCH: real suite ran, output is MATCH ONLY (no results fragment).
+gen_invoke context --check evidence/test-run-de83a4552e45.json
+if [ "$GEN_RC" -eq 0 ] && [ "$GEN_OUT" = 'CHECK: MATCH' ] \
+   && grep -qx 'run' "$CARGO_STUB_LOG"; then
+  echo "  PASS: generator --check prints CHECK: MATCH after the real run"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator --check MATCH branch regressed (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+# --check MISMATCH: exit 1 with MISMATCH only, still no success fragment.
+gen_invoke context --check evidence/test-run-000000000001.json
+if [ "$GEN_RC" -eq 1 ] && [ "$GEN_OUT" = 'CHECK: MISMATCH' ] \
+   && grep -qx 'run' "$CARGO_STUB_LOG"; then
+  echo "  PASS: generator --check prints CHECK: MISMATCH and exits 1"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator --check MISMATCH branch regressed (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+# Real-run failure must be detected and must leave NO success fragment.
+CARGO_STUB_FAIL=1
+export CARGO_STUB_FAIL
+gen_invoke context --check evidence/test-run-de83a4552e45.json
+unset CARGO_STUB_FAIL
+if [ "$GEN_RC" -eq 1 ] \
+   && printf '%s' "$GEN_ERR" | grep -q 'FAIL: ActualRunDetectedFailure' \
+   && [ -z "$GEN_OUT" ] \
+   && grep -qx 'run' "$CARGO_STUB_LOG"; then
+  echo "  PASS: generator fails closed on real-run failure without a results fragment"
+  ok=$((ok+1))
+else
+  echo "  FAIL: generator swallowed a real-run failure (exit $GEN_RC)"
+  fail=$((fail+1))
+fi
+
+# I95-E (c): every concrete evidence JSON path cited under docs/ must exist
+# and use test-run-<12hex>.json; documentation placeholders (* / YYYY / <>) are
+# intentionally ignored. No documentation file is modified.
+if python3 - "$repo" <<'PY'
+import os, re, sys
+
+root = sys.argv[1]
+docs = os.path.join(root, 'docs')
+concrete = re.compile(r'(?:[A-Za-z0-9_.\-]+/)*test-run-[0-9]{8}-[0-9a-fA-F]{12}[.]json')
+loose = re.compile(r'test-run-[^ \t`\[\]\(\)<>\x27\x22]*[.]json')
+errors = []
+refs = 0
+for dirpath, _, filenames in os.walk(docs):
+    for name in filenames:
+        if not name.endswith('.md'):
+            continue
+        path = os.path.join(dirpath, name)
+        with open(path, encoding='utf-8') as fh:
+            text = fh.read()
+        for token in loose.findall(text):
+            if '*' in token or 'YYYY' in token or '<' in token:
+                continue
+            base = token.rsplit('/', 1)[-1]
+            if '..' in token or not re.fullmatch(r'test-run-[0-9]{8}-[0-9a-f]{12}[.]json', base):
+                errors.append('BAD_DOC_EVIDENCE_REF ' + os.path.relpath(path, root) + ' ' + token)
+        for token in concrete.findall(text):
+            refs += 1
+            if token.startswith('evidence/'):
+                rel = token
+            elif token.startswith('../'):
+                rel = os.path.normpath(os.path.join(os.path.relpath(dirpath, root), token))
+            else:
+                rel = 'evidence/' + token
+            if not os.path.isfile(os.path.join(root, rel)):
+                errors.append('MISSING_DOC_EVIDENCE_REF ' + os.path.relpath(path, root) + ' ' + token)
+if refs == 0:
+    errors.append('NO_DOC_EVIDENCE_REF')
+for err in errors:
+    print(err)
+sys.exit(1 if errors else 0)
+PY
+then
+  echo "  PASS: docs evidence JSON references resolve to existing files"
+  ok=$((ok+1))
+else
+  echo "  FAIL: docs contain a stale or malformed evidence JSON reference"
+  fail=$((fail+1))
+fi
+
+# I95-D: the spec's Risk & tier R-ID set must equal risk_items[].id in every
+# evidence citing that spec. Two tamper directions -- one declared R-ID removed
+# from an evidence array, one undeclared R-ID appended -- must both fail with
+# RISK_SET_MISMATCH. Use copied specs and evidence in a fresh tree so the
+# repository files are never modified.
+risk_tmp="$tmp/risk_set_negative"
+mkdir -p "$risk_tmp/ci/scripts" "$risk_tmp/evidence" "$risk_tmp/specs"
+cp "$repo/ci/scripts/check-evidence.sh" "$risk_tmp/ci/scripts/check-evidence.sh"
+cp "$repo/specs/index.md" "$risk_tmp/specs/index.md"
+cp "$repo/evidence/index.md" "$risk_tmp/evidence/index.md"
+cp "$repo/todo.md" "$risk_tmp/todo.md"
+cp "$repo"/specs/test-*.md "$risk_tmp/specs/"
+cp "$repo"/evidence/test-run-*.json "$risk_tmp/evidence/"
+
+if bash "$risk_tmp/ci/scripts/check-evidence.sh" >/dev/null 2>&1; then
+  echo "  PASS: I95-D pristine Risk & tier sets accepted"
+  ok=$((ok+1))
+else
+  echo "  FAIL: I95-D pristine Risk & tier sets rejected"
+  fail=$((fail+1))
+fi
+
+risk_source="$risk_tmp/evidence/$(basename "${evidence_files[0]}")"
+for mode in risk_removed risk_added; do
+  # Restore every evidence file first: a previous tamper must not mask the
+  # direction under test.
+  cp "$repo"/evidence/test-run-*.json "$risk_tmp/evidence/"
+  if ! python3 - "$risk_source" "$mode" <<'PY'
+import json, sys
+
+path, mode = sys.argv[1:3]
+with open(path, encoding='utf-8') as fh:
+    data = json.load(fh)
+items = data.get('risk_items')
+if not isinstance(items, list) or len(items) < 2:
+    raise SystemExit('risk_items array too short for tamper')
+if mode == 'risk_removed':
+    items.pop()
+elif mode == 'risk_added':
+    # An id the referenced spec does not declare. The item keeps a valid
+    # shape, so only the risk-set gate can reject this copy.
+    items.append({'id': 'R-9999', 'tier': 'T1',
+                  'description': 'undeclared risk',
+                  'asvs': [], 'controls': []})
+else:
+    raise SystemExit('unknown risk tamper mode: ' + mode)
+with open(path, 'w', encoding='utf-8') as fh:
+    json.dump(data, fh)
+PY
+  then
+    echo "  FAIL: could not prepare R-ID tamper ($mode)"
+    fail=$((fail+1))
+    continue
+  fi
+  out=$(bash "$risk_tmp/ci/scripts/check-evidence.sh" 2>&1); code=$?
+  if [ "$code" -ne 0 ] && printf '%s' "$out" | grep -q 'RISK_SET_MISMATCH'; then
+    echo "  PASS: check-evidence.sh rejects R-ID $mode"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: check-evidence.sh accepted R-ID $mode (exit $code)"
+    printf '%s\n' "$out" | head -3 >&2
+    fail=$((fail+1))
+  fi
+done
 
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
