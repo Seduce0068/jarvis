@@ -882,6 +882,31 @@ PY
   fi
 done
 
+# Evidence file names embed a per-run hash and change whenever the evidence
+# set is regenerated. Resolve the copied JSON through test_basis_ref.spec_path
+# instead of pinning a literal test-run-<hash>.json name, so the negative gates
+# below keep exercising the real file after regeneration.
+evidence_for_spec() { # evidence_dir spec_basename -> matching path on stdout
+  local dir="$1" spec="$2" candidate
+  for candidate in "$dir"/test-run-*.json; do
+    [ -f "$candidate" ] || continue
+    if python3 - "$candidate" "$spec" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    data = json.load(fh)
+path = data.get("test_basis_ref", {}).get("spec_path", "")
+raise SystemExit(0 if path == "specs/" + sys.argv[2] else 1)
+PY
+    then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # I65-C: in strict mode a contract keyword present in a spec but absent from
 # the matching notes, or outnumbered by duplicated spec steps, must fail with
 # SCENARIO_STEP_UNCOVERED. Use COPIED specs
@@ -901,8 +926,13 @@ cp "$repo"/specs/test-*.md "$step_tmp/specs/"
 # spec-only duplication is now rejected too (next case) because note matches
 # are counted against the spec count. The Scenario count is unchanged here, so
 # only the contract-coverage gate can reject this copy.
-step_evidence="$step_tmp/evidence/test-run-20261120-de83a4552e45.json"
-if python3 - "$step_tmp/specs/test-context.md" "$step_evidence" <<'PY'
+# I65-C tamper the copied specs/test-context.md, so select the evidence that
+# attests that spec rather than a hard-coded regenerated file name.
+step_evidence=$(evidence_for_spec "$step_tmp/evidence" test-context.md) || step_evidence=""
+if [ -z "$step_evidence" ]; then
+  echo "  FAIL: no copied evidence JSON attests specs/test-context.md"
+  fail=$((fail+1))
+elif python3 - "$step_tmp/specs/test-context.md" "$step_evidence" <<'PY'
 import json, sys
 
 spec_path, evidence_path = sys.argv[1:3]
@@ -950,8 +980,12 @@ cp "$repo/evidence/index.md" "$count_tmp/evidence/index.md"
 cp "$repo/todo.md" "$count_tmp/todo.md"
 cp "$repo"/evidence/test-run-*.json "$count_tmp/evidence/"
 cp "$repo"/specs/test-*.md "$count_tmp/specs/"
-count_evidence="$count_tmp/evidence/test-run-20261120-de83a4552e45.json"
-if python3 - "$count_tmp/specs/test-context.md" "$count_evidence" <<'PY'
+# Same dynamic selection for the fresh copy used by the count case.
+count_evidence=$(evidence_for_spec "$count_tmp/evidence" test-context.md) || count_evidence=""
+if [ -z "$count_evidence" ]; then
+  echo "  FAIL: no copied evidence JSON attests specs/test-context.md (count case)"
+  fail=$((fail+1))
+elif python3 - "$count_tmp/specs/test-context.md" "$count_evidence" <<'PY'
 import json, sys
 
 spec_path, evidence_path = sys.argv[1:3]
@@ -2076,6 +2110,64 @@ if grep -Fq 'ignore_args+=(--ignore "$advisory_id")' "$audit_gate" \
 else
   echo "  FAIL: dependency audit contract regressed"
   fail=$((fail+1))
+fi
+
+# I99-C: a deploy must fail when any /health answer is degraded, not just when
+# curl sees a non-200. Exercise the REAL std-only parser/evaluator from
+# deploy.rs by compiling the marker-delimited block with rustc and feeding it
+# stubbed probe payloads (200 healthy, 503 degraded, 200 carrying the fixed
+# degraded body). No ssh, service, or rust-script is involved. The static guard
+# first pins the block and the removal of the old `curl -sf` gate.
+deploy_src="$repo/rust/scripts/deploy.rs"
+health_block="$(sed -n '/^\/\/ health-gate-begin$/,/^\/\/ health-gate-end$/p' "$deploy_src")"
+if [ -z "$health_block" ] \
+   || ! printf '%s' "$health_block" | grep -q 'HEALTH_DEGRADED_MARKER' \
+   || ! printf '%s' "$health_block" | grep -q 'code == "503"' \
+   || grep -q 'curl -sf' "$deploy_src"; then
+  echo "  FAIL: deploy.rs lost the degraded/503 health gate"
+  fail=$((fail+1))
+elif ! command -v rustc >/dev/null 2>&1; then
+  echo "  PASS: deploy.rs keeps the degraded/503 health gate (rustc unavailable; static only)"
+  ok=$((ok+1))
+else
+  gate_rs="$tmp/deploy_health_gate.rs"
+  {
+    printf '%s\n' "$health_block"
+    cat <<'RUST_TEST'
+fn main() {
+    let ok = parse_health_probe(true, "{\"status\":\"ok\"}\n200");
+    assert_eq!(ok, HealthStatus::Healthy);
+
+    let degraded_503 = parse_health_probe(
+        true,
+        "{\"status\":\"degraded\",\"reason\":\"no_upstream\"}\n503",
+    );
+    assert!(matches!(degraded_503, HealthStatus::Degraded(_)));
+
+    // A relay that rewrites the status to 200 must not hide degradation.
+    let degraded_200 = parse_health_probe(
+        true,
+        "{\"status\":\"degraded\",\"reason\":\"store_unavailable\"}\n200",
+    );
+    assert!(matches!(degraded_200, HealthStatus::Degraded(_)));
+
+    let all_ok = vec![(8081u16, HealthStatus::Healthy)];
+    assert!(evaluate_health_checks(&all_ok).is_ok());
+
+    let mixed = vec![(8081u16, HealthStatus::Healthy), (8082u16, degraded_503)];
+    let err = evaluate_health_checks(&mixed).expect_err("degraded must fail deploy");
+    assert!(err.contains("8082") && err.contains("degraded"));
+}
+RUST_TEST
+  } > "$gate_rs"
+  if rustc --edition 2021 -A dead_code -o "$tmp/deploy_health_gate" "$gate_rs" \
+      >/dev/null 2>&1 && "$tmp/deploy_health_gate" >/dev/null 2>&1; then
+    echo "  PASS: deploy health gate rejects stubbed 503 and degraded-200 bodies"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: deploy health gate accepted a degraded stub"
+    fail=$((fail+1))
+  fi
 fi
 
 echo "result: ok=$ok fail=$fail"

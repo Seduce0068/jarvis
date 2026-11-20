@@ -7,10 +7,12 @@ use axum::{
     Json, Router,
     extract::State,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
-use jarvis_core::{BareJson, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent};
+use jarvis_core::{
+    BareJson, HEALTH_OK_BODY, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tracing::instrument;
@@ -255,6 +257,12 @@ trait MemoryBackend: Send + Sync {
     /// reaches Qdrant (I55-A). Kept on the backend so instrumented handlers can
     /// stay backend-agnostic and testable with a small in-memory stub.
     fn embedding_dim(&self) -> usize;
+    /// Cheap liveness probe for this backend's own downstream dependencies.
+    /// The default keeps in-memory test stubs healthy; the production
+    /// [`ContextBuilder`] override checks PostgreSQL and Qdrant.
+    async fn downstream_available(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait::async_trait]
@@ -273,6 +281,15 @@ impl MemoryBackend for ContextBuilder {
 
     fn embedding_dim(&self) -> usize {
         self.config.embedding_dim
+    }
+
+    /// Both pools are declared in the crate root, so this child module can read
+    /// them without touching unrelated files. A health scrape must not mutate
+    /// data: taking one pooled connection and listing collections are read-only.
+    async fn downstream_available(&self) -> bool {
+        let pg_ok = self.pg_pool.get().await.is_ok();
+        let qdrant_ok = self.qdrant_client.list_collections().await.is_ok();
+        pg_ok && qdrant_ok
     }
 }
 
@@ -358,8 +375,113 @@ mod status_label_tests {
     }
 }
 
-async fn health() -> &'static str {
-    "OK"
+/// Fixed 503 body when a required store (PostgreSQL or Qdrant) is unavailable.
+/// It mirrors `jarvis-core`'s closed health shape: healthy is the shared
+/// `HEALTH_OK_BODY`, degraded is one complete literal with `status: "degraded"`
+/// and a fixed reason. No connection string, error text or query reaches it.
+const HEALTH_STORE_UNAVAILABLE_BODY: &str = r#"{"status":"degraded","reason":"store_unavailable"}"#;
+
+/// Wrap a fixed health body with the stable JSON content type (same shape as
+/// `jarvis-policy::http::fixed_json_response`).
+fn fixed_json_response(status: axum::http::StatusCode, body: &'static str) -> Response {
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+/// Pure status/body decision so the wire contract can be pinned without a live
+/// database.
+fn health_response(downstream_available: bool) -> Response {
+    if downstream_available {
+        fixed_json_response(axum::http::StatusCode::OK, HEALTH_OK_BODY)
+    } else {
+        fixed_json_response(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            HEALTH_STORE_UNAVAILABLE_BODY,
+        )
+    }
+}
+
+/// 200 `{"status":"ok"}` while both stores answer, otherwise 503 with a fixed
+/// degraded body on the same public, token-exempt `/health`.
+async fn health(State(backend): State<Arc<dyn MemoryBackend>>) -> Response {
+    health_response(backend.downstream_available().await)
+}
+
+#[cfg(test)]
+mod health_contract_tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    struct UnhealthyBackend;
+
+    #[async_trait::async_trait]
+    impl MemoryBackend for UnhealthyBackend {
+        async fn build(&self, _event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+            Ok(serde_json::json!({"memories": []}))
+        }
+
+        async fn store(&self, _memory: MemoryEntry) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn search(&self, _query: &str, _limit: usize) -> anyhow::Result<Vec<MemoryEntry>> {
+            Ok(Vec::new())
+        }
+
+        fn embedding_dim(&self) -> usize {
+            3
+        }
+
+        async fn downstream_available(&self) -> bool {
+            false
+        }
+    }
+
+    /// I99-C: the healthy wire body is the shared `jarvis-core` literal and a
+    /// degraded answer is a 503 with one complete fixed body.
+    #[tokio::test]
+    async fn health_uses_core_ok_body_and_fixed_503_degraded_body() {
+        let ok = health_response(true);
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(
+            ok.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .expect("content type"),
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .expect("ok body bytes");
+        assert_eq!(bytes.as_ref(), HEALTH_OK_BODY.as_bytes());
+
+        let degraded = health_response(false);
+        assert_eq!(degraded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(degraded.into_body(), usize::MAX)
+            .await
+            .expect("degraded body bytes");
+        assert_eq!(bytes.as_ref(), HEALTH_STORE_UNAVAILABLE_BODY.as_bytes());
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("degraded body is JSON");
+        assert_eq!(value["status"], jarvis_core::HEALTH_STATUS_DEGRADED);
+        assert_eq!(value["reason"], "store_unavailable");
+    }
+
+    /// I99-C: the handler itself must consult the backend probe, not just the
+    /// pure decision helper. The stub is local and touches no real service.
+    #[tokio::test]
+    async fn health_handler_fails_closed_for_unavailable_backend() {
+        let backend: Arc<dyn MemoryBackend> = Arc::new(UnhealthyBackend);
+        let response = health(State(backend)).await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        assert_eq!(bytes.as_ref(), HEALTH_STORE_UNAVAILABLE_BODY.as_bytes());
+    }
 }
 
 async fn metrics() -> String {

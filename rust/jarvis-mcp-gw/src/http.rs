@@ -4,9 +4,15 @@ use crate::McpGateway;
 use axum::{
     Json, Router,
     extract::State,
+    response::IntoResponse,
     routing::{get, post},
 };
-use jarvis_core::BareJson;
+// `INTERNAL_ERROR_MESSAGE` aliases the shared gateway failure text so HTTP,
+// gRPC and the MCP surface cannot drift (R4-FIX b). The full error chain is
+// logged server-side only; a 500 body must never carry paths or upstream text.
+use jarvis_core::{
+    BareJson, HEALTH_OK_BODY, INTERNAL_GATEWAY_ERROR_MESSAGE as INTERNAL_ERROR_MESSAGE,
+};
 use rmcp::transport::streamable_http_server::session::local::LocalSessionManager;
 use rmcp::transport::{StreamableHttpServerConfig, StreamableHttpService};
 use serde::{Deserialize, Serialize};
@@ -42,12 +48,6 @@ struct ExecuteToolResponse {
 /// distinct from the gRPC header (`x-jarvis-grpc-token`) but is backed by the
 /// same `admin_token` configuration value.
 const ADMIN_TOKEN_HEADER: &str = "x-jarvis-admin-token";
-
-/// Fixed body text for gateway-side failures (R4-FIX b). The full error chain
-/// is logged server-side only; a 500 response must never carry sandbox paths,
-/// tokens or upstream text. Mirrors `grpc::INTERNAL_ERROR_MESSAGE` and
-/// `mcp_server::INTERNAL_ERROR_MESSAGE`.
-const INTERNAL_ERROR_MESSAGE: &str = "internal gateway error";
 
 /// Fixed wording for authorization denials, shared with the gRPC adapter so
 /// both transports return the same phrase. Tool/principal names are omitted
@@ -214,8 +214,75 @@ mod status_label_tests {
     }
 }
 
-async fn health() -> &'static str {
-    "OK"
+/// Fixed 503 body for a gateway whose configured upstream MCP servers are not
+/// registered. It mirrors `jarvis-core`'s closed health shape: the healthy body
+/// is the shared `HEALTH_OK_BODY`, and a degraded answer is one complete literal
+/// with `status: "degraded"` plus a fixed reason. The body is never assembled
+/// from request data or upstream text, so a relay cannot turn it into a false
+/// release by rewriting the wire shape.
+const HEALTH_NO_UPSTREAM_BODY: &str = r#"{"status":"degraded","reason":"no_upstream"}"#;
+
+/// Wrap one of the two fixed health bodies with the stable JSON content type
+/// (same shape as `jarvis-policy::http::fixed_json_response`).
+fn fixed_json_response(
+    status: axum::http::StatusCode,
+    body: &'static str,
+) -> axum::response::Response {
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+/// Pure status/body decision so the wire contract can be pinned in a unit test
+/// without standing up a listener.
+fn health_response(upstreams_ready: bool) -> axum::response::Response {
+    if upstreams_ready {
+        fixed_json_response(axum::http::StatusCode::OK, HEALTH_OK_BODY)
+    } else {
+        fixed_json_response(
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            HEALTH_NO_UPSTREAM_BODY,
+        )
+    }
+}
+
+/// Observable upstream-registration state for this process.
+///
+/// A legacy/native-only deployment configures no upstreams and stays healthy.
+/// When upstreams are configured, startup registers them before the listener
+/// starts (`main.rs`); a registration that never happened is therefore a real
+/// degraded state, not a missing capability we can silently ignore. The
+/// registration capture is observable from this transport through
+/// `Gateway::upstream_input_schema`: upstream-owned tools are the only ones
+/// with a captured upstream schema, and native tools keep the hardcoded one.
+/// Per-process liveness pruning lives in `Gateway::execute`; this probe stays
+/// read-only and never runs a tool on a health scrape.
+async fn upstreams_registered(gateway: &McpGateway) -> bool {
+    if gateway.config.upstreams.is_empty() {
+        return true;
+    }
+    let principal = gateway.config.mcp_principal.as_str();
+    for tool in gateway.tools_for_principal(principal) {
+        if gateway
+            .gateway
+            .upstream_input_schema(&tool.name)
+            .await
+            .is_some()
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// 200 `{"status":"ok"}` while the gateway is usable, 503 with a fixed
+/// degraded body when a configured upstream is not registered. No new endpoint
+/// is added; existing pollers keep the public, token-exempt `/health` route.
+async fn health(State(gateway): State<Arc<McpGateway>>) -> axum::response::Response {
+    health_response(upstreams_registered(&gateway).await)
 }
 
 async fn metrics() -> String {
@@ -958,6 +1025,78 @@ requires_approval = true
                 .expect("exempt endpoint responds");
             assert_eq!(response.status(), reqwest::StatusCode::OK, "{path}");
         }
+    }
+
+    /// I99-C: the healthy wire body is the shared `jarvis-core` literal and a
+    /// degraded answer is a 503 with one complete fixed body. Both are pinned
+    /// byte for byte so a relay cannot rewrite the health contract unnoticed.
+    #[tokio::test]
+    async fn health_uses_core_ok_body_and_fixed_503_degraded_body() {
+        let ok = health_response(true);
+        assert_eq!(ok.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            ok.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .expect("content type"),
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .expect("ok body bytes");
+        assert_eq!(bytes.as_ref(), HEALTH_OK_BODY.as_bytes());
+
+        let degraded = health_response(false);
+        assert_eq!(degraded.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(degraded.into_body(), usize::MAX)
+            .await
+            .expect("degraded body bytes");
+        assert_eq!(bytes.as_ref(), HEALTH_NO_UPSTREAM_BODY.as_bytes());
+        let value: Value = serde_json::from_slice(&bytes).expect("degraded body is JSON");
+        assert_eq!(value["status"], jarvis_core::HEALTH_STATUS_DEGRADED);
+        assert_eq!(value["reason"], "no_upstream");
+    }
+
+    /// I99-C: a native-only deployment has no upstream dependency and keeps the
+    /// historical healthy answer.
+    #[tokio::test]
+    async fn native_only_gateway_has_no_upstream_degradation() {
+        let gateway = test_gateway("health-native-only").await;
+        assert!(upstreams_registered(&gateway).await);
+    }
+
+    /// I99-C: configuring an upstream but never registering it is a degraded
+    /// state. The upstream command is deliberately nonexistent: `McpGateway::new`
+    /// does not spawn upstreams, so no process or network is touched here.
+    #[tokio::test]
+    async fn configured_upstream_without_registration_is_degraded() {
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-http-health-upstream");
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist_path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&allowlist_path, EXECUTE_ALLOWLIST)
+            .await
+            .expect("write allowlist");
+        let config = McpGatewayConfig {
+            allowlist_path: allowlist_path.to_string_lossy().into_owned(),
+            policy_http_addr: "http://127.0.0.1:1".into(),
+            upstreams: vec![crate::config::UpstreamConfig {
+                name: "unregistered".to_owned(),
+                command: vec!["/nonexistent/mcp-upstream".to_owned()],
+            }],
+            ..Default::default()
+        };
+        let policy = Arc::new(testing::shipped_policy_client("health-upstream").await);
+        let gateway = McpGateway::new(config, policy)
+            .await
+            .expect("gateway starts");
+
+        assert!(!upstreams_registered(&gateway).await);
+        let response = health_response(upstreams_registered(&gateway).await);
+        assert_eq!(response.status(), reqwest::StatusCode::SERVICE_UNAVAILABLE);
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// The nested `/mcp` streamable-HTTP service is inside the gated scope:

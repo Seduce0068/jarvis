@@ -43,6 +43,86 @@ const DRY_RUN_HEALTH_SKIP_LOG: &str = "DRY RUN: health check skipped";
 /// HTTP health-check ports for the four required services.
 const HEALTH_PORTS: [u16; 4] = [8081, 8082, 8083, 8084];
 
+/// stdout plus exit status of a remote command (see `Runner::ssh_output`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RemoteOutput {
+    success: bool,
+    stdout: String,
+}
+
+// health-gate-begin
+/// Classification of one remote `/health` probe. Kept deliberately small and
+/// std-only so `ci/scripts/test-legacy-guards.sh` can compile this exact block
+/// with `rustc` and exercise it against a stubbed 503 response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum HealthStatus {
+    Healthy,
+    NotResponding,
+    Degraded(String),
+    CheckFailed(String),
+}
+
+/// Fixed degraded marker from the `jarvis-core` health contract. Matching the
+/// whole `status` field (rather than a service-specific reason) keeps the gate
+/// correct as individual services add their own downstream reasons.
+const HEALTH_DEGRADED_MARKER: &str = r#""status":"degraded""#;
+
+/// Parse the output of `curl -s -w '\n%{http_code}' <url>`: the last line is the
+/// three-digit status, everything before it is the body. A non-success HTTP
+/// status, a degraded body, a malformed response and a failed command are all
+/// fail-closed; only a 2xx with a non-degraded body is `Healthy`.
+fn parse_health_probe(command_succeeded: bool, stdout: &str) -> HealthStatus {
+    if !command_succeeded {
+        return HealthStatus::CheckFailed("health probe command exited non-zero".to_owned());
+    }
+    let Some((body, code)) = stdout.rsplit_once('\n') else {
+        return HealthStatus::NotResponding;
+    };
+    let code = code.trim();
+    if code.len() != 3 || !code.bytes().all(|byte| byte.is_ascii_digit()) {
+        return HealthStatus::NotResponding;
+    }
+    let body = body.trim();
+    let degraded = body.contains(HEALTH_DEGRADED_MARKER);
+    if code.starts_with('2') {
+        return if degraded {
+            HealthStatus::Degraded(body.to_owned())
+        } else {
+            HealthStatus::Healthy
+        };
+    }
+    if code == "503" {
+        return HealthStatus::Degraded(body.to_owned());
+    }
+    HealthStatus::NotResponding
+}
+
+/// Turn health outcomes into a deploy result. Any port that is not healthy is
+/// a hard error for a real deploy, not a warning. All ports are evaluated so
+/// the error lists every failure. Returns a plain `String` error to stay
+/// std-only and directly testable; callers lift it into `anyhow`.
+fn evaluate_health_checks(results: &[(u16, HealthStatus)]) -> Result<(), String> {
+    let unhealthy: Vec<String> = results
+        .iter()
+        .filter_map(|(port, status)| match status {
+            HealthStatus::Healthy => None,
+            HealthStatus::NotResponding => Some(format!("{port} (not responding)")),
+            HealthStatus::Degraded(reason) => Some(format!("{port} (degraded: {reason})")),
+            HealthStatus::CheckFailed(err) => Some(format!("{port} (check failed: {err})")),
+        })
+        .collect();
+
+    if unhealthy.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "health check failed for port(s): {}",
+            unhealthy.join(", ")
+        ))
+    }
+}
+// health-gate-end
+
 /// Environment files copied from infra/config/ that must be readable by the
 /// jarvis user (op.env is intentionally excluded: it holds the 1Password
 /// service account token and stays root-owned).
@@ -177,17 +257,25 @@ impl Runner {
         Ok(())
     }
 
-    /// Run a command on the remote host and report whether it succeeded.
-    fn ssh_output(&self, target: &str, command: &str) -> Result<bool> {
+    /// Run a command on the remote host and keep both its exit status and its
+    /// stdout. Health checks need the body, not just a 200/Non-200 boolean:
+    /// a degraded service can answer 200 with a degraded fixed body.
+    fn ssh_output(&self, target: &str, command: &str) -> Result<RemoteOutput> {
         if self.dry_run {
             info!("[dry-run] ssh {target} {command}");
-            return Ok(true);
+            return Ok(RemoteOutput {
+                success: true,
+                stdout: String::new(),
+            });
         }
         let output = Command::new("ssh")
             .args([target, command])
             .output()
             .context("ssh command failed")?;
-        Ok(output.status.success())
+        Ok(RemoteOutput {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        })
     }
 
     /// Copy a local path (file or directory) to the remote host.
@@ -316,28 +404,6 @@ fn missing_binaries(target_dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Turn health-check outcomes into a deploy result. Any port that is not
-/// healthy (HTTP failure or a failed check) is a hard error for a real deploy,
-/// not a warning. All ports are evaluated so the error lists every failure.
-/// Dry-run never reaches this function: nothing was deployed, so no health is
-/// claimed there (see `DRY_RUN_HEALTH_SKIP_LOG`).
-fn evaluate_health_checks(results: &[(u16, Result<bool>)]) -> Result<()> {
-    let unhealthy: Vec<String> = results
-        .iter()
-        .filter_map(|(port, outcome)| match outcome {
-            Ok(true) => None,
-            Ok(false) => Some(format!("{port} (not responding)")),
-            Err(err) => Some(format!("{port} (check failed: {err})")),
-        })
-        .collect();
-
-    if unhealthy.is_empty() {
-        Ok(())
-    } else {
-        bail!("health check failed for port(s): {}", unhealthy.join(", "))
-    }
-}
-
 fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Result<()> {
     info!("Deploying to {}...", args.host);
 
@@ -454,17 +520,30 @@ fn deploy(runner: &Runner, args: &Args, rust_dir: &str, repo_dir: &Path) -> Resu
         let mut results = Vec::with_capacity(HEALTH_PORTS.len());
         for port in HEALTH_PORTS {
             let url = format!("http://127.0.0.1:{port}/health");
-            let outcome = runner.ssh_output(&remote_base, &format!("curl -sf {url}"));
+            // Deliberately NO `-f`: curl must print the body of a 503 so a
+            // degraded service cannot pass as healthy. `-w` appends the status
+            // code on its own last line for an explicit status check as well.
+            let command = format!("curl -s -w '\\n%{{http_code}}' {url}");
+            let outcome = match runner.ssh_output(&remote_base, &command) {
+                Ok(output) => parse_health_probe(output.success, &output.stdout),
+                Err(err) => HealthStatus::CheckFailed(err.to_string()),
+            };
             match &outcome {
-                Ok(true) => info!("Service on port {port} is healthy"),
-                Ok(false) => warn!("Service on port {port} not responding"),
-                Err(err) => warn!("Health check on port {port} failed: {err}"),
+                HealthStatus::Healthy => info!("Service on port {port} is healthy"),
+                HealthStatus::NotResponding => warn!("Service on port {port} not responding"),
+                HealthStatus::Degraded(reason) => {
+                    warn!("Service on port {port} is degraded: {reason}")
+                }
+                HealthStatus::CheckFailed(err) => {
+                    warn!("Health check on port {port} failed: {err}")
+                }
             }
             results.push((port, outcome));
         }
-        // A real deploy must not report completion with an unhealthy service:
-        // `?` returns early so the "Deployment completed" line below is skipped.
-        evaluate_health_checks(&results)?;
+        // A real deploy must not report completion with an unhealthy or
+        // degraded service: `?` returns early so "Deployment completed" is
+        // skipped. Dry-run never reaches this function.
+        evaluate_health_checks(&results).map_err(anyhow::Error::msg)?;
     }
 
     info!("Deployment completed");
@@ -567,10 +646,19 @@ mod tests {
         assert!(!DRY_RUN_HEALTH_SKIP_LOG.to_lowercase().contains("healthy"));
     }
 
-    fn outcomes(healthy: bool) -> Vec<(u16, Result<bool>)> {
+    fn outcomes(healthy: bool) -> Vec<(u16, HealthStatus)> {
         HEALTH_PORTS
             .into_iter()
-            .map(|port| (port, Ok(healthy)))
+            .map(|port| {
+                (
+                    port,
+                    if healthy {
+                        HealthStatus::Healthy
+                    } else {
+                        HealthStatus::NotResponding
+                    },
+                )
+            })
             .collect()
     }
 
@@ -583,11 +671,11 @@ mod tests {
     fn health_checks_fail_deploy_when_port_not_responding() {
         let mut results = outcomes(true);
         let failed_port = HEALTH_PORTS[1];
-        results[1] = (failed_port, Ok(false));
+        results[1] = (failed_port, HealthStatus::NotResponding);
 
         let err = evaluate_health_checks(&results).expect_err("unhealthy port must fail deploy");
-        assert!(err.to_string().contains(&failed_port.to_string()));
-        assert!(err.to_string().contains("not responding"));
+        assert!(err.contains(&failed_port.to_string()));
+        assert!(err.contains("not responding"));
     }
 
     #[test]
@@ -596,25 +684,77 @@ mod tests {
         let failed_port = HEALTH_PORTS[2];
         results[2] = (
             failed_port,
-            Err(anyhow::anyhow!("ssh exited with status 255")),
+            HealthStatus::CheckFailed("ssh exited with status 255".to_owned()),
         );
 
         let err = evaluate_health_checks(&results).expect_err("check error must fail deploy");
-        assert!(err.to_string().contains(&failed_port.to_string()));
-        assert!(err.to_string().contains("check failed"));
+        assert!(err.contains(&failed_port.to_string()));
+        assert!(err.contains("check failed"));
+    }
+
+    /// I99-C: a 503 from any service must fail the deploy even when a naive
+    /// 200-only gate would have accepted it.
+    #[test]
+    fn health_checks_fail_deploy_when_service_is_degraded() {
+        let mut results = outcomes(true);
+        let failed_port = HEALTH_PORTS[0];
+        let body = r#"{"status":"degraded","reason":"kill_switch"}"#;
+        results[0] = (failed_port, HealthStatus::Degraded(body.to_owned()));
+
+        let err = evaluate_health_checks(&results).expect_err("degraded port must fail deploy");
+        assert!(err.contains(&failed_port.to_string()));
+        assert!(err.contains("degraded"));
+        assert!(err.contains(body));
     }
 
     #[test]
     fn health_checks_report_every_failure() {
         let results = outcomes(false);
         let msg = evaluate_health_checks(&results)
-            .expect_err("all-unhealthy ports must fail deploy")
-            .to_string();
+            .expect_err("all-unhealthy ports must fail deploy");
         for port in HEALTH_PORTS {
             assert!(
                 msg.contains(&port.to_string()),
                 "missing port {port} in: {msg}"
             );
         }
+    }
+
+    /// I99-C: parser-level guards for the two degraded shapes (503 status and
+    /// a 200 carrying the fixed degraded body), plus the healthy and unreachable
+    /// cases. Stub payloads only; no service is contacted.
+    #[test]
+    fn parse_health_probe_distinguishes_healthy_degraded_and_unreachable() {
+        assert_eq!(
+            parse_health_probe(true, "{\"status\":\"ok\"}\n200"),
+            HealthStatus::Healthy
+        );
+        assert_eq!(
+            parse_health_probe(
+                true,
+                "{\"status\":\"degraded\",\"reason\":\"no_upstream\"}\n503"
+            ),
+            HealthStatus::Degraded(
+                r#"{"status":"degraded","reason":"no_upstream"}"#.to_owned()
+            )
+        );
+        // A relay that rewrites the status to 200 must not hide degradation.
+        assert_eq!(
+            parse_health_probe(
+                true,
+                "{\"status\":\"degraded\",\"reason\":\"store_unavailable\"}\n200"
+            ),
+            HealthStatus::Degraded(
+                r#"{"status":"degraded","reason":"store_unavailable"}"#.to_owned()
+            )
+        );
+        assert_eq!(
+            parse_health_probe(true, "\n000"),
+            HealthStatus::NotResponding
+        );
+        assert_eq!(
+            parse_health_probe(false, ""),
+            HealthStatus::CheckFailed("health probe command exited non-zero".to_owned())
+        );
     }
 }

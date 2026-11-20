@@ -6,9 +6,10 @@ use axum::{
     Json, Router,
     extract::State,
     http::StatusCode,
+    response::IntoResponse,
     routing::{get, post},
 };
-use jarvis_core::{BareJson, EventSource, UnifiedEvent};
+use jarvis_core::{BareJson, EventSource, HEALTH_OK_BODY, UnifiedEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
@@ -241,8 +242,76 @@ mod status_label_tests {
     }
 }
 
-async fn health() -> &'static str {
-    "OK"
+/// Fixed 503 body when the OpenCode downstream cannot be reached. It mirrors
+/// `jarvis-core`'s closed health shape: healthy is the shared `HEALTH_OK_BODY`,
+/// degraded is one complete literal with `status: "degraded"` and a fixed
+/// reason. No request data, upstream body or password can reach this text.
+const HEALTH_OPENCODE_UNAVAILABLE_BODY: &str =
+    r#"{"status":"degraded","reason":"opencode_unavailable"}"#;
+
+/// Bound for the OpenCode reachability probe. The dispatch client uses a 30s
+/// timeout; a health scrape must never inherit it.
+const OPENCODE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(750);
+
+/// Wrap a fixed health body with the stable JSON content type (same shape as
+/// `jarvis-policy::http::fixed_json_response`).
+fn fixed_json_response(status: StatusCode, body: &'static str) -> axum::response::Response {
+    let mut response = (status, body).into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+/// Pure status/body decision so the wire contract can be pinned without a
+/// listener or a live OpenCode process.
+fn health_response(opencode_reachable: bool) -> axum::response::Response {
+    if opencode_reachable {
+        fixed_json_response(StatusCode::OK, HEALTH_OK_BODY)
+    } else {
+        fixed_json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            HEALTH_OPENCODE_UNAVAILABLE_BODY,
+        )
+    }
+}
+
+/// OpenCode base URL used by the probe. Transport modules cannot read
+/// `Normalizer`'s private config, so this mirrors the admin-token gate's
+/// process-env fallback and the shipped default from `EventConfig`.
+fn opencode_probe_url() -> String {
+    std::env::var("JARVIS_EVENT_OPENCODE_URL")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| crate::config::EventConfig::default().opencode_url)
+}
+
+/// Cheap transport-level liveness probe: a TCP connect, not an HTTP dispatch.
+/// No session is created, no prompt is sent and no credential is logged.
+async fn opencode_reachable(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = parsed.host_str() else {
+        return false;
+    };
+    let port = parsed.port_or_known_default().unwrap_or(80);
+    matches!(
+        tokio::time::timeout(
+            OPENCODE_PROBE_TIMEOUT,
+            tokio::net::TcpStream::connect((host, port)),
+        )
+        .await,
+        Ok(Ok(_))
+    )
+}
+
+/// 200 `{"status":"ok"}` while the OpenCode hop is reachable, otherwise 503
+/// with a fixed degraded body on the same public, token-exempt `/health`.
+async fn health() -> axum::response::Response {
+    health_response(opencode_reachable(&opencode_probe_url()).await)
 }
 
 async fn metrics() -> String {
@@ -278,6 +347,60 @@ pub async fn serve(normalizer: Arc<Normalizer>, addr: std::net::SocketAddr) -> a
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// I99-C: the healthy wire body is the shared `jarvis-core` literal and a
+    /// degraded answer is a 503 with one complete fixed body.
+    #[tokio::test]
+    async fn health_uses_core_ok_body_and_fixed_503_degraded_body() {
+        let ok = health_response(true);
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(
+            ok.headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .expect("content type"),
+            "application/json"
+        );
+        let bytes = axum::body::to_bytes(ok.into_body(), usize::MAX)
+            .await
+            .expect("ok body bytes");
+        assert_eq!(bytes.as_ref(), HEALTH_OK_BODY.as_bytes());
+
+        let degraded = health_response(false);
+        assert_eq!(degraded.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let bytes = axum::body::to_bytes(degraded.into_body(), usize::MAX)
+            .await
+            .expect("degraded body bytes");
+        assert_eq!(bytes.as_ref(), HEALTH_OPENCODE_UNAVAILABLE_BODY.as_bytes());
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).expect("degraded body is JSON");
+        assert_eq!(value["status"], jarvis_core::HEALTH_STATUS_DEGRADED);
+        assert_eq!(value["reason"], "opencode_unavailable");
+    }
+
+    /// I99-C: a reserved-and-released loopback port must be reported as an
+    /// unreachable OpenCode hop. No real service is contacted.
+    #[tokio::test]
+    async fn opencode_probe_flags_a_released_loopback_port() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        drop(listener);
+
+        assert!(!opencode_reachable(&url).await);
+        assert_eq!(
+            health_response(opencode_reachable(&url).await).status(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+    }
+
+    /// I99-C positive control: a local listener stub is enough for the
+    /// transport-level probe. No prompt, session or credential is involved.
+    #[tokio::test]
+    async fn opencode_probe_accepts_a_local_listener_stub() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let url = format!("http://{}", listener.local_addr().expect("local addr"));
+        assert!(opencode_reachable(&url).await);
+        drop(listener);
+    }
 
     fn fixed_id() -> uuid::Uuid {
         uuid::Uuid::from_u128(7)
