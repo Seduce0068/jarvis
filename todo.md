@@ -2344,3 +2344,35 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: restore コピードライバへの module 複製、shellcheck SC2016、
   全ゲート再検証。
+
+### Round 81（R4 で修正済み）
+
+- [x] `ci/review-gate.yml` の checkout@v4 4箇所をフル SHA 固定（v4 併記）、
+  未配線 reference である旨を先頭コメントへ明記。
+- [x] reqwest 0.13 統一は見送り（rmcp/testcontainers が 0.12 を固定しており
+  ワークスペース変更では消えない）。qdrant-client exact pin と共存記録を維持し、
+  otel 由来も含む重複発生源を記録へ補正。
+- [x] rust-script 4スクリプトのメタ依存9件を rust/Cargo.lock 根拠で exact pin。
+  clap/hostname はリポジトリ内に根拠が無いため保留理由を記録。
+
+### Round 81 の残り指摘（未対応）
+
+- [ ] **PII パターン設定が PiiConfig スキーマと不一致**（confirmed high）—
+  `pii_patterns.toml` がトップレベルキーで14パターンを定義するが
+  `patterns: HashMap` を要求するパースに失敗し既定6パターンのみが有効。
+  `[patterns]` 配下へ移動＋実設定のパース回帰を追加。
+- [ ] 証跡 generator／UI README／Makefile:test に --locked が無い（medium）。
+- [ ] policy/event の起動検証テストが env 存在で早期 return し vacuous pass
+  （medium）— Serialized で明示値をマージして常にアサート。
+- [ ] egress ホスト長 253/254・ラベル長 63/64 の境界回帰が無い（low）。
+- [ ] ContextConfig の Debug が pg_url を redact せず userinfo がダンプされる
+  （medium）。
+- [ ] UI の二重 POST 防止テストが実 decide() を通らず空振り（medium）—
+  in-flight 解放の全経路を回帰で担保。
+- [ ] root の /run ロック成功枝に回帰が無い（low）、psql モックが sudo 経路を
+  通らない（medium）、Qdrant コレクション名がハードコード（low）。
+- [ ] CI の記録 SHA がコメント止まりで自動照合が無い／上流 v1 が未署名（low）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: 全ゲート再検証。
