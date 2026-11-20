@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:56516ddbefd917c9e3188e1e9431d74d936d052affd6624d069587ad988ba821",
-  "timestamp": "2026-11-20T07:40:37+09:00",
+  "spec_hash": "sha256:e0ad3238b25d3b444afe1edd55be86cb50b671aa8f797aef5eeb34ddd441e226",
+  "timestamp": "2026-11-20T18:08:33+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-mcp-gw --lib --offline",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 126,
+    "passed": 151,
     "failed": 0,
     "skipped": 1,
     "duration_ms": 200,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-mcp-gateway.md",
-    "spec_hash": "sha256:56516ddbefd917c9e3188e1e9431d74d936d052affd6624d069587ad988ba821",
+    "spec_hash": "sha256:e0ad3238b25d3b444afe1edd55be86cb50b671aa8f797aef5eeb34ddd441e226",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -44,7 +44,8 @@
       "REQ-18",
       "REQ-19",
       "REQ-20",
-      "REQ-21"
+      "REQ-21",
+      "REQ-22"
     ]
   },
   "techniques": [
@@ -205,6 +206,11 @@
       "controls": [
         "SP800-53r5.2/CM-7"
       ]
+    },
+    {
+      "id": "R-13",
+      "description": "/health 本文が改変・未知形状になり upstream 未登録が見逃される",
+      "tier": "unit >= 0.90"
     }
   ],
   "assurance": {
@@ -215,5 +221,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-mcp-gw lib テスト 126 件の実測結果（126 passed / 0 failed / 1 ignored）。P0-3 opt-in server-side principal ガード (TC-A4: 既定 false、true で caller principal を mcp_principal に上書き、/mcp は固定) を含む。wire 形式は不変。TC-S1 境界カバー済み。カバレッジ・ミューテーションは未測定。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ。空本文 400 は ArgsTooLarge の 400 と別経路）。"
+  "notes": "jarvis-mcp-gw lib テスト 151 件の実測結果（151 passed / 0 failed / 1 ignored）。P0-3 opt-in server-side principal ガード (TC-A4: 既定 false、true で caller principal を mcp_principal に上書き、/mcp は固定) を含む。wire 形式は不変。TC-S1 境界カバー済み。カバレッジ・ミューテーションは未測定。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ。空本文 400 は ArgsTooLarge の 400 と別経路）。"
 }

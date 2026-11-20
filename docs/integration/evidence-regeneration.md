@@ -281,7 +281,7 @@ echo "== 2. 実測実行 =="
 (cd rust && cargo test -p jarvis-context --lib --locked)
 echo "== 3. 既存証跡との照合（値は出力しない） =="
 bash ci/scripts/generate-evidence.sh context --check \
-  evidence/test-run-20261120-de83a4552e45.json
+  evidence/test-run-20261120-1fd8edfa3ae1.json
 ```
 
 `--check` に渡せるのは `evidence/` 直下の

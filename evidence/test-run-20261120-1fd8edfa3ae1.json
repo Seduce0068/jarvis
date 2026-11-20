@@ -1,6 +1,6 @@
 {
-  "spec_hash": "sha256:de83a4552e458c5308cab2d74c0b9435dc12bbaf7cd5118d90de0ae230c20617",
-  "timestamp": "2026-11-20T13:45:08+09:00",
+  "spec_hash": "sha256:1fd8edfa3ae1aa7eae5f3c2108dbb377ad86074b3d05e8c68db0476fb160433c",
+  "timestamp": "2026-11-20T18:08:33+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
     "runtime": "cargo test -p jarvis-context --lib --offline",
@@ -10,7 +10,7 @@
     }
   },
   "results": {
-    "passed": 172,
+    "passed": 181,
     "failed": 0,
     "skipped": 0,
     "duration_ms": 50,
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-context.md",
-    "spec_hash": "sha256:de83a4552e458c5308cab2d74c0b9435dc12bbaf7cd5118d90de0ae230c20617",
+    "spec_hash": "sha256:1fd8edfa3ae1aa7eae5f3c2108dbb377ad86074b3d05e8c68db0476fb160433c",
     "requirements": [
       "REQ-1",
       "REQ-2",
@@ -37,7 +37,8 @@
       "REQ-11",
       "REQ-12",
       "REQ-13",
-      "REQ-14"
+      "REQ-14",
+      "REQ-15"
     ]
   },
   "techniques": [
@@ -153,6 +154,11 @@
       "controls": [
         "SP800-53r5.2/CM-7"
       ]
+    },
+    {
+      "id": "R-10",
+      "description": "/health 本文が改変・未知形状になりストア停止が見逃される",
+      "tier": "unit >= 0.90"
     }
   ],
   "assurance": {
@@ -163,5 +169,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "jarvis-context の 172 テスト再実行結果。REQ-12/13（attach_scores が Qdrant スコアを保持し 0 と欠落を区別）を追加。TC-P3 にテスト用 replacement [X] の Given を明記。実機 DB/Qdrant 結合試験は対象外。カバレッジ・ミューテーションは未測定。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ）。"
+  "notes": "jarvis-context の 181 テスト再実行結果。REQ-12/13（attach_scores が Qdrant スコアを保持し 0 と欠落を区別）を追加。TC-P3 にテスト用 replacement [X] の Given を明記。実機 DB/Qdrant 結合試験は対象外。カバレッジ・ミューテーションは未測定。契約 step の BareJson / 415 / 413 / 400 / no-leak / error_kind=invalid_input / field=body を実測で確認済み（JSON 拒否は空本文で返し、rejection 文と入力本文バイトは応答・ログへ出さず、ログは DEBUG の固定語彙のみ）。"
 }
