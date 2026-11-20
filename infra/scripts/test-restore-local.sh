@@ -341,6 +341,24 @@ manifest_matches() { # dir name
   [ "$recorded" = "$actual_bytes $actual_sha" ]
 }
 
+# I74-A: write a 7-column descriptor manifest
+#   name size sha256 format encryption signature role
+# Each spec is "name|format|encryption|signature|role"; size and SHA-256 come
+# from the synthetic file only. Descriptor values are vocabulary probes, never
+# secrets or real key material.
+write_described_manifest() { # dir spec...
+  local dir="$1" spec name format encryption signature role bytes sha
+  shift
+  printf '# created_at=2026-11-20T00:00:00Z\n'
+  for spec in "$@"; do
+    IFS='|' read -r name format encryption signature role <<< "$spec"
+    bytes="$(wc -c < "$dir/$name" | tr -d ' ')"
+    sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+    printf '%s %s %s %s %s %s %s\n' \
+      "$name" "$bytes" "$sha" "$format" "$encryption" "$signature" "$role"
+  done
+}
+
 all_payloads=(
   postgres-jarvis.sql.gz
   qdrant-snapshot.bin
@@ -667,6 +685,121 @@ if has_fragment "$timer_fail_out" 'restore sequence finished'; then
   fail_case "timer: success line printed despite abort"
 else
   pass "timer: no success line after abort"
+fi
+
+# --- 6. I74-A: 7列記述子のロール導出と fail-closed ゲート ---------------------
+# TC-R1 / TC-R2 (specs/test-backup.md, REQ-20 / REQ-21)。
+#   - 7 列 manifest (format/encryption/signature/role) の既定 none/none セット
+#     が legacy 3 列と同等に通ること。
+#   - 必須コンポーネント判定が固定名ではなく role 列から導出されること。
+#   - 未知記述子が stop_services() より前の検証ゲートで拒否され、
+#     psql / curl / systemctl モックが一切呼ばれないこと。
+# 実 DB / 実 Qdrant / 実サービスは使わず、既存モックのみで検証する。
+printf '%s\n' '-- I74-A: descriptor roles and fail-closed gate --'
+
+# 6a. TC-R1: 7 列 none/none セットが legacy 3 列と同等に dry-run を通る。
+described="$tmp/described"
+cp -R -- "$set_dir" "$described" || exit 1
+write_described_manifest "$described" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$described/manifest.txt"
+check_exit "TC-R1: verifier accepts described set" 0 bash "$verifier" "$described"
+rm -f -- "$tmp/logs"/*.log
+desc_code=0
+desc_out="$(run_driver --backup-set "$described" 2>&1)" || desc_code=$?
+if [ "$desc_code" -eq 0 ]; then
+  pass "TC-R1: described set dry-run accepted (exit 0)"
+else
+  fail_case "TC-R1: described set dry-run rejected (exit $desc_code)"
+  printf '%s\n' "$desc_out" | head -12 >&2
+fi
+if has_fragment "$desc_out" 'verification OK'; then
+  pass "TC-R1: described set verification OK"
+else
+  fail_case "TC-R1: described set verification OK missing"
+fi
+assert_no_log "TC-R1: described dry-run: psql never called" "$tmp/logs/psql.log"
+assert_no_log "TC-R1: described dry-run: curl never called" "$tmp/logs/curl.log"
+assert_no_log "TC-R1: described dry-run: no service stop/start" "$tmp/logs/systemctl.log"
+
+# 6b. TC-R1: ファイル名が postgres 固定名でなくても role 列で必須判定される。
+# 名前に依存する旧経路なら has_pg=0 となり両 verifier が拒否するため、
+# このケースが通ること自体が記述子駆動の証拠になる。
+renamed="$tmp/described_renamed"
+cp -R -- "$set_dir" "$renamed" || exit 1
+mv -- "$renamed/postgres-jarvis.sql.gz" "$renamed/pg-data.sql.gz"
+write_described_manifest "$renamed" \
+  'pg-data.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$renamed/manifest.txt"
+check_exit "TC-R1: verifier accepts renamed payload via role" 0 \
+  bash "$verifier" "$renamed"
+rm -f -- "$tmp/logs"/*.log
+rename_code=0
+rename_out="$(run_driver --backup-set "$renamed" 2>&1)" || rename_code=$?
+if [ "$rename_code" -eq 0 ]; then
+  pass "TC-R1: renamed payload accepted via role (exit 0)"
+else
+  fail_case "TC-R1: renamed payload rejected (exit $rename_code)"
+  printf '%s\n' "$rename_out" | head -12 >&2
+fi
+if has_fragment "$rename_out" 'verification OK'; then
+  pass "TC-R1: renamed payload verification OK"
+else
+  fail_case "TC-R1: renamed payload verification OK missing"
+fi
+assert_no_log "TC-R1: renamed dry-run: psql never called" "$tmp/logs/psql.log"
+assert_no_log "TC-R1: renamed dry-run: curl never called" "$tmp/logs/curl.log"
+assert_no_log "TC-R1: renamed dry-run: no service stop/start" "$tmp/logs/systemctl.log"
+
+# 6c. TC-R2: 未知 signature (ed25519) を含む set は --apply でも stop_services
+# に到達する前に拒否され、DB / Qdrant / サービスが一切触られないことを証明する。
+unknown="$tmp/described_unknown"
+cp -R -- "$set_dir" "$unknown" || exit 1
+write_described_manifest "$unknown" \
+  'postgres-jarvis.sql.gz|gzip|none|ed25519|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  'git-jarvis-head.tar.gz|gzip|none|none|git' \
+  > "$unknown/manifest.txt"
+check_exit "TC-R2: verifier rejects unknown descriptor" 1 \
+  bash "$verifier" "$unknown"
+rm -f -- "$tmp/logs"/*.log
+unknown_code=0
+unknown_out="$(run_driver --backup-set "$unknown" --apply 2>&1)" || unknown_code=$?
+if [ "$unknown_code" -ne 0 ]; then
+  pass "TC-R2: unknown descriptor rejected with --apply (exit $unknown_code)"
+else
+  fail_case "TC-R2: unknown descriptor accepted with --apply"
+fi
+for fragment in 'FORMAT MISMATCH' 'signature=ed25519' \
+                'verification FAILED' 'no writes performed'; do
+  if has_fragment "$unknown_out" "$fragment"; then
+    pass "TC-R2: reject output: $fragment"
+  else
+    fail_case "TC-R2: reject output missing: $fragment"
+    printf '%s\n' "$unknown_out" | head -12 >&2
+  fi
+done
+assert_no_log "TC-R2: psql never called" "$tmp/logs/psql.log"
+assert_no_log "TC-R2: curl never called" "$tmp/logs/curl.log"
+assert_no_log "TC-R2: jq never called" "$tmp/logs/jq.log"
+assert_no_log "TC-R2: cmp never called" "$tmp/logs/cmp.log"
+assert_no_log "TC-R2: no service stop/start" "$tmp/logs/systemctl.log"
+if has_fragment "$unknown_out" 'stopping service:'; then
+  fail_case "TC-R2: stop_services ran despite unknown descriptor"
+else
+  pass "TC-R2: stop_services never reached"
+fi
+if has_fragment "$unknown_out" 'dispatch: restore_pg'; then
+  fail_case "TC-R2: dispatch ran despite unknown descriptor"
+else
+  pass "TC-R2: no module dispatch before the gate"
 fi
 
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"

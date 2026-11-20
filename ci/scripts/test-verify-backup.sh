@@ -58,6 +58,23 @@ check_includes() { # label expected_exit pattern args...
   fi
 }
 
+# Mirror of check_includes for fail-closed assertions: the pattern must NOT be
+# present. grep reads to EOF (no -q) so pipefail cannot invert the result.
+check_excludes() { # label expected_exit pattern args...
+  local label="$1" expected="$2" pattern="$3"; shift 3
+  local out code
+  out=$(bash "$script" "$@" 2>&1); code=$?
+  if [ "$code" -eq "$expected" ] && \
+     ! printf '%s\n' "$out" | grep -F -- "$pattern" >/dev/null 2>&1; then
+    echo "  PASS: $label (exit $code, output does not match)"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: $label expected=$expected actual=$code forbidden_pattern=$pattern"
+    printf '%s\n' "$out" | head -5 >&2
+    fail=$((fail+1))
+  fi
+}
+
 # Synthetic sentinel only; no real secret value is ever written or read.
 sentinel='DUMMY_SENTINEL_DO_NOT_USE'
 
@@ -116,6 +133,23 @@ record_manifest_entries() { # dir name...
     bytes="$(wc -c < "$dir/$name" | tr -d ' ')"
     sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
     printf '%s %s %s\n' "$name" "$bytes" "$sha"
+  done
+}
+
+# Write a 7-column descriptor manifest:
+#   name size sha256 format encryption signature role
+# Each spec is "name|format|encryption|signature|role"; size and SHA-256 are
+# computed from the synthetic payload only. No key or signature value appears.
+record_described_manifest_entries() { # dir spec...
+  local dir="$1" spec name format encryption signature role bytes sha
+  shift
+  printf '# created_at=2026-11-20T00:00:00Z\n'
+  for spec in "$@"; do
+    IFS='|' read -r name format encryption signature role <<< "$spec"
+    bytes="$(wc -c < "$dir/$name" | tr -d ' ')"
+    sha="$(sha256sum "$dir/$name" | cut -d' ' -f1)"
+    printf '%s %s %s %s %s %s %s\n' \
+      "$name" "$bytes" "$sha" "$format" "$encryption" "$signature" "$role"
   done
 }
 
@@ -264,6 +298,72 @@ leak_bin="$extra/leak_bin"
 mkdir -p "$leak_bin"
 tar -czf "$leak_bin/qdrant-snapshot.bin" -C "$tmp/leak-src" token.txt
 assert_false "TC-B3: sentinel in tar-in-.bin member detected" sentinel_absent "$leak_bin"
+
+# TC-B6 / TC-V5 (REQ-19 / REQ-20): 7-column descriptor manifests.
+# The defaults are format-by-extension, encryption=none, signature=none plus an
+# explicit role -- the same effective descriptors a legacy 3-column row derives.
+described="$extra/described"
+mkdir -p "$described" "$tmp/described-qdrant"
+printf '%s\n' '-- PostgreSQL database dump' 'CREATE TABLE t (id int);' \
+  '-- PostgreSQL database dump complete' | gzip > "$described/postgres-jarvis.sql.gz"
+printf 'snapshot' > "$tmp/described-qdrant/snapshot.json"
+tar -cf "$described/qdrant-snapshot.bin" -C "$tmp/described-qdrant" snapshot.json
+printf 'allow = ["tool.read"]\n' > "$described/config-mcp_allowlist.toml"
+record_described_manifest_entries "$described" \
+  'postgres-jarvis.sql.gz|gzip|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  > "$described/manifest.txt"
+printf 'complete 2026-11-20T00:00:00Z\n' > "$described/COMPLETE"
+
+check "TC-B6: 7-column none/none set accepted (backward compatible)" 0 "$described"
+check_includes "TC-B6: postgres role descriptor drives footer check" 0 \
+  "FORMAT OK: postgres dump" "$described"
+check_includes "TC-B6: qdrant role descriptor drives tar check" 0 \
+  "FORMAT OK: qdrant snapshot" "$described"
+
+# TC-V5: an explicit but unknown descriptor must be rejected fail-closed. The
+# payload itself is byte-identical to the accepted set, so only the descriptor
+# column can cause the rejection. The values below are vocabulary probes, not
+# secrets and not supported algorithms.
+unknown_enc="$extra/described_unknown_enc"
+cp -R -- "$described" "$unknown_enc"
+record_described_manifest_entries "$unknown_enc" \
+  'postgres-jarvis.sql.gz|gzip|age|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  > "$unknown_enc/manifest.txt"
+check "TC-V5: unknown encryption rejected" 1 "$unknown_enc"
+check_includes "TC-V5: unknown encryption reported" 1 \
+  "encryption=age" "$unknown_enc"
+check_excludes "TC-V5: no format check for unknown encryption row" 1 \
+  "FORMAT OK: postgres dump" "$unknown_enc"
+
+unknown_sig="$extra/described_unknown_sig"
+cp -R -- "$described" "$unknown_sig"
+record_described_manifest_entries "$unknown_sig" \
+  'postgres-jarvis.sql.gz|gzip|none|ed25519|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  > "$unknown_sig/manifest.txt"
+check "TC-V5: unknown signature rejected" 1 "$unknown_sig"
+check_includes "TC-V5: unknown signature reported" 1 \
+  "signature=ed25519" "$unknown_sig"
+check_excludes "TC-V5: no format check for unknown signature row" 1 \
+  "FORMAT OK: postgres dump" "$unknown_sig"
+
+unknown_fmt="$extra/described_unknown_fmt"
+cp -R -- "$described" "$unknown_fmt"
+record_described_manifest_entries "$unknown_fmt" \
+  'postgres-jarvis.sql.gz|zstd|none|none|postgres' \
+  'qdrant-snapshot.bin|tar|none|none|qdrant' \
+  'config-mcp_allowlist.toml|raw|none|none|config' \
+  > "$unknown_fmt/manifest.txt"
+check "TC-V5: unknown format rejected" 1 "$unknown_fmt"
+check_includes "TC-V5: unknown format reported" 1 \
+  "format=zstd" "$unknown_fmt"
+check_excludes "TC-V5: no format check for unknown format row" 1 \
+  "FORMAT OK: postgres dump" "$unknown_fmt"
 
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]
