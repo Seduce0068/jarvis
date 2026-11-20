@@ -2392,9 +2392,24 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 82 の残り指摘（未対応）
 
-- [ ] CI の記録 SHA がコメント止まりで自動照合が無い／上流 v1 が未署名
-      （low）— API 照合ゲートを CI に追加するか §5 の例外明文化。
+- [x] CI の記録 SHA がコメント止まりで自動照合が無い（low）— Round 83 で
+  `ci/scripts/check-workflow-pins.sh` を追加し GitHub API で現行 SHA を照合。
+  ci-local と CI extra_gates に配線、オフライン時は UNVERIFIED 警告で通過。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
+### Round 83（R4 で修正済み）
+
+- [x] workflow pin 照合ゲートを新規作成し、ci-local / CI extra_gates / Runbook
+  へ配線。オンライン照合 OK、オフライン UNVERIFIED 警告の両方を実測。
 - 親が対応: 全ゲート再検証（restore 461件、ci-local ok=435）。
+
+### Round 83 の残り指摘（未対応／次ラウンド候補）
+
+- [ ] --locked 取りこぼし: `build-selfhost.sh:200` の cargo build と
+      `docs/integration/*.md` / `AGENTS.md` のコマンド例に --locked が無い
+      （medium）。
+- [ ] PiiConfig に deny_unknown_fields が無く、パターン設定のタイポが黙って
+      消える（low）— 未知キー拒否の回帰を追加。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
