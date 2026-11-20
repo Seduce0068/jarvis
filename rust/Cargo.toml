@@ -120,6 +120,17 @@ tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-uuid-
 # - 影響: base 0.22.1/0.23.1、wasm-streams 0.4.2/0.5.0、
 #   rustls-platform-verifier（0.13 側のみ）等が重複し、バイナリサイズ・
 #   コンパイル時間が増加する。実測値は未確認（axum メモと同様）。
+# I85-B 再評価（2026-11-20、manifest/lock のみ担当・shell 検証不可）:
+# - Cargo.lock 照合で reqwest 0.12.28 は上記 4 crate に加え rmcp 0.3
+#   (:3683) と testcontainers 0.20 (:4701) からも要求されている。
+#   workspace の reqwest を 0.13 へ上げてもこれら 2 crate は 0.12 系に
+#   留まり、「0.12 系が lock から消える」条件は workspace 単独では成立しない。
+# - 0.13.5 は qdrant-client に加え opentelemetry-http / opentelemetry-otlp
+#   0.33.1 (:2757 / :2773) からも要求され、major 重複は既に広範。
+# - 0.12 -> 0.13 は breaking change で 4 crate の利用側実装の型整合を要するが、
+#   本担当はサービス側ソース編集・shell 実行が禁止され cargo check で
+#   検証できない。優先度低のため現状維持（exact pin + 共存）を選択。
+#   Cargo.lock は未変更。
 qdrant-client = { version = "=1.19.0", features = ["reqwest", "uuid"] }
 
 # Object Storage
