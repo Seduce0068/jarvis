@@ -40,8 +40,9 @@ const REQUIRED_BINARIES: [&str; 4] = [
 /// Deliberately avoids the word "healthy": no check ran, so no health is claimed.
 const DRY_RUN_HEALTH_SKIP_LOG: &str = "DRY RUN: health check skipped";
 
-/// HTTP health-check ports for the four required services.
-const HEALTH_PORTS: [u16; 4] = [8081, 8082, 8083, 8084];
+/// HTTP health-check ports for every managed service: the four required
+/// services plus otelcol's health_check extension (13133).
+const HEALTH_PORTS: [u16; 5] = [8081, 8082, 8083, 8084, 13133];
 
 /// stdout plus exit status of a remote command (see `Runner::ssh_output`).
 #[derive(Debug, Clone, PartialEq, Eq)]
