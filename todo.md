@@ -2125,3 +2125,35 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: fmt 差分、AllowList の `#[derive(Debug)]`（expect_err 要件）、
   全ゲート再検証。
+
+### Round 73（R4 で修正済み）
+
+- [x] verify_set() に stop_services 前の `resolve_restore_input()` 事前解決
+  ゲートを追加（未知 role／複数一致／解決先不在を stop 前に拒否）。
+  回帰3ケース追加、restore 119→155件。
+- 親が対応: 全ゲート再検証。
+
+### Round 73 の残り指摘（未対応）
+
+- [ ] 共有 lib の role 解決と basename 判定が不一致（medium）— role=other の
+  config-* が検証は通るが restore_configs が黙ってスキップ。role 解決を
+  共有関数へ集約し、矛盾行を検証時に fail-closed。
+- [ ] payload_format_check がグローバル hook 経由のみで既定 no-op（low）—
+  上書き忘れで破損ペイロードが無視される fail-open。hook 装填 assert または
+  戻り値での判定伝播。
+- [ ] root 固定の restore が git アーカイブを root:root で展開し koppe 所有
+  repo を編集不能にする（medium）— --no-same-owner／対象所有者での展開。
+- [ ] curl/psql/jq モックが常に成功し fail-closed 分岐が未検証（medium）—
+  失敗注入モックを追加。
+- [ ] MOCK_LOG が本番の postgres precondition と psql ラッパを迂回（low）—
+  専用名 `JARVIS_RESTORE_FIXTURE_MODE` へ変更し本番で拒否。
+- [ ] 4 crate の env キー→フィールド写像テストが Serialized 上書きで
+  形骸化（medium）— 本番 ENV_PREFIX 定数を参照する contract テストへ。
+- [ ] infra/README.md の MCP Gateway 節が旧挙動（承認ツール非表示、
+  upstream メモリのみ）のまま（medium）。
+- [ ] check-evidence のファイル名ハッシュ照合が空サフィックスでスキップ
+  （low）— fail-closed 化＋tamper ケース。
+- [ ] mcp_allowlist.toml の shell.execute timeout 参照先コメントが誤り
+  （low）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push。共有 lib の実機配布（再インストール）。
