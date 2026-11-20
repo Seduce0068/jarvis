@@ -1,6 +1,6 @@
 //! Allowlist management for MCP tools
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tokio::fs;
@@ -21,6 +21,7 @@ pub struct AllowedTool {
     pub requires_approval: bool,
 }
 
+#[derive(Debug)]
 pub struct AllowList {
     tools: std::sync::RwLock<HashSet<String>>,
     tool_configs: std::sync::RwLock<std::collections::HashMap<String, AllowedTool>>,
@@ -41,6 +42,25 @@ impl AllowList {
         let mut tools = HashSet::new();
         let mut tool_configs = std::collections::HashMap::new();
         for tool in allowlist_config.tools {
+            // Fail closed: an empty tool name would register `""` as a callable
+            // tool (so `check("")` succeeded) and would collide with any other
+            // unnamed entry in the name index. Reject the whole file at startup.
+            if tool.name.is_empty() {
+                bail!("allowlist contains a tool with an empty name");
+            }
+            // Fail closed: an empty principal grants the tool to an empty
+            // identity and silently widens access. Reject the whole file rather
+            // than keeping a tool that no real principal should be able to use.
+            if tool
+                .allowed_principals
+                .iter()
+                .any(|principal| principal.is_empty())
+            {
+                bail!(
+                    "allowlist tool '{}' contains an empty allowed principal",
+                    tool.name
+                );
+            }
             tools.insert(tool.name.clone());
             tool_configs.insert(tool.name.clone(), tool);
         }
@@ -140,6 +160,95 @@ mod tests {
             config.principals.contains("jarvis"),
             "expected the top-level principals list to deserialize"
         );
+    }
+
+    /// Build a throwaway allowlist TOML and a gateway config pointing at it.
+    /// Production config files are never touched.
+    async fn config_with_allowlist(
+        label: &str,
+        toml: &str,
+    ) -> (std::path::PathBuf, crate::config::McpGatewayConfig) {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-allowlist-{label}"));
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let path = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(&path, toml)
+            .await
+            .expect("write allowlist");
+        let config = crate::config::McpGatewayConfig {
+            allowlist_path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        (dir, config)
+    }
+
+    /// Minimal single-tool allowlist with caller-controlled name/principals.
+    fn tool_toml(name: &str, principals: &[&str]) -> String {
+        let principals = principals
+            .iter()
+            .map(|principal| format!("\"{principal}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            r#"
+principals = ["jarvis"]
+
+[[tools]]
+name = "{name}"
+description = "test tool"
+allowed_principals = [{principals}]
+max_args_size = 1
+timeout_ms = 1
+requires_approval = false
+"#
+        )
+    }
+
+    /// I75-C: an empty tool name used to be registered, making `check("")`
+    /// succeed. Startup must now abort instead of admitting that identity.
+    #[tokio::test]
+    async fn new_rejects_empty_tool_name() {
+        let toml = tool_toml("", &["jarvis"]);
+        let (dir, config) = config_with_allowlist("empty-name", &toml).await;
+        let error = AllowList::new(&config)
+            .await
+            .expect_err("empty tool name must abort startup");
+        assert!(error.to_string().contains("empty name"), "{error}");
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// I75-C: an empty string inside `allowed_principals` grants the tool to
+    /// an empty identity; the whole allowlist must be rejected at startup.
+    #[tokio::test]
+    async fn new_rejects_empty_allowed_principal() {
+        let toml = tool_toml("read.tool", &["jarvis", ""]);
+        let (dir, config) = config_with_allowlist("empty-principal", &toml).await;
+        let error = AllowList::new(&config)
+            .await
+            .expect_err("empty allowed principal must abort startup");
+        assert!(
+            error.to_string().contains("empty allowed principal"),
+            "{error}"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// I75-C: the new startup guards must not reject the shipped allowlist.
+    /// Real tools stay callable while the empty-tool identity stays denied.
+    #[tokio::test]
+    async fn shipped_allowlist_still_loads_and_empty_tool_is_denied() {
+        let shipped = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../infra/config/mcp_allowlist.toml");
+        let config = crate::config::McpGatewayConfig {
+            allowlist_path: shipped.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let allowlist = AllowList::new(&config)
+            .await
+            .expect("shipped allowlist still passes startup validation");
+        assert!(allowlist.check("filesystem.read").is_ok());
+        assert!(allowlist.check("").is_err());
     }
 
     #[test]

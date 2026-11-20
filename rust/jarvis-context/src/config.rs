@@ -527,6 +527,62 @@ pub(crate) mod validation {
             assert!(entry("content", "source", &metadata_at_limit).is_ok());
         }
 
+        /// I57-C: `validate_text_bytes` is defined in UTF-8 bytes. A pure
+        /// multi-byte value at exactly `max` bytes is accepted, while one more
+        /// multi-byte character (over the byte budget but still far under it
+        /// in characters) is rejected. A switch to `chars().count()` would fail
+        /// the second assertion.
+        #[test]
+        fn validate_text_bytes_uses_utf8_byte_length_not_char_count() {
+            let at_limit = "あ".repeat(10); // 10 chars, 30 UTF-8 bytes
+            assert_eq!(at_limit.len(), 30, "test premise");
+            assert_eq!(at_limit.chars().count(), 10, "test premise");
+            assert!(validate_text_bytes(&at_limit, 30, "source").is_ok());
+
+            let over_limit = "あ".repeat(11); // 11 chars, 33 UTF-8 bytes
+            assert_eq!(over_limit.len(), 33, "test premise");
+            assert_eq!(
+                validate_text_bytes(&over_limit, 30, "source"),
+                Err(InvalidInput { field: "source" })
+            );
+        }
+
+        /// I57-C: `validate_text_bytes` counts UTF-8 bytes, not characters.
+        /// A multi-byte value whose byte length sits exactly on the limit is
+        /// accepted even though its `chars().count()` is far smaller; one more
+        /// multi-byte character crosses the byte budget and must be rejected.
+        /// Guards against regressing to a character-count check.
+        #[test]
+        fn prepare_memory_counts_multibyte_text_bytes_not_chars() {
+            let valid_metadata = r#"{"kind":"test"}"#;
+            // "あ" is 3 bytes in UTF-8. Fill to exactly MAX_SOURCE_BYTES with
+            // whole multibyte characters plus a single ASCII byte of padding.
+            let filler = "あ".repeat(MAX_SOURCE_BYTES / 3);
+            let source_at_limit = format!("{filler}a");
+            assert_eq!(
+                source_at_limit.len(),
+                MAX_SOURCE_BYTES,
+                "test premise: exact UTF-8 byte boundary"
+            );
+            assert!(
+                source_at_limit.chars().count() < MAX_SOURCE_BYTES,
+                "test premise: character count differs from byte count"
+            );
+            assert!(
+                entry("content", &source_at_limit, valid_metadata).is_ok(),
+                "a value exactly at the byte limit stays accepted"
+            );
+
+            let over_limit = format!("{source_at_limit}あ");
+            assert_eq!(
+                over_limit.len(),
+                MAX_SOURCE_BYTES + "あ".len(),
+                "test premise: one more 3-byte character exceeds the limit"
+            );
+            let err = entry("content", &over_limit, valid_metadata).unwrap_err();
+            assert_eq!(err.field, "source");
+        }
+
         /// I57-C: metadata nesting is bounded both at ingress and at the
         /// core-store recheck.
         #[test]
@@ -562,6 +618,28 @@ pub(crate) mod validation {
             memory.content.clear();
 
             memory.source = "s".repeat(MAX_SOURCE_BYTES + 1);
+            let err = validate_memory_for_store(&memory, 3).unwrap_err();
+            assert_eq!(err.field, "source");
+        }
+
+        /// I57-C: the defense-in-depth core-store recheck counts UTF-8 bytes
+        /// too, so a direct `store_memory` caller cannot slip an oversized
+        /// multibyte value past the shared bound by relying on char count.
+        #[test]
+        fn core_store_recheck_counts_multibyte_text_bytes_not_chars() {
+            let mut memory = entry("content", "source", r#"{"kind":"test"}"#).unwrap();
+            let filler = "あ".repeat(MAX_SOURCE_BYTES / 3);
+            let source_at_limit = format!("{filler}a");
+            assert_eq!(source_at_limit.len(), MAX_SOURCE_BYTES, "test premise");
+            memory.source = source_at_limit;
+            assert!(validate_memory_for_store(&memory, 3).is_ok());
+
+            memory.source.push('あ');
+            assert_eq!(
+                memory.source.len(),
+                MAX_SOURCE_BYTES + "あ".len(),
+                "test premise: one more multibyte character exceeds the limit"
+            );
             let err = validate_memory_for_store(&memory, 3).unwrap_err();
             assert_eq!(err.field, "source");
         }
