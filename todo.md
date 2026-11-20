@@ -2558,10 +2558,34 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [ ] mcp-gw testing.rs の固定 /tmp パス（pid+AtomicU64 未対応、
       medium）— 残存する並走競合経路。
-- [ ] approval.rs / http.rs / policy/http.rs のデッドラインなし承認ポーリング
-      4箇所（medium）。
-- [ ] context gRPC トークン etc の設定公開（health probe 用の URL 参照、
-      medium）— transport から private config を読めない制約。
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
+- [x] approval.rs / http.rs / policy/http.rs のデッドラインなし承認ポーリング
+      4箇所＋testing.rs の固定 /tmp → Round 92 で解消。
+- [x] event の OpenCode URL を config 側で解決し公開 getter 経由で probe
+      → Round 92 で解消。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
+
+### Round 92（R4 で修正済み）
+
+- [x] testing.rs の固定 /tmp を pid+AtomicU64 一意化、承認ポーリング4箇所へ
+      5s デッドライン。
+- [x] EventConfig に OpenCode URL getter／load 時スナップショットを追加、
+      http.rs の直接 env 参照を廃止。
+
+### Round 92 の残り指摘（未対応・次ラウンド優先）
+
+- [ ] policy 仕様に 410 Gone（期限切れ承認）の HTTP 契約が未反映（中）—
+      REQ-10＋Scenario＋Traceability 追加、証跡再生成、両 index 同期。
+- [ ] 3仕様（event/context/mcp-gw）に下流連動 /health の degraded 契約が
+      未反映（中）— REQ＋Scenario＋Traceability 追加、証跡再生成。
+- [ ] mcp-gw /health が allowlist 経由で upstream 登録を判定し、登録済みだが
+      allowlist 未掲載だと永続 503 誤判定（中）— Gateway の実際の登録数を
+      直接公開して照合。
+- [ ] deploy-mcp-gw-safe.sh が 503 degraded を消费せず劣化サービスを
+      DONE と報告（中）— スクリプト側にも degraded 検出と rollback。
+- [ ] deploy.rs のヘルスゲートが固定5秒＋1回プローブで低速起動を誤判定
+      （中）— 上限付きリトライ（20回×0.5s 等）へ。
+- [ ] drift が casbin_model.conf の内容・owner/mode を未検査（中）。
+- [ ] ui/README.md:39 と remaining-tasks.md:288 の clippy 例に
+      undocumented_unsafe_blocks が欠落（低）。
+- [ ] major 更新待ち29件（再評価 2026-12-20）。
