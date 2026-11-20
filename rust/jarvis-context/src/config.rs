@@ -666,7 +666,8 @@ pub struct ContextConfig {
     /// Optional shared secret for the HTTP API. When set via
     /// `JARVIS_CONTEXT_ADMIN_TOKEN`, every API route except `/health` requires
     /// it in the `x-jarvis-context-token` header. Unset keeps loopback clients
-    /// working unchanged.
+    /// working unchanged; a configured but blank value aborts startup
+    /// (fail-closed).
     #[serde(default)]
     pub admin_token: Option<String>,
 }
@@ -697,7 +698,35 @@ impl ContextConfig {
             // of the field provider as well.
             .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
             .extract()?;
+        // I99-A: a configured-but-blank token would otherwise collapse to
+        // `None` in `admin_token()` and leave the `/v1/*` memory API and gRPC
+        // memory gates unauthenticated. Fail closed at startup.
+        config.validate_admin_token()?;
         Ok(config)
+    }
+
+    /// Fail-closed startup validation of the optional admin token (I99-A).
+    ///
+    /// A token that is present but blank (empty or whitespace-only) is
+    /// rejected: `admin_token()` would otherwise treat it as unset and both
+    /// the HTTP `/v1/*` memory API and the gRPC metadata gate would fall back
+    /// to the legacy unauthenticated loopback path. `None` (unset) stays valid
+    /// and keeps that legacy behavior for compatibility.
+    ///
+    /// The error is a fixed literal: no configured token value is ever
+    /// interpolated, so secrets cannot reach startup logs.
+    pub fn validate_admin_token(&self) -> Result<()> {
+        if self
+            .admin_token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            anyhow::bail!(
+                "admin_token is set but blank; set JARVIS_CONTEXT_ADMIN_TOKEN \
+                 to a non-empty secret or unset it before starting the service"
+            );
+        }
+        Ok(())
     }
 
     pub fn pg_url(&self) -> &str {
@@ -713,9 +742,10 @@ impl ContextConfig {
             .filter(|key| !key.is_empty())
     }
 
-    /// An empty or whitespace-only `JARVIS_CONTEXT_ADMIN_TOKEN` means "no
-    /// token", matching the `qdrant_api_key` convention and keeping legacy
-    /// deployments unauthenticated.
+    /// Returns the trimmed token, or `None` when unset/blank. A configured but
+    /// blank `JARVIS_CONTEXT_ADMIN_TOKEN` is rejected at startup by
+    /// [`Self::validate_admin_token`]; this filter only guards direct callers
+    /// (defense in depth).
     pub fn admin_token(&self) -> Option<&str> {
         self.admin_token
             .as_deref()
@@ -800,22 +830,92 @@ max_context_tokens = 8000
         assert_eq!(ContextConfig::default().admin_token, None);
     }
 
+    /// Fail-closed regression: a set-but-blank token must never silently
+    /// collapse to the unauthenticated path. Both the legacy unset case and a
+    /// real secret must still validate.
     #[test]
-    fn admin_token_from_toml_and_blank_value_disables_auth() {
+    fn admin_token_from_toml_and_blank_value_is_rejected() {
         let with_token = format!("{LEGACY_TOML}\nadmin_token = \"admin-secret\"\n");
         let config: ContextConfig = Figment::from(Toml::string(&with_token))
             .extract()
             .expect("config with token parses");
         assert_eq!(config.admin_token(), Some("admin-secret"));
+        assert!(config.validate_admin_token().is_ok());
 
         let blank = format!("{LEGACY_TOML}\nadmin_token = \"  \"\n");
         let config: ContextConfig = Figment::from(Toml::string(&blank))
             .extract()
             .expect("blank token parses");
+        let message = config
+            .validate_admin_token()
+            .expect_err("blank configured token must be rejected")
+            .to_string();
         assert!(
-            config.admin_token().is_none(),
-            "a blank token is treated as unset"
+            message.contains("admin_token is set but blank"),
+            "{message}"
         );
+    }
+
+    /// `None` (unset) remains the legacy unauthenticated compatibility case;
+    /// a real secret is accepted. Only a present-but-blank value is an error.
+    #[test]
+    fn validate_admin_token_accepts_unset_and_non_blank() {
+        assert!(ContextConfig::default().validate_admin_token().is_ok());
+        let config = ContextConfig {
+            admin_token: Some("admin-secret".to_owned()),
+            ..Default::default()
+        };
+        assert!(config.validate_admin_token().is_ok());
+    }
+
+    /// Empty, ASCII whitespace and visually distinct Unicode whitespace are
+    /// all blank after `trim()` and must abort startup. The fixed error text
+    /// interpolates no configuration value, so a non-breaking-space token
+    /// cannot be echoed back into startup logs.
+    #[test]
+    fn validate_admin_token_rejects_blank_and_never_echoes_value() {
+        for token in ["", "   ", "\t\n", "\u{00a0}\u{00a0}"] {
+            let config = ContextConfig {
+                admin_token: Some(token.to_owned()),
+                ..Default::default()
+            };
+            let message = config
+                .validate_admin_token()
+                .expect_err("blank configured token must be rejected")
+                .to_string();
+            assert!(
+                message.contains("admin_token is set but blank"),
+                "{message}"
+            );
+        }
+        let config = ContextConfig {
+            admin_token: Some("\u{00a0}\u{00a0}".to_owned()),
+            ..Default::default()
+        };
+        let message = config
+            .validate_admin_token()
+            .expect_err("blank configured token must be rejected")
+            .to_string();
+        assert!(!message.contains('\u{00a0}'), "{message}");
+    }
+
+    /// The real startup path (`load` -> `load_from_path`) must enforce the
+    /// guard, not just a directly called helper.
+    #[test]
+    fn load_from_path_rejects_blank_admin_token() {
+        let dir = std::env::temp_dir().join("jarvis-context-config-blank-token");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("context.toml");
+        let toml = format!("{LEGACY_TOML}\nadmin_token = \"   \"\n");
+        std::fs::write(&path, &toml).expect("write config");
+        let error = ContextConfig::load_from_path(path.to_str().expect("utf8 path"))
+            .expect_err("blank configured token must abort startup");
+        assert!(
+            error.to_string().contains("admin_token is set but blank"),
+            "{error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `JARVIS_CONTEXT_ADMIN_TOKEN` becomes `admin_token` through the same

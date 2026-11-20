@@ -165,7 +165,8 @@ pub struct EventConfig {
     pub policy_grpc_addr: String,
     /// Optional shared secret for `/v1/events` and gRPC `EmitEvent`.
     /// `JARVIS_EVENT_ADMIN_TOKEN` maps here through the figment env prefix.
-    /// Unset/blank keeps the legacy unauthenticated loopback behavior.
+    /// Unset keeps the legacy unauthenticated loopback behavior; a configured
+    /// but blank value aborts startup (fail-closed).
     #[serde(default)]
     pub admin_token: Option<String>,
     /// Context backend selection. Missing/legacy configs stay on `in_process`.
@@ -214,15 +215,46 @@ impl EventConfig {
             .merge(Toml::file(path))
             .merge(overrides)
             .extract()?;
+        // I99-A: a configured-but-blank token would otherwise collapse to
+        // `None` in `admin_token()` and silently leave the Webhook (8085) and
+        // gRPC admin gates unauthenticated. Fail closed at startup, before the
+        // value is published to ingress.
+        config.validate_admin_token()?;
         publish_admin_token(config.admin_token().map(str::to_owned));
         Ok(config)
+    }
+
+    /// Fail-closed startup validation of the optional admin token (I99-A).
+    ///
+    /// A token that is present but blank (empty or whitespace-only) is
+    /// rejected: `admin_token()` would otherwise treat it as unset and both
+    /// the HTTP `x-jarvis-event-token` gate and the gRPC metadata gate would
+    /// fall back to the legacy unauthenticated loopback path. `None` (unset)
+    /// stays valid and keeps that legacy behavior for compatibility.
+    ///
+    /// The error is a fixed literal: no configured token value is ever
+    /// interpolated, so secrets cannot reach startup logs.
+    pub fn validate_admin_token(&self) -> Result<()> {
+        if self
+            .admin_token
+            .as_deref()
+            .is_some_and(|token| token.trim().is_empty())
+        {
+            anyhow::bail!(
+                "admin_token is set but blank; set JARVIS_EVENT_ADMIN_TOKEN \
+                 to a non-empty secret or unset it before starting the service"
+            );
+        }
+        Ok(())
     }
 
     pub fn ha_token(&self) -> &str {
         &self.ha_token
     }
 
-    /// An empty or whitespace-only value means "no token" (loopback compat).
+    /// Returns the trimmed token, or `None` when unset/blank. A configured
+    /// blank value is rejected at startup by [`Self::validate_admin_token`];
+    /// this filter only guards direct callers (defense in depth).
     pub fn admin_token(&self) -> Option<&str> {
         self.admin_token
             .as_deref()
@@ -288,6 +320,19 @@ impl Default for EventConfig {
 mod tests {
     use super::*;
     use figment::providers::Serialized;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// pid + counter keeps temp config files of concurrent cargo test
+    /// processes apart; the in-process token lock alone cannot do that.
+    fn unique_temp_file(tag: &str) -> std::path::PathBuf {
+        let n = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "jarvis-event-{tag}-{}-{n}.toml",
+            std::process::id()
+        ))
+    }
 
     /// A config identical to a legacy deployment: no `admin_token` key at all.
     const LEGACY_TOML: &str = r#"
@@ -311,22 +356,91 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         assert!(EventConfig::default().admin_token.is_none());
     }
 
+    /// Fail-closed regression: a set-but-blank token must never silently
+    /// collapse to the unauthenticated path. Both the legacy unset case and a
+    /// real secret must still validate.
     #[test]
-    fn admin_token_from_toml_and_blank_value_disables_auth() {
+    fn admin_token_from_toml_and_blank_value_is_rejected() {
         let with_token = format!("{LEGACY_TOML}\nadmin_token = \"event-secret\"\n");
         let config: EventConfig = Figment::from(Toml::string(&with_token))
             .extract()
             .expect("config with token parses");
         assert_eq!(config.admin_token(), Some("event-secret"));
+        assert!(config.validate_admin_token().is_ok());
 
         let blank = format!("{LEGACY_TOML}\nadmin_token = \"  \"\n");
         let config: EventConfig = Figment::from(Toml::string(&blank))
             .extract()
             .expect("blank token parses");
+        let message = config
+            .validate_admin_token()
+            .expect_err("blank configured token must be rejected")
+            .to_string();
         assert!(
-            config.admin_token().is_none(),
-            "a blank token is treated as unset"
+            message.contains("admin_token is set but blank"),
+            "{message}"
         );
+    }
+
+    /// `None` (unset) remains the legacy unauthenticated compatibility case;
+    /// a real secret is accepted. Only a present-but-blank value is an error.
+    #[test]
+    fn validate_admin_token_accepts_unset_and_non_blank() {
+        assert!(EventConfig::default().validate_admin_token().is_ok());
+        let config = EventConfig {
+            admin_token: Some("event-secret".to_owned()),
+            ..Default::default()
+        };
+        assert!(config.validate_admin_token().is_ok());
+    }
+
+    /// Empty, ASCII whitespace and visually distinct Unicode whitespace are
+    /// all blank after `trim()` and must abort startup. The fixed error text
+    /// interpolates no configuration value, so a non-breaking-space token
+    /// cannot be echoed back into startup logs.
+    #[test]
+    fn validate_admin_token_rejects_blank_and_never_echoes_value() {
+        for token in ["", "   ", "\t\n", "\u{00a0}\u{00a0}"] {
+            let config = EventConfig {
+                admin_token: Some(token.to_owned()),
+                ..Default::default()
+            };
+            let message = config
+                .validate_admin_token()
+                .expect_err("blank configured token must be rejected")
+                .to_string();
+            assert!(
+                message.contains("admin_token is set but blank"),
+                "{message}"
+            );
+        }
+        let config = EventConfig {
+            admin_token: Some("\u{00a0}\u{00a0}".to_owned()),
+            ..Default::default()
+        };
+        let message = config
+            .validate_admin_token()
+            .expect_err("blank configured token must be rejected")
+            .to_string();
+        assert!(!message.contains('\u{00a0}'), "{message}");
+    }
+
+    /// The real startup path must enforce the guard, not just a direct helper
+    /// call. An empty override provider is used so no ambient
+    /// `JARVIS_EVENT_ADMIN_TOKEN` can mask the TOML value under test.
+    #[test]
+    fn load_from_path_rejects_blank_admin_token() {
+        let toml = format!("{LEGACY_TOML}\nadmin_token = \"   \"\n");
+        let path = std::env::temp_dir().join("jarvis-event-blank-admin-token.toml");
+        std::fs::write(&path, &toml).expect("write temp config");
+        let path_str = path.to_str().expect("utf8 temp path");
+        let error = EventConfig::load_from_path_with(path_str, Figment::new())
+            .expect_err("blank configured token must abort startup");
+        assert!(
+            error.to_string().contains("admin_token is set but blank"),
+            "{error}"
+        );
+        std::fs::remove_file(&path).expect("clean temp config");
     }
 
     /// `JARVIS_EVENT_ADMIN_TOKEN` becomes `admin_token` through the same
@@ -404,7 +518,7 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         reset_admin_token_for_test();
 
         let toml = format!("{LEGACY_TOML}\nadmin_token = \"from-toml\"\n");
-        let path = std::env::temp_dir().join("jarvis-event-i81d-admin-token-file.toml");
+        let path = unique_temp_file("i81d-admin-token-file");
         std::fs::write(&path, &toml).expect("write temp config");
         let path_str = path.to_str().expect("utf8 temp path");
         let overrides = Figment::new();
@@ -432,7 +546,7 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         reset_admin_token_for_test();
 
         let toml = format!("{LEGACY_TOML}\nadmin_token = \"from-toml\"\n");
-        let path = std::env::temp_dir().join("jarvis-event-i81d-admin-token-env.toml");
+        let path = unique_temp_file("i81d-admin-token-env");
         std::fs::write(&path, &toml).expect("write temp config");
         let path_str = path.to_str().expect("utf8 temp path");
         let overrides = Figment::from(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
