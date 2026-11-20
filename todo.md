@@ -3022,9 +3022,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/scripts/install-mcp-gateway.sh:3,51-53` / R1-ST06 / confirmed。
 - [ ] **Qdrant 本番反映の「evacuating old collection」ログに実処理が伴わない** —
   `infra/scripts/restore-local.d/qdrant.sh:106-116` / R1-ST06 / confirmed。
-- [ ] **hooks.json の Rust post-edit フックが repo root で cargo を実行** —
-  `hooks.json:57-60`, `rust/Cargo.toml:1`, `ui/Cargo.toml:1`, `Makefile:62-67` /
-  R1-ST08,R1-ST10,R1-CF02 / confirmed。ルートに Cargo.toml は無い。
+- [x] **hooks.json の Rust post-edit フックが repo root で cargo を実行** — 2026-11-21 対応済み: matcher `**/*.rs` を `rust/**/*.rs` と `ui/**/*.rs` に分割し、それぞれ `cd rust && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings` / `cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings` を実行（Makefile:63,66 と同一引数）。JSON parse OK、post-edit matchers = ['**/*.ts', 'rust/**/*.rs', 'ui/**/*.rs', '**/*.md'] / 根拠
+  `hooks.json:57-64`, `rust/Cargo.toml:1`, `ui/Cargo.toml:1` /
+  R1-ST08,R1-ST10,R1-CF02 / confirmed。
 - [ ] **pre-task フックが未定義サブエージェントを起動** —
   `hooks.json:10-17`, `opencode.jsonc:132-133,190-191` / R1-ST10 / confirmed。
 - [x] **.gitignore が ui/target/ を無視していない** — 2026-11-21 対応済み: `/ui/target/` を repo ローカルの `.gitignore` へ追加。従前はグローバル gitignore (`~/.config/git/ignore` の `target/`) にのみ依存しており、CI runner 等では誤追跡リスクがあった。`git check-ignore -v ui/target/` が `.gitignore:47` を参照することを確認 / 根拠
