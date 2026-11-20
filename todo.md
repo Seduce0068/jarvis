@@ -2539,3 +2539,29 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
+
+### Round 91（R4 で修正済み）
+
+- [x] **admin_token 空白 fail-open**（confirmed high）→ event/context に
+      mcp-gw と同じ validate_admin_token を追加、未設定は互換維持。
+- [x] systemd 依存順序（migrations→policy→{mcp-gw,context}→opencode→event）
+      と migration unit の両 DB 適用、build-selfhost の順序表示を同期。
+- [x] 3サービスの /health を HEALTH_* 契約へ統一し下流状態を反映、
+      deploy のヘルスゲートで degraded(503) を検出。
+- [x] テスト決定性: 証跡ファイル名の動的選択、固定 /tmp を pid+AtomicU64
+      一意化、承認ポーリングへ 5s デッドライン。
+- [x] 未使用生成 proto／PolicyError 削除、internal gateway error 文言を
+      jarvis-core 集約、UI env 定数化、ドキュメント行番号ドリフト解消。
+- 親が対応: fmt 差分、空ファイル git rm、systemd-analyze verify、全ゲート再検証。
+
+### Round 91 の残り指摘（未対応／次ラウンド候補）
+
+- [ ] mcp-gw testing.rs の固定 /tmp パス（pid+AtomicU64 未対応、
+      medium）— 残存する並走競合経路。
+- [ ] approval.rs / http.rs / policy/http.rs のデッドラインなし承認ポーリング
+      4箇所（medium）。
+- [ ] context gRPC トークン etc の設定公開（health probe 用の URL 参照、
+      medium）— transport から private config を読めない制約。
+- [ ] major 更新待ち29件（再評価 2026-12-20）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
