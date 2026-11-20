@@ -54,6 +54,12 @@ pub(crate) const EVENT_TOKEN_HEADER: &str = "x-jarvis-event-token";
 /// silently disable the ingress gate.
 const ADMIN_TOKEN_ENV_KEY: &str = "JARVIS_EVENT_ADMIN_TOKEN";
 
+/// Environment variable that overrides the OpenCode probe URL. Figment's
+/// `JARVIS_EVENT_` prefix maps it to [`EventConfig::opencode_url`] during
+/// `load`; this key is the one place the transport-side fallback reads it so
+/// `http.rs` no longer resolves the variable on its own.
+pub(crate) const OPENCODE_URL_ENV_KEY: &str = "JARVIS_EVENT_OPENCODE_URL";
+
 /// Process-wide snapshot of the effective admin token, published by
 /// [`EventConfig::load`].
 ///
@@ -103,6 +109,64 @@ pub(crate) fn ingress_admin_token() -> Option<String> {
 #[cfg(test)]
 fn reset_admin_token_for_test() {
     let mut snapshot = match INGRESS_ADMIN_TOKEN.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *snapshot = OnceLock::new();
+}
+
+/// Process-wide snapshot of the effective OpenCode URL, published by
+/// [`EventConfig::load`].
+///
+/// `EventNormalizer` passes only an `Arc<Normalizer>` to the HTTP `serve`
+/// entry point and `Normalizer` lives in a sibling module, so `http.rs` cannot
+/// read its private `config`. Publishing the already-merged value here lets
+/// the `/health` TCP probe use the same TOML + `JARVIS_EVENT_OPENCODE_URL`
+/// resolution as the rest of the service (the admin-token gate uses the same
+/// pattern). An unset snapshot means "no config was loaded" (embedded callers).
+///
+/// The `Mutex` wrapper exists only so `#[cfg(test)]` can reset the snapshot;
+/// production reads/writes keep the bare `OnceLock` first-wins semantics.
+static OPENCODE_PROBE_URL: Mutex<OnceLock<String>> = Mutex::new(OnceLock::new());
+
+/// Publish the effective OpenCode URL before any listener starts. Only the
+/// first value wins; the value can be a local URL, so it is never logged.
+pub(crate) fn publish_opencode_url(url: String) {
+    let snapshot = match OPENCODE_PROBE_URL.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if snapshot.set(url).is_err() {
+        tracing::warn!("opencode probe URL already published; keeping the first value");
+    }
+}
+
+/// Effective OpenCode URL for the `/health` probe.
+///
+/// Returns the value published by [`EventConfig::load`] (the fully merged
+/// TOML + env result) when available. Embedded callers that never loaded a
+/// config fall back to `JARVIS_EVENT_OPENCODE_URL` and then the shipped
+/// default, preserving the old behavior without any env access in the
+/// transport layer.
+pub(crate) fn opencode_probe_url() -> String {
+    let snapshot = match OPENCODE_PROBE_URL.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    snapshot.get().cloned().unwrap_or_else(|| {
+        std::env::var(OPENCODE_URL_ENV_KEY)
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| EventConfig::default().opencode_url().to_owned())
+    })
+}
+
+/// Clear the process-wide snapshot so tests do not depend on execution order.
+/// Test-only: production code has no path that unpublishes a URL.
+#[cfg(test)]
+fn reset_opencode_url_for_test() {
+    let mut snapshot = match OPENCODE_PROBE_URL.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     };
@@ -221,6 +285,9 @@ impl EventConfig {
         // value is published to ingress.
         config.validate_admin_token()?;
         publish_admin_token(config.admin_token().map(str::to_owned));
+        // I100-B: publish the fully resolved URL so the HTTP `/health` probe
+        // sees TOML values, not just the env var or the shipped default.
+        publish_opencode_url(config.opencode_url().to_owned());
         Ok(config)
     }
 
@@ -250,6 +317,13 @@ impl EventConfig {
 
     pub fn ha_token(&self) -> &str {
         &self.ha_token
+    }
+
+    /// Effective OpenCode base URL after TOML + `JARVIS_EVENT_OPENCODE_URL`
+    /// merging. This is the single value published at load time and used by
+    /// the `/health` probe; callers must not resolve the env var themselves.
+    pub fn opencode_url(&self) -> &str {
+        &self.opencode_url
     }
 
     /// Returns the trimmed token, or `None` when unset/blank. A configured
@@ -659,5 +733,119 @@ policy_grpc_addr = "http://127.0.0.1:50051"
             .expect("override variable uses the event env prefix")
             .to_ascii_lowercase();
         assert_eq!(field, "config_path");
+    }
+
+    /// I100-B: the env key must live on the config side and map to the same
+    /// flat `opencode_url` field figment merges, so transport has no reason
+    /// to read the variable directly.
+    #[test]
+    fn opencode_url_env_key_maps_to_field() {
+        let field = OPENCODE_URL_ENV_KEY
+            .strip_prefix(ENV_PREFIX)
+            .expect("override variable uses the event env prefix")
+            .to_ascii_lowercase();
+        assert_eq!(field, "opencode_url");
+    }
+
+    /// I100-B: the public getter returns the figment-resolved value for both a
+    /// non-default TOML URL and an env-style override, while a legacy config
+    /// without a custom URL keeps the shipped default.
+    #[test]
+    fn opencode_url_getter_reflects_toml_and_env_override() {
+        const TOML_URL: &str = "http://toml-opencode:9101";
+        const ENV_URL: &str = "http://env-opencode:9102";
+        // Replace only the `opencode_url` line; `android_mcp_url` happens to
+        // share the default value but must stay untouched.
+        let toml = LEGACY_TOML.replace(
+            "opencode_url = \"http://127.0.0.1:49374\"",
+            &format!("opencode_url = \"{TOML_URL}\""),
+        );
+
+        let from_toml: EventConfig = Figment::from(Toml::string(&toml))
+            .extract()
+            .expect("TOML opencode url parses");
+        assert_eq!(from_toml.opencode_url(), TOML_URL);
+
+        let from_env: EventConfig = Figment::from(Toml::string(&toml))
+            .merge(Serialized::default("opencode_url", ENV_URL))
+            .extract()
+            .expect("env-style opencode url override merges");
+        assert_eq!(from_env.opencode_url(), ENV_URL);
+
+        let legacy: EventConfig = Figment::from(Toml::string(LEGACY_TOML))
+            .extract()
+            .expect("legacy config parses");
+        assert_eq!(legacy.opencode_url(), EventConfig::default().opencode_url());
+    }
+
+    /// I100-B regression: the URL the transport probes must equal the value
+    /// resolved from TOML at load time. Before the fix `http.rs` ignored this
+    /// value and probed env/default, so a non-default TOML URL was lost.
+    #[test]
+    fn load_from_path_publishes_toml_opencode_url_to_transport() {
+        let _guard = match TOKEN_SNAPSHOT_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        reset_opencode_url_for_test();
+
+        const URL: &str = "http://toml-opencode:9101";
+        let toml = LEGACY_TOML.replace(
+            "opencode_url = \"http://127.0.0.1:49374\"",
+            &format!("opencode_url = \"{URL}\""),
+        );
+        let path = unique_temp_file("i100b-opencode-toml");
+        std::fs::write(&path, &toml).expect("write temp config");
+        let path_str = path.to_str().expect("utf8 temp path");
+
+        let config =
+            EventConfig::load_from_path_with(path_str, Figment::new()).expect("config loads");
+        assert_eq!(config.opencode_url(), URL);
+        assert_eq!(
+            opencode_probe_url(),
+            URL,
+            "transport must probe the TOML URL"
+        );
+
+        std::fs::remove_file(&path).expect("clean temp config");
+        reset_opencode_url_for_test();
+    }
+
+    /// I100-B regression: an env-style override replaces the TOML URL and the
+    /// value published to the transport matches it exactly. The snapshot is
+    /// reset first, so the assertion cannot pass via the fallback env/default
+    /// path; `Serialized` is merged after the env provider so ambient CI vars
+    /// cannot decide the outcome.
+    #[test]
+    fn load_from_path_env_override_publishes_opencode_url_to_transport() {
+        let _guard = match TOKEN_SNAPSHOT_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        reset_opencode_url_for_test();
+
+        const TOML_URL: &str = "http://toml-opencode:9101";
+        const ENV_URL: &str = "http://env-opencode:9102";
+        let toml = LEGACY_TOML.replace(
+            "opencode_url = \"http://127.0.0.1:49374\"",
+            &format!("opencode_url = \"{TOML_URL}\""),
+        );
+        let path = unique_temp_file("i100b-opencode-env");
+        std::fs::write(&path, &toml).expect("write temp config");
+        let path_str = path.to_str().expect("utf8 temp path");
+
+        let overrides = Figment::from(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+            .merge(Serialized::default("opencode_url", ENV_URL))
+            .merge(Serialized::default("admin_token", "i100b-token"));
+        let config = EventConfig::load_from_path_with(path_str, overrides).expect("config loads");
+        assert_eq!(config.opencode_url(), ENV_URL);
+        assert_eq!(
+            opencode_probe_url(),
+            ENV_URL,
+            "transport must probe the env URL"
+        );
+
+        std::fs::remove_file(&path).expect("clean temp config");
+        reset_opencode_url_for_test();
     }
 }

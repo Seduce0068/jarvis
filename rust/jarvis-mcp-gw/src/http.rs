@@ -623,23 +623,29 @@ requires_approval = true
         });
 
         // Operator approves the pending request raised by the gateway.
-        let id = loop {
-            let pending: Value = http
-                .get(format!("{policy_http}/v1/approvals"))
-                .send()
-                .await
-                .expect("list approvals")
-                .json()
-                .await
-                .expect("pending list is JSON");
-            if let Some(entry) = pending["pending"]
-                .as_array()
-                .and_then(|items| items.first())
-            {
-                break entry["id"].as_str().expect("id is a string").to_owned();
+        // Poll with a deadline so a missing Pending entry fails the test
+        // instead of hanging the whole test binary.
+        let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let pending: Value = http
+                    .get(format!("{policy_http}/v1/approvals"))
+                    .send()
+                    .await
+                    .expect("list approvals")
+                    .json()
+                    .await
+                    .expect("pending list is JSON");
+                if let Some(entry) = pending["pending"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                {
+                    break entry["id"].as_str().expect("id is a string").to_owned();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        })
+        .await
+        .expect("approval must become pending within 5s");
         let decision: Value = http
             .post(format!("{policy_http}/v1/approval/{id}/approve"))
             .json(&json!({ "approved_by": "koppe" }))

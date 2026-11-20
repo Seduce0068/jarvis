@@ -8,7 +8,22 @@ use jarvis_policy::{PolicyClient, PolicyEngine};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// `pid` separates concurrent cargo test processes; the counter separates
+/// repeated calls in one process. Every helper gets a fresh directory, so
+/// setup can never clobber a directory another process is using. Cleanup, if
+/// any, therefore only ever targets a path this process created.
+fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+    let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!(
+        "jarvis-mcp-gw-policy-{tag}-{}-{n}",
+        std::process::id()
+    ))
+}
 
 /// Minimal MCP server speaking newline-delimited JSON-RPC over the given
 /// stream. Advertises a single `tool_name` tool. `fail_calls` makes
@@ -105,7 +120,7 @@ pub(crate) async fn shipped_policy_client_with_engine(
 /// the Casbin files (the engine persists policy edits to its own copy).
 pub(crate) async fn shipped_policy_engine(label: &str) -> PolicyEngine {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
-    let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-policy-{label}"));
+    let dir = unique_temp_dir(label);
     tokio::fs::create_dir_all(&dir)
         .await
         .expect("create temp policy dir");
@@ -142,7 +157,7 @@ pub(crate) async fn start_policy_http(label: &str) -> String {
 pub(crate) async fn start_policy_http_with_token(label: &str, token: Option<String>) -> String {
     // Build the engine directly so the token can be injected before serving.
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
-    let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-policy-{label}"));
+    let dir = unique_temp_dir(label);
     tokio::fs::create_dir_all(&dir)
         .await
         .expect("create temp policy dir");

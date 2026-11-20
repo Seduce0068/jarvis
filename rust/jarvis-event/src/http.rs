@@ -1,6 +1,6 @@
 //! HTTP/REST for Event Normalizer
 
-use crate::config::{EVENT_TOKEN_HEADER, ingress_admin_token};
+use crate::config::{EVENT_TOKEN_HEADER, ingress_admin_token, opencode_probe_url};
 use crate::normalizer::Normalizer;
 use axum::{
     Json, Router,
@@ -275,17 +275,6 @@ fn health_response(opencode_reachable: bool) -> axum::response::Response {
             HEALTH_OPENCODE_UNAVAILABLE_BODY,
         )
     }
-}
-
-/// OpenCode base URL used by the probe. Transport modules cannot read
-/// `Normalizer`'s private config, so this mirrors the admin-token gate's
-/// process-env fallback and the shipped default from `EventConfig`.
-fn opencode_probe_url() -> String {
-    std::env::var("JARVIS_EVENT_OPENCODE_URL")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| crate::config::EventConfig::default().opencode_url)
 }
 
 /// Cheap transport-level liveness probe: a TCP connect, not an HTTP dispatch.
@@ -600,6 +589,20 @@ mod tests {
             outcome.unwrap_err(),
             StatusCode::BAD_REQUEST,
             "type mismatch must collapse to an empty 400"
+        );
+    }
+
+    /// I100-B: the transport must obtain the probe URL from the config-side
+    /// getter (TOML + env merged at `load`), never by reading the variable
+    /// directly. Assembling the key with `concat!` keeps this guard from
+    /// matching its own literal through `include_str!`.
+    #[test]
+    fn health_probe_url_comes_from_config_not_direct_env() {
+        const SRC: &str = include_str!("http.rs");
+        const ENV_KEY: &str = concat!("JARVIS_EVENT_", "OPENCODE_URL");
+        assert!(
+            !SRC.contains(ENV_KEY),
+            "http.rs must not resolve the OpenCode URL env var directly"
         );
     }
 }

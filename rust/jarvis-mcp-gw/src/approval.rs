@@ -500,24 +500,30 @@ mod tests {
         });
 
         // Wait for the pending request, then approve it as the operator.
-        let id = loop {
-            let pending: serde_json::Value = http
-                .get(format!("{base}/v1/approvals"))
-                .send()
-                .await
-                .expect("list approvals")
-                .json()
-                .await
-                .expect("pending list is JSON");
-            let first = pending["pending"]
-                .as_array()
-                .and_then(|items| items.first())
-                .cloned();
-            if let Some(entry) = first {
-                break entry["id"].as_str().expect("id is a string").to_owned();
+        // Poll with a deadline: a policy endpoint that never reports Pending
+        // must fail the test instead of hanging the whole test binary.
+        let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let pending: serde_json::Value = http
+                    .get(format!("{base}/v1/approvals"))
+                    .send()
+                    .await
+                    .expect("list approvals")
+                    .json()
+                    .await
+                    .expect("pending list is JSON");
+                let first = pending["pending"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .cloned();
+                if let Some(entry) = first {
+                    break entry["id"].as_str().expect("id is a string").to_owned();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        })
+        .await
+        .expect("approval must become pending within 5s");
         let decision: serde_json::Value = http
             .post(format!("{base}/v1/approval/{id}/approve"))
             .json(&json!({ "approved_by": "koppe" }))
@@ -551,24 +557,30 @@ mod tests {
                 .await
         });
 
-        let id = loop {
-            let pending: serde_json::Value = http
-                .get(format!("{base}/v1/approvals"))
-                .send()
-                .await
-                .expect("list approvals")
-                .json()
-                .await
-                .expect("pending list is JSON");
-            let first = pending["pending"]
-                .as_array()
-                .and_then(|items| items.first())
-                .cloned();
-            if let Some(entry) = first {
-                break entry["id"].as_str().expect("id is a string").to_owned();
+        // Poll with a deadline so a missing Pending entry fails the test
+        // instead of hanging the whole test binary.
+        let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let pending: serde_json::Value = http
+                    .get(format!("{base}/v1/approvals"))
+                    .send()
+                    .await
+                    .expect("list approvals")
+                    .json()
+                    .await
+                    .expect("pending list is JSON");
+                let first = pending["pending"]
+                    .as_array()
+                    .and_then(|items| items.first())
+                    .cloned();
+                if let Some(entry) = first {
+                    break entry["id"].as_str().expect("id is a string").to_owned();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        })
+        .await
+        .expect("approval must become pending within 5s");
         let decision: serde_json::Value = http
             .post(format!("{base}/v1/approval/{id}/deny"))
             .json(&json!({ "reason": "not now" }))

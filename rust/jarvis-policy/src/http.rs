@@ -1477,20 +1477,26 @@ mod tests {
                     .expect("json")
             }
         });
-        let id = loop {
-            let list: serde_json::Value = client
-                .get(format!("{base}/v1/approvals"))
-                .send()
-                .await
-                .expect("list")
-                .json()
-                .await
-                .expect("json");
-            if let Some(entry) = list["pending"].as_array().and_then(|v| v.first()) {
-                break entry["id"].as_str().expect("id").to_owned();
+        // Poll with a deadline: if the first request never reaches Pending
+        // the test must fail instead of hanging the whole test binary.
+        let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let list: serde_json::Value = client
+                    .get(format!("{base}/v1/approvals"))
+                    .send()
+                    .await
+                    .expect("list")
+                    .json()
+                    .await
+                    .expect("json");
+                if let Some(entry) = list["pending"].as_array().and_then(|v| v.first()) {
+                    break entry["id"].as_str().expect("id").to_owned();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        })
+        .await
+        .expect("approval must become pending within 5s");
 
         // A distinct id avoids the duplicate-id guard; the cap must trigger.
         // 期待値を更新: キュー枯渇は基盤エラーなので、従来の 200 の Denied
