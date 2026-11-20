@@ -24,6 +24,15 @@ const INVALID_ADMIN_TOKEN_MESSAGE: &str = "Invalid admin token";
 /// record is written, so that detail is never logged (R5-B / I46-D).
 const KILL_SWITCH_INTERNAL_ERROR_MESSAGE: &str = "internal error";
 
+/// Fixed status message for a malformed `context` JSON string on `Check`.
+///
+/// `serde_json`'s error text embeds a byte offset and an expected-token
+/// description derived from caller input. Echoing it into a gRPC status made
+/// this surface asymmetric with the HTTP path's empty bare 400 (I97-D): only
+/// this literal is observable by the caller, while the raw error is reduced to
+/// a fixed `error_kind` before any tracing record is written.
+const INVALID_CONTEXT_JSON_MESSAGE: &str = "invalid context JSON";
+
 /// Fixed-vocabulary categories for kill-switch failures (I46-D).
 ///
 /// `KillSwitchError::Persistence` embeds a state-file path and an OS error in
@@ -65,6 +74,22 @@ fn kill_switch_status(error: anyhow::Error) -> Status {
     Status::internal(KILL_SWITCH_INTERNAL_ERROR_MESSAGE)
 }
 
+/// Map a malformed context JSON error onto the fixed gRPC contract.
+///
+/// The `serde_json::Error` is deliberately never read: its `Display`/`Debug`
+/// text carries caller-derived fragments, a byte offset and an expected-token
+/// description. It is absorbed here and only a fixed `error_kind` (shared with
+/// `jarvis_core`'s `BareJson` vocabulary) reaches tracing, so neither the
+/// status nor OTLP/Grafana can echo the offending input (I97-D).
+fn invalid_context_json_status(_error: serde_json::Error) -> Status {
+    tracing::debug!(
+        error_kind = jarvis_core::INVALID_JSON_BODY_ERROR_KIND,
+        field = "context",
+        "invalid client input"
+    );
+    Status::invalid_argument(INVALID_CONTEXT_JSON_MESSAGE)
+}
+
 pub struct GrpcPolicyService {
     engine: Arc<PolicyEngine>,
 }
@@ -79,8 +104,8 @@ impl PolicyService for GrpcPolicyService {
         // A malformed context used to fall back to an empty object via
         // `unwrap_or_default()`, so Cedar evaluated a different request than
         // the caller sent. Reject it at the RPC boundary instead.
-        let context: serde_json::Value = serde_json::from_str(&req.context)
-            .map_err(|e| Status::invalid_argument(format!("invalid context JSON: {}", e)))?;
+        let context: serde_json::Value =
+            serde_json::from_str(&req.context).map_err(invalid_context_json_status)?;
         // I14-B: normalize at the same policy-side boundary as the HTTP
         // handler. Cedar rejects JSON `null`, so without this the gRPC server
         // would error on contexts the client used to sanitize before sending.
@@ -289,17 +314,81 @@ mod tests {
     }
 
     /// Regression: unparseable context must not silently become `{}`; the gRPC
-    /// layer must surface it as `InvalidArgument` (tonic code 3).
+    /// layer must surface it as `InvalidArgument` (tonic code 3). I97-D: the
+    /// message is the one fixed phrase — serde's caller-derived detail must not
+    /// be echoed, matching HTTP's empty bare-400 contract.
     #[tokio::test]
     async fn malformed_context_json_is_invalid_argument() {
         let service = test_service("malformed-context").await;
 
+        const MALFORMED: &str = "{ not valid json";
+        let raw_detail = serde_json::from_str::<serde_json::Value>(MALFORMED)
+            .expect_err("probe is malformed")
+            .to_string();
+        assert!(!raw_detail.is_empty());
+
         let status = service
-            .check(check_request("{ not valid json"))
+            .check(check_request(MALFORMED))
             .await
             .expect_err("malformed JSON context must be rejected");
 
         assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_CONTEXT_JSON_MESSAGE);
+        assert!(
+            !status.message().contains(raw_detail.as_str()),
+            "serde detail leaked into the status: {}",
+            status.message()
+        );
+    }
+
+    /// I97-D: the fixed status message and the log error_kind are contract
+    /// constants; the latter matches the shared `BareJson` invalid-input token.
+    #[test]
+    fn invalid_context_json_contract_constants_are_fixed() {
+        assert_eq!(INVALID_CONTEXT_JSON_MESSAGE, "invalid context JSON");
+        assert_eq!(jarvis_core::INVALID_JSON_BODY_ERROR_KIND, "invalid_input");
+    }
+
+    /// I97-D: the raw serde error — derived from caller input — must be
+    /// absorbed before tracing. Only the fixed error_kind and message are
+    /// logged, so no offending fragment or serde detail reaches OTLP/Grafana.
+    #[test]
+    fn malformed_context_json_never_logs_raw_error_detail() {
+        const PROBE: &str = "PROBE_MALFORMED_CONTEXT_INPUT";
+        let malformed = format!("{{ {PROBE}}}");
+        let raw_detail = serde_json::from_str::<serde_json::Value>(&malformed)
+            .expect_err("probe is malformed")
+            .to_string();
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let status = tracing::subscriber::with_default(subscriber, || {
+            let error = serde_json::from_str::<serde_json::Value>(&malformed)
+                .expect_err("probe is malformed");
+            invalid_context_json_status(error)
+        });
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(status.message(), INVALID_CONTEXT_JSON_MESSAGE);
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(
+            logs.contains("invalid client input"),
+            "fixed log is missing"
+        );
+        assert!(!logs.contains(PROBE), "raw input leaked to logs: {logs}");
+        assert!(
+            !logs.contains(raw_detail.as_str()),
+            "raw serde detail leaked: {logs}"
+        );
     }
 
     /// Guard the normal path: well-formed JSON still reaches evaluation.

@@ -358,6 +358,21 @@ mod status_label_tests {
         // Bounded vocabulary: unrelated codes must still collapse to `other`.
         assert_eq!(jarvis_core::status_label(unlisted), "other");
     }
+
+    /// I97-D: 410 is the policy service's expired-approval outcome (no winner),
+    /// distinct from the 409 winner/halt branches. It must keep its own bucket
+    /// instead of collapsing into `other`, so expiry stays observable.
+    #[test]
+    fn maps_410_to_its_own_label() {
+        let expired = StatusCode::from_u16(410).expect("valid status");
+        let decided = StatusCode::from_u16(409).expect("valid status");
+        assert_eq!(jarvis_core::status_label(expired), "410");
+        assert_ne!(
+            jarvis_core::status_label(expired),
+            jarvis_core::status_label(decided)
+        );
+        assert_ne!(jarvis_core::status_label(expired), "other");
+    }
 }
 
 /// Wrap one of the three fixed `/health` bodies with the stable JSON content

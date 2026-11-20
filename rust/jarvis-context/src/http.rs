@@ -342,6 +342,20 @@ mod status_label_tests {
         let unavailable = StatusCode::from_u16(503).expect("valid status");
         assert_eq!(jarvis_core::status_label(unavailable), "503");
     }
+
+    /// I97-D: the shared vocabulary must expose 410 as its own bucket so an
+    /// expired approval stays observable instead of collapsing to `other`.
+    #[test]
+    fn maps_410_to_its_own_label() {
+        let expired = StatusCode::from_u16(410).expect("valid status");
+        let decided = StatusCode::from_u16(409).expect("valid status");
+        assert_eq!(jarvis_core::status_label(expired), "410");
+        assert_ne!(
+            jarvis_core::status_label(expired),
+            jarvis_core::status_label(decided)
+        );
+        assert_ne!(jarvis_core::status_label(expired), "other");
+    }
 }
 
 async fn health() -> &'static str {

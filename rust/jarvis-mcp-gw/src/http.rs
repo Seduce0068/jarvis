@@ -198,6 +198,20 @@ mod status_label_tests {
         let unavailable = StatusCode::from_u16(503).expect("valid status");
         assert_eq!(jarvis_core::status_label(unavailable), "503");
     }
+
+    /// I97-D: the shared vocabulary must expose 410 as its own bucket so an
+    /// expired approval stays observable instead of collapsing to `other`.
+    #[test]
+    fn maps_410_to_its_own_label() {
+        let expired = StatusCode::from_u16(410).expect("valid status");
+        let decided = StatusCode::from_u16(409).expect("valid status");
+        assert_eq!(jarvis_core::status_label(expired), "410");
+        assert_ne!(
+            jarvis_core::status_label(expired),
+            jarvis_core::status_label(decided)
+        );
+        assert_ne!(jarvis_core::status_label(expired), "other");
+    }
 }
 
 async fn health() -> &'static str {
@@ -232,9 +246,10 @@ async fn execute_tool(
 /// Reduce a caller-input failure to a fixed vocabulary of safe, static
 /// phrases. Several `client_error()` messages interpolate absolute sandbox
 /// paths, git stderr, egress hosts or raw URLs, so only known-static messages
-/// pass through verbatim. This is the single shared helper for the HTTP and
-/// gRPC adapters (and mirrors the private one in `mcp_server`); both callers
-/// must use it instead of echoing `error.to_string()` into a response.
+/// pass through verbatim. This is the single shared helper for the HTTP, gRPC
+/// and MCP surfaces; every caller must use it instead of echoing
+/// `error.to_string()` into a response, so a vocabulary update cannot fork one
+/// surface (I97-D).
 pub(crate) fn safe_client_error_text(message: &str) -> &'static str {
     match message {
         "missing 'url' argument" => "missing 'url' argument",
@@ -592,6 +607,29 @@ requires_approval = true
     /// Build a typed client error while preserving the original message.
     fn client_error(message: &str) -> anyhow::Error {
         crate::error::McpGatewayError::ClientError(message.to_owned()).into()
+    }
+
+    /// I97-D: the HTTP adapter's caller-visible body must come from the same
+    /// helper the MCP protocol surface uses (see the contract test in
+    /// `mcp_server::tests`). A vocabulary edit can therefore no longer make the
+    /// HTTP/gRPC and MCP faces disagree.
+    #[test]
+    fn http_error_uses_the_shared_client_error_vocabulary() {
+        for message in [
+            "missing 'url' argument",
+            "too many redirects (> 3)",
+            "host 'attacker.example' is not in the egress allowlist",
+            "stat /home/koppe/.secret/token: permission denied",
+            "completely unknown caller text",
+        ] {
+            let (status, body) = http_error(client_error(message));
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+            assert_eq!(
+                body.0["error"].as_str().unwrap(),
+                safe_client_error_text(message),
+                "HTTP and MCP faces must sanitize {message} identically"
+            );
+        }
     }
 
     #[test]

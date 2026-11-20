@@ -168,43 +168,6 @@ const INTERNAL_ERROR_MESSAGE: &str = "internal gateway error";
 /// instead of routing it through the safe-summary error path.
 const UPSTREAM_ERROR_MESSAGE: &str = "upstream tool returned an error";
 
-/// Reduce a caller-input failure to a small, fixed vocabulary.
-///
-/// Several `client_error()` messages interpolate absolute sandbox paths, git
-/// stderr or raw URLs (e.g. `stat /home/...`). Echoing such text to an MCP
-/// client would open the same disclosure channel as internal errors, so only
-/// known-static messages are passed through verbatim; everything else is
-/// replaced by one fixed phrase.
-fn safe_client_error_text(message: &str) -> &'static str {
-    match message {
-        "missing 'url' argument" => "missing 'url' argument",
-        "url has no host" => "url has no host",
-        "credentials in URL are not allowed" => "credentials in URL are not allowed",
-        "redirect response has no Location header" => "redirect response has no Location header",
-        "redirect response has an empty Location header" => {
-            "redirect response has an empty Location header"
-        }
-        "web.fetch timed out" => "web.fetch timed out",
-        "web.fetch body timed out" => "web.fetch body timed out",
-        "MCP server name must not be empty" => "MCP server name must not be empty",
-        "MCP server command must not be empty" => "MCP server command must not be empty",
-        _ if message.starts_with("too many redirects (") => "too many redirects",
-        _ if message.starts_with("file too large to read (") => "file too large to read",
-        _ if message.starts_with("response too large (") => "response too large",
-        _ if message.starts_with("git output too large (") => "git output too large",
-        _ if message.starts_with("unsupported scheme '") => "unsupported scheme",
-        _ if message.starts_with("unsupported content type:") => "unsupported content type",
-        _ if message.starts_with("host '") => "host is not allowed by the egress policy",
-        _ if message.starts_with("refusing to fetch non-public address") => {
-            "refusing to fetch non-public address"
-        }
-        _ if message.contains("dns lookup") => "dns lookup failed",
-        _ if message.starts_with("no native handler for tool '") => "no native handler for tool",
-        _ if message.starts_with("MCP server '") => "upstream MCP server is unavailable",
-        _ => "invalid tool arguments",
-    }
-}
-
 /// Turn an execution failure into the only text an MCP client may see.
 ///
 /// Classification uses `McpGatewayError::kind()` (as the HTTP and gRPC
@@ -214,6 +177,11 @@ fn safe_client_error_text(message: &str) -> &'static str {
 /// `Internal` and are sanitized. Denials use the same fixed phrase as the
 /// HTTP/gRPC adapters: `ApprovalDenied.reason` is approver-controlled free
 /// text and must never become a tool result an OpenCode/LLM client sees.
+///
+/// Caller-input wording comes from the single shared
+/// [`crate::http::safe_client_error_text`] used by the HTTP and gRPC adapters,
+/// so the MCP protocol surface cannot drift into a different sanitization
+/// vocabulary when that helper is updated (I97-D).
 fn client_facing_tool_error(error: &anyhow::Error) -> String {
     use crate::error::ErrorKind;
 
@@ -229,7 +197,9 @@ fn client_facing_tool_error(error: &anyhow::Error) -> String {
         // out of any downstream log of the client conversation.
         ErrorKind::Forbidden => crate::http::POLICY_DENIED_MESSAGE.to_string(),
         // Caller-input errors are rounded to a fixed vocabulary as well.
-        ErrorKind::ClientError => safe_client_error_text(&error.to_string()).to_string(),
+        ErrorKind::ClientError => {
+            crate::http::safe_client_error_text(&error.to_string()).to_string()
+        }
         ErrorKind::Internal => {
             let detail = format!("{error:#}");
             tracing::error!(error = %detail, "MCP tools/call failed with internal gateway error");
@@ -707,6 +677,57 @@ requires_approval = true
         let denied_text = client_facing_tool_error(&denied);
         assert_eq!(denied_text, crate::http::POLICY_DENIED_MESSAGE);
         assert!(!denied_text.contains("git.commit"));
+    }
+
+    /// I97-D contract: the HTTP/gRPC adapters and the MCP protocol surface must
+    /// sanitize caller-input failures through one implementation. These
+    /// representative inputs cover exact-phrase passthrough, interpolated
+    /// prefixes and unknown text; every face must produce byte-identical output
+    /// for each of them.
+    #[test]
+    fn client_error_sanitization_matches_http_adapter() {
+        use crate::error::McpGatewayError;
+
+        for message in [
+            "missing 'url' argument",
+            "url has no host",
+            "credentials in URL are not allowed",
+            "web.fetch timed out",
+            "web.fetch body timed out",
+            "MCP server name must not be empty",
+            "too many redirects (> 3)",
+            "file too large to read (1048577 bytes)",
+            "response too large (4096 bytes > 1024)",
+            "git output too large (4096 bytes)",
+            "unsupported scheme 'file'",
+            "unsupported content type: 'application/octet-stream'",
+            "host 'attacker.example' is not in the egress allowlist",
+            "refusing to fetch non-public address 127.0.0.1",
+            "dns lookup failed: missing.invalid",
+            "no native handler for tool 'x'",
+            "MCP server 'upstream' is unavailable",
+            "stat /home/koppe/.secret/token: permission denied",
+            "completely unknown caller text",
+        ] {
+            let shared = crate::http::safe_client_error_text(message);
+            let error: anyhow::Error = McpGatewayError::ClientError(message.to_owned()).into();
+            let mcp = client_facing_tool_error(&error);
+            assert_eq!(mcp, shared, "sanitization diverged for {message}");
+        }
+    }
+
+    /// Static guard: this module must not reintroduce a private copy of the
+    /// sanitizer, which would let a one-sided edit fork the MCP vocabulary from
+    /// HTTP/gRPC. `concat!` keeps the needle out of this file's own source so
+    /// the guard cannot self-match.
+    #[test]
+    fn mcp_server_has_no_private_safe_client_error_text() {
+        const SRC: &str = include_str!("mcp_server.rs");
+        let needle = concat!("fn safe_client_error", "_text");
+        assert!(
+            !SRC.contains(needle),
+            "mcp_server must call crate::http::safe_client_error_text"
+        );
     }
 
     /// R5-B regression: an approver's free-form denial reason must never be

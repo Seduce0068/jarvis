@@ -112,6 +112,12 @@ pub const HEALTH_NO_POLICY_BODY: &str = r#"{"status":"degraded","reason":"no_pol
 /// here is the one the policy and event services already carried, so the
 /// vocabulary itself is unchanged — this only removes the four-way duplication
 /// and lifts mcp-gw/context onto the same contract.
+///
+/// I97-D: `410` is likewise a first-class bucket. `jarvis-policy` emits 410 for
+/// an expired approval decision window ([`APPROVAL_EXPIRED_BODY`]); it is a
+/// terminal outcome distinct from the 409 winner/halt branches. Without a
+/// dedicated label every expiry collapsed into `other`, making expired
+/// approvals unobservable in `jarvis_http_requests_total`.
 #[cfg(feature = "http")]
 pub fn status_label(status: axum::http::StatusCode) -> &'static str {
     match status.as_u16() {
@@ -123,6 +129,7 @@ pub fn status_label(status: axum::http::StatusCode) -> &'static str {
         403 => "403",
         404 => "404",
         409 => "409",
+        410 => "410",
         413 => "413",
         415 => "415",
         500 => "500",
@@ -581,10 +588,13 @@ mod tests {
     /// the same mapping every service emits; a one-sided edit in a consumer
     /// cannot silently drift an availability bucket.
     ///
-    /// The `503` row is the regression this change is about: it must stay its
-    /// own label instead of collapsing to `other` (the old mcp-gw/context
-    /// behavior). The final loop also proves the vocabulary is unchanged and
-    /// bounded — other 5xx codes such as 502/504 still fall into `other`.
+    /// The `503` row is the regression I93-D was about: it must stay its own
+    /// label instead of collapsing to `other` (the old mcp-gw/context
+    /// behavior). The `410` row is the I97-D regression: an expired approval
+    /// window is a terminal outcome, not the 409 winner/halt branches, so it
+    /// must stay observable as its own bucket. The final loop also proves the
+    /// vocabulary is unchanged and bounded — other 4xx/5xx codes such as
+    /// 418/429/502/504 still fall into `other`.
     #[cfg(feature = "http")]
     #[test]
     fn status_label_vocabulary_is_identical_for_all_services() {
@@ -597,6 +607,7 @@ mod tests {
             (403, "403"),
             (404, "404"),
             (409, "409"),
+            (410, "410"),
             (413, "413"),
             (415, "415"),
             (500, "500"),
@@ -617,6 +628,14 @@ mod tests {
         let service_unavailable = axum::http::StatusCode::from_u16(503).expect("valid status");
         let unlisted = axum::http::StatusCode::from_u16(502).expect("valid status");
         assert_ne!(status_label(service_unavailable), status_label(unlisted));
+
+        // I97-D: approval expiry is terminal but distinct from the 409
+        // winner/halt branches; it must not fold back into `other`.
+        let expired = axum::http::StatusCode::from_u16(410).expect("valid status");
+        let decided = axum::http::StatusCode::from_u16(409).expect("valid status");
+        assert_eq!(status_label(expired), "410");
+        assert_ne!(status_label(expired), status_label(decided));
+        assert_ne!(status_label(expired), status_label(unlisted));
     }
 
     fn all_sources() -> [EventSource; 7] {
