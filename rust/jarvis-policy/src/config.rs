@@ -91,8 +91,12 @@ pub struct PolicyConfig {
     #[serde(default)]
     pub require_kill_switch_state_path: bool,
     /// Optional PostgreSQL connection URL for durable approval persistence
-    /// (I29-A, 案A). Slice 1 only defines the config surface: no connection is
-    /// opened and no URL is parsed here.
+    /// (I29-A, 案A). A non-blank URL makes `PolicyEngine::new` open the store
+    /// via `PgApprovalPersistence::connect(pg_url).await?`; an unset/blank URL
+    /// keeps the Noop/in-memory store (legacy behavior). With
+    /// `require_approval_persistence` enabled, a missing URL fails startup
+    /// closed through `validate_approval_persistence`. The URL itself is
+    /// never logged or echoed into errors because it may embed credentials.
     #[serde(default)]
     pub pg_url: Option<String>,
     /// Opt-in guard: when true, startup fails closed if `pg_url` is unset (or
@@ -297,10 +301,11 @@ impl PolicyConfig {
     /// while the operator believes they are durable. With the guard off this
     /// is a no-op, preserving the legacy in-memory + warn-only behavior.
     ///
-    /// This only validates configuration — no connection is attempted, so the
-    /// seam stays free of external I/O until slice 2. Kept public so callers
-    /// that build a `PolicyConfig` programmatically can enforce the same
-    /// guard before constructing a `PolicyEngine`.
+    /// This only validates configuration: no connection is attempted here and
+    /// the URL value is never interpolated into the error. The connection is
+    /// opened later by `PolicyEngine::new` when a non-blank URL is configured.
+    /// Kept public so callers that build a `PolicyConfig` programmatically can
+    /// enforce the same guard before constructing a `PolicyEngine`.
     pub fn validate_approval_persistence(&self) -> Result<()> {
         let url_missing = self
             .pg_url

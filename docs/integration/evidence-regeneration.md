@@ -295,6 +295,20 @@ bash ci/scripts/generate-evidence.sh context --check \
 Scenario 数・契約 step キーワード・index の件数は generator の対象外のため、
 従来どおり手順4〜6で同期する。
 
+## verify サマリの件数単位（I81-D (c)）
+
+`infra/scripts/verify-backup.sh` の `== result: ok=<n> fail=<n> ==` は
+**ペイロード／呼び出し単位の判定数**である。カウンタ単一化後は 1 ペイロード
+に対する完全性チェック、フォーマット判定、ロール判定などがそれぞれ
+`ok` / `fail` を 1 件ずつ加算する。旧来の「イベント数」（ペイロードや
+バックアップセットの個数）とは一致しないので、`ok + fail` を
+イベント件数として読まないこと。
+
+`evidence/*.json` の `results.passed` はテスト関数の列挙数であり、
+verify サマリとは単位が異なる。両者を照合する場合は
+「テストケース」「ペイロード判定呼び出し」「イベント」の
+どの単位で数えたかを明記する。
+
 ## 関連
 
 - [specs/index.md](../../specs/index.md): テスト仕様の索引

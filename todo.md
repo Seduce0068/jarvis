@@ -2257,3 +2257,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
+
+### Round 78（R4 で修正済み）
+
+- [x] flock を堅牢化: スコープ記述を訂正（timer 除外は stop/verify が担任）、
+  dispatch 前に fd を閉じる、PID／取得時刻を記録、/run 安定パス＋inode 照合。
+- [x] secret_scan.py を repo root 固定の git ls-files へ変更、CWD 非依存と
+  index 件数クロスチェック、サブディレクトリ CWD 回帰3件。
+- [x] egress allowlist テストを本番 from_config() 経路へ統一、空入力が
+  DenyAll になる fail-closed を期待へ反転。
+- [x] pg_url doc・event OnceLock 順序依存・verify サマリ単位の Runbook
+  明記を同期（event 77→78 テスト、証跡更新）。
+
+### Round 78 の残り指摘（未対応）
+
+- [ ] flock を dispatch 前に閉じるため、dispatch 中の他インスタンス排除は
+  このロックでは担保されない（トレードオフを子が明記）。厳密な相互排除が
+  必要なら別 fd で再取得する別タスク。
+- [ ] stat 照合は TOCTOU を完全に排除するものではない（一次防御は /run 権限、
+  設計書に明記済み）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: shellcheck SC2174／SC2261、event 証跡の件数同期、全ゲート検証。

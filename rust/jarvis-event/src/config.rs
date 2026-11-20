@@ -6,7 +6,7 @@ use figment::{
     providers::{Env, Format, Toml},
 };
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 /// Absolute default location of the event TOML. The former CWD-relative
 /// `config/event.toml` was not found when the service was started outside
@@ -63,12 +63,19 @@ const ADMIN_TOKEN_ENV_KEY: &str = "JARVIS_EVENT_ADMIN_TOKEN";
 /// transport modules. Publishing the already-merged value here lets both TOML
 /// and environment configuration drive the gate without touching those call
 /// sites. `None` means "no token configured" (legacy loopback behavior).
-static INGRESS_ADMIN_TOKEN: OnceLock<Option<String>> = OnceLock::new();
+///
+/// The `Mutex` wrapper exists only so `#[cfg(test)]` can reset the snapshot;
+/// production reads/writes keep the bare `OnceLock` first-wins semantics.
+static INGRESS_ADMIN_TOKEN: Mutex<OnceLock<Option<String>>> = Mutex::new(OnceLock::new());
 
 /// Publish the effective token before any listener starts. Only the first
 /// value wins; the value itself is never logged.
 pub(crate) fn publish_admin_token(token: Option<String>) {
-    if INGRESS_ADMIN_TOKEN.set(token).is_err() {
+    let snapshot = match INGRESS_ADMIN_TOKEN.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if snapshot.set(token).is_err() {
         tracing::warn!("event admin token already published; keeping the first value");
     }
 }
@@ -78,13 +85,28 @@ pub(crate) fn publish_admin_token(token: Option<String>) {
 /// Uses the value published by [`EventConfig::load`] when available, and falls
 /// back to the environment for embedded callers that never invoked it.
 pub(crate) fn ingress_admin_token() -> Option<String> {
-    match INGRESS_ADMIN_TOKEN.get() {
-        Some(token) => token.as_ref().cloned(),
+    let snapshot = match INGRESS_ADMIN_TOKEN.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    match snapshot.get() {
+        Some(token) => token.clone(),
         None => std::env::var(ADMIN_TOKEN_ENV_KEY)
             .ok()
             .map(|value| value.trim().to_owned())
             .filter(|value| !value.is_empty()),
     }
+}
+
+/// Clear the process-wide snapshot so tests do not depend on execution order.
+/// Test-only: production code has no path that unpublishes a token.
+#[cfg(test)]
+fn reset_admin_token_for_test() {
+    let mut snapshot = match INGRESS_ADMIN_TOKEN.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *snapshot = OnceLock::new();
 }
 
 /// Compare two token byte strings without an early exit on the first mismatch.
@@ -341,10 +363,48 @@ policy_grpc_addr = "http://127.0.0.1:50051"
         assert!(!token_matches(Some("secret"), Some("")));
     }
 
+    /// Serializes the two tests that reset the process-wide token snapshot.
+    static TOKEN_SNAPSHOT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A second publish is ignored: `load()` can run more than once, and the
+    /// first merged value is the one the HTTP/gRPC transports must use.
     #[test]
-    fn ingress_token_snapshot_is_used_by_transports() {
-        publish_admin_token(Some("snapshot-secret".into()));
-        assert_eq!(ingress_admin_token().as_deref(), Some("snapshot-secret"));
+    fn ingress_token_snapshot_is_first_wins() {
+        let _guard = match TOKEN_SNAPSHOT_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        reset_admin_token_for_test();
+        publish_admin_token(Some("first-secret".into()));
+        publish_admin_token(Some("second-secret".into()));
+        assert_eq!(ingress_admin_token().as_deref(), Some("first-secret"));
+        reset_admin_token_for_test();
+    }
+
+    /// One-shot check of the real `load_from_path()` publish route. An ambient
+    /// `JARVIS_EVENT_ADMIN_TOKEN` would override the TOML value, so skip
+    /// there; first-wins itself is covered by the test above.
+    #[test]
+    fn load_from_path_publishes_admin_token() {
+        if std::env::var_os(ADMIN_TOKEN_ENV_KEY).is_some() {
+            return;
+        }
+        let _guard = match TOKEN_SNAPSHOT_TEST_LOCK.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        reset_admin_token_for_test();
+
+        let toml = format!("{LEGACY_TOML}\nadmin_token = \"load-secret\"\n");
+        let path = std::env::temp_dir().join("jarvis-event-i81d-admin-token.toml");
+        std::fs::write(&path, &toml).expect("write temp config");
+        let path_str = path.to_str().expect("utf8 temp path");
+        let config = EventConfig::load_from_path(path_str).expect("config loads");
+        assert_eq!(config.admin_token(), Some("load-secret"));
+        assert_eq!(ingress_admin_token().as_deref(), Some("load-secret"));
+
+        std::fs::remove_file(&path).expect("clean temp config");
+        reset_admin_token_for_test();
     }
 
     /// I31-B: a legacy deployment with no new keys keeps the in-process route
