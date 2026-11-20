@@ -54,8 +54,13 @@
         "description": "TypeScript編集後にテスト仕様確認"
       },
       {
-        "matcher": "**/*.rs",
-        "command": "shell cargo fmt --check && cargo clippy -- -D warnings",
+        "matcher": "rust/**/*.rs",
+        "command": "shell cd rust && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings",
+        "description": "Rust編集後にフォーマット・リントチェック"
+      },
+      {
+        "matcher": "ui/**/*.rs",
+        "command": "shell cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings",
         "description": "Rust編集後にフォーマット・リントチェック"
       },
       {
