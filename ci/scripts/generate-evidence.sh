@@ -18,7 +18,7 @@
 # trusting that value. check-evidence.sh's `failed == 0` gate and the six
 # existing evidence files therefore stay intact.
 #
-# I95-E (a)/(d): --check accepts only `evidence/test-run-<12hex>.json` directly
+# I95-E (a)/(d): --check accepts only `evidence/test-run-<YYYYMMDD>-<12hex>.json` directly
 # under evidence/ (no slash inside the filename, no ".."), and emits ONLY
 # MATCH / MISMATCH. The `results` fragment is printed in generation mode alone,
 # so a failed check can never leave a success-looking fragment in the output.
@@ -27,7 +27,7 @@ repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: ci/scripts/generate-evidence.sh <target> [--check evidence/test-run-<12hex>.json]
+Usage: ci/scripts/generate-evidence.sh <target> [--check evidence/test-run-<YYYYMMDD>-<12hex>.json]
   target: policy | mcp | context | event | ui | core
   --check also RUNS the real suite (not --list) and requires it to pass,
           then compares the derived counts with an existing evidence JSON;
@@ -62,11 +62,11 @@ if [ "$#" -ge 2 ]; then
   # the case and fail later as EvidenceFileNotFound (exit 1) instead of the
   # documented BadEvidencePath (exit 2). Strip the ONE mandatory `evidence/`
   # prefix, then reject any further "/" or ".." explicitly, and finally require
-  # the exact evidence/test-run-<12hex>.json shape.
+  # the exact evidence/test-run-<YYYYMMDD>-<12hex>.json shape.
   case "${check_file#evidence/}" in
     */*|*..*) echo "FAIL: BadEvidencePath" >&2; exit 2 ;;
   esac
-  evidence_path_re='^evidence/test-run-[0-9a-f]{12}[.]json$'
+  evidence_path_re='^evidence/test-run-[0-9]{8}-[0-9a-f]{12}[.]json$'
   if [[ ! "$check_file" =~ $evidence_path_re ]]; then
     echo "FAIL: BadEvidencePath" >&2
     exit 2
