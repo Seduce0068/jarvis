@@ -133,8 +133,14 @@ impl McpGatewayService for GrpcMcpGatewayService {
     ) -> Result<Response<ExecuteToolResponse>, Status> {
         authorize_grpc(&request, self.admin_token.as_deref(), false)?;
         let req = request.into_inner();
-        let args: serde_json::Value = serde_json::from_str(&req.args)
-            .map_err(|e| Status::invalid_argument(format!("invalid args JSON: {e}")))?;
+        let args: serde_json::Value = serde_json::from_str(&req.args).map_err(|e| {
+            // Caller input stays server-side: log the serde_json detail but
+            // return the same fixed client-error token the HTTP adapter uses.
+            tracing::warn!(error = %e, "gRPC execute_tool rejected malformed args JSON");
+            Status::invalid_argument(crate::http::safe_client_error_text(
+                "invalid tool arguments",
+            ))
+        })?;
         let result = self
             .gateway
             .execute_tool(&req.tool, args, &req.principal)
@@ -391,6 +397,13 @@ requires_approval = false
             .await
             .expect_err("malformed args JSON must be rejected");
         assert_eq!(status.code(), Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            crate::http::safe_client_error_text("invalid tool arguments")
+        );
+        for leaked in ["expected value", "line 1", "column", "invalid args JSON"] {
+            assert!(!status.message().contains(leaked), "leaked '{leaked}'");
+        }
     }
 
     /// Every `ErrorKind` must map to its agreed gRPC code, and the caller-
@@ -687,5 +700,126 @@ requires_approval = false
         assert_eq!(grpc_status.code(), Code::Internal);
         assert_eq!(grpc_status.message(), INTERNAL_ERROR_MESSAGE);
         assert!(!grpc_status.message().contains("returned an error"));
+    }
+
+    /// Build a service with a tiny argument cap so a generic client-input
+    /// failure can be exercised over HTTP and gRPC alike. Uses the same
+    /// shipped-policy principal/tool pair as the joint-status regression.
+    async fn test_service_with_args_cap(
+        label: &str,
+        max_args_size: usize,
+    ) -> GrpcMcpGatewayService {
+        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-grpc-{label}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .expect("create temp dir");
+        let allowlist = dir.join("mcp_allowlist.toml");
+        tokio::fs::write(
+            &allowlist,
+            format!(
+                r#"
+principals = ["opencode"]
+
+[[tools]]
+name = "shell.execute"
+description = "Echo tool"
+allowed_principals = ["opencode"]
+max_args_size = {max_args_size}
+timeout_ms = 5000
+requires_approval = false
+"#
+            ),
+        )
+        .await
+        .expect("write allowlist");
+        let config = crate::config::McpGatewayConfig {
+            allowlist_path: allowlist.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+        let policy = crate::testing::shipped_policy_client(label).await;
+        let gateway = crate::McpGateway::new(config, Arc::new(policy))
+            .await
+            .expect("gateway starts");
+        GrpcMcpGatewayService {
+            gateway,
+            admin_token: None,
+        }
+    }
+
+    /// Cross-transport vocabulary regression (I83-C a): malformed JSON must
+    /// never leak serde_json detail on either adapter. HTTP collapses a broken
+    /// body to a bare 400 (`BareJson`); gRPC reduces a malformed `args` string
+    /// to the very same fixed client-error token the HTTP adapter puts in its
+    /// 400 body. The raw error is left to the server log only.
+    #[tokio::test]
+    async fn malformed_json_uses_same_fixed_vocabulary_on_http_and_grpc() {
+        let service = test_service_with_args_cap("json-vocab", 8).await;
+        let app = crate::http::router(Arc::new(service.gateway.clone()));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind http test server");
+        let base = format!("http://{}", listener.local_addr().expect("http addr"));
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("http server runs");
+        });
+        let http = reqwest::Client::new();
+
+        // HTTP client-error bucket: oversized args -> 400 with fixed body.
+        let oversized = serde_json::json!({ "cmd": "a".repeat(64) });
+        let response = http
+            .post(format!("{base}/v1/execute"))
+            .json(&serde_json::json!({
+                "tool": "shell.execute",
+                "args": oversized,
+                "principal": "opencode",
+            }))
+            .send()
+            .await
+            .expect("http execute runs");
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+        let body: serde_json::Value = response.json().await.expect("http error body is JSON");
+        let http_message = body["error"]
+            .as_str()
+            .expect("400 body carries an error token");
+
+        // HTTP syntax error: bare 400, no serde detail in the response.
+        let syntax = http
+            .post(format!("{base}/v1/execute"))
+            .header("content-type", "application/json")
+            .body("{ this is not valid json")
+            .send()
+            .await
+            .expect("http syntax request runs");
+        assert_eq!(syntax.status(), reqwest::StatusCode::BAD_REQUEST);
+        let syntax_body = syntax.text().await.expect("http syntax body");
+        assert!(
+            !syntax_body.contains("expected value"),
+            "serde detail leaked: {syntax_body}"
+        );
+
+        // gRPC: the malformed `args` string must produce the very same token
+        // as the HTTP client-error body, with no serde_json detail attached.
+        let status = service
+            .execute_tool(Request::new(ExecuteToolRequest {
+                tool: "shell.execute".into(),
+                args: "{ this is not valid json".into(),
+                principal: "opencode".into(),
+            }))
+            .await
+            .expect_err("malformed args rejected by grpc");
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            crate::http::safe_client_error_text("invalid tool arguments")
+        );
+        assert_eq!(
+            status.message(),
+            http_message,
+            "HTTP/gRPC vocabulary diverged"
+        );
+        for leaked in ["expected value", "line 1", "column", "invalid args JSON"] {
+            assert!(!status.message().contains(leaked), "leaked '{leaked}'");
+        }
     }
 }
