@@ -1,6 +1,6 @@
 /// ```cargo
 /// [dependencies]
-/// anyhow = "1.0"
+/// anyhow = "=1.0.104"
 /// clap = { version = "4.5", features = ["derive"] }
 /// ```
 // Bootstrap JARVIS server or Termux environment.

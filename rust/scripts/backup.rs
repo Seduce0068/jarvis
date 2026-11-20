@@ -1,16 +1,16 @@
 /// ```cargo
 /// [dependencies]
-/// anyhow = "1.0"
-/// chrono = { version = "0.4", features = ["serde"] }
+/// anyhow = "=1.0.104"
+/// chrono = { version = "=0.4.45", features = ["serde"] }
 /// clap = { version = "4.5", features = ["derive"] }
-/// reqwest = { version = "0.12", features = ["json", "blocking", "rustls-tls"] }
-/// serde = { version = "1.0", features = ["derive"] }
-/// serde_json = "1.0"
-/// tokio = { version = "1.40", features = ["full"] }
-/// tracing = "0.1"
-/// tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+/// reqwest = { version = "=0.12.28", features = ["json", "blocking", "rustls-tls"] }
+/// serde = { version = "=1.0.229", features = ["derive"] }
+/// serde_json = "=1.0.151"
+/// tokio = { version = "=1.53.2", features = ["full"] }
+/// tracing = "=0.1.44"
+/// tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 /// hostname = "0.3"
-/// dirs = "5.0"
+/// dirs = "=5.0.1"
 /// ```
 
 /// JARVIS Backup Script - Rust version（レガシー・非推奨）

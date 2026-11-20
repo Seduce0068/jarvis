@@ -11,18 +11,26 @@ SHELL := $(shell command -v bash 2>/dev/null || echo /bin/sh)
 help: ## ヘルプ表示
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-# I84-A: rust-script 依存の exact pin 方針（記録のみ・メタブロックは担当外）
+# I84-A / I85-C: rust-script 依存の exact pin 方針
 # 下記ターゲットが呼ぶ rust-script は、各 .rs 先頭の `/// ```cargo` メタブロックに
-# `anyhow = "1.0"` 等の semver 下限だけを書き、Cargo.lock に相当する固定が無い。
-# bootstrap / doctor / deploy / backup / restore は特権・本番接触の可能性がある
-# ため、再現性と監査性の観点から各メタブロックの直接依存を `=x.y.z` の exact pin
-# へ統一する方針とする（推移依存まで固定する場合は rust-script 側のロック運用を
-# 別途調査して採用する）。
-# 例外 / 現状: 本次（I84-A）は Makefile への方針記録のみを行い、各スクリプトの
-# メタブロックは担当外のため未編集。pin 化は別タスクで実施する。
+# 直接依存を宣言する。bootstrap / deploy / backup / restore は特権・本番接触の
+# 可能性があるため、再現性と監査性の観点から直接依存は `=x.y.z` の exact pin へ
+# 統一する（推移依存まで固定する場合は rust-script 側のロック運用を別途調査して
+# 採用する）。
+# 根拠バージョンは rust/Cargo.lock の解決版とする（対象スクリプトは rust/scripts/
+# 配下であり、ui/Cargo.lock は serde_json / tokio 等が異なるため混用しない）。
+# 現状（I85-C）: ロックに載っている依存は pin 済み。`clap` と `hostname` は
+# rust/Cargo.lock / ui/Cargo.lock のいずれにも無く、リポジトリ内に利用バージョンの
+# 根拠が無いため pin を保留する（推測で数値を書かない）。これらを workspace ロック
+# に載せるか、rust-script 実行時に生成されるロックを取得してから pin すること。
+# rust-script 本体のバージョン固定方針: インストールは
+# `cargo install rust-script --version 0.36.0 --locked` のように exact version を
+# 明示し、`rust-script --version` が一致することを手動ゲートで確認する。更新は
+# 意図的な変更として記録し、各メタブロックの pin と同時に見直す（ローカルの
+# インストール／キャッシュ上の解決版は 0.36.0）。
 # 補足: `make ci-local` は rust-script を実行せず（cargo ゲート + シェル/
-# Python ゲートのみ）、また `rust-script` 自体のインストールバージョンも未固定
-# なので、この drift は現状 CI ではなく手動の特権操作経路に留まる。
+# Python ゲートのみ）、rust-script 自体のバージョンも CI で固定されていないため、
+# この drift は現状 CI ではなく手動の特権操作経路に留まる。
 # 更新時はこのコメントと各スクリプトのメタブロックを同時に見直すこと。
 
 bootstrap-server: ## サーバー(Linux/VPS)をブートストラップ

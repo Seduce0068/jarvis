@@ -1,9 +1,9 @@
 /// ```cargo
 /// [dependencies]
-/// anyhow = "1.0"
+/// anyhow = "=1.0.104"
 /// clap = { version = "4.5", features = ["derive"] }
-/// tracing = "0.1"
-/// tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+/// tracing = "=0.1.44"
+/// tracing-subscriber = { version = "=0.3.23", features = ["env-filter", "fmt"] }
 /// ```
 
 /// JARVIS Deploy Script - Rust version
