@@ -345,13 +345,52 @@ immutable なので対象外とし、`@vN` 形式のタグ参照のみを検査�
 # Kubuntu / jarvis リポジトリルートで実行
 echo "== workflow pin 照合 =="
 make check-workflow-pins
-echo "== ci-local（check-shell の直後に含まれる） =="
+echo "== ci-local（check-workflow-pins とその回帰が含まれる） =="
 make ci-local
 ```
 
 `make ci-local` のほか、`.github/workflows/ci.yml` の `extra_gates` と
 `.github/workflows/review-gate.yml` の手動ゲート（`make ci-local`）でも
 実行される。
+
+### 自動回帰（I89-B / `test-workflow-pins.sh`）
+
+`check-workflow-pins.sh` の各分岐は手動確認に依存していたため、
+[test-workflow-pins.sh](../../ci/scripts/test-workflow-pins.sh) で自動回帰する。
+一時ディレクトリへゲート本体と mini workflow をコピーし、`curl` を PATH 上の
+疑似レスポンス・スタブで隠すため、実ワークフロー・実 API・ネットワークには
+触れない（既存の証跡・設定ファイルも書き換えない）。
+
+```bash
+# Kubuntu / jarvis リポジトリルートで実行
+echo "== ピン照合ゲートの自動回帰 =="
+bash ci/scripts/test-workflow-pins.sh
+echo "== Makefile 経由（単体 / safety / ci-local） =="
+make test-workflow-pins
+make safety-test
+make ci-local
+```
+
+網羅する分岐は次のとおり。いずれも終了コードと固定語彙の両方を検証する。
+
+| 分岐 | 疑似条件 | 期待 |
+| --- | --- | --- |
+| lightweight tag | 解決 SHA = 記録 SHA（`type=commit`） | `OK` / 終了 0 |
+| annotated tag follow | ref が `type=tag` の tag オブジェクトを指す | API を 2 回呼び出し `OK` / 終了 0 |
+| 不整合 SHA | 記録値と異なる commit SHA を返す | `SHA_MISMATCH` / 終了 1 |
+| 記録欠落 | 直前コメントに `refs/tags/v1 -> <40hex>` が無い | `PIN_RECORD_MISSING` / 終了 1 |
+| 到達不可 rc 6 | 疑似 curl が 6 を返す | `UNVERIFIED` / 終了 0 |
+| 到達不可 rc 28 | 疑似 curl が 28 を返す | `UNVERIFIED` / 終了 0 |
+| `--offline` | 引数指定と `WORKFLOW_PINS_OFFLINE=1` | curl 未呼び出し・`UNVERIFIED` / 終了 0 |
+| HTTP エラー | 疑似 curl が 22 を返す | `API_RESOLVE_FAILED` / 終了 1 |
+| JSON 不正 | 不正なボディ | `API_RESOLVE_FAILED` / 終了 1 |
+| その他 | workflow 無し・不正 uses・引数過多 | `NO_WORKFLOW_FILES` / `PIN_RECORD_MALFORMED` / `BAD_USAGE` |
+
+SHA は合成値（例: `aaaa...`）のみで、トークンその他の秘密情報は使わない。
+`make safety-test` と `make ci-local` に1行ずつ配線済み。
+`.github/workflows/ci.yml` の `extra_gates` は変更していない: 既に
+`make check-workflow-pins` と `make safety-test` が列挙されているため、
+回帰は `safety-test` 経由で CI でも実行される。
 
 ### オフライン挙動
 
