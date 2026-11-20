@@ -1,3 +1,9 @@
+# I85-A: これは .github/workflows/ に配線されていない reference 実装である。
+# auto-merge を含むため、配線には credentials とポリシーの決定が必要（未配線）。
+# 全ステージの actions/checkout をフル SHA へ固定した（各 step のコメント参照）。
+#   配線時も同じピン留め方針（フル SHA + バージョン併記）を維持すること。
+#   更新時は refs/tags/v4 の解決 SHA を再確認し、コメントも更新する。
+#
 # CI-1: still not wired into .github/workflows/ (manual/reference pipeline).
 # CI-2: runtime-agnostic adapter in ci/scripts/review-run.sh (JARVIS_REVIEW_RUNNER,
 #       default `opencode`). Credentials/runner provisioning remains a decision.
@@ -53,7 +59,12 @@ jobs:
       summary: ${{ steps.gate.outputs.summary }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # I85-A: 可変タグ @v4 をフル SHA へ固定し、バージョンをコメント併記する。
+        # 11d5960a326750d5838078e36cf38b85af677262 = actions/checkout v4
+        #   (refs/tags/v4 を 2026-11-20 に解決, commit
+        #   "backport fixes to releases-v4 (#2524)", 2026-07-16)
+        # 更新時は refs/tags/v4 の解決 SHA を再確認し、このコメントも更新する。
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Review the PR, not the default branch (workflow_dispatch fallback).
           ref: refs/pull/${{ github.event.pull_request.number || github.event.inputs.pr_number }}/head
@@ -131,7 +142,12 @@ jobs:
       low: ${{ steps.review.outputs.low }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # I85-A: 可変タグ @v4 をフル SHA へ固定し、バージョンをコメント併記する。
+        # 11d5960a326750d5838078e36cf38b85af677262 = actions/checkout v4
+        #   (refs/tags/v4 を 2026-11-20 に解決, commit
+        #   "backport fixes to releases-v4 (#2524)", 2026-07-16)
+        # 更新時は refs/tags/v4 の解決 SHA を再確認し、このコメントも更新する。
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Review the PR, not the default branch (workflow_dispatch fallback).
           ref: refs/pull/${{ github.event.pull_request.number || github.event.inputs.pr_number }}/head
@@ -238,7 +254,12 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # I85-A: 可変タグ @v4 をフル SHA へ固定し、バージョンをコメント併記する。
+        # 11d5960a326750d5838078e36cf38b85af677262 = actions/checkout v4
+        #   (refs/tags/v4 を 2026-11-20 に解決, commit
+        #   "backport fixes to releases-v4 (#2524)", 2026-07-16)
+        # 更新時は refs/tags/v4 の解決 SHA を再確認し、このコメントも更新する。
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           # Review the PR, not the default branch (workflow_dispatch fallback).
           ref: refs/pull/${{ github.event.pull_request.number || github.event.inputs.pr_number }}/head
@@ -292,7 +313,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # I85-A: 可変タグ @v4 をフル SHA へ固定し、バージョンをコメント併記する。
+        # 11d5960a326750d5838078e36cf38b85af677262 = actions/checkout v4
+        #   (refs/tags/v4 を 2026-11-20 に解決, commit
+        #   "backport fixes to releases-v4 (#2524)", 2026-07-16)
+        # 更新時は refs/tags/v4 の解決 SHA を再確認し、このコメントも更新する。
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Install OpenCode CLI
         run: |
