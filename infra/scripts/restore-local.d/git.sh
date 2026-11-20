@@ -7,10 +7,14 @@
 # 対象リポジトリは設計文書の --repo-dir 相当の固定パス。
 #   /home/koppe/ドキュメント/作業用/jarvis/jarvis
 # 入力は git archive HEAD の成果物（.git/ 不包含・追跡ファイルのみ）。
+# I75-B: 入力パスは共有ヘルパ resolve_restore_input() が manifest の
+# role/format 記述子から解決する。git-jarvis-head.tar.gz は legacy 3列行の
+# フォールバック名に留まる。git は任意コンポーネントのため「行が無い」場合
+# のみ警告してスキップし、複数一致・不正 role・ファイル不在は fail-closed。
 
 restore_git() {
   local rc=0
-  local archive="${SET_DIR:-}/git-jarvis-head.tar.gz"
+  local archive="" resolve_rc=0
   local repo='/home/koppe/ドキュメント/作業用/jarvis/jarvis'
   local tmp_dir='' bad='' status_out='' ts='' tag='' top='' real_repo='' suggested=''
   # backup-local.sh の拒否条件 (.git / .env / *.key) を基数に、
@@ -18,9 +22,23 @@ restore_git() {
   local secret_re='(^|/)\.git(/|$)|(^|/)\.env($|\.)|(^|/)bws\.env$|\.key$|\.pem$|(^|/)\.ssh(/|$)|(^|/)id_rsa|(^|/)credentials($|/)'
   local traversal_re='(^/)|((^|/)\.\.(/|$))'
 
+  # I75-B: manifest の role/format 記述子から入力を解決する。
+  if ! declare -F resolve_restore_input >/dev/null 2>&1; then
+    fail "git: shared restore input resolver unavailable" || true
+    return 1
+  fi
+  archive="$(resolve_restore_input "${SET_DIR:-}" git git-jarvis-head.tar.gz)" || resolve_rc=$?
+  if [ "$resolve_rc" -eq 2 ]; then
+    log "WARN: git payload が manifest に無いため git 復元をスキップ（任意コンポーネント）"
+    return 0
+  elif [ "$resolve_rc" -ne 0 ]; then
+    fail "git: cannot resolve a unique git payload from manifest (unknown/ambiguous/missing)" || true
+    return 1
+  fi
+
   # 任意コンポーネント: 無ければ警告して成功扱いでスキップ。
   if [ ! -f "$archive" ]; then
-    log "WARN: git-jarvis-head.tar.gz が無いため git 復元をスキップ（任意コンポーネント）"
+    log "WARN: $(basename -- "$archive") が無いため git 復元をスキップ（任意コンポーネント）"
     return 0
   fi
 

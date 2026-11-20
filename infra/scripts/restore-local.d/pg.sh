@@ -11,7 +11,10 @@
 #   ISOLATED_DB_NAME / ISOLATED_DB_CREATED : 後始末状態を EXIT trap と共有するグローバル。
 #
 # 定義する関数は restore_pg() のみ（引数なし、戻り値 0/1）。
-# 実 DB 操作は APPLY=1 のときだけ行う。入力は $SET_DIR/postgres-jarvis.sql.gz。
+# 実 DB 操作は APPLY=1 のときだけ行う。入力は共有ヘルパ
+# resolve_restore_input()（restore-local.d/configs.sh で定義）が manifest の
+# role/format 記述子から解決するパス。固定名 postgres-jarvis.sql.gz は
+# role 列を持たない legacy 3列行のフォールバックとしてのみ使う（I75-B）。
 # 設定: DB_NAME=jarvis / 隔離 DB=jarvis_restore_test。
 # 出力・ログには DB 名とテーブル件数（数値）のみを出し、テーブル内容・行データ・
 # 接続情報（秘密情報）は一切出力しない。
@@ -33,7 +36,18 @@ restore_pg() {
     echo "ERROR: restore_pg requires SET_DIR, log() and fail() from the caller" >&2
     return 1
   fi
-  dump_file="$SET_DIR/postgres-jarvis.sql.gz"
+  # I75-B: resolve the input from the manifest descriptors instead of a fixed
+  # basename. Fail closed on unknown/ambiguous roles and missing files, using
+  # the same rules as verify_set(). `none` is the only accepted encryption /
+  # signature (P1-6 connection point: lib/payload-descriptors.sh).
+  if ! declare -F resolve_restore_input >/dev/null 2>&1; then
+    fail "PG: shared restore input resolver unavailable"
+    return 1
+  fi
+  if ! dump_file="$(resolve_restore_input "$SET_DIR" postgres postgres-jarvis.sql.gz)"; then
+    fail "PG: cannot resolve a unique postgres payload from manifest (unknown/ambiguous/missing)"
+    return 1
+  fi
 
   # --- APPLY=0: 計画のみ。DB 接続を含む書き込みを一切行わない ---
   if [ "${APPLY:-0}" -ne 1 ]; then
@@ -55,6 +69,8 @@ restore_pg() {
   fi
 
   [ -f "$dump_file" ] || { fail "PG: バックアップが見つかりません: $dump_file"; return 1; }
+  # 解決済み入力パスを記録（ファイル名のみ。内容・接続情報は出さない）。
+  log "PG: resolved input = $dump_file"
 
   # --- 既存の隔離 DB は上書きせず fail ---
   exists="$(psql -v ON_ERROR_STOP=1 -d postgres -tAc \

@@ -9,6 +9,10 @@
 #
 # No snapshot content and no payload other than the points_count validation
 # result is ever written to the log.
+# I75-B: the snapshot path is resolved from the manifest role/format
+# descriptors by the shared resolve_restore_input() helper (defined in
+# restore-local.d/configs.sh); qdrant-snapshot.bin is only the legacy 3-column
+# fallback. The none/none descriptor contract is unchanged (P1-6 undecided).
 
 restore_qdrant() {
   if [ "$#" -ne 0 ]; then
@@ -16,7 +20,15 @@ restore_qdrant() {
     return 1
   fi
 
-  local snapshot_file="${SET_DIR}/qdrant-snapshot.bin"
+  local snapshot_file
+  if ! declare -F resolve_restore_input >/dev/null 2>&1; then
+    fail "Qdrant: shared restore input resolver unavailable"
+    return 1
+  fi
+  if ! snapshot_file="$(resolve_restore_input "$SET_DIR" qdrant qdrant-snapshot.bin)"; then
+    fail "Qdrant: cannot resolve a unique qdrant payload from manifest (unknown/ambiguous/missing)"
+    return 1
+  fi
   local qdrant_url="${QDRANT_URL:-http://127.0.0.1:6333}"
   # Single source of truth shared with backup-local.sh; mirrors the
   # configurable jarvis-context `collection_name`. The default preserves the

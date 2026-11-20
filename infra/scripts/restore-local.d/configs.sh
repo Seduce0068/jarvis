@@ -41,6 +41,93 @@
 # NOTE: build-selfhost.sh and deploy-mcp-gw-safe.sh both source this file to
 # reuse the table. Keep everything at file scope free of side effects
 # (definitions only).
+# --- I75-B: shared restore-input resolver ------------------------------------
+# Single derivation path for the input basename of every restore component.
+# The classification is delegated to lib/payload-descriptors.sh (sourced by
+# restore-local.sh before load_modules()), so verify_set()/verify-backup.sh and
+# the four restore modules cannot disagree about a payload's role/format.
+#
+# resolve_restore_input <set_dir> <role> <legacy_name> [one|all]
+#   stdout : "$set_dir/<basename>" (one path in `one` mode, all matches in
+#            `all` mode).  A basename is derived from the manifest row whose
+#            resolved role == <role>; the declared format participates through
+#            resolve_descriptors()/descriptor_supported().
+#   return : 0 resolved, 1 invalid / ambiguous / resolved file missing
+#            (fail-closed), 2 no role match (absent; only optional components
+#            may treat this as "nothing to do").
+#   Backward compatibility: a legacy 3-column row has no role column, so
+#   resolve_descriptors() derives the role from the canonical basename via
+#   legacy_role_for(). If that still yields no match, <legacy_name> is accepted
+#   ONLY when it is actually recorded in the manifest - a renamed payload in a
+#   role-less manifest is intentionally not discovered.
+#   P1-6 connection point: descriptor_supported() currently accepts only
+#   encryption=none / signature=none. Future encryption/signature support (a
+#   user decision) plugs in here and in lib/payload-descriptors.sh; this helper
+#   never decrypts and never opens a payload's contents.
+resolve_restore_input() {
+  local set_dir="$1" role="$2" legacy_name="${3:-}" mode="${4:-one}"
+  local manifest="$set_dir/manifest.txt"
+  local name _bytes _sha format encryption signature row_role resolved item
+  local -a matches=()
+  local matched_count=0
+
+  [ -n "$set_dir" ] && [ -d "$set_dir" ] && [ -f "$manifest" ] || return 1
+
+  while read -r name _bytes _sha format encryption signature row_role; do
+    case "$name" in ''|\#*) continue ;; esac
+    # Unknown explicit roles fail closed, exactly as in verify_set().
+    case "$row_role" in
+      ''|postgres|qdrant|config|git|other) ;;
+      *) return 1 ;;
+    esac
+    resolved="$(resolve_descriptors "$name" "$format" "$encryption" "$signature" "$row_role")" || return 1
+    read -r format encryption signature row_role <<< "$resolved"
+    # I75-B: only the none/none contract is accepted (P1-6 undecided).
+    descriptor_supported "$format" "$encryption" "$signature" || return 1
+    # A role claim that the real basename does not back is rejected by the
+    # same shared rule the verification gate uses.
+    role_basename_consistent "$name" "$row_role" || return 1
+    if [ "$row_role" = "$role" ]; then
+      matches+=("$name")
+      matched_count=$((matched_count + 1))
+    fi
+  done < "$manifest"
+
+  # Legacy 3-column fallback: derive from the existing fixed name, but only if
+  # that name is recorded in this manifest (no bypass of integrity checking).
+  if [ "$matched_count" -eq 0 ] && [ -n "$legacy_name" ]; then
+    while read -r name _bytes _sha; do
+      case "$name" in ''|\#*) continue ;; esac
+      if [ "$name" = "$legacy_name" ]; then
+        matches+=("$name")
+        matched_count=$((matched_count + 1))
+      fi
+    done < "$manifest"
+  fi
+
+  [ "$matched_count" -ne 0 ] || return 2
+  # Fail closed on a resolved payload that is absent on disk.
+  for item in "${matches[@]}"; do
+    [ -f "$set_dir/$item" ] || return 1
+  done
+
+  case "$mode" in
+    one)
+      [ "$matched_count" -eq 1 ] || return 1 # ambiguous: multiple matches
+      printf '%s\n' "$set_dir/${matches[0]}"
+      ;;
+    all)
+      for item in "${matches[@]}"; do
+        printf '%s\n' "$set_dir/$item"
+      done
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  return 0
+}
+
 declare -gA EXPECTED_CONFIG_MODE=(
   [mcp_allowlist.toml]='0644'
   [pii_patterns.toml]='0644'
@@ -97,8 +184,9 @@ restore_configs() {
   local -a names=()
   local -a destinations=()
   local -a modes=()
-  local name base dest src mode ts tmp_dir=""
-  local i _bytes _sha
+  local -a inputs=()
+  local name base dest src mode ts tmp_dir="" path
+  local i input_text="" rc=0
 
   # --- gate: set dir and manifest must be readable (fail-closed) ---
   if [ -z "$set_dir" ] || [ ! -d "$set_dir" ]; then
@@ -110,19 +198,27 @@ restore_configs() {
     return 1
   fi
 
-  # --- step 1: scan manifest config-* entries and resolve destinations ---
-  # Read-only and idempotent. The authoritative "before any write" allowlist
-  # gate is verify_set() in ../restore-local.sh (it runs before
-  # stop_services()/dispatch_restore(), and also for --skip-configs). This
-  # block merely re-checks via the same config_dest_for_base() helper as a
+  # --- step 1: resolve config payloads via the shared descriptor helper -----
+  # I75-B: input basenames come from resolve_restore_input() (role=config), not
+  # from a fixed name. Read-only and idempotent. The authoritative "before any
+  # write" allowlist gate is verify_set() in ../restore-local.sh (it runs before
+  # stop_services()/dispatch_restore(), and also for --skip-configs). This block
+  # merely re-checks via the same config_dest_for_base() helper as a
   # defense-in-depth net; rejection here never writes anything.
-  while read -r name _bytes _sha; do
-    case "$name" in
-      ''|\#*) continue ;;
-      config-*) ;;
-      *) continue ;;
-    esac
+  input_text="$(resolve_restore_input "$set_dir" config '' all)" || rc=$?
+  if [ "$rc" -eq 2 ]; then
+    log "configs: no config payload resolved from manifest; nothing to do"
+    return 0
+  elif [ "$rc" -ne 0 ]; then
+    fail "configs: cannot resolve config payloads from manifest (unknown/ambiguous/missing)"
+    return 1
+  fi
+  if [ -n "$input_text" ]; then
+    mapfile -t inputs <<< "$input_text"
+  fi
 
+  for path in "${inputs[@]}"; do
+    name="${path##*/}"
     base="${name#config-}"
     if ! dest="$(config_dest_for_base "$base")"; then
       fail "configs: manifest has non-allowlisted config entry: $name"
@@ -136,14 +232,14 @@ restore_configs() {
       return 1
     fi
 
-    if [ ! -f "$set_dir/$name" ]; then
+    if [ ! -f "$path" ]; then
       fail "configs: allowlisted config file missing from set: $name"
       return 1
     fi
     names+=("$name")
     destinations+=("$dest")
     modes+=("$mode")
-  done < "$manifest"
+  done
 
   if [ "${#names[@]}" -eq 0 ]; then
     log "configs: no allowlisted config entries in manifest; nothing to do"

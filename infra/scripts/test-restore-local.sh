@@ -802,5 +802,51 @@ else
   pass "TC-R2: no module dispatch before the gate"
 fi
 
+# --- 6d. I75-B: role=postgres ペイロードを pg-data.sql.gz へ改名しても復元可 -
+# 6b は dry-run のみだった。ここでは --apply 経路で 4 モジュールが固定名ではなく
+# 共有ヘルパ resolve_restore_input() が manifest の role 記述子から解決した
+# パスを読むことを、モックの呼び出し記録で証明する（実 DB / Qdrant は使わない）。
+printf '%s\n' '-- I75-B: renamed postgres payload restore via role descriptor --'
+rm -f -- "$tmp/logs"/*.log
+renamed_apply_code=0
+renamed_apply_out="$(run_driver --backup-set "$renamed" --apply 2>&1)" || renamed_apply_code=$?
+if [ "$renamed_apply_code" -eq 0 ]; then
+  pass "I75-B: renamed payload --apply exit 0"
+else
+  fail_case "I75-B: renamed payload --apply exit=$renamed_apply_code"
+  printf '%s\n' "$renamed_apply_out" | head -20 >&2
+fi
+for fragment in 'dispatch: restore_pg' 'PG: resolved input = ' \
+                'pg-data.sql.gz' 'dispatch: restore_qdrant' \
+                'dispatch: restore_configs' 'dispatch: restore_git' \
+                'restore sequence finished'; do
+  if has_fragment "$renamed_apply_out" "$fragment"; then
+    pass "I75-B: renamed apply output: $fragment"
+  else
+    fail_case "I75-B: renamed apply output missing: $fragment"
+  fi
+done
+if has_fragment "$renamed_apply_out" 'バックアップが見つかりません'; then
+  fail_case "I75-B: module fell back to the fixed postgres filename"
+else
+  pass "I75-B: no fixed-filename fallback error"
+fi
+if has_fragment "$renamed_apply_out" 'cannot resolve a unique postgres payload'; then
+  fail_case "I75-B: resolver rejected the renamed role=postgres payload"
+else
+  pass "I75-B: resolver accepted the renamed role=postgres payload"
+fi
+assert_present "I75-B: isolated DB restored from resolved payload" \
+  'CREATE DATABASE "jarvis_restore_test"' "$tmp/logs/psql.log"
+assert_absent "I75-B: no production DB DROP" \
+  'DROP DATABASE "jarvis"' "$tmp/logs/psql.log"
+check_exit "I75-B: renamed set still verifies after apply" 0 \
+  bash "$verifier" "$renamed"
+if manifest_matches "$renamed" "pg-data.sql.gz"; then
+  pass "I75-B: manifest unchanged for pg-data.sql.gz"
+else
+  fail_case "I75-B: manifest changed for pg-data.sql.gz"
+fi
+
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"
 [ "$bad" -eq 0 ]
