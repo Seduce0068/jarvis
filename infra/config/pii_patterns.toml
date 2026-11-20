@@ -1,6 +1,18 @@
 # JARVIS PII Detection Patterns
 # Used by jarvis-context PiiFilter
+#
+# Schema must match `PiiConfig` in rust/jarvis-context/src/pii.rs:
+# top-level `enabled` / `redact_replacement` plus a `[patterns]` table.
+# A TOML table header owns every later key, so the two top-level keys
+# stay above `[patterns]`.
 
+# Enable PII filtering
+enabled = true
+
+# Redaction replacement
+redact_replacement = "[REDACTED]"
+
+[patterns]
 # Email addresses
 email = "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}"
 
@@ -40,9 +52,3 @@ db_connection = "(?i)(postgres|mysql|mongodb)://[^\\s]+"
 
 # JWT tokens
 jwt = "eyJ[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+\\.[a-zA-Z0-9_-]+"
-
-# Redaction replacement
-redact_replacement = "[REDACTED]"
-
-# Enable PII filtering
-enabled = true

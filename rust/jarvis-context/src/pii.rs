@@ -197,6 +197,14 @@ impl PiiFilter {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// Absolute path to the shipped config, baked in at compile time.
+    const SHIPPED_PATH: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../infra/config/pii_patterns.toml"
+    );
 
     fn filter(enabled: bool) -> PiiFilter {
         let mut patterns = HashMap::new();
@@ -287,6 +295,135 @@ mod tests {
         assert_eq!(filter.filter(sample).expect("filter runs"), expected);
 
         std::fs::remove_dir_all(&dir).expect("clean temp dir");
+    }
+
+    /// In-memory `MakeWriter` target: no global subscriber, so other tests
+    /// can still install their own.
+    #[derive(Clone)]
+    struct ConfigLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for ConfigLogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("log buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Run `future` under a thread-local WARN subscriber and return its output
+    /// plus the captured log text. A current-thread runtime keeps every event
+    /// on the subscribed thread; the lock serializes capture across tests.
+    fn capture_warns<F, T>(future: F) -> (T, String)
+    where
+        F: std::future::Future<Output = T>,
+    {
+        static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let buffer = Arc::new(Mutex::new(Vec::new()));
+        let writer = ConfigLogBuffer(buffer.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        let output = tracing::subscriber::with_default(subscriber, || runtime.block_on(future));
+        let captured = buffer.lock().expect("log buffer lock").clone();
+        let logs = String::from_utf8(captured).expect("captured logs are UTF-8");
+        (output, logs)
+    }
+
+    /// I86-A: the shipped TOML must deserialize into the current `PiiConfig`
+    /// schema. With patterns at the top level `toml::from_str` ignored them
+    /// and silently fell back to the six default patterns.
+    #[test]
+    fn shipped_pii_config_matches_pii_config_schema() {
+        const SHIPPED: &str = include_str!("../../../infra/config/pii_patterns.toml");
+        let parsed: PiiConfig = toml::from_str(SHIPPED).expect("shipped TOML matches PiiConfig");
+        assert_eq!(parsed.patterns.len(), 14, "all shipped patterns are loaded");
+        assert!(parsed.enabled, "filter stays enabled");
+        assert_eq!(parsed.redact_replacement, "[REDACTED]");
+
+        for name in [
+            "email",
+            "phone_jp",
+            "credit_card",
+            "api_key",
+            "ipv4",
+            "uuid",
+            "aws_access_key",
+            "aws_secret_key",
+            "github_token",
+            "slack_token",
+            "bearer_token",
+            "private_key",
+            "db_connection",
+            "jwt",
+        ] {
+            assert!(
+                parsed.patterns.contains_key(name),
+                "missing pattern: {name}"
+            );
+        }
+    }
+
+    /// I86-A: loading the shipped config must not warn (no read/parse or
+    /// invalid-regex failure), and its extra patterns must redact AWS,
+    /// GitHub and JWT values that the six-pattern default omitted.
+    #[test]
+    fn shipped_config_loads_without_warning_and_redacts_provider_tokens() {
+        const PROBE: &str = "pii-config-capture-probe";
+        let config = crate::config::ContextConfig {
+            pii_patterns_path: SHIPPED_PATH.into(),
+            ..Default::default()
+        };
+
+        let (filter, logs) = capture_warns(async {
+            let loaded = PiiFilter::new(&config).await.expect("shipped config loads");
+            tracing::warn!(probe = PROBE, "capture control event");
+            loaded
+        });
+
+        assert!(
+            logs.contains(PROBE),
+            "capture must observe WARN events: {logs}"
+        );
+        assert!(
+            !logs.contains("Failed to read PII pattern config file"),
+            "shipped config must be readable: {logs}"
+        );
+        assert!(
+            !logs.contains("Failed to parse PII pattern config file"),
+            "shipped config must parse: {logs}"
+        );
+        assert!(
+            !logs.contains("Invalid PII pattern"),
+            "all shipped regexes must compile: {logs}"
+        );
+
+        assert_eq!(filter.patterns.len(), 14, "all 14 patterns are active");
+
+        let aws = format!("AKIA{}", "A".repeat(16));
+        let github = format!("ghp_{}", "a".repeat(36));
+        let jwt = format!("eyJ{}.{}.{}", "a".repeat(8), "b".repeat(8), "c".repeat(8));
+        let out = filter
+            .filter(json!({ "aws": aws, "github": github, "jwt": jwt }))
+            .expect("filter runs");
+
+        assert_eq!(out["aws"], "[REDACTED]");
+        assert_eq!(out["github"], "[REDACTED]");
+        assert_eq!(out["jwt"], "[REDACTED]");
     }
 
     /// I12-E: ordinary object keys are preserved unchanged; only string

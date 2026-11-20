@@ -48,6 +48,7 @@ status: draft
 | REQ-11 | 予算超過時は memories/recent を落とし event は保持する |
 | REQ-12 | `attach_scores` が Qdrant のスコアを `MemoryEntry.score` へ付与し、順序変更後も id とスコアが対応する |
 | REQ-13 | スコア 0 は `Some(0.0)`、ランク外は `None` とし、両者を区別する |
+| REQ-14 | 同梱 TOML が `PiiConfig` スキーマに適合し、14 パターンで AWS/GitHub/JWT を redact する |
 
 `MemoryEntry.score` は `Option<f32>` で serde default を持ち、
 legacy JSON からスコアが欠落しても後方互換で読める。
@@ -64,6 +65,7 @@ legacy JSON からスコアが欠落しても後方互換で読める。
 | R-6 | 欠損/余分行で重複や誤順序が発生する | T2 | unit >= 0.80 |
 | R-7 | 予算超過で必要な event データまで失われる | T3 | unit >= 0.60 |
 | R-8 | refetch でスコアが失われ関連度が壊れる / 0 と欠落が混同される | T2 | unit >= 0.80 |
+| R-9 | 設定スキーマ不整合で同梱 14 パターンが黙って失われる | T1 | unit >= 0.90 |
 
 tier は `web-api-l2-moderate` の定義に従う。
 
@@ -86,6 +88,7 @@ TD3 (test case) の順で導出した。
 | metamorphic testing | 5.2.11 | PG 行順を変えても reorder 結果は不変 |
 | scenario testing | 5.2.9 | build_context の組み立て〜truncate |
 | error guessing | 5.4.1 | 不正 TOML、欠損行、余分な行 |
+| contract testing | 5.2.12 | 同梱 TOML のキー構造と `PiiConfig` の一致 |
 
 カバレッジ測定は 29119-4:2021 Clause 6 に従い、等価クラス・境界値・
 分岐を記録する。ミューテーションスコアは本スライスでは未測定。
@@ -105,7 +108,7 @@ TD3 (test case) の順で導出した。
 
 ## Scenarios
 
-### PII フィルタ (REQ-1〜REQ-6)
+### PII フィルタ (REQ-1〜REQ-6, REQ-14)
 
 ```gherkin
 Scenario: TC-P1 再帰的な redact
@@ -138,6 +141,17 @@ Scenario: TC-P4 設定ファイルの fallback
   When PiiFilter::new を呼ぶ
   Then 既定パターン (email/phone_jp/credit_card/api_key/ipv4/uuid) が有効
   Then enabled=true で redact が動作する
+```
+
+```gherkin
+Scenario: TC-P5 同梱設定のスキーマ契約
+  Given infra/config/pii_patterns.toml が include_str! でコンパイル時に埋め込まれている
+  When toml::from_str で PiiConfig にデシリアライズする
+  Then enabled=true と redact_replacement=[REDACTED] がトップレベルで読める
+  Then [patterns] 配下の 14 パターンがすべて有効
+  When PiiFilter::new で同梱ファイルを読み込む
+  Then 読み込み・パース・正規表現コンパイルの warn が出ない
+  Then AWS/GitHub/JWT のダミー値が [REDACTED] になる
 ```
 
 ### 検索順序保持 (REQ-7〜REQ-9)
@@ -218,6 +232,8 @@ Scenario: TC-C2 トークン予算の境界
 | TC-P2 | REQ-4 | v5.0.0-V13.1.2 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.6 | T1 |
 | TC-P3 | REQ-5 | v5.0.0-V16.5.2 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-P4 | REQ-6 | v5.0.0-V16.5.2 | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.4.1 | T1 |
+| TC-P5 | REQ-14 | v5.0.0-V16.5.2 | SP800-53r5.2/CM-7 | ATE_COV.2 | 5.2.12 | T1 |
+| TC-P5 | REQ-14 | v5.0.0-V14.2.4 | SP800-53r5.2/SC-28 | ATE_FUN.1 | 5.2.1 | T1 |
 | TC-O1 | REQ-7 | - | - | ATE_FUN.1 | 5.2.11 | T2 |
 | TC-O2 | REQ-8 | - | - | ATE_COV.2 | 5.2.1 | T2 |
 | TC-O3 | REQ-9 | - | - | ATE_COV.2 | 5.2.3 | T2 |
@@ -238,7 +254,9 @@ SP 800-53 を Release 5.2、CC を ISO/IEC 15408-3:2022 の構成要素 ID と�
 実行結果は `evidence/` の test-run JSON に記録する。
 
 TC-P4 (設定 fallback)、TC-C (filter→truncate 順序)、PII 境界
-(object key を保持し値のみ redact) は回帰テスト追加でカバー済み（17 テスト）。
+(object key を保持し値のみ redact) は回帰テスト追加でカバー済み（従来 17 テスト）。
+I86-A では TC-P5 として同梱 TOML のスキーマ一致・warn 不出・プロバイダトークン
+redact の回帰を 2 件追加した。実行結果は親が再生成する証跡で確認する。
 TC-S1 / TC-S2 は `builder.rs` の純粋テスト（Qdrant/PostgreSQL 接続なし）で
 カバー済み。TC-P3 の `[X]` はテスト用 replacement を Given で明示した。
 実機 DB/Qdrant を用いる結合試験は対象外として未検証のままとする。
