@@ -12,8 +12,9 @@ Safety properties:
   documentation fails the gate just like one in source code.
 
 Usage: python3 ci/scripts/secret_scan.py
-Exit 0 only when no value-like credentials are found and every tracked file
-was read successfully; 1 otherwise (unreadable files fail closed).
+Exit 0 only when at least one tracked file exists, no value-like credentials
+are found and every tracked file was read successfully; 1 otherwise (an empty
+tracked set and unreadable files both fail closed, I79-C).
 """
 
 from __future__ import annotations
@@ -68,6 +69,14 @@ def main() -> int:
     findings: list[tuple[str, int, str, str]] = []
     errors: list[tuple[str, str]] = []
     tracked = tracked_files()
+    if not tracked:
+        # Fail closed (I79-C): an empty tracked set is indistinguishable from
+        # a broken/bypassed `git ls-files` (e.g. a repo with only `git init`).
+        # The old path printed "scanned 0 tracked files ... OK" and exited 0,
+        # unlike check-toml.sh / check-shell.sh which reject a zero-target
+        # scan. Report only a fixed error on stderr -- never any value.
+        print("ERROR: no tracked files to scan", file=sys.stderr)
+        return 1
     for path in tracked:
         try:
             text = open(path, encoding="utf-8", errors="replace").read()

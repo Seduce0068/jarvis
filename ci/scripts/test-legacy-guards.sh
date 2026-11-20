@@ -1041,6 +1041,33 @@ else
   fi
 fi
 
+# I79-C: an empty tracked-file set must fail closed. A repo with only
+# `git init` (no `git add`) makes `git ls-files` return nothing; the scanner
+# used to print "scanned 0 tracked files ... OK" and exit 0. Assert exit 1,
+# the fixed stderr error, and that no OK/summary report is emitted.
+scan_empty="$tmp/secret_scan_empty"
+mkdir -p "$scan_empty"
+if ! (cd "$scan_empty" && git init -q >/dev/null 2>&1); then
+  echo "  FAIL: could not initialize empty git repo for secret scanner test"
+  fail=$((fail+1))
+else
+  # Copy the scanner AFTER git init so it stays untracked: the tracked set
+  # remains empty (its own regex literals are legitimate VALUE-LIKE shapes).
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_empty/secret_scan.py"
+  out=$(cd "$scan_empty" && python3 secret_scan.py 2>&1); code=$?
+  if [ "$code" -eq 1 ] \
+     && printf '%s' "$out" | grep -qi 'no tracked files' \
+     && ! printf '%s' "$out" | grep -q 'scanned 0 tracked files' \
+     && ! printf '%s' "$out" | grep -q 'no value-like credentials found'; then
+    echo "  PASS: secret_scan.py fails closed on an empty tracked-file set"
+    ok=$((ok+1))
+  else
+    # Never echo raw scanner output: show only the exit code.
+    echo "  FAIL: secret_scan.py accepted an empty tracked-file set (exit=$code)"
+    fail=$((fail+1))
+  fi
+fi
+
 # The gate must reject a spec that lost one required test-spec section. Reuse
 # the spec list from the index-negative case above; all temp trees use $tmp.
 section_tmp="$tmp/section_negative"
