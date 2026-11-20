@@ -3583,6 +3583,12 @@ mod log_safety_tests {
     where
         F: std::future::Future<Output = ()>,
     {
+        // tracing's thread-local dispatcher and the current-thread runtime can
+        // interfere across parallel tests; serialize all log-capture helpers.
+        static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let writer = SharedLogBuffer(buffer.clone());
         let subscriber = tracing_subscriber::fmt()

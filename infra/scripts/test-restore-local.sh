@@ -22,6 +22,14 @@
 #   - I78-B: git モジュール内の resolver rc=2（absent／未解決）の警告付き
 #     成功スキップを廃止し fail-closed にした回帰を、共有 resolver / log / fail
 #     のスタブで pre-stop ゲート通過状態を再現して検証する（モックのみ）。
+#   - I80-A: assert_absent の「ログ不在 = pass」を前提ログ非空チェックで担保し、
+#     本番未接触の完全検証を代表1ケース（8e）へ集約した。旧 690 件のうち
+#     I77-C の反復 480 件（both 19×16 / prod_stage 16×11）を、失敗モードごとの
+#     fail-closed 124 件（exit code + 固定 fail 語彙のみ）と代表検証 13 件へ
+#     置換し 343 件を削減（690 → 347 相当）。I80-B の追加 2 ケースにも同じ
+#     削減を適用するため現行ファイルでの実削減は 363 件。全失敗モードの
+#     非ゼロ exit と固定 fail 語彙は維持し、実 DB / Qdrant / 本番パスは
+#     従来どおりモックのみ（最終 result の fail=0 を維持）。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -407,10 +415,25 @@ assert_present() { # label regex file
   fi
 }
 
-assert_absent() { # label regex file
-  local label="$1" pattern="$2" file="$3"
-  if [ ! -f "$file" ]; then
-    pass "$label (no log produced)"
+# I80-A: 「ログが無い = pass」はドライバがモック境界まで到達していない空実行でも
+# 成立してしまっていた。前提ログ（既定は検査対象ログ自身、本番未接触グループは
+# 呼び出し側で systemctl-query.log 等を明示）が非空であることを先に検証し、
+# vacuous pass を排除する。
+assert_log_produced() { # label file
+  local label="$1" file="$2"
+  if [ -s "$file" ]; then
+    pass "$label (premise log present: ${file##*/})"
+  else
+    fail_case "$label (premise log missing or empty: ${file##*/})"
+  fi
+}
+
+assert_absent() { # label regex file [premise-file]
+  local label="$1" pattern="$2" file="$3" premise="${4:-$3}"
+  if [ ! -s "$premise" ]; then
+    fail_case "$label (assertion vacuous: premise log missing/empty: $premise)"
+  elif [ ! -f "$file" ]; then
+    pass "$label (no log produced; driver reached mock boundary)"
   elif grep -E -- "$pattern" "$file" >/dev/null 2>&1; then
     fail_case "$label (forbidden pattern present: $pattern)"
     grep -E -- "$pattern" "$file" | head -5 >&2
@@ -1102,28 +1125,32 @@ fi
 # 実 DB / 実 Qdrant / 実 systemctl は一切使わない（既存モックと :1 のまま）。
 printf '%s\n' '-- I77-C: failure-injection fail-closed branches --'
 
-assert_no_production_contact() { # label
-  local label="$1"
+# I80-A: この6項目の完全検証は代表ケース（8e）だけで行う。前提ログは
+# verify_set 通過後の inventory が必ず生成する systemctl-query.log を使用し、
+# --skip-db で psql.log が無いケースでも「ドライバはモック境界に到達した」ことを
+# 証明してから不在判定する（queries が無い経路では別の前提ログを渡す）。
+assert_no_production_contact() { # label [premise-file]
+  local label="$1" premise="${2:-$tmp/logs/systemctl-query.log}"
   assert_absent "$label: no production DB DROP" \
-    'DROP DATABASE "jarvis"' "$tmp/logs/psql.log"
+    'DROP DATABASE "jarvis"' "$tmp/logs/psql.log" "$premise"
   assert_absent "$label: no production DB as -d target" \
-    '[-]d jarvis([[:space:]]|$)' "$tmp/logs/psql.log"
+    '[-]d jarvis([[:space:]]|$)' "$tmp/logs/psql.log" "$premise"
   assert_absent "$label: no production DB name in SQL" \
-    "datname = 'jarvis'" "$tmp/logs/psql.log"
+    "datname = 'jarvis'" "$tmp/logs/psql.log" "$premise"
   assert_absent "$label: no production collection path" \
-    '/collections/jarvis_memories([/?]|$)' "$tmp/logs/curl.log"
+    '/collections/jarvis_memories([/?]|$)' "$tmp/logs/curl.log" "$premise"
   assert_absent "$label: qdrant service never touched" \
-    'qdrant' "$tmp/logs/systemctl.log"
+    'qdrant' "$tmp/logs/systemctl.log" "$premise"
   assert_absent "$label: enablement bit never changed" \
-    '^(enable|disable) ' "$tmp/logs/systemctl.log"
+    '^(enable|disable) ' "$tmp/logs/systemctl.log" "$premise"
 }
 
-assert_service_invariants() { # label
-  local label="$1"
+assert_service_invariants() { # label [premise-file]
+  local label="$1" premise="${2:-$tmp/logs/systemctl-query.log}"
   assert_absent "$label: qdrant service never touched" \
-    'qdrant' "$tmp/logs/systemctl.log"
+    'qdrant' "$tmp/logs/systemctl.log" "$premise"
   assert_absent "$label: enablement bit never changed" \
-    '^(enable|disable) ' "$tmp/logs/systemctl.log"
+    '^(enable|disable) ' "$tmp/logs/systemctl.log" "$premise"
 }
 
 # inject_fail <curl_mode> <psql_mode> <jq_mode> <confirm> <label> <fragment> [extra...]
@@ -1155,21 +1182,25 @@ inject_fail() {
 
 # both <curl_mode> <psql_mode> <jq_mode> <label> <fragment> [extra...]
 # 隔離段の失敗: --apply / --apply --confirm の双方で同じ fail() に到達する。
+# I80-A: 本番未接触の6アサーションは代表ケース（8e）へ集約したため、ここでは
+# 各失敗モードの fail-closed を非ゼロ exit + 固定 fail 語彙の2点だけで固定する。
+# 失敗注入モード／引数／--confirm の有無は従来どおり全ケースで網羅される。
 both() {
   local curl_mode="$1" psql_mode="$2" jq_mode="$3" label="$4" fragment="$5"
   shift 5
   local -a extra=("$@")
   inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 0 \
     "$label: --apply" "$fragment" "${extra[@]}"
-  assert_no_production_contact "$label: --apply"
   inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 1 \
     "$label: --apply --confirm" "$fragment" "${extra[@]}"
-  assert_no_production_contact "$label: --apply --confirm"
 }
 
 # prod_stage <curl_mode> <psql_mode> <jq_mode> <label> <fragment> [extra...]
 # 本番段の失敗: --apply では到達せず成功（本番未接触）、
-# --apply --confirm で fail() が非ゼロ終了。双方でサービス不変を確認する。
+# --apply --confirm で fail() が非ゼロ終了。
+# I80-A: 各ケースでは「--apply が green で本番段に到達しない」と
+# 「--confirm で非ゼロ exit + 固定 fail 語彙」のみを検証する。本番未接触の
+# 完全検証は代表ケース（8e）で1回だけ行い、全失敗モードの fail-closed は維持。
 prod_stage() {
   local curl_mode="$1" psql_mode="$2" jq_mode="$3" label="$4" fragment="$5"
   shift 5
@@ -1186,10 +1217,8 @@ prod_stage() {
     fail_case "$label: --apply unexpectedly failed (exit $code)"
     printf '%s\n' "$out" | head -12 >&2
   fi
-  assert_no_production_contact "$label: --apply"
   inject_fail "$curl_mode" "$psql_mode" "$jq_mode" 1 \
     "$label: --apply --confirm" "$fragment" "${extra[@]}"
-  assert_service_invariants "$label: --apply --confirm"
 }
 
 # 8a. Qdrant 隔離段（qdrant.sh:63-93）。--skip-db で本番 DB を完全に除外。
@@ -1218,6 +1247,10 @@ both '' '' bad \
   'unexpected points_count format in isolated collection' --skip-db
 both '' '' zero \
   'jq: isolated points_count=0' 'isolated collection has no points' --skip-db
+# I80-B: jq が exit 0 で空文字を返す経路（qdrant.sh:86-88 の case '' 分岐）。
+both '' '' empty \
+  'jq: isolated points_count empty' \
+  'unexpected points_count format in isolated collection' --skip-db
 
 # 8b. PostgreSQL 隔離段（pg.sh:76-112）。ここで失敗すれば本番段へ進まない。
 both '' exists_fail '' \
@@ -1275,6 +1308,38 @@ prod_stage '' '' prod_zero \
 prod_stage '' '' prod_bad \
   'jq: production points_count non-numeric' \
   'unexpected points_count format in production collection' --skip-db
+# I80-B: jq が exit 0 で空文字を返す経路（qdrant.sh:135-137 の case '' 分岐）。
+prod_stage '' '' prod_empty \
+  'jq: production points_count empty' \
+  'unexpected points_count format in production collection' --skip-db
+
+# 8e. I80-A: 本番到達遮断の代表ケース（完全検証はここだけの1回）。
+# --apply（confirm なし）の成功経路では pg / qdrant の両モジュールが最後まで
+# 走り、psql.log / curl.log / systemctl.log / systemctl-query.log がすべて生成
+# される。この1回でだけ本番未接触の全条件を実ログに対して検証し、8a〜8d の
+# 全失敗モードは exit code + 固定 fail 語彙へ削減する（fail-closed は維持）。
+printf '%s\n' '-- I80-A: single representative full production-contact check --'
+# 直前の失敗注入モードを持ち越さず、既定成功のモックに戻す。
+MOCK_CURL_MODE=''
+MOCK_PSQL_MODE=''
+MOCK_JQ_MODE=''
+rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
+guard_code=0
+guard_out="$(run_driver --backup-set "$set_dir" --apply 2>&1)" || guard_code=$?
+if [ "$guard_code" -eq 0 ]; then
+  pass "I80-A: representative --apply stays green (exit 0)"
+else
+  fail_case "I80-A: representative --apply failed (exit $guard_code)"
+  printf '%s\n' "$guard_out" | head -12 >&2
+fi
+# 空ログの vacuous pass を排除するため、ドライバがモック境界に到達した証拠を
+# 前提ログとして先にアサートする（assert_absent にも同じ前提を渡す）。
+assert_log_produced 'I80-A: premise systemctl-query.log' "$tmp/logs/systemctl-query.log"
+assert_log_produced 'I80-A: premise psql.log' "$tmp/logs/psql.log"
+assert_log_produced 'I80-A: premise curl.log' "$tmp/logs/curl.log"
+assert_log_produced 'I80-A: premise systemctl.log' "$tmp/logs/systemctl.log"
+assert_no_production_contact 'I80-A: representative full guard'
+assert_service_invariants 'I80-A: representative full guard'
 
 # --- 9. I77-A: role=other の config-* / git* は stop 前に拒否される ----------
 # is_config_payload / is_git_payload は basename からコンポーネントを数える一方、
