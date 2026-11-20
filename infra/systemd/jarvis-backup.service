@@ -12,13 +12,17 @@ Group=postgres
 # Script is installed to /opt/jarvis/scripts/backup-local.sh by the deploy step.
 ExecStart=/usr/bin/bash /opt/jarvis/scripts/backup-local.sh --backup-dir /var/lib/postgresql/jarvis-backups --repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis --apply
 
-# Round 19 B4: the integrity check used to run only at timer installation, so a
-# nightly set carrying COMPLETE but missing a mandatory payload was never
-# verified. Use the repo working copy of verify-backup.sh, exactly like the
-# read-only `make verify-backup` path (postgres user, no writes to backup data).
-# --latest targets the set just produced; unprefixed ExecStartPost= makes this
-# oneshot unit fail (non-zero) when verification fails.
-ExecStartPost=/usr/bin/bash /home/koppe/ドキュメント/作業用/jarvis/jarvis/infra/scripts/verify-backup.sh --latest --backup-dir /var/lib/postgresql/jarvis-backups
+# Round 19 B4 / I73-C (b): the integrity check used to run only at timer
+# installation, so a nightly set carrying COMPLETE but missing a mandatory
+# payload was never verified. Run it after every nightly backup, read-only
+# (postgres user, no writes to backup data); --latest targets the set just
+# produced and unprefixed ExecStartPost= makes this oneshot unit fail
+# (non-zero) when verification fails.
+# I73-C (b): use the INSTALLED copy, not the repo working copy. The repo tree is
+# 0711 koppe and ProtectHome=read-only, so User=postgres cannot read
+# infra/scripts/verify-backup.sh there and every run failed. install-backup-timer.sh
+# places /opt/jarvis/scripts/verify-backup.sh as root:root 0755 before any start.
+ExecStartPost=/usr/bin/bash /opt/jarvis/scripts/verify-backup.sh --latest --backup-dir /var/lib/postgresql/jarvis-backups
 
 # Security hardening (no OCI / rclone / 1Password / secrets).
 NoNewPrivileges=yes

@@ -156,6 +156,12 @@ fail() {
 # (e.g. post-install verification) fails mid-way.
 backup_configs
 install -o root -g root -m 0755 "$script_src" "$script_dst"
+# I73-C (b): install the verifier BEFORE the timer is enabled / the service is
+# started below. jarvis-backup.service ExecStartPost runs this exact path as
+# User=postgres; the repo working copy is 0711 koppe and is not readable by
+# postgres, so the unit used to fail on every run. Installed root:root 0755.
+[ -f "$verify_src" ] || fail "verify-backup.sh working copy is required for daily verification: $verify_src"
+install -o root -g root -m 0755 "$verify_src" "$verify_dst"
 for pair in "$service_src:$service_dst" "$timer_src:$timer_dst" "$migrations_unit_src:$migrations_unit_dst"; do
   src="${pair%%:*}"; dst="${pair##*:}"
   install -o root -g root -m 0644 "$src" "$dst"
@@ -202,12 +208,11 @@ echo "  manual run: OK"
 # backup was verified. Fail loudly (rollback + exit) instead of silently
 # skipping verification and still printing the "verified" DONE message.
 command -v jq >/dev/null 2>&1 || fail "jq is required for backup integrity verification"
-# jarvis-backup.service now runs this same working copy via ExecStartPost after
-# every nightly backup. Fail closed here as well: an enabled timer whose daily
-# verifier is missing would leave failed units while this installer still
-# printed the "verified" DONE message. Same framework as the jq check above.
-[ -f "$verify_src" ] || fail "verify-backup.sh working copy is required for daily verification: $verify_src"
-install -o root -g root -m 0755 "$verify_src" "$verify_dst"
+# jarvis-backup.service runs the INSTALLED $verify_dst via ExecStartPost after
+# every nightly backup (I73-C (b)); the working copy is only the install source
+# and was already installed above, before the manual service run. Fail closed
+# here as well: a missing verifier would leave failed units while this installer
+# still printed the "verified" DONE message. Same framework as the jq check.
 echo "  verifying backup integrity ..."
 if ! sudo -u postgres bash "$verify_dst" --backup-dir "$backup_dir" | tail -20; then
   fail "backup integrity verification failed"
