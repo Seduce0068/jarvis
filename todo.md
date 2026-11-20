@@ -2280,3 +2280,34 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   push、共有 lib の実機配布。
 
 - 親が対応: shellcheck SC2174／SC2261、event 証跡の件数同期、全ゲート検証。
+
+### Round 79（R4 で修正済み）
+
+- [x] UI cargo コマンドへ `--locked`、workspace の jarvis-core http feature を
+  利用側4クレートへ明示化（新規 crate への推移を防止）。
+- [x] `--backup-dir` 値欠落ガード（verify 48件／backup-args 7件）、smoke の
+  EXIT trap pid 初期化と mode 検証、op:// 記述を現行へ訂正。
+- [x] gRPC の serde_json エラー本文を固定語彙へ、apply_minimal_env の実効
+  テストと spawn 静的ガード、UI の同一 id 二重決定を防止（UI 84件）。
+
+### Round 79 の残り指摘（未対応）
+
+- [ ] CI の外部アクション／再利用ワークフローが可変タグ参照（low）—
+  checkout を SHA 固定、rust-gates.yml@v1 の解決 SHA を記録。
+- [ ] qdrant-client の ^1.10 が reqwest 0.12/0.13 の major 重複を招く
+  （low）— exact pin か共存理由の記録。
+- [ ] rust-script の依存が semver 下限のみでロック無し（medium）—
+  exact pin または Makefile + rust-script 例外の明記。
+- [ ] verify サマリ「ok=43」の単位誤記（medium）— 証跡のテスト件数と
+  verify の判定呼び出し数を区別して表記。
+- [ ] テスト集約で失敗時の本番非接触検証が代表1ケースのみに（medium）—
+  失敗クラスごとに1件ずつ復活。
+- [ ] test-restore-local が既定ロックパスを使用し /run 経路が CI で未検証
+  （low）— LOCK_FILE を一時パスへ。
+- [ ] secret_scan の index 件数クロスチェックが自己和集（low）—
+  主張を限定または独立検証へ置換。
+- [ ] todo.md:591 の egress「未設定時は無制限」が現行と逆（low）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: fmt 差分、全ゲート再検証。
