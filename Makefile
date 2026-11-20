@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args timer-status check-shell check-toml check-evidence init-config
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args timer-status check-shell check-workflow-pins check-toml check-evidence init-config
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -67,6 +67,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks && cargo test --locked
 	@python3 ci/scripts/secret_scan.py
 	@bash ci/scripts/check-shell.sh
+	@bash ci/scripts/check-workflow-pins.sh
 	@bash ci/scripts/check-toml.sh
 	@bash ci/scripts/check-evidence.sh
 	@bash ci/scripts/test-legacy-guards.sh
@@ -98,6 +99,9 @@ check-evidence: ## テスト仕様とエビデンスのハッシュ一致を検�
 
 check-shell: ## 全 tracked *.sh の静的解析（bash -n / shellcheck）
 	@bash ci/scripts/check-shell.sh
+
+check-workflow-pins: ## workflow の @vN ピンを記録 SHA と GitHub API で照合（オフラインは未検証警告・fail-closed）
+	@bash ci/scripts/check-workflow-pins.sh
 
 check-toml: ## 全 tracked *.toml の構文検証（tomllib/tomli、値は出力しない・fail-closed）
 	@bash ci/scripts/check-toml.sh

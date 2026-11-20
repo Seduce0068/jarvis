@@ -26,7 +26,11 @@ jobs:
     # 2026-11-20 確認: refs/tags/v1 -> b7675efd8a9a84ebc5b560da628d1a82f3fbf98f
     #   (Seduce0068/workflows, commit "ci(rust-gates): アクションをSHAピン留め
     #   （checkout/rust-cache/install-action）", 2026-11-08)
-    # 再確認: GitHub API で refs/tags/v1 の commit SHA を照合する。
+    # 再確認: `bash ci/scripts/check-workflow-pins.sh`（make check-workflow-pins、
+    # make ci-local、および下記 extra_gates）が直近コメントの記録 SHA と
+    # GitHub API の現行 SHA を照合し、タグの付け替えを fail-closed で検知する。
+    # オフライン時は未検証警告のみ。タグを付け替える場合は上の記録 SHA も
+    # 同じコミットで更新すること。
     # §5 の方針に反するため `uses:` 自体は SHA 固定にせず v1 タグを維持する。
     uses: Seduce0068/workflows/.github/workflows/rust-gates.yml@v1
     with:
@@ -80,6 +84,7 @@ jobs:
         # repo-relative script paths.
         cd ..
         make check-shell
+        make check-workflow-pins
         make check-toml
         make check-evidence
         make secret-scan

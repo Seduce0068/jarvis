@@ -325,6 +325,65 @@ CWD 検出器ではない。`tracked_files()` が将来 CWD 依存／フィル�
 列挙へ変更された場合に fail-closed で検出するためのものであり、
 CWD 非依存を担保する一次防御ではない（混同しないこと）。
 
+## workflow pin 照合ゲート（I87-A）
+
+### 目的
+
+`.github/workflows/*.yml` の `uses: owner/repo/path@vN` は可変タグである。
+共通指示 §5 は参照を `v1` タグへピン留めする方針のため、`actions/checkout`
+のようにフル SHA 固定へ置き換えることはしない。代わりに直近コメントへ
+`refs/tags/v1 -> <40hex>` の形式で解決 SHA を記録し、
+[check-workflow-pins.sh](../../ci/scripts/check-workflow-pins.sh) が
+GitHub API（読み取り専用）で現行 SHA を解決して照合する。タグが付け替え
+られたのに記録が更新されていない場合は `SHA_MISMATCH` で fail-closed に
+拒否する。フル SHA 固定済みの `uses:`（例: `actions/checkout@11d596...`）は
+immutable なので対象外とし、`@vN` 形式のタグ参照のみを検査する。
+
+### 実行
+
+```bash
+# Kubuntu / jarvis リポジトリルートで実行
+echo "== workflow pin 照合 =="
+make check-workflow-pins
+echo "== ci-local（check-shell の直後に含まれる） =="
+make ci-local
+```
+
+`make ci-local` のほか、`.github/workflows/ci.yml` の `extra_gates` と
+`.github/workflows/review-gate.yml` の手動ゲート（`make ci-local`）でも
+実行される。
+
+### オフライン挙動
+
+`WORKFLOW_PINS_OFFLINE=1` または `--offline` を指定すると API 照合を
+スキップし、各エントリを `UNVERIFIED` として警告して終了コード 0 を返す。
+ネットワーク到達不可（curl の DNS／接続／タイムアウト失敗、rc 6/7/28/35）も
+同様に `UNVERIFIED` へ格下げする。これはローカル作業を止めないための
+opt-out であり、CI は API 到達性がある前提で運用する。
+
+```bash
+# オフライン環境での実行
+WORKFLOW_PINS_OFFLINE=1 bash ci/scripts/check-workflow-pins.sh
+bash ci/scripts/check-workflow-pins.sh --offline
+```
+
+到達はできるが HTTP エラー（認証・レート制限・404 等）や JSON 不正の場合は
+`API_RESOLVE_FAILED` で fail-closed とする。「到達できない」ことと
+「API が失敗した」ことは誤って混同しないこと。
+
+### 出力と限界
+
+不一致・API 失敗・記録欠落は固定語彙（`SHA_MISMATCH` /
+`API_RESOLVE_FAILED` / `PIN_RECORD_MISSING` / `PIN_RECORD_MALFORMED` /
+`NO_WORKFLOW_FILES` / `WORKFLOW_READ_FAILED` / `BAD_USAGE`）で出力する。
+SHA 値自体は診断出力に出してよいが、トークンその他の秘密情報は出力・保存
+しない。`GITHUB_TOKEN` / `GH_TOKEN` が環境に存在する場合は Authorization
+ヘッダにのみ使用する。
+
+**限界**: タグの付け替えと記録 SHA の更新を同じコミットで行うと整合するため
+ゲートは通過する。記録は監査用のピンであり、タグ更新の承認を自動化する
+ものではない（共通指示 §5 の「互換更新はタグの付け替え」運用を前提とする）。
+
 ## 関連
 
 - [specs/index.md](../../specs/index.md): テスト仕様の索引
