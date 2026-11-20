@@ -333,7 +333,8 @@ clippy ゲートは次の3経路に限定して表記する。
 - UI 直接（GPUI 承認コンソール）:
 
   ```bash
-  cd ui && cargo clippy --all-targets --locked -- -D warnings
+  cd ui && cargo clippy --all-targets --locked -- \
+    -D warnings -D clippy::undocumented_unsafe_blocks
   ```
 
 表記ルール:

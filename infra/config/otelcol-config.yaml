@@ -55,6 +55,7 @@ receivers:
       - jarvis-mcp-gw.service
       - jarvis-event.service
       - jarvis-context.service
+      - jarvis-migrations.service
       - jarvis-backup.service
       - jarvis-backup.timer
 

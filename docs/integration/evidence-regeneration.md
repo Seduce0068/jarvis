@@ -330,14 +330,40 @@ CWD 非依存を担保する一次防御ではない（混同しないこと）�
 ### 目的
 
 `.github/workflows/*.yml` の `uses: owner/repo/path@vN` は可変タグである。
-共通指示 §5 は参照を `v1` タグへピン留めする方針のため、`actions/checkout`
-のようにフル SHA 固定へ置き換えることはしない。代わりに直近コメントへ
+共通指示 §5 は再利用可能 workflow（`Seduce0068/workflows` の
+`rust-gates.yml`）を `v1` タグへピン留めする方針を定める。一方
+`actions/checkout` などの個別アクションはフル SHA 固定済みであり、
+[review-gate.yml](../../.github/workflows/review-gate.yml) と
+[ci/review-gate.yml](../../ci/review-gate.yml) がその例である。
+再利用 workflow のタグ参照については直近コメントへ
 `refs/tags/v1 -> <40hex>` の形式で解決 SHA を記録し、
 [check-workflow-pins.sh](../../ci/scripts/check-workflow-pins.sh) が
 GitHub API（読み取り専用）で現行 SHA を解決して照合する。タグが付け替え
 られたのに記録が更新されていない場合は `SHA_MISMATCH` で fail-closed に
-拒否する。フル SHA 固定済みの `uses:`（例: `actions/checkout@11d596...`）は
-immutable なので対象外とし、`@vN` 形式のタグ参照のみを検査する。
+拒否する。フル SHA（40hex）固定済みの `uses:`（例: `actions/checkout@11d596...`）は
+immutable なので対象外とし、**それ以外のすべての ref** を検査する。
+
+### 適用範囲（I91-C）
+
+ゲートの検査対象は「完全 SHA（40hex）固定以外のすべての ref」である。
+許可 ref の allowlist は持たず、完全 SHA 以外はすべて可変として扱う。
+
+| ref の形態 | 扱い |
+| --- | --- |
+| `@<40hex>`（完全 SHA） | immutable としてスキップ（記録不要） |
+| `@vN` / `@vN.M.P` | 可変タグ。記録必須 |
+| `@main` / `@master` | 可変ブランチ。記録必須（無ければ `PIN_RECORD_MISSING`） |
+| `@v1-beta` / `@release/*` 等 | 可変 ref。記録必須 |
+
+旧実装は `^v[0-9]+([.][0-9]+)*$` に一致しない ref を黙ってスキップしていたため、
+`@main` 等は記録が無くても対象外だった。現在は完全 SHA 固定のみを除外し、
+可変 ref に記録が無ければ `PIN_RECORD_MISSING`、記録形式が不正なら
+`PIN_RECORD_MALFORMED` で fail-closed に拒否する（ネットワーク到達不可による
+格下げは可変 ref の記録欠落には適用されない）。
+
+現行の API 解決は `git/ref/tags/<ref>` エンドポイントを使うため、ブランチ ref
+（`@main` 等）は記録があってもオンライン照合で `API_RESOLVE_FAILED` に
+なり得る（fail-closed）。記録欠落の検出自体は API 応答に依存しない。
 
 ### 実行
 
@@ -379,6 +405,7 @@ make ci-local
 | annotated tag follow | ref が `type=tag` の tag オブジェクトを指す | API を 2 回呼び出し `OK` / 終了 0 |
 | 不整合 SHA | 記録値と異なる commit SHA を返す | `SHA_MISMATCH` / 終了 1 |
 | 記録欠落 | 直前コメントに `refs/tags/v1 -> <40hex>` が無い | `PIN_RECORD_MISSING` / 終了 1 |
+| 可変 ref `@main`（I91-C） | `@main` に記録が無い（旧 Filter では黙ってスキップ） | `PIN_RECORD_MISSING` / 終了 1 |
 | 到達不可 rc 6 | 疑似 curl が 6 を返す | `UNVERIFIED` / 終了 0 |
 | 到達不可 rc 28 | 疑似 curl が 28 を返す | `UNVERIFIED` / 終了 0 |
 | `--offline` | 引数指定と `WORKFLOW_PINS_OFFLINE=1` | curl 未呼び出し・`UNVERIFIED` / 終了 0 |
