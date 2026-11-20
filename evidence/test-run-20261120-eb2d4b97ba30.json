@@ -184,6 +184,50 @@
         "SP800-53r5.2/AC-3",
         "SP800-53r5.2/IA-5"
       ]
+    },
+    {
+      "id": "R-11",
+      "tier": "T1",
+      "description": "発動中の kill switch で承認済み表示が件数に上書きされ誤認される",
+      "asvs": [
+        "v5.0.0-V8.3.1"
+      ],
+      "controls": [
+        "SP800-53r5.2/AC-3"
+      ]
+    },
+    {
+      "id": "R-12",
+      "tier": "T1",
+      "description": "409 winner が読めず失敗/誤表示、winner 理由が漏れる",
+      "asvs": [
+        "v5.0.0-V16.5.2"
+      ],
+      "controls": [
+        "SP800-53r5.2/AU-3"
+      ]
+    },
+    {
+      "id": "R-13",
+      "tier": "T1",
+      "description": "kill switch 409 が winner と誤認され停止表示が消える",
+      "asvs": [
+        "v5.0.0-V16.5.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/SI-4"
+      ]
+    },
+    {
+      "id": "R-14",
+      "tier": "T1",
+      "description": "probe の transient 失敗で停止 pin が外れ fail-open になる",
+      "asvs": [
+        "v5.0.0-V16.5.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/SC-5"
+      ]
     }
   ],
   "assurance": {

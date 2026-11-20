@@ -16,7 +16,10 @@
 # results.passed/failed/skipped, so a multi-gate claim cannot drift away from
 # the single aggregated total. The evidence requirements, the spec's REQ
 # definitions and the Traceability Req column must be the same set, so adding
-# or removing a requirement or citing an undefined Req fails closed. Every
+# or removing a requirement or citing an undefined Req fails closed. The R-ID
+# set declared in a spec's Risk & tier table must likewise equal the
+# risk_items[].id set of EVERY evidence citing that spec, so adding or dropping
+# a risk id on either side fails closed with RISK_SET_MISMATCH. Every
 # evidence declaration for a spec is checked, so a second evidence file cannot
 # hide behind a first one with the correct requirements. The executed total
 # (passed + failed only; skipped does not count) must cover every
@@ -63,6 +66,7 @@ covered = set()
 # Keep one entry per evidence file. A dict keyed by spec would let a later
 # evidence overwrite an earlier one, hiding a tampered requirements array.
 evi_reqs_entries = []  # (evidence_file, spec_path, requirements)
+evi_risk_entries = []  # (evidence_file, spec_path, risk_item_ids or None)
 ok = 0
 
 # A timezone is mandatory: naive ISO strings are not RFC 3339. Fractional
@@ -159,6 +163,26 @@ def contract_note_keyword_counts(notes):
 
 def digest(path):
     return "sha256:" + hashlib.sha256(open(path, "rb").read()).hexdigest()
+
+def evidence_risk_ids(data):
+    """R-IDs declared in an evidence `risk_items` array.
+
+    Returns None for a missing, empty or malformed array so the risk-set gate
+    fails closed instead of silently skipping the comparison. Only ids are
+    read; descriptions and control references are never emitted.
+    """
+    items = data.get("risk_items")
+    if not isinstance(items, list) or not items:
+        return None
+    ids = []
+    for item in items:
+        if not isinstance(item, dict):
+            return None
+        rid = item.get("id")
+        if not isinstance(rid, str) or not re.fullmatch(r'R-\d+', rid):
+            return None
+        ids.append(rid)
+    return ids
 
 for f in evidence_files:
     try:
@@ -273,6 +297,10 @@ for f in evidence_files:
     # the same spec from overwriting each other's requirements.
     evi_reqs_entries.append((f, os.path.normpath(spec_path),
                              ref.get("requirements")))
+    # Risk ids are collected in the same pre-hash pass as requirements, so a
+    # spec-side Risk & tier tamper still reaches the risk-set gate below.
+    evi_risk_entries.append((f, os.path.normpath(spec_path),
+                             evidence_risk_ids(d)))
     if not os.path.isfile(spec_path):
         errors.append(f"{f}: SPEC_PATH_NOT_FOUND:{spec_path}"); continue
     # Read the spec before the hash gate: appending a contract step to a spec
@@ -378,6 +406,18 @@ def section_body(text, name):
     following = re.search(r'^#{1,6}\s+', rest, re.MULTILINE)
     return rest[:following.start()] if following else rest
 
+def defined_risk_ids(text):
+    """R-IDs defined in the Risk & tier table (table's first cell).
+
+    Scoping to the section body keeps an R-ID mentioned elsewhere in prose or
+    in the Traceability table from being mistaken for a declared risk. An empty
+    result is rejected by the caller, so a section without a risk table cannot
+    pass by having an empty set on both sides.
+    """
+    body = section_body(text, "Risk & tier")
+    return set(re.findall(r'^\|[ \t]*`?(R-\d+)`?[ \t]*\|',
+                          body, re.MULTILINE))
+
 for spec in spec_files:
     try:
         with open(spec, encoding="utf-8") as fh:
@@ -409,6 +449,21 @@ for spec in spec_files:
                 and def_reqs and trc_reqs
                 and set(evi_reqs) == def_reqs == trc_reqs):
             errors.append(f"REQ_SET_MISMATCH:{spec}:{evi_file}")
+    # I95-D: the spec's Risk & tier R-ID set must equal the risk_items[].id
+    # set of EVERY evidence citing this spec. The former gate only checked
+    # that the section existed, so a risk id added or removed on either side
+    # still passed with ok=6 errors=0. Collect one entry per evidence (a dict
+    # would let a second file overwrite the first) and fail closed with a
+    # value-less code; no R-ID value is emitted.
+    risk_entries = [entry for entry in evi_risk_entries
+                    if entry[1] == os.path.normpath(spec)]
+    def_risks = defined_risk_ids(spec_text)
+    if not def_risks:
+        errors.append(f"RISK_SET_MISMATCH:{spec}:NO_RISK_IDS")
+    for evi_file, _spec_path, evi_risks in risk_entries:
+        if (not isinstance(evi_risks, list)
+                or set(evi_risks) != def_risks):
+            errors.append(f"RISK_SET_MISMATCH:{spec}:{evi_file}")
     doc_map = section_body(spec_text, "Document map")
     for item in INFO_ITEMS:
         if item not in doc_map:

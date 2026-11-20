@@ -161,6 +161,50 @@
       "controls": [
         "SP800-53r5.2/AC-3"
       ]
+    },
+    {
+      "id": "R-9",
+      "tier": "T1",
+      "description": "egress allowlist 未設定・不正で外部 host へ fetch され漏洩する",
+      "asvs": [
+        "v5.0.0-V16.5.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/SC-7"
+      ]
+    },
+    {
+      "id": "R-10",
+      "tier": "T1",
+      "description": "admin token 比較がタイミング依存/空値通過し制御面が乗っ取られる",
+      "asvs": [
+        "v5.0.0-V13.2.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/IA-5"
+      ]
+    },
+    {
+      "id": "R-11",
+      "tier": "T2",
+      "description": "upstream 登録失敗を無視し機能欠落のまま起動する",
+      "asvs": [
+        "v5.0.0-V16.5.3"
+      ],
+      "controls": [
+        "SP800-53r5.2/CM-7"
+      ]
+    },
+    {
+      "id": "R-12",
+      "tier": "T2",
+      "description": "終了時に in-flight を正常完了と誤主張 / tracer が未 shutdown",
+      "asvs": [
+        "v5.0.0-V16.5.1"
+      ],
+      "controls": [
+        "SP800-53r5.2/CM-7"
+      ]
     }
   ],
   "assurance": {

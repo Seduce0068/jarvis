@@ -159,6 +159,28 @@
       "controls": [
         "SP800-53r5.2/CM-7"
       ]
+    },
+    {
+      "id": "R-9",
+      "tier": "T1",
+      "description": "未知の形式/暗号化記述子を平文として検証し、破損を見逃す",
+      "asvs": [
+        "v5.0.0-V14.2.4"
+      ],
+      "controls": [
+        "SP800-53r5.2/SI-7"
+      ]
+    },
+    {
+      "id": "R-10",
+      "tier": "T2",
+      "description": "記述子導入で既存 set / verify / restore の互換性が失われる",
+      "asvs": [
+        "v5.0.0-V14.2.4"
+      ],
+      "controls": [
+        "SP800-53r5.2/CP-9"
+      ]
     }
   ],
   "assurance": {

@@ -17,16 +17,21 @@
 # `--check` now runs the real suite and fails closed unless it exits 0 before
 # trusting that value. check-evidence.sh's `failed == 0` gate and the six
 # existing evidence files therefore stay intact.
+#
+# I95-E (a)/(d): --check accepts only `evidence/test-run-<12hex>.json` directly
+# under evidence/ (no slash inside the filename, no ".."), and emits ONLY
+# MATCH / MISMATCH. The `results` fragment is printed in generation mode alone,
+# so a failed check can never leave a success-looking fragment in the output.
 set -euo pipefail
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: ci/scripts/generate-evidence.sh <target> [--check evidence/test-run-*.json]
+Usage: ci/scripts/generate-evidence.sh <target> [--check evidence/test-run-<12hex>.json]
   target: policy | mcp | context | event | ui | core
   --check also RUNS the real suite (not --list) and requires it to pass,
           then compares the derived counts with an existing evidence JSON;
-          prints only MATCH / MISMATCH (no values).
+          prints only MATCH / MISMATCH (no values, no results fragment).
 EOF
 }
 
@@ -51,12 +56,21 @@ if [ "$#" -ge 2 ]; then
     exit 2
   fi
   check_file="$3"
-  # Constrain reads to the repository's evidence tree: no absolute path, ".."
-  # escape or unrelated file may be opened, so no secret can be read here.
-  case "$check_file" in
-    evidence/test-run-*.json) ;;
-    *) echo "FAIL: BadEvidencePath" >&2; exit 2 ;;
+  # Constrain reads to the repository's evidence tree. A bare
+  # `evidence/test-run-*.json` case is NOT enough: in bash a glob `*` also
+  # matches "/", so `evidence/test-run-../../nonexistent.json` used to pass
+  # the case and fail later as EvidenceFileNotFound (exit 1) instead of the
+  # documented BadEvidencePath (exit 2). Strip the ONE mandatory `evidence/`
+  # prefix, then reject any further "/" or ".." explicitly, and finally require
+  # the exact evidence/test-run-<12hex>.json shape.
+  case "${check_file#evidence/}" in
+    */*|*..*) echo "FAIL: BadEvidencePath" >&2; exit 2 ;;
   esac
+  evidence_path_re='^evidence/test-run-[0-9a-f]{12}[.]json$'
+  if [[ ! "$check_file" =~ $evidence_path_re ]]; then
+    echo "FAIL: BadEvidencePath" >&2
+    exit 2
+  fi
   if [ ! -f "$repo/$check_file" ]; then
     echo "FAIL: EvidenceFileNotFound" >&2
     exit 1
@@ -101,11 +115,17 @@ passed=$((total - ignored))
 
 # I71-D: label the predicted `failed` value so it can never be mistaken for a
 # measured result when this fragment is pasted into evidence.
-printf '# LABEL: failed=0 は --list 由来の予測値であり実測ではない。\n'
-printf '#        --list はテストを実行しないため failing test を検出できない。\n'
-printf '#        適用前に実 suite を実行し失敗 0 を確認すること（--check は実 run も照合）。\n'
-printf 'results: {"passed": %d, "failed": 0, "skipped": %d}\n' "$passed" "$ignored"
-printf 'notes  : %d passed / 0 failed / %d ignored (cargo --list から機械導出; failed は予測値・実測ではない)\n' "$passed" "$ignored"
+# I95-E (d): generation mode ONLY. In --check mode the real suite has not run
+# yet here, so emitting this fragment would leave a success-looking
+# `results`/`notes` snippet even when the run below fails. The check path
+# prints MATCH / MISMATCH only, after the real run has succeeded.
+if [ -z "$check_file" ]; then
+  printf '# LABEL: failed=0 は --list 由来の予測値であり実測ではない。\n'
+  printf '#        --list はテストを実行しないため failing test を検出できない。\n'
+  printf '#        適用前に実 suite を実行し失敗 0 を確認すること（--check は実 run も照合）。\n'
+  printf 'results: {"passed": %d, "failed": 0, "skipped": %d}\n' "$passed" "$ignored"
+  printf 'notes  : %d passed / 0 failed / %d ignored (cargo --list から機械導出; failed は予測値・実測ではない)\n' "$passed" "$ignored"
+fi
 
 if [ -n "$check_file" ]; then
   # I71-D: --list cannot detect a failing test. Fail closed unless the real

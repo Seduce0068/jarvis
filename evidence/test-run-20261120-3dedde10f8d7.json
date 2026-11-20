@@ -155,17 +155,6 @@
       "controls": [
         "SP800-53r5.2/AU-3"
       ]
-    },
-    {
-      "id": "R-9",
-      "tier": "T1",
-      "description": "キュー満杯時の失敗レスポンス欠落",
-      "asvs": [
-        "v5.0.0-V16.2.4"
-      ],
-      "controls": [
-        "SP800-53r5.2/SC-5"
-      ]
     }
   ],
   "assurance": {
