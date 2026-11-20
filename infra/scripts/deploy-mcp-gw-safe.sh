@@ -376,6 +376,13 @@ if [ "$apply" -eq 1 ]; then
   # restart/health/diff へ進み "DONE: APPLIED" と誤報告しうる（env 配置と同調）。
   install -o root -g root -m 0755 "$bin" /opt/jarvis/bin/jarvis-mcp-gw \
     || die "バイナリ配置失敗: $bin -> /opt/jarvis/bin/jarvis-mcp-gw"
+  # I99-B: opencode.service now declares After/Wants on jarvis-mcp-gw.service
+  # (and jarvis-policy.service). This step restarts ONLY the gateway: Wants= is
+  # a weak dependency with no PartOf=/BindsTo=, so systemd does not drag
+  # opencode or jarvis-event down here, and the health probe below confirms the
+  # restarted unit before step 6. The chain is policy -> mcp-gw -> opencode ->
+  # event, so there is no restart-order conflict in this script and no ordering
+  # change was required (verified, comment-only edit).
   systemctl restart jarvis-mcp-gw || { echo "再起動に失敗しました" >&2; rollback; }
   for _ in $(seq 1 20); do
     code=$(curl -q -s -o /dev/null -w '%{http_code}' -m 2 http://127.0.0.1:8082/health || true)

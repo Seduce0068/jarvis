@@ -742,5 +742,11 @@ echo "binaries and units installed; create /etc/jarvis/bws.env before starting s
 echo "migrations: install sqlx-cli (cargo-sqlx) on the service PATH before starting policy/context; Wants= will NOT stop them if the migration unit fails"
 echo "migration sources: deployed ${MIGRATIONS_SRC} -> ${MIGRATIONS_DST} from commit ${BUILD_COMMIT} (same as binaries); verify with 'systemctl is-active jarvis-migrations'"
 echo "start with:"
-echo "  sudo systemctl enable --now qdrant opencode jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context"
+# I99-B: print the units in dependency (topological) order so the operator
+# example matches the unit graph: qdrant -> jarvis-policy -> jarvis-mcp-gw ->
+# jarvis-context -> opencode -> jarvis-event. opencode now orders after
+# policy/mcp-gw and event orders after opencode (plus policy/mcp-gw/context),
+# so event must come last. systemd also sorts the transaction via After=/Wants=;
+# this ordering only keeps the documented command consistent with the graph.
+echo "  sudo systemctl enable --now qdrant jarvis-policy jarvis-mcp-gw jarvis-context opencode jarvis-event"
 echo "jarvis-migrations.service is pulled in via Wants= from policy/context (no separate enable needed; Wants= does not propagate a failed unit to its dependants)"

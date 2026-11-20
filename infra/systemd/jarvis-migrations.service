@@ -32,12 +32,30 @@ Environment=HOME=/opt/jarvis/data
 Environment=RUST_LOG=info
 
 # No credential value is stored in this unit. `bws run` injects the project
-# secrets into the child process; sqlx expects DATABASE_URL, so map the
-# injected JARVIS_CONTEXT_PG_URL inside a short-lived bash. The doubled `$$`
-# is required: systemd would otherwise expand `${...}` at unit-parse time,
-# before bws has injected anything. Migration sources come from the deployed
-# Rust workspace at /opt/jarvis/rust/migrations.
-ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /usr/bin/bash -c 'exec /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_CONTEXT_PG_URL:?JARVIS_CONTEXT_PG_URL is required}"'
+# secrets into the child process; sqlx is given an explicit --url, so map the
+# injected variables inside a short-lived bash. The doubled `$$` is required:
+# systemd would otherwise expand `${...}` at unit-parse time, before bws has
+# injected anything. Migration sources come from the deployed Rust workspace
+# at /opt/jarvis/rust/migrations.
+#
+# I99-B: apply the SAME shared migration set to both databases when both URLs
+# are injected. jarvis-policy reads JARVIS_POLICY_PG_URL (config.rs `pg_url`,
+# ENV_KEY) and calls PgApprovalPersistence::connect() at startup; the
+# approval_requests / audit_log / kill_switch tables it needs come from
+# 001_initial.sql. Applying only to JARVIS_CONTEXT_PG_URL left the policy DB
+# without those tables when the two URLs drifted apart, producing a
+# start-fail loop.
+#
+# Decision: keep both URL variables (do NOT unify to one shared variable).
+# Unifying would require changing the policy binary's env key and its unit,
+# both outside this change's scope, and would break installs where the two
+# URLs intentionally point at different databases. This option is additive and
+# backward compatible: pg_url is Option and require_approval_persistence
+# defaults to false, so a blank/absent JARVIS_POLICY_PG_URL means policy uses
+# the Noop store and the second run is skipped. When both URLs resolve to the
+# same DB, the second `migrate run` is a no-op (checksum-recorded and
+# advisory-lock serialized). JARVIS_CONTEXT_PG_URL stays mandatory, as before.
+ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /usr/bin/bash -c 'set -e; /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_CONTEXT_PG_URL:?JARVIS_CONTEXT_PG_URL is required}"; if [[ -n "$${JARVIS_POLICY_PG_URL:-}" ]]; then /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_POLICY_PG_URL}"; fi'
 TimeoutStartSec=120
 
 # Security hardening (same baseline as the other jarvis units).

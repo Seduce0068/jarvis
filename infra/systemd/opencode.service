@@ -1,8 +1,15 @@
 [Unit]
 Description=OpenCode V2 Server (Agent Runtime)
 Documentation=https://opencode.ai/v2/docs
-After=network.target
-Wants=network.target
+# I99-B: wait for the authorization / tool gateway before serving. The agent
+# runtime is an MCP client and calls approval-gated tools; starting it before
+# jarvis-policy (kill switch / approvals) and jarvis-mcp-gw (allowlist) lets the
+# first event dispatch or tool call race their startup and be lost. Ordering is
+# one-way: policy -> mcp-gw -> opencode -> event. Neither policy nor mcp-gw
+# declares After/Wants on opencode, so no systemd-analyze verify cycle is
+# introduced. The pre-existing network.target ordering is preserved.
+After=network.target jarvis-policy.service jarvis-mcp-gw.service
+Wants=network.target jarvis-policy.service jarvis-mcp-gw.service
 
 [Service]
 Type=simple

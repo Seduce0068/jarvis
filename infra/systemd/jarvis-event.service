@@ -1,8 +1,13 @@
 [Unit]
 Description=JARVIS Event Normalizer
 Documentation=https://github.com/Seduce0068/jarvis
-After=network.target jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
-Wants=jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service
+# I99-B: opencode.service is appended to the existing dependency set. The
+# runtime brings up its event/webhook consumer at startup; with parallel boot
+# the first dispatch has no consumer and is lost. opencode orders only after
+# policy/mcp-gw, never after event, so this adds no ordering cycle. All
+# pre-existing After/Wants entries are retained.
+After=network.target jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service opencode.service
+Wants=jarvis-policy.service jarvis-mcp-gw.service jarvis-context.service opencode.service
 
 [Service]
 Type=exec
