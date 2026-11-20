@@ -126,15 +126,30 @@ if not objs:
     except Exception: pass
 names = []
 schemas_ok = False
+
+
+def read_schema_ok(tool):
+    # MCP inputSchema contract (todo.md:734-738 / mcp_server.rs native_input_schema):
+    # filesystem.read の path は optional で既定は "."。required キー自体が
+    # 出力されない（欠落または空配列）ことを確認する。
+    # 一方 git.status / git.diff は required=["path"] を維持しているため、
+    # ここでは filesystem.read に対してのみ optional を要求する。
+    if tool.get('name') != 'filesystem.read':
+        return False
+    schema = tool.get('inputSchema') or {}
+    path = (schema.get('properties') or {}).get('path')
+    if not isinstance(path, dict):
+        return False
+    desc = path.get('description') or ''
+    required = schema.get('required') or []
+    return '.' in desc and 'default' in desc.lower() and not required
+
+
 for o in objs:
     if isinstance(o, dict) and 'result' in o:
         tools = o['result'].get('tools', [])
         names = [tool.get('name') for tool in tools]
-        schemas_ok = any(
-            tool.get('name') == 'filesystem.read'
-            and 'path' in (tool.get('inputSchema') or {}).get('required', [])
-            for tool in tools
-        )
+        schemas_ok = any(read_schema_ok(tool) for tool in tools)
 print('\n'.join(names))
 print('SCHEMA_OK' if schemas_ok else 'SCHEMA_MISSING', file=sys.stderr)
 PY
@@ -161,9 +176,12 @@ else
   fi
 fi
 
-# MCP 契約: 既知のネイティブツールは引数スキーマを公開する
+# MCP 契約: filesystem.read は path を optional（既定 "."）として公開する。
+# required キーは削除済み（todo.md:734-738 / mcp_server.rs native_input_schema）。
+# git.status / git.diff は従来どおり required=["path"] を維持しているので、
+# この確認は filesystem.read の optional 契約に限定している。
 if grep -q SCHEMA_OK "$tmp/tools.schema"; then
-  echo "  PASS: mcp tools/list inputSchema (filesystem.read requires path)"; ok=$((ok+1))
+  echo "  PASS: mcp tools/list inputSchema: filesystem.read exposes optional path (defaults to .)"; ok=$((ok+1))
 else
   echo "  FAIL: mcp tools/list inputSchema"; fail=$((fail+1))
 fi
