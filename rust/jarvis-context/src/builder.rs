@@ -1060,7 +1060,8 @@ impl Builder {
         client.execute(
             "INSERT INTO memories (id, content, metadata, source, created_at, updated_at, expires_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)
-             ON CONFLICT (id) DO UPDATE SET content = $2, metadata = $3, updated_at = $6",
+             ON CONFLICT (id) DO UPDATE SET content = $2, metadata = $3, source = $4,
+             updated_at = $6, expires_at = $7",
             &[
                 &memory.id,
                 &memory.content,

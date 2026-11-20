@@ -26,7 +26,9 @@
 # ISOLATED_DB_CREATED を見て片付ける（既存のサービス再起動 trap は変更しない）。
 
 restore_pg() {
-  local db_name="jarvis"
+  # DB_NAME is defined by restore-local.sh; honour it here so the dry-run plan
+  # and the real psql calls target the same database (Round 95).
+  local db_name="${DB_NAME:-jarvis}"
   local isolated_db="jarvis_restore_test"
   local backup_db="" ts="" exists="" table_count="" dump_file=""
   local count_sql="SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema')"

@@ -91,6 +91,13 @@ for _ in $(seq 1 40); do curl -q -s -o /dev/null "http://127.0.0.1:$port/health"
 
 echo "== mode: $mode =="
 check health 200 "$(curl -q -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/health")"
+# A 200 with a degraded fixed body still means an unhealthy service (Round 95).
+health_body="$(curl -q -s "http://127.0.0.1:$port/health")"
+health_state="healthy"
+if printf '%s' "$health_body" | grep -Eq '"status"[[:space:]]*:[[:space:]]*"degraded"'; then
+  health_state="degraded"
+fi
+check health-body healthy "$health_state"
 check metrics 200 "$(curl -q -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/metrics")"
 
 # web.fetch: 承認必須なら403、現行allowlistなら実取得（200 + Example Domain）

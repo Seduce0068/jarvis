@@ -2656,3 +2656,21 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - 親が対応: 2体の途中終了を確認、矛盾する backup-multidb 差分を差し戻し、
   全ゲート再検証。
+
+### Round 96（/swarm-limited・親が直接対応）
+
+- [x] source のスキーマ不一致（high）→ migration 006 で `TEXT` 化、
+      ON CONFLICT へ `source` / `expires_at` を追加。
+- [x] DB_NAME が pg.sh で無視される（low）→ `${DB_NAME:-jarvis}` へ。
+- [x] smoke の /health が 200 degraded を合格させる（medium）→
+      固定本文 `status=degraded` を検出して FAIL。
+- 親が対応: 全ゲート再検証（restore 461件）。
+
+### Round 96 の残り指摘（未対応）
+
+- [ ] 両 DB バックアップギャップ（high）— 子実装は既存回帰と矛盾したため
+      差し戻し済み。manifest role と verify/restore を整合させた再設計が必要。
+- [ ] reconcile_pending の同時実行制御、mcp_allowlist.toml の行番号陳腐化、
+      CONTEXT_TOKEN_HEADER 重複、major 更新待ち29件（再評価 2026-12-20）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
