@@ -2519,3 +2519,23 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       旧 rustls 0.22 系統 / libsqlite3-sys）— 再評価 2026-12-20。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
+
+### Round 90（R4 で修正済み）
+
+- [x] **retain_days オーバーフロー**（confirmed high）→ 乗算前上限
+      `106751991167300` 検証＋未来 cutoff ガード、境界回帰（backup-args 9件）。
+- [x] SSRF 判定を IANA/IETF 分類へ（is_global は toolchain で不安定のため
+      明示実装）、非 UTF-8 パスも機密判定対象へ。
+- [x] MCP 子プロセスの kill+reap、ツール上限を extend 前に事前検査。
+- [x] status_label に 410、safe_client_error_text 単一化、policy gRPC の
+      serde エラー固定文言化。
+- [x] drift の egress 形式を Rust と同一化、JARVIS_DRIFT_BINARY、JSON 安全
+      構築、監査ドキュメントの古い主張と古い固定件数を同期。
+- 親が対応: is_global 自前実装、format! エスケープ、shellcheck 抑止、
+      secret_scan のテストリテラル、全ゲート再検証。
+
+### Round 90 の残り指摘（未対応）
+
+- [ ] major 更新待ち29件（再評価 2026-12-20）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
