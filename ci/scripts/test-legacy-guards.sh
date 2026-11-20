@@ -1068,6 +1068,84 @@ else
   fi
 fi
 
+# I81-B: the scanner must anchor its tracked-file listing at the repo root
+# derived from its own path, not at the caller's CWD. The old CWD-relative
+# `git ls-files` scanned only the subdirectory's files and printed OK even
+# though a root-level credential was tracked. Run from rust/ and require both
+# the root-level finding and the full two-file scan count.
+scan_subdir="$tmp/secret_scan_subdir"
+mkdir -p "$scan_subdir/rust"
+if ! (cd "$scan_subdir" \
+      && git init -q >/dev/null 2>&1 \
+      && printf 'BWS_ACCESS_TOKEN = %s\n' "$dummy_value" > leaky.env \
+      && printf 'fn main() {}\n' > rust/clean.rs \
+      && git add -f leaky.env rust/clean.rs >/dev/null 2>&1); then
+  echo "  FAIL: could not prepare subdirectory git repo for secret scanner test"
+  fail=$((fail+1))
+else
+  # Copy the scanner AFTER git add so it stays untracked (its own regex
+  # literals are legitimate VALUE-LIKE shapes).
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_subdir/secret_scan.py"
+  out=$(cd "$scan_subdir/rust" && python3 ../secret_scan.py 2>&1); code=$?
+  if [ "$code" -eq 1 ] \
+     && printf '%s' "$out" | grep -q 'VALUE-LIKE' \
+     && printf '%s' "$out" | grep -q 'scanned 2 tracked files' \
+     && ! printf '%s' "$out" | grep -q -- "$dummy_value"; then
+    echo "  PASS: secret_scan.py scans all tracked files from a subdirectory CWD"
+    ok=$((ok+1))
+  else
+    # Never echo raw scanner output: it may contain the dummy value.
+    echo "  FAIL: secret_scan.py missed a root-level credential from rust/ (exit=$code, output withheld)"
+    fail=$((fail+1))
+  fi
+fi
+
+# I81-B (franken CWD): invoke the scanner from an UNRELATED git repo whose own
+# tracked file is harmless. The old CWD-relative listing would scan that file
+# and wrongly report OK; the fixed scanner uses the repo root derived from its
+# own path and must still reject the credential in the scanner's repo.
+scan_franken="$tmp/secret_scan_franken"
+mkdir -p "$scan_franken/cwd_repo"
+if ! (cd "$scan_franken" \
+      && git init -q >/dev/null 2>&1 \
+      && printf 'BWS_ACCESS_TOKEN = %s\n' "$dummy_value" > leaky.env \
+      && git add -f leaky.env >/dev/null 2>&1 \
+      && cd cwd_repo \
+      && git init -q >/dev/null 2>&1 \
+      && printf 'harmless = true\n' > clean.env \
+      && git add -f clean.env >/dev/null 2>&1); then
+  echo "  FAIL: could not prepare franken-CWD repos for secret scanner test"
+  fail=$((fail+1))
+else
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_franken/secret_scan.py"
+  out=$(cd "$scan_franken/cwd_repo" && python3 ../secret_scan.py 2>&1); code=$?
+  if [ "$code" -eq 1 ] \
+     && printf '%s' "$out" | grep -q 'VALUE-LIKE' \
+     && printf '%s' "$out" | grep -q 'scanned 1 tracked files' \
+     && ! printf '%s' "$out" | grep -q -- "$dummy_value"; then
+    echo "  PASS: secret_scan.py ignores a franken CWD and scans its own repo"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: secret_scan.py reported false OK from a franken CWD (exit=$code, output withheld)"
+    fail=$((fail+1))
+  fi
+fi
+
+# Static guard: keep the root-anchored lookup and the fixed-vocabulary index
+# cross-check in the scanner source, and make sure no bare CWD-relative
+# `git ls-files` call creeps back in.
+scanner_src="$repo/ci/scripts/secret_scan.py"
+if grep -Fq '"git", "-C", script_dir, "rev-parse"' "$scanner_src" \
+   && grep -Fq '"git", "-C", root, "ls-files"' "$scanner_src" \
+   && grep -Fq 'scan set/index mismatch' "$scanner_src" \
+   && ! grep -Fq '["git", "ls-files"]' "$scanner_src"; then
+  echo "  PASS: secret_scan.py is root-anchored with an index-count cross-check"
+  ok=$((ok+1))
+else
+  echo "  FAIL: secret_scan.py lost the root anchor or the index cross-check"
+  fail=$((fail+1))
+fi
+
 # The gate must reject a spec that lost one required test-spec section. Reuse
 # the spec list from the index-negative case above; all temp trees use $tmp.
 section_tmp="$tmp/section_negative"
