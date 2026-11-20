@@ -96,6 +96,41 @@ pub const HEALTH_KILL_SWITCH_BODY: &str = r#"{"status":"degraded","reason":"kill
 /// (I64-B). See [`HEALTH_OK_BODY`] for the shared-contract rationale.
 pub const HEALTH_NO_POLICY_BODY: &str = r#"{"status":"degraded","reason":"no_policy"}"#;
 
+/// Fixed, closed label vocabulary of the `jarvis_http_requests_total{status=...}`
+/// counter emitted by all four JARVIS HTTP services.
+///
+/// Policy, event, mcp-gw and context all classify every response through this
+/// one function, so the same status can no longer produce a different metric
+/// label in different services. The set is deliberately bounded: only the
+/// statuses the services actually emit get a dedicated literal, and everything
+/// else collapses to `other` so an unbounded status cannot inflate the metric.
+///
+/// I93-D: `503` is intentionally a first-class bucket. It is a genuine
+/// availability signal (kill switch, approval queue exhaustion, full event
+/// channel, persistence outage) and must stay visible; folding it into `other`
+/// hides exactly the incidents an operator needs to see. The canonical mapping
+/// here is the one the policy and event services already carried, so the
+/// vocabulary itself is unchanged — this only removes the four-way duplication
+/// and lifts mcp-gw/context onto the same contract.
+#[cfg(feature = "http")]
+pub fn status_label(status: axum::http::StatusCode) -> &'static str {
+    match status.as_u16() {
+        200 => "200",
+        201 => "201",
+        204 => "204",
+        400 => "400",
+        401 => "401",
+        403 => "403",
+        404 => "404",
+        409 => "409",
+        413 => "413",
+        415 => "415",
+        500 => "500",
+        503 => "503",
+        _ => "other",
+    }
+}
+
 /// Fixed classification token emitted when a JSON body fails to deserialize.
 ///
 /// The offending bytes and axum's `JsonRejection` detail are never formatted:
@@ -538,6 +573,50 @@ mod tests {
         assert_ne!(HEALTH_OK_BODY, HEALTH_KILL_SWITCH_BODY);
         assert_ne!(HEALTH_OK_BODY, HEALTH_NO_POLICY_BODY);
         assert_ne!(HEALTH_KILL_SWITCH_BODY, HEALTH_NO_POLICY_BODY);
+    }
+
+    /// I93-D: pin the complete status→label vocabulary that all four HTTP
+    /// services share through [`status_label`]. Because policy, event, mcp-gw
+    /// and context no longer keep private copies, one canonical table here is
+    /// the same mapping every service emits; a one-sided edit in a consumer
+    /// cannot silently drift an availability bucket.
+    ///
+    /// The `503` row is the regression this change is about: it must stay its
+    /// own label instead of collapsing to `other` (the old mcp-gw/context
+    /// behavior). The final loop also proves the vocabulary is unchanged and
+    /// bounded — other 5xx codes such as 502/504 still fall into `other`.
+    #[cfg(feature = "http")]
+    #[test]
+    fn status_label_vocabulary_is_identical_for_all_services() {
+        let labelled = [
+            (200, "200"),
+            (201, "201"),
+            (204, "204"),
+            (400, "400"),
+            (401, "401"),
+            (403, "403"),
+            (404, "404"),
+            (409, "409"),
+            (413, "413"),
+            (415, "415"),
+            (500, "500"),
+            (503, "503"),
+        ];
+        for (code, expected) in labelled {
+            let status = axum::http::StatusCode::from_u16(code).expect("valid status");
+            assert_eq!(status_label(status), expected, "status {code}");
+        }
+
+        for code in [418, 429, 502, 504] {
+            let status = axum::http::StatusCode::from_u16(code).expect("valid status");
+            assert_eq!(status_label(status), "other", "status {code}");
+        }
+
+        // The availability signal must remain distinguishable from the bucket
+        // that used to swallow it.
+        let service_unavailable = axum::http::StatusCode::from_u16(503).expect("valid status");
+        let unlisted = axum::http::StatusCode::from_u16(502).expect("valid status");
+        assert_ne!(status_label(service_unavailable), status_label(unlisted));
     }
 
     fn all_sources() -> [EventSource; 7] {

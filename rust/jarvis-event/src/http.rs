@@ -199,33 +199,17 @@ async fn track_metrics(
     metrics::counter!(
         "jarvis_http_requests_total",
         "service" => "jarvis-event",
-        "status" => status_label(response.status()),
+        "status" => jarvis_core::status_label(response.status()),
     )
     .increment(1);
     response
 }
 
-fn status_label(status: axum::http::StatusCode) -> &'static str {
-    match status.as_u16() {
-        200 => "200",
-        201 => "201",
-        204 => "204",
-        400 => "400",
-        401 => "401",
-        403 => "403",
-        404 => "404",
-        409 => "409",
-        413 => "413",
-        415 => "415",
-        500 => "500",
-        503 => "503",
-        _ => "other",
-    }
-}
-
 /// I66-B: `jarvis_http_requests_total{status=...}` must keep body-size (413)
 /// and content-type (415) rejections in their own fixed buckets. Before this
 /// fix both collapsed into `other`, hiding size-limit spikes in Grafana.
+/// I93-D: the mapping now lives in the shared `jarvis_core::status_label`; this
+/// test keeps a local guard on the same contract for the event service.
 #[cfg(test)]
 mod status_label_tests {
     use axum::http::StatusCode;
@@ -235,10 +219,10 @@ mod status_label_tests {
         let too_large = StatusCode::from_u16(413).expect("valid status");
         let wrong_media_type = StatusCode::from_u16(415).expect("valid status");
         let unlisted = StatusCode::from_u16(418).expect("valid status");
-        assert_eq!(super::status_label(too_large), "413");
-        assert_eq!(super::status_label(wrong_media_type), "415");
+        assert_eq!(jarvis_core::status_label(too_large), "413");
+        assert_eq!(jarvis_core::status_label(wrong_media_type), "415");
         // Bounded vocabulary: unrelated codes must still collapse to `other`.
-        assert_eq!(super::status_label(unlisted), "other");
+        assert_eq!(jarvis_core::status_label(unlisted), "other");
     }
 }
 
