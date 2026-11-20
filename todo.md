@@ -2798,10 +2798,27 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **配線済み review-gate が cargo-audit 未導入で ci-local が常時失敗** — 2026-11-21 対応済み: `make ci-local` 直前に cargo-audit 0.23.0 のバージョンプローブ付き導入 step を追加（`.github/workflows/ci.yml:101-113` と同じ 0.23.0 ピン留め・`--locked`・冪等性）。追加は run ステップのみで repository 状態変更なし / 根拠
   `.github/workflows/review-gate.yml:50-64`, `Makefile:73` / R1-CF02 / confirmed。
   - 検証: `git diff` で3件のみ、`python3 -c "import yaml; yaml.safe_load(...)"` が `YAML OK, jobs: ['gate-check']`、`make secret-scan` exit 0（0 value-like credentials）。PR head checkout は手動 dispatch・read-only token・既存 `ci/review-gate.yml` と同方針のため既知判断として受け入れ。
-- [ ] **generate-evidence.sh --check（実 suite 実行＋件数照合）が未配線** —
-  根拠 `ci/scripts/generate-evidence.sh:21,130,134`, `Makefile:74`,
-  `.github/workflows/ci.yml:115` / R1-ST08 / confirmed。
-  既知の「証跡件数自己申告」の是正手段が回帰テスト内だけで使われていない。
+- [x] **generate-evidence.sh の --check が実在の証跡ファイル名を拒否していた** —
+  2026-11-21 対応済み: `evidence_path_re` を
+  `^evidence/test-run-[0-9]{8}-[0-9a-f]{12}[.]json$` へ修正し、runbook
+  `docs/integration/evidence-regeneration.md:104,298-299`（
+  `test-run-YYYYMMDD-<12hex>.json`）どおりの呼び出しが動作するようにした。
+  コメント／Usage も実在形式へ統一。traversal guard（`/` と `..` 拒否）は維持。
+  根拠 `ci/scripts/generate-evidence.sh:21,30,65,69` / R1-ST08 / confirmed。
+  - 検証: `bash -n` OK、traversal 入力が BadEvidencePath(exit 2) で拒否、
+    6件の `--check` が実動（結果は下記のとおり MISMATCH を検出）。
+- [ ] **証跡5件の passed 件数が実テスト数より古い（--check が MISMATCH）** —
+  根拠 `ci/scripts/generate-evidence.sh:130-158`（親が --check を実動させた
+  Runtime Proof, 2026-11-21）。実測 vs 証跡記録:
+  policy 213 vs 211（+2）/ mcp 154 vs 153（+1）/ context 182 vs 181（+1）/
+  event 92 vs 91（+1）/ ui 85 vs 85（一致）/ backup は --check target 無し
+  （`test-verify-backup` + `test-backup-args` で別途検証）。
+  - **配線判断**: この5件を再生成せずに `--check` を `Makefile:ci-local` と
+    `.github/workflows/ci.yml` の `extra_gates` へ配線すると即座に CI が赤くなる。
+    再生成（runbook の 7 ステップ＋ spec_hash 不変を確認した results/notes/index
+    同期）が先決。**再生成完了まで配線は保留**する。
+  - 既知の「証跡 passed 件数が自己申告の手入力」（2026-11-19 指摘）が
+    実データで裏付けられたもの。
 - [ ] **build-selfhost の policy / otelcol 退避が EXIT trap で復元されない** —
   根拠 `infra/scripts/build-selfhost.sh:559-563,600-605` / R1-ST06 / confirmed。
   配置途中で `set -e` が発動すると `.bak` だけが残り途中状態が実効になる。
