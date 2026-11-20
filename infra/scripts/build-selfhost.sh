@@ -399,7 +399,7 @@ if (( mig_unit_was_masked == 0 )); then
 fi
 
 for bin in "${BINARIES[@]}"; do
-  install -m 755 "${STAGE_BIN}/${bin}" "/opt/jarvis/bin/${bin}"
+  sudo install -o root -g root -m 0755 "${STAGE_BIN}/${bin}" "/opt/jarvis/bin/${bin}"
 done
 # Build the complete new SQL tree in a version directory (staging -> deploy).
 sudo install -d -o root -g root -m 0755 "${MIGRATIONS_VERSIONS}"

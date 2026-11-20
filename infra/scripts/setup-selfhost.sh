@@ -107,7 +107,18 @@ fi
 
 # Directories
 mkdir -p /opt/jarvis/{bin,data,logs,scripts,rust} /etc/jarvis /var/lib/jarvis
-chown -R "${JARVIS_USER}:${JARVIS_USER}" /opt/jarvis /var/lib/jarvis
+# I71-B: Limit the recursive chown to runtime DATA directories only.
+# /opt/jarvis/bin and /opt/jarvis/scripts stay root-owned: install-backup-timer.sh
+# installs backup-local.sh / verify-backup.sh there as root:root 0755 and
+# jarvis-backup.service executes them as User=postgres. If the jarvis user owned
+# those trees it could rewrite a script that is then run with postgres privileges
+# (jarvis -> postgres escalation). Re-assert root:root on EVERY run so a re-run
+# cannot undo the installer's `install -o root -g root` placement: this is the
+# idempotent guard even when an older run chowned the whole tree to jarvis.
+# root 所有を維持する理由: postgres 権限スクリプトの改ざん防止 (I71-B)。
+chown -R "${JARVIS_USER}:${JARVIS_USER}" \
+  /opt/jarvis/data /opt/jarvis/logs /var/lib/jarvis
+chown -R root:root /opt/jarvis/bin /opt/jarvis/scripts
 
 # PostgreSQL
 systemctl enable --now postgresql
