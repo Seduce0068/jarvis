@@ -2628,3 +2628,31 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   push、共有 lib の実機配布。
 
 - 親が対応: 5証跡再生成、Runbook 参照同期、全ゲート再検証。
+
+### Round 95（R4 で修正済み）
+
+- [x] 4サービス設定構造体へ `deny_unknown_fields`、mcp-gw の直接 env キーを
+      Figment `.ignore()` へ。タイポしたガードキーが起動拒否される回帰を各クレートへ追加。
+- [x] check-evidence に policy 固有の HEALTH_KILL_SWITCH_BODY /
+      HEALTH_NO_POLICY_BODY キーワードを追加。
+
+### Round 95 の残り指摘（未対応・次ラウンド優先）
+
+- [ ] **source が VARCHAR(100) で Rust 検証上限 4096 と不一致**（high、
+      子エージェントが途中終了したため未実装）— migration 006 で TEXT 化、
+      ON CONFLICT へ source/expires_at 追加、境界回帰。
+- [ ] **両 DB バックアップギャップ**（high、子の実装が既存10回帰と矛盾した
+      ため差し戻し）— JARVIS_PG_EXTRA_DATABASES を segment 単位で設計し直し、
+      manifest role と verify/restore の解決を整合させたうえで再実装。
+      DB_NAME 上書きが pg.sh:29 で無視される low も同時に解消する。
+- [ ] smoke-mcp-gw.sh:90-94 の /health が 200 degraded 本文を合格させる
+      （medium、子が途中終了）— deploy と同じ契約へ。
+- [ ] reconcile_pending の同時実行制御なし（low）— advisory lock または
+      条件付き UPDATE。
+- [ ] mcp_allowlist.toml:9-13 の行番号陳腐化、CONTEXT_TOKEN_HEADER 重複、
+      hickory/rsa 等 major 更新待ち29件（再評価 2026-12-20）。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
+
+- 親が対応: 2体の途中終了を確認、矛盾する backup-multidb 差分を差し戻し、
+  全ゲート再検証。
