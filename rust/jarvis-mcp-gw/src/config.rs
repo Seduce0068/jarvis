@@ -16,6 +16,12 @@ pub const CONFIG_PATH_ENV: &str = "JARVIS_MCP_GW_CONFIG_PATH";
 
 const ENV_PREFIX: &str = "JARVIS_MCP_GW_";
 
+/// Keys under [`ENV_PREFIX`] that are consumed directly with `std::env` and
+/// therefore have no field on [`McpGatewayConfig`]. The Figment `Env` provider
+/// still sees them, so they must be ignored: with `deny_unknown_fields` an
+/// unmapped key would otherwise abort startup on a normal deployment.
+const IGNORED_ENV_KEYS: &[&str] = &["config_path", "base_dir", "approval_window_secs"];
+
 /// Select the TOML path from an optional environment override. Kept pure so
 /// both branches are testable without mutating the process environment
 /// (edition 2024 makes `set_var` unsafe and parallel tests racy).
@@ -39,7 +45,11 @@ pub struct UpstreamConfig {
     pub command: Vec<String>,
 }
 
+/// Unknown keys are rejected at load time: a one-character typo of an opt-in
+/// guard such as `require_server_side_principal` must not silently leave it at
+/// its default `false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct McpGatewayConfig {
     pub grpc_addr: String,
     pub http_addr: String,
@@ -117,9 +127,9 @@ impl McpGatewayConfig {
             .merge(Toml::file(path))
             // Flat snake_case fields: do NOT use figment's Env split, which
             // would turn JARVIS_MCP_GW_GRPC_ADDR into the nested key `grpc.addr`.
-            // The config-path variable only selects the file, so keep it out
-            // of the field provider as well.
-            .merge(Env::prefixed(ENV_PREFIX).ignore(&["config_path"]))
+            // Direct env readers (config path, sandbox base dir, approval
+            // window) have no config field; see `IGNORED_ENV_KEYS`.
+            .merge(Env::prefixed(ENV_PREFIX).ignore(IGNORED_ENV_KEYS))
             .extract()?;
         // R4-FIX (a): a configured-but-blank admin token would let an empty
         // header/metadata match the configured value on both listeners. Fail
@@ -484,6 +494,30 @@ require_server_side_principal = true
 "#;
         let config: McpGatewayConfig = toml::from_str(toml).expect("config parses");
         assert!(config.require_server_side_principal);
+    }
+
+    /// I105-B: a one-character typo of the opt-in principal guard must abort
+    /// startup instead of being silently ignored (which would leave the guard
+    /// at its default `false`). The mistyped key goes through the real TOML
+    /// load path; no OS env var is mutated and every other key is valid.
+    #[test]
+    fn typo_guard_key_is_rejected_at_startup() {
+        let dir = std::env::temp_dir().join("jarvis-mcp-gw-config-typo-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("mcp_gateway.toml");
+        let mut toml = config_toml("none", "{}");
+        // `require_server_side_principa` differs by one character from the
+        // real `require_server_side_principal` field.
+        toml.push_str("require_server_side_principa = true\n");
+        std::fs::write(&path, &toml).expect("write config");
+        let error = McpGatewayConfig::load_from_path(path.to_str().expect("utf8 path"))
+            .expect_err("unknown guard key must abort startup");
+        assert!(
+            error.to_string().contains("require_server_side_principa"),
+            "error must name the mistyped key: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A legacy config (and `Default`) has no upstreams, so startup

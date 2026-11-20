@@ -43,7 +43,11 @@ fn resolve_config_path(override_path: Option<String>) -> String {
 /// changing one, change the other.
 pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
 
+/// Unknown keys are rejected at load time: a one-character typo of an opt-in
+/// guard such as `require_approval_api_token` must not silently leave it at
+/// its default `false`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PolicyConfig {
     pub grpc_addr: String,
     pub http_addr: String,
@@ -1168,5 +1172,51 @@ default_deny = true
             );
             std::fs::remove_file(&path).expect("clean temp config");
         }
+    }
+
+    /// I105-B: a one-character typo of an opt-in guard key must abort startup
+    /// instead of being silently ignored (leaving the guard at `false`). The
+    /// mistyped key comes from the real TOML load path; no OS env var is
+    /// mutated and every other key is valid.
+    #[test]
+    fn typo_guard_key_is_rejected_at_startup() {
+        let name = format!("jarvis-policy-typo-guard-{}.toml", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        // `require_aproval_api_token` is a one-character typo of the real
+        // opt-in `require_approval_api_token` guard.
+        let toml = format!("{}\nrequire_aproval_api_token = true\n", base_toml());
+        std::fs::write(&path, &toml).expect("write temp config");
+        let loaded = PolicyConfig::load_from_path_with(
+            path.to_str().expect("utf8 temp path"),
+            Figment::new(),
+        );
+        let error = loaded.expect_err("unknown guard key must abort startup");
+        assert!(
+            error.to_string().contains("require_aproval_api_token"),
+            "error must name the mistyped key: {error}"
+        );
+        std::fs::remove_file(&path).expect("clean temp config");
+    }
+
+    /// I105-B: the same rejection applies when the typo arrives through an
+    /// env-style provider, i.e. after `Env::prefixed("JARVIS_POLICY_")` has
+    /// stripped the prefix. `Serialized` models that shape without mutating
+    /// the process environment (edition 2024 makes `set_var` unsafe).
+    #[test]
+    fn typo_guard_env_key_is_rejected_at_startup() {
+        const TYPO: &str = "require_aproval_api_token";
+        let name = format!("jarvis-policy-typo-guard-env-{}.toml", std::process::id());
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, base_toml()).expect("write temp config");
+        let loaded = PolicyConfig::load_from_path_with(
+            path.to_str().expect("utf8 temp path"),
+            Figment::from(Serialized::default(TYPO, true)),
+        );
+        let error = loaded.expect_err("mistyped env guard key must abort startup");
+        assert!(
+            error.to_string().contains(TYPO),
+            "error must name the mistyped key: {error}"
+        );
+        std::fs::remove_file(&path).expect("clean temp config");
     }
 }

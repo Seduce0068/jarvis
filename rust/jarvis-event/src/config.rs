@@ -210,7 +210,10 @@ pub(crate) fn token_matches(expected: Option<&str>, presented: Option<&str>) -> 
     constant_time_eq(expected, presented)
 }
 
+/// Unknown keys are rejected at load time: a one-character typo of an
+/// opt-in security key such as `admin_token` must not be silently ignored.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EventConfig {
     pub grpc_addr: String,
     pub http_addr: String,
@@ -847,5 +850,26 @@ policy_grpc_addr = "http://127.0.0.1:50051"
 
         std::fs::remove_file(&path).expect("clean temp config");
         reset_opencode_url_for_test();
+    }
+
+    /// I105-B: a one-character typo of the ingress-token key must abort
+    /// startup instead of being silently ignored (which would leave the
+    /// unauthenticated legacy path in place). This crate has no `require_*`
+    /// boolean guard; `admin_token` is its opt-in security boundary.
+    #[test]
+    fn typo_guard_key_is_rejected_at_startup() {
+        let toml = format!("{LEGACY_TOML}\nadmin_tokn = \"guard-secret\"\n");
+        let path = unique_temp_file("i105b-typo-guard");
+        std::fs::write(&path, &toml).expect("write temp config");
+        let loaded = EventConfig::load_from_path_with(
+            path.to_str().expect("utf8 temp path"),
+            Figment::new(),
+        );
+        let error = loaded.expect_err("unknown guard key must abort startup");
+        assert!(
+            error.to_string().contains("admin_tokn"),
+            "error must name the mistyped key: {error}"
+        );
+        std::fs::remove_file(&path).expect("clean temp config");
     }
 }

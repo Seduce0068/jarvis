@@ -646,7 +646,10 @@ pub(crate) mod validation {
     }
 }
 
+/// Unknown keys are rejected at load time: a one-character typo of an
+/// opt-in security key such as `admin_token` must not be silently ignored.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ContextConfig {
     pub grpc_addr: String,
     pub http_addr: String,
@@ -1123,5 +1126,28 @@ max_context_tokens = 8000
             .expect("override variable uses the context env prefix")
             .to_ascii_lowercase();
         assert_eq!(field, "config_path");
+    }
+
+    /// I105-B: a one-character typo of the ingress-token key must abort
+    /// startup instead of being silently ignored (which would leave the
+    /// unauthenticated legacy path in place). This crate has no `require_*`
+    /// boolean guard; `admin_token` is its opt-in security boundary.
+    #[test]
+    fn typo_guard_key_is_rejected_at_startup() {
+        let dir = std::env::temp_dir().join("jarvis-context-config-typo-guard");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join("context.toml");
+        let mut toml = LEGACY_TOML.to_owned();
+        // `admin_tokn` differs by one character from the real `admin_token`.
+        toml.push_str("admin_tokn = \"guard-secret\"\n");
+        std::fs::write(&path, &toml).expect("write config");
+        let error = ContextConfig::load_from_path(path.to_str().expect("utf8 path"))
+            .expect_err("unknown guard key must abort startup");
+        assert!(
+            error.to_string().contains("admin_tokn"),
+            "error must name the mistyped key: {error}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
