@@ -2177,3 +2177,32 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   ゲートが先に失敗するため通常フローでは到達不能だが防御的改善の余地）。
 - ユーザー判断項目は従前どおり（P1-6／P0 ガード／Grafana／Webhook／S9／
   バックアップ外部化／push／共有 lib の実機配布）。
+
+### Round 75（R4 で修正済み）
+
+- [x] verify-backup.sh の role 判定を共有 `resolved_role_for()` へ統一、
+  未知 role／basename 矛盾を fail-closed。回帰10件（verify 37→47）。
+- [x] git.sh の resolver rc=1/2 を fail-closed 化（rc=0 のみ続行）、
+  隔離プローブで module 内の防御的拒否を実測（restore 681→690件）。
+
+### Round 75 の残り指摘（未対応）
+
+- [ ] 共有 lib が「戻り値で verdict を強制できる」と主張しつつ3呼び出し側が
+  rc=1 を無視（medium）— `format_rc -ge 1` で fail 加算、hook は記録専用に。
+- [ ] 設計書が必須とする flock 同時実行防止が restore-local.sh に未実装
+  （medium）— 実装するか設計書から要件を削除。
+- [ ] 設計書の「スキップ指定は事前検証から除外しない」が実装と正反対
+  （low）— 設計書を CLI help のセマンティクスへ更新。
+- [ ] 681件中約270件が同一の本番未接触アサーションで、ログ不在時に
+  無条件 pass（low）— 代表ケースへ集約し前提ログを必須化。
+- [ ] jq モックの empty／prod_empty モードが未使用（low）— case '' 分岐の
+  回帰を追加。
+- [ ] secret_scan.py が追跡ファイル0件で fail-open（medium）— 空集合を
+  exit 1＋回帰追加。
+- [ ] remaining-tasks.md の PASSWORD_FILE 節（行数ズレ＋「未修正」主張）、
+  local-restore-design.md の「自動スクリプト未実装」現在形（low 2件）。
+- [ ] test-review-run.sh の「default backend」テストが既定経路を通っていない
+  （low）— opencode スタブで既定分岐を実検証。
+
+- 親が対応: I78-A で verifier も role 矛盾を拒否するようになり、I77-A の
+  「verifier は受理」期待値を更新、全ゲート再検証。
