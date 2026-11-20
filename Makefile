@@ -42,7 +42,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@cd rust && cargo check --all-targets --locked
 	@cd rust && cargo test --all-targets --locked
 	@cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
-	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings -D clippy::undocumented_unsafe_blocks && cargo test
+	@cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks && cargo test --locked
 	@python3 ci/scripts/secret_scan.py
 	@bash ci/scripts/check-shell.sh
 	@bash ci/scripts/check-toml.sh
@@ -107,13 +107,13 @@ deploy-mcp-gw: ## jarvis-mcp-gw をローカルへ安全デプロイ（乾燥実
 	@bash infra/scripts/deploy-mcp-gw-safe.sh
 
 ui-build: ## GPUI 承認コンソールをビルド（独立クレート、UI 検証は make ui-test・CI 対象）
-	@cd ui && cargo build --release
+	@cd ui && cargo build --release --locked
 
 ui-run: ## GPUI 承認コンソールを起動
-	@cd ui && cargo run
+	@cd ui && cargo run --locked
 
 ui-test: ## GPUI 承認コンソールの検証（fmt/clippy/test）
-	@cd ui && cargo fmt -- --check && cargo clippy --all-targets -- -D warnings -D clippy::undocumented_unsafe_blocks && cargo test
+	@cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks && cargo test --locked
 
 lint: ## Rust script の整形・起動確認
 	@rustfmt --check rust/scripts/*.rs scripts/doctor/*.rs scripts/utils/*.rs scripts/bootstrap/*.rs config/*.rs docs/architecture/verify.rs docs/architecture/calc.rs

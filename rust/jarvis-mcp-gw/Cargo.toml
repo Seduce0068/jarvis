@@ -10,7 +10,7 @@ description = "JARVIS MCP Gateway: allowlist, sandboxing, capability-based auth 
 
 [dependencies]
 # Workspace
-jarvis-core = { workspace = true }
+jarvis-core = { workspace = true, features = ["http"] }
 tokio = { workspace = true, features = ["full", "tracing"] }
 async-trait = { workspace = true }
 serde = { workspace = true }
