@@ -10,6 +10,17 @@ set -euo pipefail
 REPO_DIR="${REPO_DIR:-$HOME/jarvis}"
 JARVIS_USER="${JARVIS_USER:-$(id -un)}"
 
+# I72-A: reuse the single authoritative owner/mode table from the restore
+# component instead of duplicating a second policy here. configs.sh keeps all
+# file-scope statements side-effect-free (definitions only), so sourcing it is
+# safe. Its helper routes writes through sudo when this script runs as the
+# JARVIS user, so the per-file root:root mode is identical to the restore path.
+SELFHOST_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+# shellcheck source=restore-local.d/configs.sh
+# Resolved at runtime via BASH_SOURCE.
+# shellcheck disable=SC1091
+source "${SELFHOST_SCRIPT_DIR}/restore-local.d/configs.sh"
+
 # R4-D: persistent marker for a mask that THIS script applies to
 # jarvis-migrations.service. It must live on persistent storage: a power loss
 # clears /run and /tmp but leaves the /etc/systemd/system mask symlink behind.
@@ -548,10 +559,36 @@ if [[ -e "${POLICY_DST}" || -L "${POLICY_DST}" ]]; then
   sudo mv "${POLICY_DST}" "${policy_backup}"
   echo "backed up existing policy dir to ${policy_backup}"
 fi
-sudo mkdir -p "${POLICY_DST}"
-sudo cp -r "${POLICY_SRC}/." "${POLICY_DST}/"
-sudo cp "${REPO_DIR}/infra/config/pii_patterns.toml" /etc/jarvis/
-sudo cp "${REPO_DIR}/infra/config/mcp_allowlist.toml" /etc/jarvis/
+sudo install -d -o root -g root -m 0755 "${POLICY_DST}"
+# I72-A: place every file with the reviewed per-basename mode from the shared
+# EXPECTED_CONFIG_MODE table (root:root 0644), never a bare `sudo cp` whose
+# mode depends on umask. Iterate the source tree so a newly added policy file
+# cannot silently escape the gate: an unreviewed basename is a hard failure.
+shopt -s nullglob
+POLICY_FILES=("${POLICY_SRC}"/*)
+shopt -u nullglob
+if (( ${#POLICY_FILES[@]} == 0 )); then
+  echo "no policy files found in ${POLICY_SRC}; refusing to deploy policy" >&2
+  exit 1
+fi
+for policy_file in "${POLICY_FILES[@]}"; do
+  policy_base="${policy_file##*/}"
+  policy_mode="$(expected_config_mode "${policy_base}")"
+  if [[ -z "${policy_mode}" ]]; then
+    echo "no reviewed mode policy for ${policy_base}; refusing to deploy policy" >&2
+    exit 1
+  fi
+  install_expected_config "${policy_mode}" "${policy_file}" "${POLICY_DST}/${policy_base}"
+done
+for top_config in pii_patterns.toml mcp_allowlist.toml; do
+  top_mode="$(expected_config_mode "${top_config}")"
+  if [[ -z "${top_mode}" ]]; then
+    echo "no reviewed mode policy for ${top_config}; refusing to deploy config" >&2
+    exit 1
+  fi
+  install_expected_config "${top_mode}" \
+    "${REPO_DIR}/infra/config/${top_config}" "/etc/jarvis/${top_config}"
+done
 
 # P0-6: otelcol.service は /etc/jarvis/otelcol-config.yaml を読み込むため、
 # repo テンプレートを配布経路に含めないと repo/実機設定が drift する。

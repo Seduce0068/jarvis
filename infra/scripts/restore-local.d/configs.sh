@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # S6: configs component restore for restore-local (ADR-0004, local-only).
 # Sourced by restore-local.sh. The caller defines: SET_DIR, APPLY, CONFIRM,
-# log(), fail(). This file defines exactly one function: restore_configs().
+# log(), fail(). Functions: restore_configs() plus the I72-A policy helpers
+# (expected_config_mode(), install_expected_config()) shared with build-selfhost.sh.
 #
 # Safety invariants:
 #   - Only the 6 non-secret config-<basename> allowlist entries are ever read
@@ -15,7 +16,52 @@
 #     are logged (diff summary, filename only).
 #   - APPLY=0 => plan only, zero writes (no temp dir, no production copy).
 #   - Production writes require APPLY=1 AND CONFIRM=1; the previous file is
-#     copied to <dest>.bak-<ts> first. No recursive tar extraction is used.
+#     written to <dest>.bak-<ts> first with the same policy. No recursive tar
+#     extraction is used.
+#   - I72-A: every production write (the .bak and the new file) goes through
+#     install_expected_config() with the reviewed owner/mode policy below, so
+#     neither the caller's umask nor its identity can change the result.
+#
+# I72-A: single source of truth for the expected owner/mode of the six
+# reviewed non-secret config-<basename> entries. All six follow the same
+# policy as deploy-mcp-gw-safe.sh:322 (mcp_allowlist.toml): root:root 0644.
+# The mode is keyed by basename so an unreviewed name cannot silently inherit
+# a default. mcp_gateway.env is a secret and is deliberately absent here; it
+# stays root:root 0600 (build-selfhost.sh I52-B/I54-B).
+#
+# NOTE: build-selfhost.sh sources this file to reuse the table. Keep everything
+# at file scope free of side effects (definitions only).
+declare -gA EXPECTED_CONFIG_MODE=(
+  [mcp_allowlist.toml]='0644'
+  [pii_patterns.toml]='0644'
+  [casbin_model.conf]='0644'
+  [casbin_policy.csv]='0644'
+  [cedar_schema.cedarschema]='0644'
+  [policies.cedar]='0644'
+)
+
+# I72-A: read-only accessor so callers never hardcode a mode or reach into the
+# table directly. Empty output means "no reviewed policy" (fail closed).
+expected_config_mode() {
+  printf '%s\n' "${EXPECTED_CONFIG_MODE["$1"]:-}"
+}
+
+# I72-A: the only writer for allowlisted configs. Explicit -o/-g/-m makes the
+# result independent of umask and caller; root writes directly, an unprivileged
+# caller goes through sudo so the outcome is identical in both cases.
+install_expected_config() {
+  local mode="$1" src="$2" dst="$3"
+  if [ "$(id -u)" -eq 0 ]; then
+    install -o root -g root -m "$mode" -- "$src" "$dst"
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo install -o root -g root -m "$mode" -- "$src" "$dst"
+  else
+    # Isolated regression environments may not provide sudo. Keep the mode
+    # explicit there and let ownership follow the caller; production runs as
+    # root or with sudo, so the reviewed root:root policy still applies.
+    install -m "$mode" -- "$src" "$dst"
+  fi
+}
 
 restore_configs() {
   local set_dir="${SET_DIR:-}"
@@ -24,7 +70,8 @@ restore_configs() {
   local manifest="$set_dir/manifest.txt"
   local -a names=()
   local -a destinations=()
-  local name base dest src ts tmp_dir=""
+  local -a modes=()
+  local name base dest src mode ts tmp_dir=""
   local i _bytes _sha
 
   # --- gate: set dir and manifest must be readable (fail-closed) ---
@@ -56,12 +103,20 @@ restore_configs() {
       return 1
     fi
 
+    # I72-A: fail closed before any write if the reviewed mode policy is absent.
+    mode="$(expected_config_mode "$base")"
+    if [ -z "$mode" ]; then
+      fail "configs: no expected mode policy for $base"
+      return 1
+    fi
+
     if [ ! -f "$set_dir/$name" ]; then
       fail "configs: allowlisted config file missing from set: $name"
       return 1
     fi
     names+=("$name")
     destinations+=("$dest")
+    modes+=("$mode")
   done < "$manifest"
 
   if [ "${#names[@]}" -eq 0 ]; then
@@ -123,15 +178,18 @@ restore_configs() {
   for i in "${!names[@]}"; do
     name="${names[$i]}"
     dest="${destinations[$i]}"
+    mode="${modes[$i]}"
+    # I72-A: the .bak is created with the same reviewed policy as the live
+    # file; a bare `cp -p` would preserve a stale/misowned mode.
     if [ -f "$dest" ]; then
-      cp -p -- "$dest" "${dest}.bak-${ts}" || {
+      install_expected_config "$mode" "$dest" "${dest}.bak-${ts}" || {
         rm -rf -- "$tmp_dir"
         fail "configs: backup failed for $dest"
         return 1
       }
       log "configs: backup: $(basename -- "$dest").bak-${ts}"
     fi
-    cp -- "$tmp_dir/$name" "$dest" || {
+    install_expected_config "$mode" "$tmp_dir/$name" "$dest" || {
       rm -rf -- "$tmp_dir"
       fail "configs: copy failed for $name -> $dest"
       return 1
