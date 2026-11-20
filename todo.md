@@ -2772,3 +2772,365 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 採用: check-evidence.sh の空サフィックス fail-open を R2 で修正。
 - 確認: config 4テンプレートの主要キーは実装側と一致し、追加作業なし。
 
+## 追加指摘（swarm コンボ 2026-11-21 / review + discovery）
+
+### 実施記録
+
+- 構成: `swarm-todo-discovery` R1（静的シグナル 10 担当）と
+  `swarm-project-review` R1〜R5（構造・設定・API・設計・エラー処理・
+  データ整合性・認証認可・依存・価値運用 14 担当）を並列実行。
+  **合計 24 エージェント**、深度 1、無制限プロファイル（`hy4-flash-free`）。
+  失敗・途中終了 0 件。生指摘約 180 件を R6 で集約した。
+- 集約: 同一根因を 1 件へ統合（event source 非対称 = ap01/st04、
+  TC-E3 シナリオ欠落 = fg01/tq01、Rust post-edit フック = st08/st10/cf02、
+  kill_switch 暗号流用 = ar01/st01）。`confirmed` は親が `path:line` を
+  実読して確定し、既存 TODO の未完了 163 件との重複は追記しない。
+- 権限分離: 子には読み取り系ツールのみを指示（DSH の preset による
+  ハーネス級 deny は未設定のため「プロンプト級の分離」であり強制ではない）。
+  コード修正は行っていない。
+
+### 優先度 高
+
+- [x] **配線済み review-gate が PR head ではなく master を検証** — 2026-11-21 対応済み: checkout の `with:` に `ref: refs/pull/${{ github.event.inputs.pr_number }}/head` を追加。手動 dispatch のみなので既定ブランチへのフォールバックは不要。I84-A の SHA pin コメントと `fetch-depth: 0` は維持 / 根拠
+  `.github/workflows/review-gate.yml:41-44` / R1-CF02 / confirmed。
+- [x] **配線済み review-gate の permissions に pull-requests: read が無い** — 2026-11-21 対応済み: `permissions:` に `pull-requests: read` を追加（`contents: read` は維持、write 権限・コメント・マージ操作は追加せず read-only 方針を維持）。`gh pr view` が 403 にならずゲートへ到達可能 / 根拠
+  `.github/workflows/review-gate.yml:20-22` / R1-ST08 / confirmed に格上げ。
+- [x] **配線済み review-gate が cargo-audit 未導入で ci-local が常時失敗** — 2026-11-21 対応済み: `make ci-local` 直前に cargo-audit 0.23.0 のバージョンプローブ付き導入 step を追加（`.github/workflows/ci.yml:101-113` と同じ 0.23.0 ピン留め・`--locked`・冪等性）。追加は run ステップのみで repository 状態変更なし / 根拠
+  `.github/workflows/review-gate.yml:50-64`, `Makefile:73` / R1-CF02 / confirmed。
+  - 検証: `git diff` で3件のみ、`python3 -c "import yaml; yaml.safe_load(...)"` が `YAML OK, jobs: ['gate-check']`、`make secret-scan` exit 0（0 value-like credentials）。PR head checkout は手動 dispatch・read-only token・既存 `ci/review-gate.yml` と同方針のため既知判断として受け入れ。
+- [ ] **generate-evidence.sh --check（実 suite 実行＋件数照合）が未配線** —
+  根拠 `ci/scripts/generate-evidence.sh:21,130,134`, `Makefile:74`,
+  `.github/workflows/ci.yml:115` / R1-ST08 / confirmed。
+  既知の「証跡件数自己申告」の是正手段が回帰テスト内だけで使われていない。
+- [ ] **build-selfhost の policy / otelcol 退避が EXIT trap で復元されない** —
+  根拠 `infra/scripts/build-selfhost.sh:559-563,600-605` / R1-ST06 / confirmed。
+  配置途中で `set -e` が発動すると `.bak` だけが残り途中状態が実効になる。
+- [ ] **本番 DB 退避から自動ロールバックが無く失敗時に空 DB が残る** —
+  根拠 `infra/scripts/restore-local.d/pg.sh:137-141,155-167`,
+  `infra/scripts/restore-local.sh:665-710` / R1-ST06 / confirmed。
+  退避 DB 名をログするだけで EXIT trap に復元処理が無い（S9 の実運用リスク）。
+- [ ] **PG 復元検証がテーブル件数>0 のみでスキーマ版を確認しない** —
+  根拠 `infra/scripts/restore-local.d/pg.sh:34,103-114,169-180` /
+  R2-DI01 / confirmed。古いダンプや 004/005/006 欠落が合格し得る。
+- [ ] **Qdrant 本番検証が隔離検証の points_count と突き合わされない** —
+  根拠 `infra/scripts/restore-local.d/qdrant.sh:82-93,131-142` /
+  R2-DI01 / confirmed。部分スナップショットのサイレント欠損を検出できない。
+- [ ] **event source の正規化が HTTP と gRPC で非対称** — 根拠
+  `rust/jarvis-event/src/http.rs:44-56`, `src/grpc.rs:114-121`,
+  `jarvis-core/src/lib.rs:378-393` / R1-AP01 / confirmed。
+  HTTP は case-sensitive＋未知値を Manual 化、gRPC は case-insensitive＋
+  未知値を InvalidArgument。同じ入力が別 source になり下流判定が食い違う。
+- [ ] **opencode サブエージェント permission がホスト側 secret deny より弱い** —
+  根拠 `infra/config/opencode/opencode.jsonc:38-45,81-83` / R1-ST07 / confirmed。
+  トップレベルの `*id_rsa*` / `*.kdbx*` / `*.npmrc*` が per-agent ブロックに欠落。
+- [ ] **opencode.jsonc が配布経路に未配線で deny が実機に届かない** —
+  根拠 `docs/integration/remaining-tasks.md:74-82` / R5-VU01 / confirmed。
+  `build-selfhost.sh` の配布対象外で旧 cloud-init.yaml にのみ記載されている。
+- [ ] **ADR-0001 の「OpenCode V2 固定」が ADR-0002 で置換された旨未反映** —
+  根拠 `adr/0001-unified-architecture.md:3,38-47`, `adr/0002-runtime-agnostic.md:4` /
+  R1-DR01 / confirmed。既存 P3-1 は OCI/1Password 置換のみを注記済み。
+- [ ] **web.fetch の DNS 解決経路エラー分岐が未テスト** — 根拠
+  `rust/jarvis-mcp-gw/src/sandbox.rs:727,744,749,753` / R3-TQ01 / confirmed。
+  既存 498 行は TOCTOU 対策の実装で、解決失敗・空配列・非公開 IP 混入の
+  fail-closed 回帰は未検証。
+- [ ] **承認 ID の再登録が DB 既存行を黙って再利用する** — 根拠
+  `rust/jarvis-policy/src/approval.rs:657,697`, `src/persistence.rs:698` /
+  R2-ER01 / likely。重複チェックがメモリ entries のみで、再起動後の
+  同一 id が古い期限・context の DB 行に紐づき即 Expired になり得る。
+
+### 優先度 中
+
+- [ ] **allowlist の timeout_ms に起動時検証がなくハンドラごとに扱いが異なる** —
+  `rust/jarvis-mcp-gw/src/allowlist.rs:20`, `sandbox.rs:223,375`, `gateway.rs:601` /
+  R1-ST02 / confirmed。web.fetch のみ clamp し git/upstream は生値を使用。
+- [ ] **safe_client_error_text の語彙に git / パス系 ClientError が抜ける** —
+  `rust/jarvis-mcp-gw/src/http.rs:323,349`, `sandbox.rs:125,330,413,473,498` /
+  R1-ST02 / confirmed。機密ファイル拒否が「引数不正」に丸められる。
+- [ ] **kill_switch の暗号プリミティブが gateway から流用され比較も二重実装** —
+  `rust/jarvis-mcp-gw/src/grpc.rs:72-73,98-106`, `http.rs:97-103` /
+  R1-AR01 / confirmed。jarvis-core への集約が必要。
+- [ ] **承認期限が 2 クレートに分散し起動時の一致検証が無い** —
+  `rust/jarvis-policy/src/config.rs:35-44,61-65`,
+  `rust/jarvis-mcp-gw/src/approval.rs:15-18,31-44`, `src/config.rs:19-23` /
+  R1-AR01,R1-CF01,R1-ST01 / confirmed。既存 469 行の対応は既定値の
+  compile-time assert のみで、Env 片側変更の drift は検出できない。
+- [ ] **allowlist と Casbin で principal / tool 許可が二重定義** —
+  `rust/jarvis-mcp-gw/src/lib.rs:111-143`, `rust/jarvis-policy/src/policy.rs:967-969` /
+  R1-AR01 / confirmed。「allowlist が single source of truth」という
+  コメントと最初のゲートが policy 側である点が矛盾。
+- [ ] **Cedar コンテキストが gateway にハードコードされ schema 検証が無い** —
+  `rust/jarvis-mcp-gw/src/lib.rs:26-47`, `rust/jarvis-policy/src/policy.rs:157-170` /
+  R1-AR01 / confirmed。`Context::from_json_value(context, None)` で属性 typo が
+  起動時 validation をすり抜ける。
+- [ ] **起動時検証が config load と engine constructor に分散する** —
+  `rust/jarvis-policy/src/config.rs:146-155`, `src/lib.rs:69`,
+  `rust/jarvis-mcp-gw/src/lib.rs:337-356` / R1-AR01 / confirmed。
+  `PolicyConfig` 直接構築経路では fail-closed ガードがスキップされる。
+- [ ] **承認 wire DTO が共有型の外で再実装されている** —
+  `rust/jarvis-mcp-gw/src/approval.rs:97-153`, `jarvis-policy/src/policy.rs:68-74` /
+  R1-AR01 / confirmed。`ApprovalDecision` は共有済みだが request/outcome が重複。
+- [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能** —
+  `rust/jarvis-policy/src/lib.rs:4-14`, `rust/jarvis-mcp-gw/src/lib.rs:3-15` /
+  R1-AR01 / confirmed。
+- [ ] **outbox バックオフ CAS が古い attempts を上書きしうる** —
+  `rust/jarvis-context/src/builder.rs:340,558,561` / R2-ER01 / confirmed。
+  既存 2672 行の `attempts <= $2` 条件が並行更新に弱い。
+- [ ] **Qdrant と outbox の二重失敗で元の障害 identity が失われる** —
+  `rust/jarvis-context/src/builder.rs:646,652,1064` / R2-ER01 / confirmed。
+  PG 行のみ永続化されベクターも outbox も無い孤立行が残る。
+- [ ] **古い pending_embeddings 行が新鲜なベクトルを Qdrant で上書き** —
+  `rust/jarvis-context/src/builder.rs:630-643,454-480,712-715,946-955` /
+  R2-DI01 / likely。outbox.remove 失敗時に世代照合が無い。
+- [ ] **PG コミット後に outbox 記録が失敗すると再試行マーカーが消える** —
+  `rust/jarvis-context/src/builder.rs:646-656,1063-1089` /
+  R2-DI01 / likely。memories INSERT と outbox record が非原子的。
+- [ ] **pending_embeddings の embedding JSON 破損が無警告で空ベクトル化** —
+  `rust/jarvis-context/src/builder.rs:521-526,712-723,888-907` /
+  R1-ST03 / confirmed。dead-letter 分類と回帰テストが必要。
+- [ ] **max_context_tokens が event.payload でバイパスされる** —
+  `rust/jarvis-context/src/builder.rs:1018-1052,1285-1305`, `src/http.rs:91-97` /
+  R1-ST03 / confirmed。payload にサイズ上限が無く設定名と保証が一致しない。
+- [ ] **Qdrant ヒットのスコア欠落時に 0.0 をでっち上げる** —
+  `rust/jarvis-context/src/builder.rs:90-107,1732-1751` /
+  R1-ST03 / confirmed。`attach_scores` の None 契約と矛盾。
+- [ ] **トークンヘッダ整合性チェックが自己比較で vacuous** —
+  `rust/jarvis-context/src/grpc.rs:9,68-74,393-401`, `src/http.rs:14,160,698-701` /
+  R1-ST03 / confirmed。既存 959 行の共有定数化の後にエイリアス同士の
+  比較だけが残った。
+- [ ] **定数時間比較が HTTP と gRPC で重複し共有コメントと矛盾** —
+  `rust/jarvis-context/src/config.rs:40-46,68-76`, `src/http.rs:207,221-236` /
+  R1-ST03 / confirmed。
+- [ ] **HA トークン失効が Fatal 扱いで listener を永久停止** —
+  `rust/jarvis-event/src/sources.rs:81,124-126`, `src/lib.rs:86-90` /
+  R1-ST04 / confirmed。/health は 200 のまま再起動まで回復しない。
+- [ ] **Webhook Router にリクエスト計測ミドルウェアが未配線** —
+  `rust/jarvis-event/src/normalizer.rs:187-193`, `src/http.rs:191,194-207` /
+  R1-ST04 / confirmed。8085 の 400/413/415 がメトリクスに現れない。
+- [ ] **Android / HA の外部クライアントが生成されるだけで未配線** —
+  `rust/jarvis-event/src/lib.rs:25-31,67-68`, `src/sources.rs:37-63,313-334` /
+  R1-ST04 / confirmed。既存 P3-10 は `Normalizer` 側の削除で、`EventNormalizer` は別。
+- [ ] **gRPC EmitEvent レスポンスに event_id が無く HTTP と非対称** —
+  `rust/jarvis-event/proto/event.proto:18-20`, `src/http.rs:38-42`, `src/grpc.rs:163` /
+  R1-ST04,R1-AP01 / confirmed。
+- [ ] **error_kind の EventError 分岐が本番経路で到達不能** —
+  `rust/jarvis-event/src/error.rs:5-27`, `src/normalizer.rs:47-66,801-804` /
+  R1-ST04 / confirmed。7 分岐中 6 分岐が vacuous。
+- [ ] **OpenCode dispatch / セッション生成の HTTP 成功経路にテストが無い** —
+  `rust/jarvis-event/src/opencode.rs:77-175,204-306` / R1-ST04 / confirmed。
+- [ ] **kill switch の activated_by が公開経路で依然 "system"** —
+  `rust/jarvis-policy/src/kill_switch.rs:241-248,280-286`, `src/lib.rs:249-251` /
+  R1-ST01 / confirmed。既存 622 行の対応は `activate_with_actor` 追加のみ。
+- [ ] **再起動復元された承認保留にタイマーがなく prune 依存** —
+  `rust/jarvis-policy/src/approval.rs:8-20,1325-1327,1407-1410` /
+  R1-ST01 / confirmed。新規リクエストが来るまで期限切れ処理が走らない。
+- [ ] **policy check 失敗ログに principal / resource / 生エラーが流出** —
+  `rust/jarvis-policy/src/client.rs:55-65,91-95` / R1-ST01 / confirmed。
+  endpoint 文字列が OTLP へ流れる固定語彙方針の迂回経路。
+- [ ] **gRPC CheckResponse.reason が PolicyClient で捨てられる** —
+  `rust/jarvis-policy/proto/policy.proto:19-25`, `src/grpc.rs:121-124`,
+  `src/client.rs:91-97` / R1-ST01 / confirmed。HTTP と transport 間で非対称。
+- [ ] **gRPC ExecuteTool が caller 由来 serde エラーを生ログへ流す** —
+  `rust/jarvis-mcp-gw/src/grpc.rs:140-147`, `jarvis-policy/src/grpc.rs:84-91` /
+  R3-AU01 / confirmed。
+- [ ] **allowlist の同名ツール定義が最後勝ちで requires_approval を上書き** —
+  `rust/jarvis-mcp-gw/src/allowlist.rs:14-22,44-66` / R3-AU01 / likely。
+  既存 472 行は upstream 登録側の衝突検出で、設定側は未対応。
+- [ ] **OpenCode remote MCP 設定に認証手段がなくデータプレーンを無認証運用に追いやる** —
+  `infra/config/opencode/opencode.jsonc:10-14`, `rust/jarvis-mcp-gw/src/http.rs:75-81` /
+  R3-AU01 / likely。
+- [ ] **verify と restore で legacy バックアップ set の受入条件が非対称** —
+  `specs/test-backup.md:186-193`, `infra/scripts/verify-backup.sh:103-112`,
+  `infra/scripts/restore-local.sh:178,368-370` / R2-FG01 / confirmed。
+  verify を通った set を restore-local が `--allow-legacy` なしで拒否する。
+- [ ] **audit.toml の旧 rustls 残存原因が axum 0.7 と誤記** —
+  `audit.toml:51-53`, `rust/Cargo.lock:144-175,4910-4923` / R4-DP01 / confirmed。
+  axum 0.7.9 の依存に rustls は無く、実態は tokio-tungstenite 0.21 系統。
+- [ ] **依存監査ゲートが git 不在時に UNVERIFIED とならず古い DB で pass** —
+  `ci/scripts/check-dependency-audit.sh:20-33,94-110` / R4-DP01 / confirmed。
+- [ ] **rust-script のマニフェスト依存が Cargo.lock 監査の対象外** —
+  `ci/scripts/check-dependency-audit.sh:39-40,122-126`,
+  `rust/scripts/{deploy,backup,restore}.rs` / R4-DP01 / confirmed。
+- [ ] **audit.toml の再評価日が依存監査ゲートで検証されない** —
+  `audit.toml:18-20`, `ci/scripts/check-dependency-audit.sh:83,116` /
+  R1-ST08,R1-CF02 / confirmed。2026-12-20 を過ぎても ignore が黙って継続。
+- [ ] **tokio-tungstenite 0.21.0 が古い TLS スタックを保持** —
+  `rust/jarvis-event/Cargo.toml:54`, `rust/Cargo.lock:4910-4923,3796-3806` /
+  R4-DP01 / confirmed。0.26 系への更新で rustls 0.22 系統を排除できる。
+- [ ] **仕様内の証跡ファイル名・ハッシュが実在値と不一致（2 仕様）** —
+  `specs/test-ui.md:421`, `specs/test-policy-approval.md:422-424`,
+  `evidence/index.md:29` / R1-ST09 / confirmed。
+  実在は `test-run-20261120-f32636593dbe.json`。check-evidence の監視外。
+- [ ] **test-event REQ-15 / TC-E3 の Scenario が仕様から欠落** —
+  `specs/test-event.md:52,212-217`, `evidence/test-run-20261120-568915d95563.json:41` /
+  R2-FG01,R3-TQ01 / confirmed。
+- [ ] **test-ui REQ-16 が無関係な TC-U10 に誤トレース** —
+  `specs/test-ui.md:53,237-244,369`, `ui/src/approvals.rs:165-202` /
+  R2-FG01 / confirmed。
+- [ ] **UI 証跡の risk_items が仕様のリスク表と乖離** —
+  `specs/test-ui.md:100,108`, `evidence/test-run-20261120-020d62ac6029.json:100,181,183` /
+  R1-ST09 / confirmed。check-evidence は id 集合のみ検証。
+- [ ] **backup 仕様の新規シナリオ（TC-B6/V5/R1/R2）に回帰テストが無い** —
+  `specs/test-backup.md:353,358`, `evidence/index.md:18` / R3-TQ01 / confirmed。
+- [ ] **トークン予算の境界値（等号 / 等号+1）が未テスト** —
+  `rust/jarvis-context/src/builder.rs:1289,1291`, `specs/test-context.md:92,222` /
+  R3-TQ01 / confirmed。
+- [ ] **web.fetch の HTTP レスポンス処理分岐が実ネットワーク依存** —
+  `rust/jarvis-mcp-gw/src/sandbox.rs:260,267,281,285,294,1110` /
+  R3-TQ01 / confirmed。redirect 4 回・Location 欠落等が CI で未検証。
+- [ ] **kill switch の時刻逆行 fail-closed 分岐が実経路で未テスト** —
+  `rust/jarvis-policy/src/kill_switch.rs:344,349,352,902` / R3-TQ01 / confirmed。
+- [ ] **gRPC admin token の定時間比較テストが戻り値のみの vacuous** —
+  `rust/jarvis-mcp-gw/src/grpc.rs:98,102,288`, `specs/test-mcp-gateway.md:284` /
+  R3-TQ01 / likely。
+- [ ] **backup.rs / deploy.rs の unit test がどのゲートからも実行されない** —
+  `Makefile:62,164,170,172`, `rust/scripts/backup.rs:423`, `rust/scripts/deploy.rs:647` /
+  R2-FG02 / confirmed。
+- [ ] **deploy のヘルスゲートが otelcol の 13133 を検査しない** —
+  `rust/scripts/deploy.rs:20-27,43-44,552-591`, `infra/config/otelcol-config.yaml:7` /
+  R1-ST05,R2-FG02 / confirmed。SERVICES に otelcol が入るのに probe されない。
+- [ ] **非推奨レガシースクリプトが本番デプロイで配布され続ける** —
+  `rust/scripts/backup.rs:16-23`, `rust/scripts/restore.rs:15-22`,
+  `rust/scripts/deploy.rs:508-528` / R1-ST05 / confirmed。
+- [ ] **restore.rs の Qdrant HTTP クライアントに timeout 設定が無い** —
+  `rust/scripts/backup.rs:35-38,192-206`, `rust/scripts/restore.rs:454-462` /
+  R1-ST05 / confirmed。backup 側の `JARVIS_QDRANT_TIMEOUT_SECS` が未反映。
+- [ ] **restore_postgres の DROP→CREATE→psql が非アトミック** —
+  `rust/scripts/restore.rs:360-435,533-555` / R1-ST05 / confirmed。
+- [ ] **restore_configs がダウンロード tar を検証なしで `/` に展開** —
+  `rust/scripts/restore.rs:467-486,342-358` / R1-ST05 / likely。
+- [ ] **release profile の strip=true + panic=abort で本番クラッシュ痕跡が失われる** —
+  `rust/Cargo.toml:157-161` / R1-ST05 / confirmed。
+- [ ] **install-mcp-gateway.sh のロールバックが旧バイナリ不在時に何も戻さない** —
+  `infra/scripts/install-mcp-gateway.sh:3,51-53` / R1-ST06 / confirmed。
+- [ ] **Qdrant 本番反映の「evacuating old collection」ログに実処理が伴わない** —
+  `infra/scripts/restore-local.d/qdrant.sh:106-116` / R1-ST06 / confirmed。
+- [ ] **hooks.json の Rust post-edit フックが repo root で cargo を実行** —
+  `hooks.json:57-60`, `rust/Cargo.toml:1`, `ui/Cargo.toml:1`, `Makefile:62-67` /
+  R1-ST08,R1-ST10,R1-CF02 / confirmed。ルートに Cargo.toml は無い。
+- [ ] **pre-task フックが未定義サブエージェントを起動** —
+  `hooks.json:10-17`, `opencode.jsonc:132-133,190-191` / R1-ST10 / confirmed。
+- [ ] **.gitignore が ui/target/ を無視していない** —
+  `.gitignore:46`, `AGENTS.md:55-57` / R1-ST10 / confirmed。
+- [ ] **ADR-0004 がバックアップ保存先を「未解決」と記載したまま** —
+  `adr/0004-local-only-no-oci.md:44-47`, `docs/integration/remaining-tasks.md:308` /
+  R1-DR01 / confirmed。BK-1 で決着済み。
+- [ ] **local-restore-design.md の「未決定事項」に決定済み項目が混在** —
+  `docs/integration/local-restore-design.md:302,320-332` / R1-DR01 / confirmed。
+- [ ] **ADR-0001 の Consequences / Neutral が OCI 前提のまま** —
+  `adr/0001-unified-architecture.md:100,104-105,169`, `adr/0004:50-52` /
+  R1-DR01 / confirmed。
+- [ ] **report.md の月間使用時間式と calc.rs の単位ラベルが結論と乖離** —
+  `docs/architecture/report.md:79-83`, `docs/architecture/calc.rs:125-130,237-240` /
+  R1-DR01 / confirmed。
+- [ ] **stale_after を超過した OCI 設計文書が draft のまま** —
+  `docs/architecture/opencode-v2-oci-code-server.md:18-19`,
+  `docs/architecture/index.md:15-16` / R1-ST09 / confirmed。
+- [ ] **バックアップ再設計メモのブロッカー節が解消済み決定を未解決と提示** —
+  `docs/integration/backup-redesign-notes.md:143-148` / R5-VU01 / confirmed。
+- [ ] **期限内切れ表示の承認要求でも承認 / 却下ボタンが有効** —
+  `ui/README.md:69-72`, `docs/integration/evidence-regeneration.md:88-90` /
+  R5-VU01 / confirmed。policy 側は 410 を返す契約と矛盾。
+
+### 優先度 低
+
+- [ ] **.editorconfig に Rust の indent 指定が無く rustfmt 既定と衝突** —
+  `.editorconfig:6-24`, `Makefile:63` / R1-ST10 / likely。
+- [ ] **audit.toml と Makefile の cargo-audit バージョンが二重管理** —
+  `Makefile:116-121`, `.github/workflows/ci.yml:101-113` / R1-CF02 / confirmed。
+- [ ] **CI で safety-test と個別ゲートが重複実行される** —
+  `.github/workflows/ci.yml:114,117,120`, `Makefile:85-91` / R1-CF02 / confirmed。
+- [ ] **markdownlint がフックのみで CI にゲートが無い** —
+  `hooks.json:62-65,85-89`, `.github/workflows/ci.yml:61-122` / R1-CF02 / confirmed。
+- [ ] **check-workflow-pins の走査対象に ci/*.yml が含まれない** —
+  `ci/scripts/check-workflow-pins.sh:70-76`, `ci/review-gate.yml:74,80,83,111` /
+  R1-ST08,R1-CF02,R2-FG01 / confirmed。
+- [ ] **kill switch コミット中発動テストの名前が旧契約のまま** —
+  `rust/jarvis-policy/src/lib.rs:714`, `specs/test-policy-approval.md:370-379` /
+  R2-FG01 / confirmed。`kill_switch_during_commit_is_not_published` の改名。
+- [ ] **local-restore-design.md の verify-backup.sh 記述が現行実装と乖離** —
+  `docs/integration/local-restore-design.md:98-100,339-340`,
+  `infra/scripts/lib/payload-descriptors.sh:36-50` / R2-FG01 / confirmed。
+- [ ] **ADR-0003 の egress allowlist「導入も検討」が実装済み宣言と矛盾** —
+  `adr/0003-native-web-fetch.md:38-40`, `docs/integration/tool-matrix.md:171-176` /
+  R2-FG01 / likely。
+- [ ] **ADR-0001 の 1Password チェック項目が移行済み注記と矛盾** —
+  `adr/0001-unified-architecture.md:126-131,137` / R2-FG01 / confirmed。
+- [ ] **JARVIS_QDRANT_TIMEOUT_SECS が設定テンプレート側で宣言されていない** —
+  `rust/scripts/backup.rs:38,193` / R2-FG02 / likely。
+- [ ] **bootstrap の --skip-opencode が Makefile ターゲットから渡されない** —
+  `scripts/bootstrap/bootstrap.rs:43,249`, `Makefile:36,42,45` / R2-FG02 / confirmed。
+- [ ] **deploy.rs の build/restart/logs/status サブコマンドに Makefile ターゲットが無い** —
+  `rust/scripts/deploy.rs:189-200`, `Makefile:54,59` / R2-FG02 / likely。
+- [ ] **otelcol 自己メトリクス 8888 が prometheus scrape 対象に無い** —
+  `infra/config/otelcol-config.yaml:198,207,22-47` / R2-FG02,R5-VU01 / confirmed。
+- [ ] **journald receiver の units に opencode.service が無い** —
+  `infra/config/otelcol-config.yaml:49-60` / R5-VU01 / likely。
+- [ ] **tail_sampling の jarvis.severity が属性未生成で常に非マッチ** —
+  `infra/config/otelcol-config.yaml:137,140,89` / R2-FG02 / confirmed。
+- [ ] **mcp-gw リリースバイナリの SHA256 既知良好値が未記録** —
+  `docs/integration/tool-matrix.md:66,76-81` / R5-VU01 / confirmed。
+- [ ] **NULL の decided_by / reason が空文字の承認者として再構成される** —
+  `rust/jarvis-policy/src/persistence.rs:886-893`, `rust/migrations/001_initial.sql:47-50` /
+  R2-DI01 / confirmed。
+- [ ] **非終端の Pending が終端 decision として永続化され得る** —
+  `rust/jarvis-policy/src/persistence.rs:865-896,546-557` / R2-DI01 / likely。
+- [ ] **embedding_dim の既定値が embedding_model と結び付いていない** —
+  `rust/jarvis-context/src/config.rs:29-38,654-658`, `src/builder.rs:994-999` /
+  R2-DI01 / confirmed。
+- [ ] **レガシー request() が永続化障害をポリシー拒否に変換** —
+  `rust/jarvis-policy/src/approval.rs:610,618,90` / R2-ER01 / confirmed。
+- [ ] **kill switch 永続化失敗時に operator 属性が system で上書き** —
+  `rust/jarvis-policy/src/kill_switch.rs:248,335,495` / R2-ER01 / confirmed。
+- [ ] **有効な隔離コレクションが本番 upload 前に削除される** —
+  `infra/scripts/restore-local.d/qdrant.sh:95-103,113-120` / R2-DI01 / confirmed。
+- [ ] **前回失敗の隔離コレクションが検証を汚染しうる** —
+  `infra/scripts/restore-local.d/qdrant.sh:37-38,63-70,82-93` / R2-DI01 / likely。
+- [ ] **backup の configs / repos 失敗が warn のみで成功報告** —
+  `rust/scripts/backup.rs:259-281,284-321` / R1-ST05 / confirmed。
+- [ ] **deploy.rs と restore.rs で管理サービス一覧が一致しない** —
+  `rust/scripts/deploy.rs:20-27`, `restore.rs:373-385,537-555` / R1-ST05 / likely。
+- [ ] **dead_lettered_at の部分インデックスが reconcile 選択と逆** —
+  `rust/migrations/005_pending_embeddings_dead_letter.sql:9-15,26-28` /
+  R1-ST05 / likely。
+- [ ] **valid_backup_date がカレンダー範囲を検証せず latest が文字列比較** —
+  `rust/scripts/restore.rs:145-152,102-115,321-340` / R1-ST05 / confirmed。
+- [ ] **Gateway が書き込み専用の config クローンを保持** —
+  `rust/jarvis-mcp-gw/src/gateway.rs:229,243`, `src/lib.rs:52` / R1-ST02 / confirmed。
+- [ ] **install_metrics の OnceLock 警告分岐が実質到達不能（policy / mcp-gw / event）** —
+  `rust/jarvis-policy/src/http.rs:28-39`, `rust/jarvis-mcp-gw/src/http.rs:27-29`,
+  `rust/jarvis-event/src/http.rs:18-28` / R1-ST01,R1-ST02,R1-ST04 / likely。
+- [ ] **mcp_principal に serde default が無く旧設定ファイルが起動失敗** —
+  `rust/jarvis-mcp-gw/src/config.rs:85` / R1-ST02 / likely。
+- [ ] **default_deny / sandbox_type 等の inert キーを明示** — 既存 P3-7 と
+  R1-CF01,R1-ST01 の指摘を統合。設定を読む利用者が誤判断しうる。
+
+### メモ（要判断・却下）
+
+- **却下（既知の設計判断）**: mcp-gw unit のリテラル `Environment=` は
+  `jarvis-mcp-gw.service:64-78` のコメントで「LITERAL default、唯一の上書き経路は
+  EnvironmentFile、deny-all テンプレートを_backup として保持」と明記された
+  意図的設計。R1-CF01 の「TOML を常に上書きする」は Figment の merge 順序として
+  事実だが、バグではなく設計どおり。ドキュメント明確化は低優先で残す。
+- **却下（Runtime Proof で否定）**: R1-ST06 の「test-restore-local.sh が
+  Makefile/ci-local に未配線」は誤検知。`Makefile:80` に
+  `@bash infra/scripts/test-restore-local.sh`、`.github/workflows/ci.yml:117` に
+  `make test-restore-local` が実在する。
+- **却下（既存重複）**: `approved_by` 偽装 = 既存 P0-1 の残対応、Casbin allow が
+  Cedar を短絡 = 既存「妥当性検証」の意図的二段評価、Grafana アラート / bws.env /
+  pprof-zpages = 既存 B7 needs_user、major 更新待ち 29 件 / RustSec 38 件 =
+  既存「進行中」、otel.env キー不一致 = 既存 P0-7 の判断材料、
+  `default_deny` 無視 = `lib.rs:73-76` で warn 済みの互換キー。
+- **要判断（既存の拡張）**: R3-AU01 の「MCP データプレーンに fail-closed
+  オプションが無い」は既存 945-946 行の「gRPC `ExecuteTool` が
+  `admin_token` 未設定時に無認証」と同一根因だが、HTTP `/v1/execute` と
+  `/mcp` を含む点が新しい。opt-in 厳格フラグの要否は P0 ガード有効化と同時判断。
+- **要判断**: R1-AR01 の「Casbin allow なら Cedar を評価しない OR 規則が
+  API 名から読み取れない」は、意図的な二段評価自体は既存判断で維持し、
+  関数名・ドキュメントへの明示（authorize_any 等）のみを残す。
+- ** speculation （メモのみ）**: 内部エラーの生 anyhow チェーンが JSON ログ経由で
+  OTLP へ流出（R1-ST02）、RUSTSEC ID 抽出 sed がセクション境界を解析しない
+  （R4-DP01）。事実根拠が薄いため TODO 化しない。
+- **外部ブロッカー（既知）**: CI が Billing 原因で全件 failure のまま
+  （R5-VU01）。権限外のためユーザー対応待ち。解消まで `make ci-local` が
+  唯一の決定論的検証。
+
