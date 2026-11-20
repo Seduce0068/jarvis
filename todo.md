@@ -2431,3 +2431,24 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - 自動修正可能な既知指摘はすべて解消済み。残るのはユーザー判断:
   P1-6 暗号化鍵の注入先、8段階の P0 ガード有効化、Grafana Cloud 認証、
   Webhook 公開範囲、S9 実機復元演習、バックアップ外部化、push（446+ commits）。
+
+### Round 86（R4 で修正済み）
+
+- [x] PII の `redact_replacement` が regex キャプチャ展開（`$0`）で PII を
+  復元する fail-open（medium）→ `regex::NoExpand` によるリテラル置換化、
+  回帰追加。
+- [x] CI `extra_gates` の2コマンドと README の cargo 例へ --locked。
+- [x] workflow pin ゲートの適用範囲を「完全 SHA 以外の全 ref」へ拡大、
+  `@main` の PIN_RECORD_MISSING 回帰（pin 17件）。
+- [x] ci.yml の §5 自己矛盾・Makefile 行番号、Runbook の checkout 方針矛盾、
+  UI clippy フラグ欠落、otel journald の migrations 欠落を訂正。
+- 親が対応: fmt 差分、secret_scan のテストリテラル誤検出（`concat!` 分割・
+  汎用名化）、全ゲート再検証。
+
+### Round 86 の残り指摘（未対応）
+
+- [ ] pin ゲートのブランチ ref（`@main` 等）は記録があっても API 解決が
+  `git/ref/tags/<ref>` のため API_RESOLVE_FAILED になり得る（low）—
+  `git/ref/heads/<ref>` 切替は curl スタブ改修を伴う別タスク。
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
