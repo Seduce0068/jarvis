@@ -38,6 +38,14 @@
 #     prod_stage() の green --apply 経路にも同じ境界チェックを戻す。
 #     代表ケース 8e の完全検証はそのまま維持し、ケース数を大幅に増やさずに
 #     全失敗モードの「失敗時の本番非接触」を担保する（実 DB/Qdrant はモックのみ）。
+#   - I86-B: 全 run_driver が LOCK_FILE を注入して未検証だった root の /run
+#     成功枝（restore-local.sh:50-51,797-798）を sed コピーで一時ディレクトリ
+#     へ差し替えて実行し、`[ -d /run ]` が偽の else 枝も別途固定する。
+#   - I86-C: psql モックが MOCK_LOG 設定で `command psql` 枝しか通さなかった
+#     ため、sudo モックとガード差し替えコピーで `sudo -u postgres psql` の
+#     最終 argv を記録・検証する。
+#   - I86-D: 本番の ${JARVIS_QDRANT_COLLECTION:-jarvis_memories} 契約を
+#     モックと境界チェックで共有し、カスタム名ケースを1件追加する。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -78,6 +86,23 @@ USAGE
 repo="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 driver="$repo/infra/scripts/restore-local.sh"
 verifier="$repo/infra/scripts/verify-backup.sh"
+
+# I86-D: 本番 qdrant.sh:36 / backup-local.sh:19 と同じ契約を 1 箇所で共有する。
+# モックのスコープ判定と境界チェック（grep -E）は両方この値から導出し、
+# jarvis_memories ハードコードをテスト側に残さない。
+qdrant_collection="${JARVIS_QDRANT_COLLECTION:-jarvis_memories}"
+set_qdrant_collection() { # name -> 共有名と grep -E 用リテラルを更新
+  qdrant_collection="$1"
+  # Qdrant のコレクション名は [A-Za-z0-9_-]。メタ文字を許すと境界チェックの
+  # grep -E パターンが誤一致するため、その場合は fail-closed にする。
+  if [[ "$qdrant_collection" == *[!A-Za-z0-9_-]* ]]; then
+    printf 'ERROR: unsupported JARVIS_QDRANT_COLLECTION for boundary checks: %s\n' \
+      "$qdrant_collection" >&2
+    exit 1
+  fi
+  qdrant_collection_re="$qdrant_collection"
+}
+set_qdrant_collection "$qdrant_collection"
 
 apply=0
 if [ "$#" -gt 1 ]; then
@@ -247,6 +272,25 @@ cat >/dev/null
 exit "$rc"
 MOCK_PSQL
 
+# I86-C: 本番の `sudo -u postgres psql` 経路を通すための sudo モック。
+# ラッパ通過後の最終 argv を sudo.log に残し、psql 以降の引数をそのまま
+# psql モックへ渡す。ドライバの export -f psql を回避するため command を使う。
+cat > "$tmp/bin/sudo" <<'MOCK_SUDO'
+#!/usr/bin/env bash
+printf 'sudo %s\n' "$*" >> "${MOCK_LOG:?}/sudo.log"
+args=("$@")
+i=0
+while [ "$i" -lt "${#args[@]}" ]; do
+  [ "${args[$i]}" = psql ] && break
+  i=$((i + 1))
+done
+if [ "$i" -lt "${#args[@]}" ]; then
+  command psql "${args[@]:$((i + 1))}"
+  exit $?
+fi
+exit 0
+MOCK_SUDO
+
 cat > "$tmp/bin/curl" <<'MOCK_CURL'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >> "${MOCK_LOG:?}/curl.log"
@@ -258,8 +302,11 @@ for arg in "$@"; do
   fi
 done
 # スコープ（isolated / prod）と要求種別（upload / probe / delete）を判定する。
+# I86-D: 本番契約と同じ ${JARVIS_QDRANT_COLLECTION:-jarvis_memories} を使い、
+# 隔離コレクション名をハードコードしない。
+collection="${JARVIS_QDRANT_COLLECTION:-jarvis_memories}"
 scope='prod'
-case "$all" in *jarvis_memories_restore_test*) scope='isolated' ;; esac
+case "$all" in *"${collection}_restore_test"*) scope='isolated' ;; esac
 kind='probe'
 case "$all" in
   *"/snapshots/upload"*) kind='upload' ;;
@@ -325,8 +372,8 @@ printf 'cmp %s\n' "$*" >> "${MOCK_LOG:?}/cmp.log"
 exit 1
 MOCK_CMP
 
-chmod 0755 -- "$tmp/bin/systemctl" "$tmp/bin/psql" "$tmp/bin/curl" \
-  "$tmp/bin/jq" "$tmp/bin/cmp" || exit 1
+chmod 0755 -- "$tmp/bin/systemctl" "$tmp/bin/psql" "$tmp/bin/sudo" \
+  "$tmp/bin/curl" "$tmp/bin/jq" "$tmp/bin/cmp" || exit 1
 
 # ---------------------------------------------------------------------------
 # フィクスチャ（実データは含めない。既存 test-verify-backup.sh と同じ形）
@@ -393,6 +440,7 @@ run_driver() {
     MOCK_PSQL_MODE="${MOCK_PSQL_MODE:-}" \
     MOCK_CURL_MODE="${MOCK_CURL_MODE:-}" \
     MOCK_JQ_MODE="${MOCK_JQ_MODE:-}" \
+    JARVIS_QDRANT_COLLECTION="$qdrant_collection" \
     LOCK_FILE="$tmp/restore.lock" \
     TMPDIR="$tmp/tmp" \
     BACKUP_ROOT="$tmp/backups" \
@@ -601,6 +649,151 @@ fi
 assert_no_log "I84-D: fallback dry-run: psql never called" "$tmp/logs/psql.log"
 assert_no_log "I84-D: fallback dry-run: no service stop/start" "$tmp/logs/systemctl.log"
 
+# (iii) I86-B: /run 成功枝。全 run_driver が LOCK_FILE を注入するため従来は
+# 未検証だった restore-local.sh:50-51 の選択と :797-798 の mkdir + open を、
+# `[ -d /run ]` を真に固定したコピーで一時ディレクトリに対して実行する。
+run_root="$tmp/run"
+# sed patterns match shell fragments literally.
+# shellcheck disable=SC2016
+if sed \
+    -e 's#if \[ -n "${LOCK_FILE:-}" \]; then#if false; then#' \
+    -e 's#elif \[ -d /run \]; then#elif true; then#' \
+    -e "s#LOCK_FILE=\"/run/jarvis/restore.lock\"#LOCK_FILE=\"$run_root/jarvis/restore.lock\"#" \
+    -e "s#LOCK_FILE=\"/tmp/jarvis-restore.lock\"#LOCK_FILE=\"$tmp/tmp/fallback-restore.lock\"#g" \
+    -e "s#LOCK_DIR=\"/tmp\"#LOCK_DIR=\"$tmp/tmp\"#" \
+    "$driver" > "$tmp/lock-run-driver.sh"; then
+  chmod 0755 -- "$tmp/lock-run-driver.sh"
+else
+  fail_case "I86-B: could not build the /run-branch driver copy"
+fi
+rm -f -- "$tmp/logs"/*.log "$tmp/tmp/fallback-restore.lock" "$run_root/jarvis/restore.lock"
+orig_driver="$driver"
+driver="$tmp/lock-run-driver.sh"
+run_code=0
+run_out="$(run_driver --backup-set "$set_dir" 2>&1)" || run_code=$?
+driver="$orig_driver"
+if [ "$run_code" -eq 0 ]; then
+  pass "I86-B: /run branch dry-run exit 0"
+else
+  fail_case "I86-B: /run branch dry-run exit=$run_code"
+  printf '%s\n' "$run_out" | head -12 >&2
+fi
+if has_fragment "$run_out" "lock acquired: $run_root/jarvis/restore.lock"; then
+  pass "I86-B: /run-equivalent lock path selected"
+else
+  fail_case "I86-B: /run-equivalent lock path not selected"
+  printf '%s\n' "$run_out" | head -12 >&2
+fi
+if has_fragment "$run_out" 'WARN: /run lock path unavailable'; then
+  fail_case "I86-B: /run success branch must not emit the fallback WARN"
+else
+  pass "I86-B: /run success branch emits no fallback WARN"
+fi
+if [ -d "$run_root/jarvis" ] && [ -f "$run_root/jarvis/restore.lock" ]; then
+  pass "I86-B: lock dir and file created under /run equivalent (:797-798)"
+else
+  fail_case "I86-B: /run-equivalent lock dir/file not created"
+fi
+if [ -f "$tmp/tmp/fallback-restore.lock" ]; then
+  fail_case "I86-B: /run success branch must not use the /tmp fallback lock"
+else
+  pass "I86-B: /run success branch did not use the /tmp fallback"
+fi
+assert_no_log "I86-B: /run branch: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I86-B: /run branch: no service stop/start" "$tmp/logs/systemctl.log"
+
+# (iv) I86-B: `[ -d /run ]` が偽のときの else 枝（restore-local.sh:52-55）。
+# (ii) は mkdir 失敗によるフォールバックなので、判定そのものを偽にした枝も
+# 別途固定する。実 /run へは一切触れず、フォールバック先は TMPDIR 配下。
+# sed patterns match shell fragments literally.
+# shellcheck disable=SC2016
+if sed \
+    -e 's#if \[ -n "${LOCK_FILE:-}" \]; then#if false; then#' \
+    -e 's#elif \[ -d /run \]; then#elif false; then#' \
+    -e "s#LOCK_FILE=\"/run/jarvis/restore.lock\"#LOCK_FILE=\"$tmp/run-missing/jarvis/restore.lock\"#" \
+    -e "s#LOCK_FILE=\"/tmp/jarvis-restore.lock\"#LOCK_FILE=\"$tmp/tmp/no-run-fallback.lock\"#g" \
+    -e "s#LOCK_DIR=\"/tmp\"#LOCK_DIR=\"$tmp/tmp\"#" \
+    "$driver" > "$tmp/lock-no-run-driver.sh"; then
+  chmod 0755 -- "$tmp/lock-no-run-driver.sh"
+else
+  fail_case "I86-B: could not build the no-/run driver copy"
+fi
+rm -f -- "$tmp/logs"/*.log "$tmp/tmp/no-run-fallback.lock"
+orig_driver="$driver"
+driver="$tmp/lock-no-run-driver.sh"
+norun_code=0
+norun_out="$(run_driver --backup-set "$set_dir" 2>&1)" || norun_code=$?
+driver="$orig_driver"
+if [ "$norun_code" -eq 0 ]; then
+  pass "I86-B: no-/run fallback dry-run exit 0"
+else
+  fail_case "I86-B: no-/run fallback dry-run exit=$norun_code"
+  printf '%s\n' "$norun_out" | head -12 >&2
+fi
+if has_fragment "$norun_out" "lock acquired: $tmp/tmp/no-run-fallback.lock"; then
+  pass "I86-B: no-/run fallback lock path selected"
+else
+  fail_case "I86-B: no-/run fallback lock path not selected"
+  printf '%s\n' "$norun_out" | head -12 >&2
+fi
+if has_fragment "$norun_out" 'WARN: /run lock path unavailable'; then
+  pass "I86-B: no-/run fallback WARN emitted"
+else
+  fail_case "I86-B: no-/run fallback WARN missing"
+fi
+if [ -f "$tmp/tmp/no-run-fallback.lock" ] && [ ! -f "$tmp/run-missing/jarvis/restore.lock" ]; then
+  pass "I86-B: no-/run branch created only the TMPDIR fallback lock"
+else
+  fail_case "I86-B: no-/run branch lock file location wrong"
+fi
+assert_no_log "I86-B: no-/run branch: psql never called" "$tmp/logs/psql.log"
+assert_no_log "I86-B: no-/run branch: no service stop/start" "$tmp/logs/systemctl.log"
+
+# --- 0c. I86-C: sudo -u postgres psql 経路の final argv 検証 ---------------
+# 従来は MOCK_LOG 設定で psql() ラッパの `command psql` 枝しか通らず、
+# 本番の `sudo -u postgres psql` 枝（restore-local.sh:109-118）が未検証だった。
+# MOCK_LOG ガードを真に差し替えたコピーと sudo モックで最終 argv を記録する。
+printf '%s\n' '-- I86-C: sudo -u postgres psql wrapper path --'
+cp -- "$repo/infra/scripts/lib/payload-descriptors.sh" "$tmp/lib/payload-descriptors.sh"
+for module in pg.sh qdrant.sh configs.sh git.sh; do
+  cp -- "$repo/infra/scripts/restore-local.d/$module" \
+    "$tmp/restore-local.d/$module" || exit 1
+done
+# sed patterns match shell fragments literally.
+# shellcheck disable=SC2016
+if sed \
+    -e 's#if \[ "\$EUID" -eq 0 \] && \[ -z "\${MOCK_LOG:-}" \]; then#if true; then#' \
+    -e 's#if \[ "\$uid" -eq 0 \] && \[ -z "\${MOCK_LOG:-}" \]; then#if true; then#' \
+    "$driver" > "$tmp/sudo-wrapper-driver.sh"; then
+  chmod 0755 -- "$tmp/sudo-wrapper-driver.sh"
+else
+  fail_case "I86-C: could not build the sudo-wrapper driver copy"
+fi
+rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
+orig_driver="$driver"
+driver="$tmp/sudo-wrapper-driver.sh"
+sudo_code=0
+sudo_out="$(run_driver --backup-set "$set_dir" --apply 2>&1)" || sudo_code=$?
+driver="$orig_driver"
+if [ "$sudo_code" -eq 0 ]; then
+  pass "I86-C: sudo-wrapper --apply stays green (exit 0)"
+else
+  fail_case "I86-C: sudo-wrapper --apply failed (exit=$sudo_code)"
+  printf '%s\n' "$sudo_out" | head -12 >&2
+fi
+assert_log_produced "I86-C: sudo log premise" "$tmp/logs/sudo.log"
+assert_present "I86-C: production sudo -u postgres psql argv used" \
+  '^sudo -u postgres psql ' "$tmp/logs/sudo.log"
+assert_present "I86-C: final argv keeps isolated DB target" \
+  '[-]d jarvis_restore_test' "$tmp/logs/sudo.log"
+assert_absent "I86-C: wrapper never targets production DB" \
+  '[-]d jarvis([[:space:]]|$)' "$tmp/logs/sudo.log" "$tmp/logs/sudo.log"
+assert_present "I86-C: psql mock received the forwarded argv" \
+  'jarvis_restore_test' "$tmp/logs/psql.log"
+# 0c の --apply で生成したログを落とし、以降の dry-run の assert_no_log が
+# 前ケースの記録を拾わないようにする。
+rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
+
 # --- 1. dry-run（既定。オプション無し）------------------------------------
 printf '%s\n' '-- restore-local.sh dry-run (default, zero writes) --'
 dry_code=0
@@ -711,11 +904,11 @@ if [ "$apply" -eq 1 ]; then
     "datname = 'jarvis'" "$tmp/logs/psql.log"
 
   assert_present "apply: isolated collection used" \
-    'jarvis_memories_restore_test' "$tmp/logs/curl.log"
+    "${qdrant_collection}_restore_test" "$tmp/logs/curl.log"
   assert_present "apply: priority=snapshot used" \
     'priority=snapshot' "$tmp/logs/curl.log"
   assert_absent "apply: production collection path never used" \
-    '/collections/jarvis_memories([/?]|$)' "$tmp/logs/curl.log"
+    "/collections/${qdrant_collection_re}([/?]|$)" "$tmp/logs/curl.log"
   assert_present "apply: points_count validated via mock jq" \
     '[.]result[.]points_count' "$tmp/logs/jq.log"
 
@@ -750,6 +943,36 @@ if [ "$apply" -eq 1 ]; then
 else
   printf '%s\n' '-- --apply not requested: isolated apply path skipped (default contract) --'
 fi
+
+# --- 3a. I86-D: JARVIS_QDRANT_COLLECTION 設定可能契約の回帰 -----------------
+# モックのスコープ判定と本番境界チェックが同じ変数を共有していることを、
+# デフォルト以外のコレクション名で 1 ケースだけ検証する。--apply の green
+# 経路を使い、本番コレクションへの URL が一切出ないことを同時に確認する。
+printf '%s\n' '-- I86-D: configurable Qdrant collection contract --'
+orig_collection="$qdrant_collection"
+set_qdrant_collection 'jarvis_memories_custom'
+rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
+custom_code=0
+custom_out="$(run_driver --backup-set "$set_dir" --apply 2>&1)" || custom_code=$?
+if [ "$custom_code" -eq 0 ]; then
+  pass "I86-D: custom collection --apply stays green (exit 0)"
+else
+  fail_case "I86-D: custom collection --apply failed (exit=$custom_code)"
+  printf '%s\n' "$custom_out" | head -12 >&2
+fi
+if has_fragment "$custom_out" 'production collection jarvis_memories_custom untouched'; then
+  pass "I86-D: driver reports the configured production collection"
+else
+  fail_case "I86-D: configured production collection not reported"
+  printf '%s\n' "$custom_out" | head -12 >&2
+fi
+assert_present "I86-D: custom isolated collection used by mock" \
+  "${qdrant_collection}_restore_test" "$tmp/logs/curl.log"
+assert_absent "I86-D: custom production collection path never used" \
+  "/collections/${qdrant_collection_re}([/?]|$)" "$tmp/logs/curl.log" "$tmp/logs/curl.log"
+assert_absent "I86-D: hardcoded default collection not used under custom name" \
+  'collections/jarvis_memories([/?]|$)' "$tmp/logs/curl.log" "$tmp/logs/curl.log"
+set_qdrant_collection "$orig_collection"
 
 # --- 4. non-allowlisted config ゲート（Round 66 回帰。常時実行）-------------
 # verify_set() の allowlist 検査は stop_services() より前の必須ゲート。
@@ -1241,7 +1464,7 @@ assert_no_production_contact() { # label [premise-file]
   assert_absent "$label: no production DB name in SQL" \
     "datname = 'jarvis'" "$tmp/logs/psql.log" "$premise"
   assert_absent "$label: no production collection path" \
-    '/collections/jarvis_memories([/?]|$)' "$tmp/logs/curl.log" "$premise"
+    "/collections/${qdrant_collection_re}([/?]|$)" "$tmp/logs/curl.log" "$premise"
   assert_absent "$label: qdrant service never touched" \
     'qdrant' "$tmp/logs/systemctl.log" "$premise"
   assert_absent "$label: enablement bit never changed" \
@@ -1275,7 +1498,7 @@ assert_production_boundary() { # label scope
   local -a svc_patterns=('qdrant' '^(enable|disable) ')
   local -a db_patterns=('DROP DATABASE "jarvis"' \
     '[-]d jarvis([[:space:]]|$)' "datname = 'jarvis'")
-  local -a curl_patterns=('/collections/jarvis_memories([/?]|$)')
+  local -a curl_patterns=("/collections/${qdrant_collection_re}([/?]|$)")
   local pattern file
 
   if [ ! -s "$premise" ]; then
@@ -1320,7 +1543,7 @@ assert_production_boundary() { # label scope
         printf '  evidence %s:\n' "${file##*/}" >&2
         grep -E -e 'qdrant' -e '^(enable|disable) ' \
           -e 'DROP DATABASE "jarvis"' -e '[-]d jarvis([[:space:]]|$)' \
-          -e "datname = 'jarvis'" -e '/collections/jarvis_memories([/?]|$)' \
+          -e "datname = 'jarvis'" -e "/collections/${qdrant_collection_re}([/?]|$)" \
           "$file" | head -5 >&2 || true
       fi
     done

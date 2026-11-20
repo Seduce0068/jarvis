@@ -2,8 +2,8 @@
 //! lets the operator approve or deny each one.
 
 use gpui::{
-    ClickEvent, Context, IntoElement, KeyBinding, ParentElement, Render, Role, SharedString,
-    Styled, Window, actions, div, prelude::*, rgb,
+    AsyncApp, ClickEvent, Context, IntoElement, KeyBinding, ParentElement, Render, Role,
+    SharedString, Styled, WeakEntity, Window, actions, div, prelude::*, rgb,
 };
 
 use crate::policy_client::{ApprovalRequest, DecisionOutcome, PolicyClient, request_to_core};
@@ -54,6 +54,71 @@ pub struct ApprovalsView {
     /// click on the same row is dropped until the first task finishes, so two
     /// concurrent POSTs cannot race to overwrite the operator-visible status.
     in_flight: HashSet<String>,
+    /// I86-D: the only GPUI-facing part of a decision. Production dispatches
+    /// through GPUI's executor; tests install the synchronous double from the
+    /// `tests` module so the real `decide` runs without GPUI's `test-support`.
+    decision_seam: Box<dyn DecisionSeam>,
+}
+
+/// I86-D: the three loopback results of a decision, kept as one value so the
+/// completion path is shared byte-for-byte by production and the test double.
+struct DecisionWorkResult {
+    outcome: anyhow::Result<DecisionOutcome>,
+    refresh: anyhow::Result<Vec<ApprovalRequest>>,
+    kill_switch_active: bool,
+}
+
+/// I86-D: everything `decide` needs from GPUI. Keeping this boundary narrow is
+/// what lets a plain unit test drive the real `decide` (including the in-flight
+/// guard and both `finish_decision` calls) synchronously.
+type DecisionWork = Box<dyn FnOnce() -> DecisionWorkResult + Send>;
+type DecisionFinish = Box<dyn FnOnce(DecisionWorkResult, &mut ApprovalsView) + Send>;
+
+trait DecisionSeam {
+    /// Launch the loopback work and, once it completes, fold the result into
+    /// the view. The test double queues both steps until explicitly drained.
+    fn dispatch(&self, work: DecisionWork, finish: DecisionFinish);
+
+    /// Repaint after a synchronous status change (target-resolution failure).
+    fn notify(&self);
+}
+
+/// Production seam: GPUI foreground task + background loopback calls.
+struct GpuiDecisionSeam {
+    cx: AsyncApp,
+    weak: WeakEntity<ApprovalsView>,
+}
+
+impl DecisionSeam for GpuiDecisionSeam {
+    fn dispatch(
+        &self,
+        work: Box<dyn FnOnce() -> DecisionWorkResult + Send>,
+        finish: DecisionFinish,
+    ) {
+        let cx = self.cx.clone();
+        let weak = self.weak.clone();
+        cx.spawn(async move |cx| {
+            let task = cx.background_executor().spawn(async move { work() });
+            let result = task.await;
+            let _ = weak.update(cx, |view, cx| {
+                finish(result, view);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn notify(&self) {
+        // Re-entering the app from inside the click handler that called
+        // `decide` would hit an active App borrow, so schedule the repaint on
+        // the foreground executor instead. It runs right after this dispatch.
+        let cx = self.cx.clone();
+        let weak = self.weak.clone();
+        cx.spawn(async move |cx| {
+            let _ = weak.update(cx, |_view, cx| cx.notify());
+        })
+        .detach();
+    }
 }
 
 /// A `/health` observation paired with the latch generation observed when the
@@ -87,6 +152,10 @@ impl ApprovalsView {
             kill_switch_latch_generation: 0,
             halted_decision_status: false,
             in_flight: HashSet::new(),
+            decision_seam: Box::new(GpuiDecisionSeam {
+                cx: cx.to_async(),
+                weak: cx.weak_entity(),
+            }),
         };
         view.spawn_poller(cx);
         view
@@ -232,7 +301,12 @@ impl ApprovalsView {
     }
 
     /// Apply an operator decision, then refresh immediately.
-    fn decide(&mut self, id: String, approve: bool, cx: &mut Context<Self>) {
+    ///
+    /// I86-D: every state transition below (the in-flight guard, both
+    /// `finish_decision` calls, the status/error updates) is the real
+    /// production path. Only the GPUI plumbing is behind [`DecisionSeam`], so a
+    /// plain unit test can drive this method synchronously.
+    fn decide(&mut self, id: String, approve: bool) {
         // I83-D: drop rapid duplicate clicks on the same row while its first
         // POST is still in flight; the last response must not win the race.
         if !self.begin_decision(&id) {
@@ -250,7 +324,7 @@ impl ApprovalsView {
                 self.error = Some(format!("{error:#}").into());
                 self.action_status = true;
                 self.halted_decision_status = false;
-                cx.notify();
+                self.decision_seam.notify();
                 return;
             }
         };
@@ -267,50 +341,51 @@ impl ApprovalsView {
         // outcome is known (I50-C (a)).
         self.halted_decision_status = false;
 
-        cx.spawn(async move |weak, cx| {
+        // The three loopback calls stay sequential and in the original order;
+        // packaging them as one closure lets the test double execute the exact
+        // same work without GPUI's executor.
+        let work = Box::new(move || {
             let decide_client = client.clone();
             let probe_client = client.clone();
             let decide_id = canonical_id.clone();
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    match &intent {
-                        CoreApprovalDecision::Approved { approved_by, .. } => {
-                            decide_client.approve_outcome(&decide_id, approved_by)
-                        }
-                        CoreApprovalDecision::Denied { reason } => {
-                            decide_client.deny_outcome(&decide_id, reason)
-                        }
-                        CoreApprovalDecision::Pending | CoreApprovalDecision::Expired => {
-                            unreachable!("an operator action is never Pending or Expired")
-                        }
-                    }
-                })
-                .await;
-            let refresh = cx
-                .background_executor()
-                .spawn(async move { client.pending() })
-                .await;
+            let outcome = match &intent {
+                CoreApprovalDecision::Approved { approved_by, .. } => {
+                    decide_client.approve_outcome(&decide_id, approved_by)
+                }
+                CoreApprovalDecision::Denied { reason } => {
+                    decide_client.deny_outcome(&decide_id, reason)
+                }
+                CoreApprovalDecision::Pending | CoreApprovalDecision::Expired => {
+                    unreachable!("an operator action is never Pending or Expired")
+                }
+            };
+            let refresh = client.pending();
             // A stop landing mid-commit still yields a published 200/Approved
             // decision. Probe the service so the operator sees that the tool
             // execution will be fail-closed at the gateway (I48-D).
-            let kill_switch_active = cx
-                .background_executor()
-                .spawn(async move { probe_client.kill_switch_active() })
-                .await;
+            let kill_switch_active = probe_client.kill_switch_active();
+            DecisionWorkResult {
+                outcome,
+                refresh,
+                kill_switch_active,
+            }
+        });
 
-            let _ = weak.update(cx, |view, cx| {
+        let finish_id = id.clone();
+        let finish_label = label.to_string();
+        let finish = Box::new(
+            move |result: DecisionWorkResult, view: &mut ApprovalsView| {
                 // I83-D: release the reservation on every completion path so
                 // the operator can decide this row again after the outcome.
-                view.finish_decision(&id);
+                view.finish_decision(&finish_id);
                 // Refresh the queue first; then set the decision outcome so
                 // the poll result cannot overwrite it (P0-8).
-                view.apply_poll(refresh);
+                view.apply_poll(result.refresh);
                 view.apply_kill_switch(KillSwitchProbe {
-                    active: kill_switch_active,
+                    active: result.kill_switch_active,
                     generation: probe_generation,
                 });
-                match result {
+                match result.outcome {
                     Ok(outcome) => {
                         // The service's tagged decision JSON crossed the core
                         // boundary in the client; project the winner onto the
@@ -342,16 +417,15 @@ impl ApprovalsView {
                         // A genuine failure (unreachable service, bad decision
                         // JSON, unreadable winner) still surfaces as a failure;
                         // it is never pinned as a halted-approval status.
-                        view.status = format!("{label}に失敗しました").into();
+                        view.status = format!("{finish_label}に失敗しました").into();
                         view.error = Some(format!("{error:#}").into());
                         view.action_status = true;
                         view.halted_decision_status = false;
                     }
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+            },
+        );
+        self.decision_seam.dispatch(work, finish);
     }
 
     fn render_row(&self, request: &ApprovalRequest, cx: &mut Context<Self>) -> impl IntoElement {
@@ -432,8 +506,8 @@ impl ApprovalsView {
                             .text_color(rgb(0xffffff))
                             .cursor_pointer()
                             .child("承認")
-                            .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
-                                view.decide(approve_id.clone(), true, cx)
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _window, _cx| {
+                                view.decide(approve_id.clone(), true)
                             })),
                     )
                     .child(
@@ -450,8 +524,8 @@ impl ApprovalsView {
                             .text_color(rgb(0xffffff))
                             .cursor_pointer()
                             .child("却下")
-                            .on_click(cx.listener(move |view, _: &ClickEvent, _window, cx| {
-                                view.decide(deny_id.clone(), false, cx)
+                            .on_click(cx.listener(move |view, _: &ClickEvent, _window, _cx| {
+                                view.decide(deny_id.clone(), false)
                             })),
                     ),
             )
@@ -657,13 +731,17 @@ fn is_expired(request: &ApprovalRequest, now: chrono::DateTime<chrono::Utc>) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalsView, CoreApprovalDecision, KillSwitchProbe, UiDecision, decision_target,
-        format_args, is_expired, operator_decision, status_for_decision,
-        status_for_decision_with_kill_switch, status_for_outcome,
+        ApprovalsView, CoreApprovalDecision, DecisionFinish, DecisionSeam, DecisionWorkResult,
+        KillSwitchProbe, UiDecision, decision_target, format_args, is_expired, operator_decision,
+        status_for_decision, status_for_decision_with_kill_switch, status_for_outcome,
     };
     use crate::policy_client::{ApprovalRequest, DecisionOutcome, PolicyClient, request_to_core};
     use serde_json::json;
     use std::collections::HashSet;
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
 
     #[test]
     fn approval_args_are_never_truncated() {
@@ -702,6 +780,51 @@ mod tests {
             kill_switch_latch_generation: 0,
             halted_decision_status: false,
             in_flight: HashSet::new(),
+            decision_seam: Box::new(SyncDecisionSeam::default()),
+        }
+    }
+
+    /// I86-D: one queued decision task. Both halves come from the real
+    /// `decide`; only their *execution* is deferred so a test can observe the
+    /// in-flight window between two clicks.
+    struct PendingDecision {
+        work: Box<dyn FnOnce() -> DecisionWorkResult + Send>,
+        finish: DecisionFinish,
+    }
+
+    #[derive(Clone, Default)]
+    struct SyncDecisionSeam {
+        pending: Arc<Mutex<Vec<PendingDecision>>>,
+    }
+
+    impl DecisionSeam for SyncDecisionSeam {
+        fn dispatch(
+            &self,
+            work: Box<dyn FnOnce() -> DecisionWorkResult + Send>,
+            finish: DecisionFinish,
+        ) {
+            self.pending
+                .lock()
+                .expect("seam queue")
+                .push(PendingDecision { work, finish });
+        }
+
+        fn notify(&self) {
+            // No UI to repaint in a unit test; the state is read directly.
+        }
+    }
+
+    impl SyncDecisionSeam {
+        fn pending_count(&self) -> usize {
+            self.pending.lock().expect("seam queue").len()
+        }
+
+        /// Drive exactly one queued task through the real loopback and the
+        /// real completion path against the borrowed view.
+        fn run_one(&self, view: &mut ApprovalsView) {
+            let task = self.pending.lock().expect("seam queue").remove(0);
+            let result = (task.work)();
+            (task.finish)(result, view);
         }
     }
 
@@ -1120,31 +1243,32 @@ mod tests {
         assert!(!view.halted_decision_status);
     }
 
-    /// I83-D regression: two decisions for the same row while the first POST
-    /// is still in flight must reach the policy server exactly once. The mock
-    /// loopback server records every accepted connection (the "accept
-    /// connector"); only the first click's POST may appear there.
-    ///
-    /// This crate does not enable GPUI's `test-support` feature, so the async
-    /// `decide` task cannot be driven from a plain unit test. The test drives
-    /// the same `begin_decision` / `finish_decision` guard that `decide` uses
-    /// and performs a real blocking POST through `PolicyClient` between the
-    /// two clicks.
+    fn post_count(accepted: &Arc<Mutex<Vec<String>>>) -> usize {
+        accepted
+            .lock()
+            .expect("lock accept connector")
+            .iter()
+            .filter(|marker| *marker == "post")
+            .count()
+    }
+
+    /// I83-D / I86-D regression. The real `decide` is driven through all three
+    /// paths against a mock policy server. Removing either `finish_decision`
+    /// call (the `decision_target` failure branch or the task-completion
+    /// branch) leaves a row reserved forever and fails this test.
     #[test]
-    fn duplicate_decision_posts_only_once_to_mock_server() {
+    fn decide_drives_duplicate_target_failure_and_release_paths() {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
-        use std::sync::{
-            Arc, Mutex,
-            atomic::{AtomicBool, Ordering},
-        };
         use std::thread;
         use std::time::{Duration, Instant};
 
         const ID: &str = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
         const APPROVE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}";
+        const PENDING_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"pending\":[]}";
+        const HEALTH_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
 
-        // Accept connector: one entry per connection the mock server accepts.
+        // Accept connector: one entry per loopback connection the mock sees.
         let accepted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let stop = Arc::new(AtomicBool::new(false));
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock policy server");
@@ -1163,61 +1287,101 @@ mod tests {
                         let mut buf = [0u8; 4096];
                         let n = stream.read(&mut buf).unwrap_or(0);
                         let request = String::from_utf8_lossy(&buf[..n]).to_string();
-                        let marker = if request.starts_with("POST ") {
-                            "post"
+                        let (marker, response) = if request.starts_with("POST ") {
+                            ("post", APPROVE_RESPONSE)
+                        } else if request.starts_with("GET /health") {
+                            ("health", HEALTH_RESPONSE)
                         } else {
-                            "other"
+                            ("pending", PENDING_RESPONSE)
                         };
                         accepted_for_server
                             .lock()
                             .expect("lock accept connector")
                             .push(marker.to_string());
-                        let _ = stream.write_all(APPROVE_RESPONSE.as_bytes());
+                        let _ = stream.write_all(response.as_bytes());
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(5));
+                        thread::sleep(Duration::from_millis(2));
                     }
                     Err(_) => break,
                 }
             }
         });
 
+        let seam = SyncDecisionSeam::default();
         let mut view = view_with("", None, false);
         view.client = PolicyClient::new(format!("http://{addr}"));
         view.pending = vec![request_with_expiry(ID, None)];
+        view.decision_seam = Box::new(seam.clone());
 
-        // First click: reserve the row and start the POST. The spawned task
-        // holds the reservation until it finishes, so it is not released yet.
-        assert!(view.begin_decision(ID), "first click must be accepted");
+        // (1) Same-row double click. The second `decide` reaches the real
+        // in-flight guard and is dropped before any task is queued.
+        view.decide(ID.to_string(), true);
         assert!(
-            view.client.approve_outcome(ID, "koppe").is_ok(),
-            "mock approve must succeed"
+            view.in_flight.contains(ID),
+            "the first decide must reserve the row"
         );
+        view.decide(ID.to_string(), true);
+        assert_eq!(
+            seam.pending_count(),
+            1,
+            "duplicate click must not enqueue a second decision"
+        );
+        seam.run_one(&mut view);
+        assert!(
+            !view.in_flight.contains(ID),
+            "the completion path must release the reservation"
+        );
+        assert_eq!(post_count(&accepted), 1, "only the first click may POST");
 
-        // Second click on the same row while the first POST is still in flight:
-        // the guard drops it before any request is started.
+        // (2) decision_target failure. The real decide releases the row before
+        // returning; deleting that release wedges the row and fails the next
+        // valid click below.
+        view.decide("missing-id".to_string(), true);
         assert!(
-            !view.begin_decision(ID),
-            "duplicate click must be dropped while in flight"
+            !view.in_flight.contains("missing-id"),
+            "target failure must release the reservation"
         );
+        assert!(
+            view.status.to_string().contains("失敗"),
+            "target failure must be reported"
+        );
+        assert_eq!(
+            seam.pending_count(),
+            0,
+            "target failure must not enqueue loopback work"
+        );
+        assert_eq!(post_count(&accepted), 1, "target failure must not POST");
+        // The completed task's refresh response can clear the queue; restore
+        // the row so this click exercises the reusable-after-failure contract.
+        view.pending = vec![request_with_expiry(ID, None)];
+        view.decide(ID.to_string(), true);
+        assert_eq!(
+            seam.pending_count(),
+            1,
+            "row must be reusable after a target failure; in_flight={:?}",
+            view.in_flight
+        );
+        seam.run_one(&mut view);
 
-        // Task completion releases the reservation, so a later click is free
-        // to decide the row again.
-        view.finish_decision(ID);
-        assert!(
-            view.begin_decision(ID),
-            "reservation must be released on completion"
+        // (3) Re-click after a completed decision: the completion release must
+        // have run, otherwise this third decide is silently dropped.
+        view.pending = vec![request_with_expiry(ID, None)];
+        view.decide(ID.to_string(), true);
+        assert_eq!(
+            seam.pending_count(),
+            1,
+            "row must be reusable after completion"
         );
-        view.finish_decision(ID);
+        seam.run_one(&mut view);
 
         stop.store(true, Ordering::Relaxed);
         server.join().expect("mock server thread");
 
-        let accepted_calls = accepted.lock().expect("lock accept connector").clone();
         assert_eq!(
-            accepted_calls,
-            vec!["post"],
-            "only the first decision may reach the policy server"
+            post_count(&accepted),
+            3,
+            "three accepted decides must produce three POSTs"
         );
     }
 }
