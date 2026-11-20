@@ -9,6 +9,7 @@ use gpui::{
 use crate::policy_client::{ApprovalRequest, DecisionOutcome, PolicyClient, request_to_core};
 use anyhow::Context as _;
 use jarvis_core::approval::ApprovalDecision as CoreApprovalDecision;
+use std::collections::HashSet;
 
 // Tab navigation for the focusable approval buttons. GPUI has no default Tab
 // binding, so these are registered here to keep the console's keyboard support
@@ -49,6 +50,10 @@ pub struct ApprovalsView {
     /// from `action_status`, whose one-poll clearing contract still governs
     /// ordinary decision/error messages.
     halted_decision_status: bool,
+    /// I83-D: row ids whose decision POST is currently in flight. A second
+    /// click on the same row is dropped until the first task finishes, so two
+    /// concurrent POSTs cannot race to overwrite the operator-visible status.
+    in_flight: HashSet<String>,
 }
 
 /// A `/health` observation paired with the latch generation observed when the
@@ -81,6 +86,7 @@ impl ApprovalsView {
             kill_switch_blocked: false,
             kill_switch_latch_generation: 0,
             halted_decision_status: false,
+            in_flight: HashSet::new(),
         };
         view.spawn_poller(cx);
         view
@@ -212,8 +218,26 @@ impl ApprovalsView {
         });
     }
 
+    /// I83-D: reserve `id` as the single in-flight decision for its row.
+    /// Returns `false` when a decision is already pending, in which case the
+    /// caller must return without starting another POST.
+    fn begin_decision(&mut self, id: &str) -> bool {
+        self.in_flight.insert(id.to_string())
+    }
+
+    /// I83-D: release the reservation once the decision task finishes. Called
+    /// on both the success and failure paths so a later click is accepted.
+    fn finish_decision(&mut self, id: &str) {
+        self.in_flight.remove(id);
+    }
+
     /// Apply an operator decision, then refresh immediately.
     fn decide(&mut self, id: String, approve: bool, cx: &mut Context<Self>) {
+        // I83-D: drop rapid duplicate clicks on the same row while its first
+        // POST is still in flight; the last response must not win the race.
+        if !self.begin_decision(&id) {
+            return;
+        }
         let label: SharedString = if approve { "承認" } else { "却下" }.into();
         // Project the target through the canonical request boundary at decision
         // time: the row id is a tolerant wire value, the POST URL needs the
@@ -221,6 +245,7 @@ impl ApprovalsView {
         let canonical_id = match decision_target(&self.pending, &id) {
             Ok(id) => id,
             Err(error) => {
+                self.finish_decision(&id);
                 self.status = format!("{label}に失敗しました").into();
                 self.error = Some(format!("{error:#}").into());
                 self.action_status = true;
@@ -275,6 +300,9 @@ impl ApprovalsView {
                 .await;
 
             let _ = weak.update(cx, |view, cx| {
+                // I83-D: release the reservation on every completion path so
+                // the operator can decide this row again after the outcome.
+                view.finish_decision(&id);
                 // Refresh the queue first; then set the decision outcome so
                 // the poll result cannot overwrite it (P0-8).
                 view.apply_poll(refresh);
@@ -635,6 +663,7 @@ mod tests {
     };
     use crate::policy_client::{ApprovalRequest, DecisionOutcome, PolicyClient, request_to_core};
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn approval_args_are_never_truncated() {
@@ -672,6 +701,7 @@ mod tests {
             kill_switch_blocked: false,
             kill_switch_latch_generation: 0,
             halted_decision_status: false,
+            in_flight: HashSet::new(),
         }
     }
 
@@ -1088,5 +1118,106 @@ mod tests {
         assert!(!view.kill_switch_blocked);
         assert!(!view.kill_switch_active);
         assert!(!view.halted_decision_status);
+    }
+
+    /// I83-D regression: two decisions for the same row while the first POST
+    /// is still in flight must reach the policy server exactly once. The mock
+    /// loopback server records every accepted connection (the "accept
+    /// connector"); only the first click's POST may appear there.
+    ///
+    /// This crate does not enable GPUI's `test-support` feature, so the async
+    /// `decide` task cannot be driven from a plain unit test. The test drives
+    /// the same `begin_decision` / `finish_decision` guard that `decide` uses
+    /// and performs a real blocking POST through `PolicyClient` between the
+    /// two clicks.
+    #[test]
+    fn duplicate_decision_posts_only_once_to_mock_server() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        const ID: &str = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
+        const APPROVE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}";
+
+        // Accept connector: one entry per connection the mock server accepts.
+        let accepted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock policy server");
+        let addr = listener.local_addr().expect("mock address");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+
+        let accepted_for_server = accepted.clone();
+        let stop_for_server = stop.clone();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !stop_for_server.load(Ordering::Relaxed) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 4096];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let marker = if request.starts_with("POST ") {
+                            "post"
+                        } else {
+                            "other"
+                        };
+                        accepted_for_server
+                            .lock()
+                            .expect("lock accept connector")
+                            .push(marker.to_string());
+                        let _ = stream.write_all(APPROVE_RESPONSE.as_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let mut view = view_with("", None, false);
+        view.client = PolicyClient::new(format!("http://{addr}"));
+        view.pending = vec![request_with_expiry(ID, None)];
+
+        // First click: reserve the row and start the POST. The spawned task
+        // holds the reservation until it finishes, so it is not released yet.
+        assert!(view.begin_decision(ID), "first click must be accepted");
+        assert!(
+            view.client.approve_outcome(ID, "koppe").is_ok(),
+            "mock approve must succeed"
+        );
+
+        // Second click on the same row while the first POST is still in flight:
+        // the guard drops it before any request is started.
+        assert!(
+            !view.begin_decision(ID),
+            "duplicate click must be dropped while in flight"
+        );
+
+        // Task completion releases the reservation, so a later click is free
+        // to decide the row again.
+        view.finish_decision(ID);
+        assert!(
+            view.begin_decision(ID),
+            "reservation must be released on completion"
+        );
+        view.finish_decision(ID);
+
+        stop.store(true, Ordering::Relaxed);
+        server.join().expect("mock server thread");
+
+        let accepted_calls = accepted.lock().expect("lock accept connector").clone();
+        assert_eq!(
+            accepted_calls,
+            vec!["post"],
+            "only the first decision may reach the policy server"
+        );
     }
 }
