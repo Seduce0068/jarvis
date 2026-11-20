@@ -4,7 +4,6 @@
 pub mod approval;
 pub mod client;
 pub mod config;
-pub mod error;
 pub mod grpc;
 pub mod http;
 pub mod kill_switch;
@@ -272,17 +271,38 @@ impl PolicyEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Mutex, OnceLock};
 
-    fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jarvis-policy-lib-{label}"));
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+    static TEST_DIRS: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+    /// One throwaway directory per (process, label), shared by the helper
+    /// calls of a single test. `pid` keeps concurrent cargo test processes
+    /// apart and the counter gives every label its own slot. A path derived
+    /// from a fixed name must never be removed here: another process may own
+    /// it by the time cleanup runs.
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let mut dirs = TEST_DIRS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(dir) = dirs.get(label) {
+            return dir.clone();
+        }
+        let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let name = format!("jarvis-policy-lib-{label}-{}-{n}", std::process::id());
+        let dir = std::env::temp_dir().join(name);
         std::fs::create_dir_all(&dir).expect("create temp dir");
+        dirs.insert(label.to_string(), dir.clone());
         dir
     }
 
     fn shipped_casbin(label: &str) -> (String, String) {
         let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../infra/config/policy");
-        let dir = temp_dir(label);
+        let dir = unique_temp_dir(label);
         let model = dir.join("casbin_model.conf");
         let policy = dir.join("casbin_policy.csv");
         std::fs::copy(source.join("casbin_model.conf"), &model).expect("copy casbin model");
@@ -296,7 +316,10 @@ mod tests {
     async fn test_engine(label: &str) -> PolicyEngine {
         let (casbin_model_path, casbin_policy_path) = shipped_casbin(label);
         let config = config::PolicyConfig {
-            cedar_policy_dir: temp_dir(label).join("cedar").to_string_lossy().into_owned(),
+            cedar_policy_dir: unique_temp_dir(label)
+                .join("cedar")
+                .to_string_lossy()
+                .into_owned(),
             casbin_model_path,
             casbin_policy_path,
             kill_switch_admin_token: "test-admin-token".into(),
@@ -379,7 +402,7 @@ mod tests {
                 .expect("check after deactivation runs")
         );
 
-        std::fs::remove_dir_all(temp_dir("killswitch")).expect("clean temp dir");
+        std::fs::remove_dir_all(unique_temp_dir("killswitch")).expect("clean temp dir");
     }
 
     #[tokio::test]
@@ -389,16 +412,21 @@ mod tests {
         let id = request.id;
         let engine_for_waiter = engine.clone();
         let waiter = tokio::spawn(async move { engine_for_waiter.request_approval(request).await });
-        // Wait until the request is registered as pending.
-        loop {
-            if matches!(
-                engine.approval_status(id).await,
-                Ok(policy::ApprovalDecision::Pending)
-            ) {
-                break;
+        // Wait until the request is registered as pending. The deadline keeps a
+        // regression in request_approval from hanging the whole test binary.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    engine.approval_status(id).await,
+                    Ok(policy::ApprovalDecision::Pending)
+                ) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
+        })
+        .await
+        .expect("request must become pending within 5s");
 
         engine
             .activate_kill_switch("test".into(), "test-admin-token")
@@ -428,7 +456,10 @@ mod tests {
         let label = "strict-token-reject";
         let (casbin_model_path, casbin_policy_path) = shipped_casbin(label);
         let config = config::PolicyConfig {
-            cedar_policy_dir: temp_dir(label).join("cedar").to_string_lossy().into_owned(),
+            cedar_policy_dir: unique_temp_dir(label)
+                .join("cedar")
+                .to_string_lossy()
+                .into_owned(),
             casbin_model_path,
             casbin_policy_path,
             kill_switch_admin_token: config::PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
@@ -450,7 +481,7 @@ mod tests {
             "error names the opt-in flag"
         );
 
-        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+        std::fs::remove_dir_all(unique_temp_dir(label)).expect("clean temp dir");
     }
 
     /// With the guard off (the default), the placeholder token still starts
@@ -460,7 +491,10 @@ mod tests {
         let label = "strict-token-off";
         let (casbin_model_path, casbin_policy_path) = shipped_casbin(label);
         let config = config::PolicyConfig {
-            cedar_policy_dir: temp_dir(label).join("cedar").to_string_lossy().into_owned(),
+            cedar_policy_dir: unique_temp_dir(label)
+                .join("cedar")
+                .to_string_lossy()
+                .into_owned(),
             casbin_model_path,
             casbin_policy_path,
             kill_switch_admin_token: config::PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
@@ -472,7 +506,7 @@ mod tests {
             .await
             .expect("placeholder token is allowed when the strict guard is off");
 
-        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+        std::fs::remove_dir_all(unique_temp_dir(label)).expect("clean temp dir");
     }
 
     // ---- R5-D TOCTOU: activation between the pre-check and the commit -------
@@ -625,7 +659,7 @@ mod tests {
             policy::ApprovalDecision::Approved { .. }
         ));
 
-        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+        std::fs::remove_dir_all(unique_temp_dir(label)).expect("clean temp dir");
     }
 
     /// Same ordering for `deny`: a human denial is also a decision and must be
@@ -665,7 +699,7 @@ mod tests {
             policy::ApprovalDecision::Denied { .. }
         ));
 
-        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+        std::fs::remove_dir_all(unique_temp_dir(label)).expect("clean temp dir");
     }
 
     /// I46-A: this test keeps its historical name as a regression ID, but its
@@ -718,6 +752,6 @@ mod tests {
             policy::ApprovalDecision::Approved { .. }
         ));
 
-        std::fs::remove_dir_all(temp_dir(label)).expect("clean temp dir");
+        std::fs::remove_dir_all(unique_temp_dir(label)).expect("clean temp dir");
     }
 }

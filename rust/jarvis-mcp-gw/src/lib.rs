@@ -269,6 +269,20 @@ mod tests {
         run_mock_mcp_server, shipped_policy_client_with_engine, start_policy_http,
     };
     use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// pid separates concurrent cargo test processes; the counter separates
+    /// repeated calls in one process. Every helper gets a fresh directory, so
+    /// setup can never remove a directory another process is using.
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "jarvis-mcp-gw-lib-{tag}-{}-{n}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn policy_context_uses_only_server_derived_attributes() {
@@ -299,8 +313,7 @@ requires_approval = true
     async fn gateway_with(
         label: &str,
     ) -> (Arc<McpGateway>, Arc<jarvis_policy::PolicyEngine>, String) {
-        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-lib-{label}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir(label);
         tokio::fs::create_dir_all(&dir)
             .await
             .expect("create temp dir");
@@ -325,8 +338,7 @@ requires_approval = true
 
     #[tokio::test]
     async fn oversized_arguments_are_rejected_before_execution() {
-        let dir = std::env::temp_dir().join("jarvis-mcp-gw-lib-argcap");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("argcap");
         tokio::fs::create_dir_all(&dir)
             .await
             .expect("create temp dir");
@@ -373,8 +385,7 @@ requires_approval = false
     /// Gateway with a 16-byte per-tool argument cap and no approval step, so
     /// the size gate is the only layer under test.
     async fn gateway_with_arg_cap(label: &str) -> Arc<McpGateway> {
-        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-lib-{label}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir(label);
         tokio::fs::create_dir_all(&dir)
             .await
             .expect("create temp dir");
@@ -458,20 +469,26 @@ requires_approval = false
                     .await
             }
         });
-        let id = loop {
-            let pending: serde_json::Value = http
-                .get(format!("{policy_http}/v1/approvals"))
-                .send()
-                .await
-                .expect("list")
-                .json()
-                .await
-                .expect("json");
-            if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
-                break entry["id"].as_str().expect("id").to_owned();
+        // Poll with a deadline: a policy endpoint that never reports Pending
+        // must fail the test instead of hanging the whole test binary.
+        let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let pending: serde_json::Value = http
+                    .get(format!("{policy_http}/v1/approvals"))
+                    .send()
+                    .await
+                    .expect("list")
+                    .json()
+                    .await
+                    .expect("json");
+                if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
+                    break entry["id"].as_str().expect("id").to_owned();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        })
+        .await
+        .expect("approval must become pending within 5s");
         http.post(format!("{policy_http}/v1/approval/{id}/approve"))
             .json(&json!({ "approved_by": "koppe" }))
             .send()
@@ -501,20 +518,26 @@ requires_approval = false
                     .await
             }
         });
-        let id = loop {
-            let pending: serde_json::Value = http
-                .get(format!("{policy_http}/v1/approvals"))
-                .send()
-                .await
-                .expect("list")
-                .json()
-                .await
-                .expect("json");
-            if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
-                break entry["id"].as_str().expect("id").to_owned();
+        // Poll with a deadline: a policy endpoint that never reports Pending
+        // must fail the test instead of hanging the whole test binary.
+        let id = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let pending: serde_json::Value = http
+                    .get(format!("{policy_http}/v1/approvals"))
+                    .send()
+                    .await
+                    .expect("list")
+                    .json()
+                    .await
+                    .expect("json");
+                if let Some(entry) = pending["pending"].as_array().and_then(|v| v.first()) {
+                    break entry["id"].as_str().expect("id").to_owned();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        };
+        })
+        .await
+        .expect("approval must become pending within 5s");
         // Emergency stop engages while the operator is still deciding.
         engine
             .activate_kill_switch("test".into(), "test-admin-token")
@@ -545,8 +568,7 @@ requires_approval = false
 "#;
 
     async fn gateway_with_principal_guard(label: &str, require: bool) -> Arc<McpGateway> {
-        let dir = std::env::temp_dir().join(format!("jarvis-mcp-gw-lib-{label}"));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir(label);
         tokio::fs::create_dir_all(&dir)
             .await
             .expect("create temp dir");

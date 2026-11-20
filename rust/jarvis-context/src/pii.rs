@@ -212,7 +212,20 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
+
+    static TEST_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// pid + counter keeps concurrent cargo test processes from sharing (and
+    /// deleting) the same scratch directory.
+    fn unique_temp_dir(tag: &str) -> std::path::PathBuf {
+        let n = TEST_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "jarvis-context-pii-{tag}-{}-{n}",
+            std::process::id()
+        ))
+    }
 
     /// Absolute path to the shipped config, baked in at compile time.
     const SHIPPED_PATH: &str = concat!(
@@ -275,8 +288,7 @@ mod tests {
     /// shipped defaults instead of disabling redaction (fail-closed).
     #[tokio::test]
     async fn missing_and_malformed_config_use_default_patterns() {
-        let dir = std::env::temp_dir().join("jarvis-context-pii-fallback");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("fallback");
         std::fs::create_dir_all(&dir).expect("create temp dir");
 
         let sample = json!("mail me at user@example.com or 090-1234-5678");
@@ -460,8 +472,7 @@ email = "[a-z]+@[a-z]+"
         let parsed = toml::from_str::<PiiConfig>(TYPO_TOML);
         assert!(parsed.is_err(), "unknown key must fail deserialization");
 
-        let dir = std::env::temp_dir().join("jarvis-context-pii-unknown-key");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = unique_temp_dir("unknown-key");
         std::fs::create_dir_all(&dir).expect("create temp dir");
         let config_path = dir.join("typo.toml");
         std::fs::write(&config_path, TYPO_TOML).expect("write typo config");
