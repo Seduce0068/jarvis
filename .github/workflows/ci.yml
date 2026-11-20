@@ -31,7 +31,7 @@ jobs:
     # GitHub API の現行 SHA を照合し、タグの付け替えを fail-closed で検知する。
     # オフライン時は未検証警告のみ。タグを付け替える場合は上の記録 SHA も
     # 同じコミットで更新すること。
-    # §5 の方針に反するため `uses:` 自体は SHA 固定にせず v1 タグを維持する。
+    # §5 の方針に従い `uses:` 自体は SHA 固定にせず v1 タグを維持する。
     uses: Seduce0068/workflows/.github/workflows/rust-gates.yml@v1
     with:
       apt_packages: |
@@ -44,15 +44,18 @@ jobs:
       # Global policy: unsafe blocks/functions are forbidden unless explicitly
       # justified with a documented SAFETY comment (common AGENTS.md §15).
       # I68-B: add -D warnings so CI clippy treats all warnings as errors,
-      # matching `make ci-local` (Makefile:44) and the documented lint command.
+      # matching `make ci-local` (clippy step) and the documented lint command.
       clippy_args: -D warnings -D clippy::undocumented_unsafe_blocks
       # I68-B: check/test `--locked` is decided inside the shared
       # rust-gates.yml@v1 workflow; its input API is not confirmed here
       # (todo.md「外部事実のため未確認」). No caller-side flag is set to avoid
       # guessing an unsupported input. Locally `make ci-local` already pins
-      # `--locked` for cargo check/test (Makefile:42-43). Recorded as-is.
+      # `--locked` for cargo check/test in `make ci-local`. Recorded as-is.
       # aarch64 cross-build (matches rust/scripts/deploy.rs) and the
       # Docker-backed testcontainers integration test.
+      # I91-B: 共有 rust-gates.yml@v1 内部の check/test が `--locked` を付けるかは
+      # 担当外のため、呼び出し側 extra_gates の下記 2 コマンドで `--locked` を明示
+      # 固定し、Cargo.lock の暗黙更新を防ぐ（共通 workflow 側の挙動には依存しない）。
       extra_gates: |
         sudo dpkg --add-architecture arm64
         # Keep amd64 on the Azure mirror; arm64 packages live on Ubuntu Ports.
@@ -71,11 +74,11 @@ jobs:
         export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
         export PKG_CONFIG_ALLOW_CROSS=1
         export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
-        cargo check --workspace --target aarch64-unknown-linux-gnu
+        cargo check --workspace --locked --target aarch64-unknown-linux-gnu
 
         # The host build must not inherit the arm64 pkg-config path.
         unset PKG_CONFIG_PATH PKG_CONFIG_ALLOW_CROSS CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER
-        cargo test -p jarvis-context -- --ignored
+        cargo test -p jarvis-context --locked -- --ignored
 
         # P1-8 / P2-3: repo-local regression scripts and the standalone GPUI
         # crate are not covered by the shared rust-gates workspace job.
