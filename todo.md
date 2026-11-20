@@ -2227,3 +2227,33 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   バックアップ外部化、push、共有 lib の実機配布（再インストール）。
 
 - 親が対応: 全ゲート再検証（restore 690件、safety 664件）。
+
+### Round 77（R4 で修正済み）
+
+- [x] テストの形骸化を解消: `assert_absent` の空ログ pass を前提ログ必須化
+  で排除、同一アサーションの反復を代表ケースへ集約（restore 690→354件、
+  失敗モードごとの fail-closed は維持）。
+- [x] jq モックの empty／prod_empty 回帰を追加（qdrant.sh の `case ''` 分岐）。
+- [x] `dead_letter_warns_once_with_fixed_vocabulary` の3回連続フレーキを
+  `capture_warns` の静的 Mutex 直列化で解消。
+- 親が対応: 全ゲート再検証。
+
+### Round 77 の残り指摘（未対応）
+
+- [ ] flock のコメントが「backup timer とのインリーブを防ぐ」と主張するが
+  バックアップ側はロックを取得しない（medium）— コメント訂正または両側取得。
+- [ ] flock fd がサブプロセスへ継承され子が残ると stale ロックが残る
+  （medium）— dispatch 前に fd を閉じる／PID 記録。
+- [ ] /tmp の予測可能ロックファイルの inode 変更で相互排除が破られる
+  （medium）— /run/jarvis 等の安定パス＋stat 照合。
+- [ ] カウンタ単一化でサマリの意味が「イベント数」→「呼び出し数」へ変化
+  （low）— runbook 明記＋サマリ値の回帰。
+- [ ] secret_scan が部分走査（サブディレクトリ実行）を検出できず OK になる
+  （medium）— repo root から git -C で走査対象を固定。
+- [ ] egress allowlist のテストが本番と逆の「空=無制限」を固定（medium）—
+  from_config 経由に統一。
+- [ ] pg_url doc が「Slice 1 のみ・接続なし」と古い（low）。
+- [ ] event の ingress トークン OnceLock テストが順序依存（low）。
+
+- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
+  push、共有 lib の実機配布。
