@@ -47,9 +47,16 @@ MODULE_DIR="$SCRIPT_DIR/restore-local.d"
 # (infra/systemd/jarvis-backup.timer) can fire while pg.sh drops/recreates the
 # production DB (restore-local.d/pg.sh:119-144), yielding a failed pg_dump or a
 # COMPLETE set that still contains the old DB. It goes through the same
-# inventory -> stop_services -> on_exit restart path as every other unit; stop
-# leaves the enablement bit untouched, so start in on_exit restores both active
-# and enabled state. Dry-run never calls stop_services, so the timer is untouched.
+# inventory -> stop_services path as every other unit; stop leaves the
+# enablement bit untouched. On SUCCESS on_exit starts it in reverse order,
+# restoring both active and enabled state. On FAILURE on_exit deliberately
+# leaves it STOPPED and emits the fixed manual-restart warning (see on_exit):
+# a restarted Persistent=true timer would elapse immediately over the dropped /
+# mid-restore DB and write a COMPLETE set that --latest treats as the newest
+# good backup. Dry-run never calls stop_services, so the timer is untouched.
+# I73-A: a timer is selected by is-active ALONE (a disabled-but-active timer can
+# still fire), and verify_stopped_services() confirms it is inactive after the
+# stop before dispatch; otherwise the run aborts fail-closed before any write.
 SERVICE_INVENTORY=(jarvis-policy jarvis-mcp-gw jarvis-event jarvis-context opencode code-server otelcol jarvis-backup.timer)
 SERVICES_TO_STOP=()
 STOPPED_SERVICES=()
@@ -61,6 +68,77 @@ log() {
 fail() {
   printf '[restore-local] ERROR: %s\n' "$*" >&2
   exit 1
+}
+
+# ---------------------------------------------------------------------------
+# I73-B: single execution user = root. The backup dir is postgres:postgres 0700
+# (install-backup-timer.sh:163-165), so only root can both read the set and
+# authorise `systemctl stop`. PostgreSQL is reached via the postgres OS role.
+# Failure vocabulary is fixed so the runbook and tests can match it exactly.
+# ---------------------------------------------------------------------------
+PRECONDITION_TAG='[restore-local] PRECONDITION FAIL:'
+
+precondition_fail() { # code detail -> fail closed before any write
+  printf '%s %s: %s\n' "$PRECONDITION_TAG" "$1" "$2" >&2
+  exit 1
+}
+
+# Single psql entry point. Bash resolves functions before PATH entries, so this
+# also wraps every bare `psql` call in the sourced restore-local.d/*.sh modules
+# (pg.sh is out of scope for this change). As root, run psql as the postgres OS
+# role (peer auth); keep the caller's psql otherwise (fixture harness / explicit
+# override) so the existing mock-based regression suite stays intact.
+psql() {
+  # The fixture harness (MOCK_LOG) injects its own psql via PATH; keep using it
+  # verbatim even if the harness itself is launched as root.
+  if [ "$EUID" -eq 0 ] && [ -z "${MOCK_LOG:-}" ]; then
+    command sudo -u postgres psql "$@"
+  else
+    command psql "$@"
+  fi
+}
+export -f psql
+
+check_preconditions() {
+  local uid="$EUID"
+
+  # 1) backup_dir readable + searchable. In production this rejects an
+  #    unprivileged caller before verify_set() fails on a missing manifest.
+  if [ ! -d "$BACKUP_ROOT" ] || [ ! -r "$BACKUP_ROOT" ] || [ ! -x "$BACKUP_ROOT" ]; then
+    precondition_fail BACKUP_DIR_UNREADABLE \
+      "cannot read backup_dir: $BACKUP_ROOT (run as root)"
+  fi
+
+  # 2) psql runnable as the postgres role. `type -P` ignores the wrapper above
+  #    and proves an external binary exists on PATH.
+  if ! type -P psql >/dev/null 2>&1; then
+    precondition_fail PSQL_UNAVAILABLE 'psql not found in PATH'
+  fi
+  if [ "$uid" -eq 0 ] && [ -z "${MOCK_LOG:-}" ]; then
+    if ! command -v sudo >/dev/null 2>&1; then
+      precondition_fail PSQL_UNAVAILABLE \
+        'sudo required to run psql as the postgres OS role'
+    fi
+    if ! sudo -n -u postgres psql -d postgres -tAc 'SELECT 1' >/dev/null 2>&1; then
+      precondition_fail PSQL_UNAVAILABLE \
+        'cannot connect to PostgreSQL as the postgres OS role'
+    fi
+  fi
+
+  # 3) systemctl stop authority. root is authoritative; a non-root caller needs
+  #    non-interactive sudo. MOCK_LOG marks the fixture harness, which supplies
+  #    its own systemctl mock and must not probe a real host here.
+  if ! command -v systemctl >/dev/null 2>&1; then
+    precondition_fail SYSTEMCTL_STOP_DENIED 'systemctl not found in PATH'
+  fi
+  if [ "$uid" -ne 0 ] && [ -z "${MOCK_LOG:-}" ]; then
+    if ! command -v sudo >/dev/null 2>&1 || ! sudo -n true >/dev/null 2>&1; then
+      precondition_fail SYSTEMCTL_STOP_DENIED \
+        'systemctl stop requires root or non-interactive sudo'
+    fi
+  fi
+
+  log "preconditions OK: backup_dir readable, psql (postgres role) available, systemctl stop authorised"
 }
 
 usage() {
@@ -386,7 +464,7 @@ verify_set() {
 # S3: service inventory and stop/restart (Qdrant is never stopped)
 # ---------------------------------------------------------------------------
 inventory_services() {
-  local unit
+  local unit enabled
   SERVICES_TO_STOP=()
   if ! command -v systemctl >/dev/null 2>&1; then
     log "WARN: systemctl unavailable; service inventory is empty"
@@ -396,11 +474,34 @@ inventory_services() {
     case "$unit" in
       qdrant|qdrant.service) continue ;; # invariant: HTTP API needs Qdrant up
     esac
-    if systemctl is-enabled "$unit" >/dev/null 2>&1 \
-       && systemctl is-active "$unit" >/dev/null 2>&1; then
-      SERVICES_TO_STOP+=("$unit")
+    # is-enabled is observed for every unit but gates only non-timer services.
+    # install-backup-timer.sh:123-133 rollback re-asserts the pre-run active and
+    # enabled dimensions independently (disable + start), which can leave
+    # jarvis-backup.timer ACTIVE but DISABLED. Gating a timer on is-enabled
+    # would drop it from the stop list and let a daily backup fire during the
+    # production DB DROP/CREATE window (I73-A).
+    enabled=0
+    if systemctl is-enabled "$unit" >/dev/null 2>&1; then
+      enabled=1
     fi
+    if ! systemctl is-active "$unit" >/dev/null 2>&1; then
+      continue
+    fi
+    case "$unit" in
+      *.timer)
+        if [ "$enabled" -eq 0 ]; then
+          log "inventory: $unit is disabled but active; stopping anyway (backup window risk)"
+        fi
+        SERVICES_TO_STOP+=("$unit")
+        ;;
+      *)
+        if [ "$enabled" -eq 1 ]; then
+          SERVICES_TO_STOP+=("$unit")
+        fi
+        ;;
+    esac
   done
+  return 0
 }
 
 stop_services() {
@@ -414,6 +515,30 @@ stop_services() {
       return 1
     fi
   done
+}
+
+# I73-A fail-closed post-stop check. A disabled-but-active timer must be proven
+# inactive before dispatch: if `systemctl stop` did not take effect, the daily
+# backup could still elapse while pg.sh drops/recreates the production DB.
+# Read-only (no enable/disable, no restart); on failure main() aborts before
+# dispatch_restore() and the existing EXIT trap still owns service recovery.
+verify_stopped_services() {
+  local unit
+  if [ "${#STOPPED_SERVICES[@]}" -eq 0 ]; then
+    return 0
+  fi
+  for unit in "${STOPPED_SERVICES[@]}"; do
+    case "$unit" in
+      *.timer)
+        if systemctl is-active "$unit" >/dev/null 2>&1; then
+          log "ERROR: timer still active after stop: $unit"
+          return 1
+        fi
+        log "verified inactive after stop: $unit"
+        ;;
+    esac
+  done
+  return 0
 }
 
 # Failure-path insurance for the isolated PostgreSQL database. It only acts when
@@ -443,22 +568,44 @@ cleanup_isolated_db() {
 }
 
 on_exit() {
+  # I73-C (a): capture the EXIT status before any command in this trap resets
+  # $?. fail()/set -e give non-zero; a normal main() return gives 0.
+  local exit_status=$?
   trap - EXIT
+  local i unit
+  local timer_left_stopped=0
+  # Fixed vocabulary (I73-C (a)): runbook and tests match this literal line.
+  local timer_warn='WARN: jarvis-backup.timer LEFT STOPPED after restore failure - MANUAL RESTART REQUIRED: sudo systemctl start jarvis-backup.timer'
+
   # STOPPED_SERVICES can include jarvis-backup.timer (see SERVICE_INVENTORY).
-  # The earlier `systemctl stop` did not change its enablement bit, and the
-  # `systemctl start` below restores its active state, so this same loop
-  # recovers the original active/enabled state without a timer-specific branch.
+  # SUCCESS: keep the original reverse-order start verbatim, restoring both the
+  # active and (untouched by stop) enabled state exactly as before.
+  # FAILURE: do NOT start jarvis-backup.timer. Persistent=true would make it
+  # elapse immediately over a dropped / mid-restore DB and write a COMPLETE set
+  # that --latest would then treat as the newest good backup. Leaving it stopped
+  # is sufficient (a stopped timer never elapses); no mask is applied so a
+  # manual `systemctl start` is all that is needed once the DB is verified.
+  # Other units are still restarted so a failed restore does not leave JARVIS down.
   if [ "${#STOPPED_SERVICES[@]}" -gt 0 ]; then
     log "restarting stopped services in reverse order"
-    local i unit
     for (( i=${#STOPPED_SERVICES[@]}-1; i>=0; i-- )); do
       unit="${STOPPED_SERVICES[$i]}"
+      if [ "$exit_status" -ne 0 ] && [ "$unit" = "jarvis-backup.timer" ]; then
+        timer_left_stopped=1
+        log "restore failure: NOT restarting jarvis-backup.timer (left stopped)"
+        continue
+      fi
       if systemctl start "$unit"; then
         log "restarted: $unit"
       else
         printf '[restore-local] restart FAILED: %s\n' "$unit" >&2
       fi
     done
+  fi
+
+  if [ "$timer_left_stopped" -eq 1 ]; then
+    printf '[restore-local] %s\n' "$timer_warn" >&2
+    printf '[restore-local] WARN: verify DB integrity before the manual restart; no backup runs until then\n' >&2
   fi
 
   # Aftercare on both success (normally a no-op: pg.sh already dropped it) and
@@ -523,6 +670,7 @@ dispatch_restore() {
 # Main flow
 # ---------------------------------------------------------------------------
 main() {
+  check_preconditions
   resolve_set
 
   log "JARVIS local restore: set=$SET_DIR apply=$APPLY confirm=$CONFIRM"
@@ -555,6 +703,11 @@ git=$([ "$SKIP_GIT" -eq 0 ] && echo restore || echo skip)"
 
   if ! stop_services; then
     fail "service stop failed; aborting restore"
+  fi
+  # I73-A: the DB DROP/CREATE window must not start while a backup timer is
+  # still active. Fail closed before any module dispatch / DB write.
+  if ! verify_stopped_services; then
+    fail "timer still active after stop; aborting before dispatch"
   fi
 
   dispatch_restore

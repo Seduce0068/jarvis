@@ -13,6 +13,9 @@
 #   - 本番データの復元演習はユーザー承認が必要なため対象外。通常の --apply 経路
 #     では --confirm を渡さない。allowlist ゲート検証のみ --apply --confirm を使う
 #     （ゲートが停止処理より前に立ち、モックが全外部呼び出しを隔離するため安全）。
+#   - I73-A: 状態付き systemctl モックで「active だが disabled」な backup timer
+#     が停止対象に入ること／停止後 inactive を確認できなければ dispatch 前に
+#     abort することを検証する（既定実行でもモックのみなので実環境に触れない）。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -87,13 +90,77 @@ mkdir -p -- "$tmp/bin" "$tmp/logs" "$tmp/tmp" "$tmp/backups" || exit 1
 # ---------------------------------------------------------------------------
 cat > "$tmp/bin/systemctl" <<'MOCK_SYSTEMCTL'
 #!/usr/bin/env bash
-# is-enabled / is-active は読み取り専用なので記録しない。
-# 変更系だけを記録し、停止/再起動パスを実際に通す。
+# I73-A: 状態を持つ systemctl モック。
+# - 変更系は従来どおり systemctl.log に記録する（既存アサーションを維持）。
+# - 読み取り系 is-enabled / is-active は結果付きで systemctl-query.log に記録し、
+#   「active だが disabled」な timer を観測可能にする。
+# - 初期状態は MOCK_DISABLED_UNITS / MOCK_INACTIVE_UNITS で指定する。
+#   MOCK_STOP_INEFFECTIVE_UNITS は stop が効かない（active のまま）ケース用。
+# - 既定は全ユニット enabled + active（旧モックと同一の振る舞い）。
+set -u
 action="${1:-}"
 unit="${2:-}"
+state_dir="${MOCK_LOG:?}/state"
+mkdir -p -- "$state_dir"
+
+listed() { # needle list
+  case " $2 " in
+    *" $1 "*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+initial_flag() { # active|enabled -> 1|0
+  case "$1" in
+    active)
+      if listed "$unit" "${MOCK_INACTIVE_UNITS:-}"; then printf '0\n'; else printf '1\n'; fi
+      ;;
+    enabled)
+      if listed "$unit" "${MOCK_DISABLED_UNITS:-}"; then printf '0\n'; else printf '1\n'; fi
+      ;;
+  esac
+}
+
+flag() { # active|enabled -> 1|0
+  local key="$1" file="$state_dir/${unit}.$1"
+  if [ -f "$file" ]; then
+    cat -- "$file"
+  else
+    initial_flag "$key"
+  fi
+}
+
+set_flag() { # key value
+  printf '%s\n' "$2" > "$state_dir/${unit}.$1"
+}
+
 case "$action" in
-  is-enabled|is-active) exit 0 ;;
+  is-enabled)
+    v="$(flag enabled)"
+    if [ "$v" = 1 ]; then result=enabled; else result=disabled; fi
+    printf '%s %s -> %s\n' "$action" "$unit" "$result" >> "${MOCK_LOG:?}/systemctl-query.log"
+    if [ "$v" = 1 ]; then exit 0; else exit 1; fi
+    ;;
+  is-active)
+    v="$(flag active)"
+    if [ "$v" = 1 ]; then result=active; else result=inactive; fi
+    printf '%s %s -> %s\n' "$action" "$unit" "$result" >> "${MOCK_LOG:?}/systemctl-query.log"
+    if [ "$v" = 1 ]; then exit 0; else exit 3; fi
+    ;;
+  stop)
+    printf '%s %s\n' "$action" "$unit" >> "${MOCK_LOG:?}/systemctl.log"
+    if ! listed "$unit" "${MOCK_STOP_INEFFECTIVE_UNITS:-}"; then
+      set_flag active 0
+    fi
+    exit 0
+    ;;
+  start)
+    printf '%s %s\n' "$action" "$unit" >> "${MOCK_LOG:?}/systemctl.log"
+    set_flag active 1
+    exit 0
+    ;;
 esac
+# 変更系だけを記録（既存契約を維持）
 printf '%s %s\n' "$action" "$unit" >> "${MOCK_LOG:?}/systemctl.log"
 exit 0
 MOCK_SYSTEMCTL
@@ -204,9 +271,14 @@ fail_case() {
 }
 
 run_driver() {
+  # 前のケースで stop された状態を持ち越さないよう、呼び出しごとに初期化する。
+  rm -rf -- "$tmp/logs/state"
   env \
     PATH="$tmp/bin:$PATH" \
     MOCK_LOG="$tmp/logs" \
+    MOCK_DISABLED_UNITS="${MOCK_DISABLED_UNITS:-}" \
+    MOCK_INACTIVE_UNITS="${MOCK_INACTIVE_UNITS:-}" \
+    MOCK_STOP_INEFFECTIVE_UNITS="${MOCK_STOP_INEFFECTIVE_UNITS:-}" \
     TMPDIR="$tmp/tmp" \
     BACKUP_ROOT="$tmp/backups" \
     VERIFY_SCRIPT="$verifier" \
@@ -312,6 +384,9 @@ assert_no_log "dry-run: psql never called" "$tmp/logs/psql.log"
 assert_no_log "dry-run: curl never called" "$tmp/logs/curl.log"
 assert_no_log "dry-run: cmp never called" "$tmp/logs/cmp.log"
 assert_no_log "dry-run: no service stop/start" "$tmp/logs/systemctl.log"
+# I73-A: dry-run は timer の状態を読むだけ（stop/start は上のアサーションで禁止）。
+assert_present "dry-run: timer state read only" \
+  '^is-active jarvis-backup[.]timer -> active$' "$tmp/logs/systemctl-query.log"
 check_exit "dry-run: backup set still verifies" 0 bash "$verifier" "$set_dir"
 
 # --- 2. fail-closed 検証ゲート --------------------------------------------
@@ -507,6 +582,92 @@ fi
 assert_no_log "--skip-configs bad config: psql never called" "$tmp/logs/psql.log"
 assert_no_log "--skip-configs bad config: curl never called" "$tmp/logs/curl.log"
 assert_no_log "--skip-configs bad config: no service stop/start" "$tmp/logs/systemctl.log"
+
+# --- 5. I73-A: active だが disabled な backup timer の停止 / fail-closed ------
+# install-backup-timer.sh:123-133 の rollback（disable + start）が残す
+# 「active だが disabled」な jarvis-backup.timer を、旧コードの
+# is-enabled && is-active ゲートが停止対象から漏らしていた。状態付きモックで
+# その構成を再現し、(a) 停止されて inactive が確認され dispatch に進むこと、
+# (b) stop が効かず active のままなら DB 書き込み前に abort することを検証する。
+# いずれも --apply 経路だが実 DB / 実 systemctl はモックのみ（安全境界は不変）。
+printf '%s\n' '-- I73-A: disabled-but-active backup timer --'
+
+# 5a. disabled でも active なら停止対象。停止後 inactive を確認し dispatch へ進む。
+rm -f -- "$tmp/logs"/*.log
+timer_ok_code=0
+timer_ok_out="$(MOCK_DISABLED_UNITS='jarvis-backup.timer' \
+  run_driver --backup-set "$set_dir" --apply 2>&1)" || timer_ok_code=$?
+if [ "$timer_ok_code" -eq 0 ]; then
+  pass "timer: disabled-but-active apply exit 0"
+else
+  fail_case "timer: disabled-but-active apply exit=$timer_ok_code"
+  printf '%s\n' "$timer_ok_out" | head -20 >&2
+fi
+# モック状態が本当に「disabled だが active」だったことをクエリ記録で証明する。
+assert_present "timer: mock reports disabled" \
+  '^is-enabled jarvis-backup[.]timer -> disabled$' "$tmp/logs/systemctl-query.log"
+assert_present "timer: mock reports active before stop" \
+  '^is-active jarvis-backup[.]timer -> active$' "$tmp/logs/systemctl-query.log"
+if has_fragment "$timer_ok_out" 'jarvis-backup.timer is disabled but active; stopping anyway'; then
+  pass "timer: inventory keeps disabled-but-active timer"
+else
+  fail_case "timer: inventory dropped the disabled-but-active timer"
+  printf '%s\n' "$timer_ok_out" | head -12 >&2
+fi
+assert_present "timer: stop recorded" \
+  '^stop jarvis-backup[.]timer$' "$tmp/logs/systemctl.log"
+assert_present "timer: inactive confirmed after stop" \
+  '^is-active jarvis-backup[.]timer -> inactive$' "$tmp/logs/systemctl-query.log"
+if has_fragment "$timer_ok_out" 'verified inactive after stop: jarvis-backup.timer'; then
+  pass "timer: post-stop verification logged"
+else
+  fail_case "timer: post-stop verification log missing"
+fi
+assert_absent "timer: enablement bit never changed" \
+  '^(enable|disable) ' "$tmp/logs/systemctl.log"
+if has_fragment "$timer_ok_out" 'dispatch: restore_pg'; then
+  pass "timer: dispatch proceeded after verified stop"
+else
+  fail_case "timer: dispatch did not proceed"
+fi
+assert_present "timer: DB write reached isolated target" \
+  'CREATE DATABASE "jarvis_restore_test"' "$tmp/logs/psql.log"
+
+# 5b. stop が効かず active のままなら fail-closed（dispatch / DB 書き込み前に終了）。
+rm -f -- "$tmp/logs"/*.log
+timer_fail_code=0
+timer_fail_out="$(MOCK_DISABLED_UNITS='jarvis-backup.timer' \
+  MOCK_STOP_INEFFECTIVE_UNITS='jarvis-backup.timer' \
+  run_driver --backup-set "$set_dir" --apply 2>&1)" || timer_fail_code=$?
+if [ "$timer_fail_code" -ne 0 ]; then
+  pass "timer: stubborn active timer aborted (exit $timer_fail_code)"
+else
+  fail_case "timer: stubborn active timer was accepted"
+fi
+for fragment in 'timer still active after stop' 'aborting before dispatch'; do
+  if has_fragment "$timer_fail_out" "$fragment"; then
+    pass "timer: abort output: $fragment"
+  else
+    fail_case "timer: abort output missing: $fragment"
+    printf '%s\n' "$timer_fail_out" | head -12 >&2
+  fi
+done
+assert_present "timer: stop was attempted" \
+  '^stop jarvis-backup[.]timer$' "$tmp/logs/systemctl.log"
+assert_present "timer: post-stop check still saw active" \
+  '^is-active jarvis-backup[.]timer -> active$' "$tmp/logs/systemctl-query.log"
+assert_no_log "timer: psql never called before abort" "$tmp/logs/psql.log"
+assert_no_log "timer: curl never called before abort" "$tmp/logs/curl.log"
+if has_fragment "$timer_fail_out" 'dispatch: restore_pg'; then
+  fail_case "timer: dispatch ran despite active timer"
+else
+  pass "timer: no module dispatch before abort"
+fi
+if has_fragment "$timer_fail_out" 'restore sequence finished'; then
+  fail_case "timer: success line printed despite abort"
+else
+  pass "timer: no success line after abort"
+fi
 
 printf 'result: ok=%d fail=%d\n' "$ok" "$bad"
 [ "$bad" -eq 0 ]
