@@ -2721,3 +2721,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
+
+## 進行中（2026-11-21 / swarm-limited 予算上限による停止）
+
+/swarm-limited の制限プロファイルでセッション合計起動数（上限40）を超過したため、
+新規サブエージェントの起動を停止した。未完了項目を次回の再開指示まで保持する。
+
+- [ ] 両 DB バックアップギャップ（high）— 設計判断待ち。
+      判断材料は `docs/integration/local-restore-design.md` の「未決定事項」に整備済み。
+      前回の子実装は既存10回帰と矛盾したため差し戻し済み。
+- [ ] major 更新待ち29件の脆弱性 — 再評価日 2026-12-20。
+      patch 版8件は更新済み、残りは hickory / rsa / rmcp 等の major 更新待ち。
+- [ ] ユーザー判断が必要な項目: P1-6 暗号化鍵の注入先、8段階の P0 ガード有効化、
+      Grafana Cloud 認証の供給、Webhook の公開範囲、S9 実機復元演習、
+      バックアップ外部化、共有 lib の実機配布（再インストール）。
+- [ ] push — ユーザーによる明示的な「push しない」制約を尊重し未実施
+      （`origin/master` より 500 commits ahead）。
+
+## メモ
+
+- 標準検証ゲートはすべて通过している。
+  `cargo fmt` / `check --locked` / `test --locked` / `clippy -D warnings` /
+  `make ci-local` / `make safety-test` / `make check-evidence` /
+  `make ui-test` / `make check-dependency-audit` / `bash -n` / `shellcheck`。
