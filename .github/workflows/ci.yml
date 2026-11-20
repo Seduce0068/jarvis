@@ -98,6 +98,19 @@ jobs:
         # The scan itself always uses --no-fetch; CI opts into refreshing the
         # advisory DB first (network READ only). A failed fetch or any advisory
         # finding fails closed; no repository data is transmitted.
+        # I94-A: install cargo-audit here, BEFORE the audit gate runs. The shared
+        # rust-gates.yml@v1 lives in a separate repository (Seduce0068/workflows)
+        # and is intentionally left unchanged. Common guidance §5 ("consider the
+        # shared side first") was evaluated; because that side is outside this
+        # repository's scope, the caller-side extra_gates is the chosen fix.
+        # Version is pinned to 0.23.0 (measured locally via `cargo audit
+        # --version`) so advisory parsing and gate results stay reproducible;
+        # --locked freezes the installer's transitive dependencies. The version
+        # probe makes this idempotent on reused runners: skip when the exact
+        # pinned version is already present, otherwise install it.
+        if ! cargo audit --version 2>/dev/null | grep -Eq '0\.23\.0([^0-9]|$)'; then
+          cargo install cargo-audit --version 0.23.0 --locked
+        fi
         DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit
         make check-evidence
         make secret-scan

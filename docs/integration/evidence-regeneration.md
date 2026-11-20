@@ -253,6 +253,16 @@ bash ci/scripts/generate-evidence.sh context
 既存 6 証跡や `check-evidence.sh` を壊さない（ファイルを一切書かない）。
 `make check-evidence` の動作は従来どおりである。
 
+### 自動回帰（I95-E）
+
+`ci/scripts/test-legacy-guards.sh` が generator 契約を回帰する。cargo は
+PATH 上のスタブで隠すため実 cargo / 実 suite は走らず、一時ディレクトリの
+コピーと合成 JSON だけを使う。検証するのは全 6 ターゲットの `--locked`、
+不正パス（入れ子 / `..` / 不正 hex）の exit 2、不在パスの exit 1、
+実 run 失敗時の `ActualRunDetectedFailure`、MATCH / MISMATCH 分岐である。
+あわせて `docs/` 内の `test-run-<12hex>.json` 参照が実在することも
+静的ガードで検証する（`make safety-test` / `make ci-local` 経由で実行）。
+
 ## 実測と JSON の対応（検算手順）
 
 1. generator で機械導出値を得る（上記コマンド）。
@@ -269,8 +279,17 @@ echo "== 2. 実測実行 =="
 (cd rust && cargo test -p jarvis-context --lib --locked)
 echo "== 3. 既存証跡との照合（値は出力しない） =="
 bash ci/scripts/generate-evidence.sh context --check \
-  evidence/test-run-20261120-f1e67b2a5e2c.json
+  evidence/test-run-20261120-de83a4552e45.json
 ```
+
+`--check` に渡せるのは `evidence/` 直下の
+`test-run-<12hex>.json` のみである。`*/*`（入れ子パス）と `*..*`（`..` を含む
+パス）は明示的に拒否され `FAIL: BadEvidencePath` / exit 2 となる。
+形式は正しいがファイルが無い場合は `FAIL: EvidenceFileNotFound` / exit 1。
+実 run が失敗した場合は `FAIL: ActualRunDetectedFailure` / exit 1。
+`--check` の標準出力は `CHECK: MATCH` または `CHECK: MISMATCH` のみで、
+成功と見える `results` / `notes` 断片は出さない（実 run 成功後にのみ
+照合結果を出す）。断片が必要な場合は `--check` を外して生成モードで実行する。
 
 `CHECK: MISMATCH` は証跡側が古い（例: テスト追加で件数が増えた）ことを示す。
 この場合だけ手順3〜6で証跡を再生成し、再度 `--check` で `MATCH` を確認する。
@@ -287,7 +306,7 @@ bash ci/scripts/generate-evidence.sh context --check \
 | JSON フィールド | 導出元 | 意味 |
 | --- | --- | --- |
 | `results.passed` | `--list` の総数 − ignored | 列挙された実行対象数（成功は実測で確認） |
-| `results.failed` | 実測実行の失敗数 | ゲートは 0 を要求 |
+| `results.failed` | 断片では `--list` 由来の予測値 0（`--check` が実 run の exit で検証） | ゲートは 0 を要求 |
 | `results.skipped` | `--list --ignored` の件数 | `notes` の `N ignored` と一致させる |
 
 `test-backup.md` は `make` ベースのシェル回帰であり `--list` に対応しない。
@@ -536,6 +555,40 @@ fail-closed とする（CI はバージョン固定で導入する前提）。
   `TODO-RUSTSEC-*` トークンは実測 ID へ置換えるためのプレースホルダであり、
   置換えるまで実 advisory を抑制しない。ID は推測せず、
   `cargo audit` の実測出力から取得して書き換えること。
+
+### cargo-audit の導入（I94-A）
+
+`cargo-audit` が未導入の場合、ゲートは `AUDIT_TOOL_MISSING` で fail-closed となる。
+バージョンはローカル実測値の **0.23.0** に固定する。advisory の解析結果と
+ゲート判定を実行間で再現可能にするためである。
+
+CI 側は `.github/workflows/ci.yml` の `extra_gates` で、監査ゲートの直前に
+固定版を導入する。`cargo audit --version` が固定版なら再導入をスキップする
+冪等性チェックを付け、再利用ランナーでの冗長な install を避ける。
+
+```bash
+# CI: extra_gates 内（working_directory: rust）の抜粋
+if ! cargo audit --version 2>/dev/null | grep -Eq '0\.23\.0([^0-9]|$)'; then
+  cargo install cargo-audit --version 0.23.0 --locked
+fi
+DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit
+```
+
+共有 `rust-gates.yml@v1` は別リポジトリ（`Seduce0068/workflows`）にあり、
+今回の変更範囲外である。共通指示 §5 の「まず共通側を検討」は検討済みで、
+別リポジトリのため呼び出し側の `extra_gates` を選択した。この理由は
+`ci.yml` のコメントにも明記している。
+
+ローカルでは自動 install しない（fail-closed 契約を維持するため）。未導入時は
+手動で固定版を導入し、バージョンを確認する。
+
+```bash
+# Kubuntu / jarvis リポジトリルートで実行
+echo "== cargo-audit 導入（固定版 0.23.0） =="
+cargo install cargo-audit --version 0.23.0 --locked
+echo "== バージョン確認 =="
+cargo audit --version
+```
 
 ### dependency audit の実行
 

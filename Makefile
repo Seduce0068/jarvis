@@ -113,6 +113,10 @@ test-workflow-pins: ## ピン照合ゲートの回帰（mini workflow と疑似 
 check-toml: ## 全 tracked *.toml の構文検証（tomllib/tomli、値は出力しない・fail-closed）
 	@bash ci/scripts/check-toml.sh
 
+# I94-A: cargo-audit が未導入の場合は AUDIT_TOOL_MISSING で fail-closed となる。
+# ローカルでは自動 install しない（fail-closed 契約を維持するため）。未導入時は
+# 下記の固定バージョンで手動導入し、`cargo audit --version` が一致することを確認する。
+#   cargo install cargo-audit --version 0.23.0 --locked
 check-dependency-audit: ## rust/ui 両 Cargo.lock の既知脆弱性を監査（cargo-audit 必須・fail-closed）
 	@bash ci/scripts/check-dependency-audit.sh
 
