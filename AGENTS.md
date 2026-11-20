@@ -71,10 +71,10 @@ jarvis/
 ```bash
 # Build all services (local x86_64)
 cd rust
-cargo build --release --workspace
+cargo build --release --workspace --locked
 
 # Run tests
-cargo test --workspace
+cargo test --workspace --locked
 
 # Lint
 cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
@@ -83,7 +83,7 @@ cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsaf
 cargo fmt --all --check
 
 # Check types
-cargo check --workspace
+cargo check --workspace --locked
 ```
 
 ### Infrastructure (local systemd; OCI unused)
@@ -147,8 +147,8 @@ sudo journalctl -u jarvis-policy -u jarvis-mcp-gw -u jarvis-event -u jarvis-cont
 
 | Task | Command |
 |------|---------|
-| Build all Rust services | `cd rust && cargo build --release --workspace` |
-| Run tests | `cd rust && cargo test --workspace` |
+| Build all Rust services | `cd rust && cargo build --release --workspace --locked` |
+| Run tests | `cd rust && cargo test --workspace --locked` |
 | Lint | `cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks` |
 | Format check | `cd rust && cargo fmt --all --check` |
 | Deploy jarvis-mcp-gw | `bash infra/scripts/deploy-mcp-gw-safe.sh`（適用は `sudo ... --apply`） |

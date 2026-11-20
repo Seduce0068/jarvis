@@ -333,12 +333,12 @@ clippy ゲートは次の3経路に限定して表記する。
 - UI 直接（GPUI 承認コンソール）:
 
   ```bash
-  cd ui && cargo clippy --all-targets -- -D warnings
+  cd ui && cargo clippy --all-targets --locked -- -D warnings
   ```
 
 表記ルール:
 
-- `cargo clippy --workspace -- -D warnings` 単独を `make ci-local` の
+- `cargo clippy --workspace --locked -- -D warnings` 単独を `make ci-local` の
   代替として書かない。Makefile の `ci-local` とオプションが異なり、
   `-D clippy::undocumented_unsafe_blocks` が抜けるため。
 - 文中では「clippy ゲートは `make ci-local` に含まれる」と書き、直接実行例

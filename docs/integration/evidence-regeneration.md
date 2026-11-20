@@ -45,11 +45,11 @@ sha256sum specs/test-<name>.md
 
 仕様変更に対応するテストを再実行し、passed / failed / skipped を控える。
 
-- `test-policy-approval.md`: `cd rust && cargo test -p jarvis-policy --lib`
-- `test-mcp-gateway.md`: `cd rust && cargo test -p jarvis-mcp-gw --lib`
-- `test-context.md`: `cd rust && cargo test -p jarvis-context --lib`
-- `test-event.md`: `cd rust && cargo test -p jarvis-event --lib`
-- `test-ui.md`: `cd ui && cargo test`
+- `test-policy-approval.md`: `cd rust && cargo test -p jarvis-policy --lib --locked`
+- `test-mcp-gateway.md`: `cd rust && cargo test -p jarvis-mcp-gw --lib --locked`
+- `test-context.md`: `cd rust && cargo test -p jarvis-context --lib --locked`
+- `test-event.md`: `cd rust && cargo test -p jarvis-event --lib --locked`
+- `test-ui.md`: `cd ui && cargo test --locked`
 - `test-backup.md`: `make test-verify-backup` と `make test-backup-args`（`make safety-test` は集計対象外）
 
 Cargo 系のターゲットは `ci/scripts/generate-evidence.sh` でテスト数を機械導出
@@ -213,15 +213,15 @@ notes 未同期を検出する（実リポジトリの仕様・証跡は変更�
 仕様・証跡を更新した場合は上記の再生成手順に従い、次の実測値を証跡へ記録する。
 
 ```bash
-cd rust && cargo test -p jarvis-core --features http --lib
-cd rust && cargo test --workspace
+cd rust && cargo test -p jarvis-core --features http --lib --locked
+cd rust && cargo test --workspace --locked
 ```
 
 ハッシュだけの書き換えは禁止する。
 
 ## 証跡 results の機械導出（I69-D (a)）
 
-`ci/scripts/generate-evidence.sh` は `cargo test -- --list` と
+`ci/scripts/generate-evidence.sh` は `cargo test --locked -- --list` と
 `--list --ignored` の件数から `results` を機械導出する。対象は
 `policy` / `mcp` / `context` / `event` / `ui` / `core` の 6 ターゲット。
 
@@ -266,7 +266,7 @@ bash ci/scripts/generate-evidence.sh context
 echo "== 1. 機械導出 =="
 bash ci/scripts/generate-evidence.sh context
 echo "== 2. 実測実行 =="
-(cd rust && cargo test -p jarvis-context --lib)
+(cd rust && cargo test -p jarvis-context --lib --locked)
 echo "== 3. 既存証跡との照合（値は出力しない） =="
 bash ci/scripts/generate-evidence.sh context --check \
   evidence/test-run-20261120-f1e67b2a5e2c.json
@@ -277,12 +277,12 @@ bash ci/scripts/generate-evidence.sh context --check \
 
 | generator target | 実測コマンド | 対応する証跡 |
 | --- | --- | --- |
-| `policy` | `cd rust && cargo test -p jarvis-policy --lib` | policy-approval |
-| `mcp` | `cd rust && cargo test -p jarvis-mcp-gw --lib` | mcp-gateway |
-| `context` | `cd rust && cargo test -p jarvis-context --lib` | context |
-| `event` | `cd rust && cargo test -p jarvis-event --lib` | event |
-| `ui` | `cd ui && cargo test` | ui |
-| `core` | `cd rust && cargo test -p jarvis-core --features http --lib` | （予備） |
+| `policy` | `cd rust && cargo test -p jarvis-policy --lib --locked` | policy-approval |
+| `mcp` | `cd rust && cargo test -p jarvis-mcp-gw --lib --locked` | mcp-gateway |
+| `context` | `cd rust && cargo test -p jarvis-context --lib --locked` | context |
+| `event` | `cd rust && cargo test -p jarvis-event --lib --locked` | event |
+| `ui` | `cd ui && cargo test --locked` | ui |
+| `core` | `cd rust && cargo test -p jarvis-core --features http --lib --locked` | （予備） |
 
 | JSON フィールド | 導出元 | 意味 |
 | --- | --- | --- |

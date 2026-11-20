@@ -281,8 +281,8 @@ generated:
   :620 の `mcp_principal_stays_fixed_when_guard_is_enabled` で
   `/mcp` が固定 principal を維持することも担保する。
 - 検証コマンド: `cd rust && cargo fmt --all --check`,
-  `cargo test -p jarvis-mcp-gw -p jarvis-policy`,
-  `cargo clippy --workspace -- -D warnings`, `make ci-local`。
+  `cargo test -p jarvis-mcp-gw -p jarvis-policy --locked`,
+  `cargo clippy --workspace --locked -- -D warnings`, `make ci-local`。
   ドキュメント更新のみの本タスクでは実行していない（親が検証）。
 
 #### 残る判断（要判断）

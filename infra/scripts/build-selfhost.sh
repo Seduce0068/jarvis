@@ -197,7 +197,7 @@ for sql_file in "${MIGRATION_SQL_FILES[@]}"; do
 done
 
 cd "${REPO_DIR}/rust"
-cargo build --release --workspace
+cargo build --release --workspace --locked
 
 # I37-A: stage every payload locally, record both markers, then run ALL
 # fallible checks before writing anything under /opt. The old code installed
