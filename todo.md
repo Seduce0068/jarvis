@@ -2077,8 +2077,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   3経路すべてが共有表を参照する形へ。
 - [x] install_expected_config の sudo 不在 fail-closed 化 — 2026-11-22 Verify: 既に解消済み（I72-A / I74-C (b)）。`restore-local.d/configs.sh:160-188` が root 直接 / 非root+sudo の両方で `install -o root -g root -m` を強制し、root も sudo も無ければ fail-closed（return 1）。mode-only fallback は明示 opt-in の隔離テスト `JARVIS_RESTORE_TEST_MODE=1` のみで、その際も「root:root NOT enforced」を stderr に明記。owner も `-o root -g root` で検証・強制済み。根拠
   `infra/scripts/restore-local.d/configs.sh:160-188` / verified。コード変更なし。
-- [ ] 記述子ロジックが verify-backup.sh と restore-local.sh に重複し既に
-  分岐（low）— 共有 lib へ抽出し両スクリプトで source。
+- [x] 記述子ロジックの共有 lib 集約 — 2026-11-22 Verify: 既に解消済み。`verify-backup.sh:47-57` と `restore-local.sh:241-248` がともに `source "$SCRIPT_DIR/lib/payload-descriptors.sh"` で同じ関数をロードし、コメントが「their verdicts cannot diverge」「shared with restore-local.sh's verify_set() and resolve_restore_input()」と明記。共有 lib への抽出と両スクリプトからの source は完了済み。根拠
+  `infra/scripts/verify-backup.sh:47-57`, `infra/scripts/restore-local.sh:241-248`, `infra/scripts/lib/payload-descriptors.sh` / verified。コード変更なし。
 
 - 親が対応: 3ワークストリームの restore-local.sh 並行編集を統合、
   全ゲート再検証（restore 80件 pass）。
