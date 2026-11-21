@@ -64,9 +64,7 @@ impl McpGateway {
     ) -> Result<Self> {
         let allowlist = Arc::new(allowlist::AllowList::new(&config).await?);
         let sandbox = Arc::new(sandbox::Sandbox::new(&config).await?);
-        let gateway = Arc::new(
-            gateway::Gateway::new(allowlist.clone(), sandbox.clone()).await?,
-        );
+        let gateway = Arc::new(gateway::Gateway::new(allowlist.clone(), sandbox.clone()).await?);
         // Forward the configured approval API token so policy's
         // require_approval_api_token check does not fail closed.
         let approval = Arc::new(approval::ApprovalClient::new_with_token(
