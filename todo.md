@@ -2075,8 +2075,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   exit 0。role と basename の整合強制＋footer 検査を role に紐付け。
 - [ ] owner/mode 表が deploy-mcp-gw-safe.sh 経路を覆っていない（medium）—
   3経路すべてが共有表を参照する形へ。
-- [ ] install_expected_config の sudo 不在フォールバックが root:root 不変
-  条件を黙って破る（medium）— fail-closed 化＋owner も検証。
+- [x] install_expected_config の sudo 不在 fail-closed 化 — 2026-11-22 Verify: 既に解消済み（I72-A / I74-C (b)）。`restore-local.d/configs.sh:160-188` が root 直接 / 非root+sudo の両方で `install -o root -g root -m` を強制し、root も sudo も無ければ fail-closed（return 1）。mode-only fallback は明示 opt-in の隔離テスト `JARVIS_RESTORE_TEST_MODE=1` のみで、その際も「root:root NOT enforced」を stderr に明記。owner も `-o root -g root` で検証・強制済み。根拠
+  `infra/scripts/restore-local.d/configs.sh:160-188` / verified。コード変更なし。
 - [ ] 記述子ロジックが verify-backup.sh と restore-local.sh に重複し既に
   分岐（low）— 共有 lib へ抽出し両スクリプトで source。
 
