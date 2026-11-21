@@ -2290,8 +2290,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 79 の残り指摘（未対応）
 
-- [ ] CI の外部アクション／再利用ワークフローが可変タグ参照（low）—
-  checkout を SHA 固定、rust-gates.yml@v1 の解決 SHA を記録。
+- [x] CI の外部アクション／再利用ワークフロー pin — 2026-11-22 Verify: 既に解消済み。`.github/workflows/ci.yml:27` が `refs/tags/v1 -> b7675efd8a9a84ebc5b560da628d1a82f3fbf98f` の解決 SHA を記録し、`:35-36` が共通指示 §5 に従い `rust-gates.yml@v1` タグ pin を維持（checkout は `11d5960...` フル SHA 固定）。`check-workflow-pins.sh` が GitHub API で現行 SHA を照合し、タグ付け替え時に SHA_MISMATCH で fail-closed。根拠
+  `.github/workflows/ci.yml:27,35-36`, `ci/scripts/check-workflow-pins.sh` / verified。コード変更なし。
 - [ ] qdrant-client の ^1.10 が reqwest 0.12/0.13 の major 重複を招く
   （low）— exact pin か共存理由の記録。
 - [ ] rust-script の依存が semver 下限のみでロック無し（medium）—
