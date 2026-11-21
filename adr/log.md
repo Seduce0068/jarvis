@@ -2,6 +2,11 @@
 
 ADR ディレクトリに変更を加えたコミットの記録。日付見出しは新しい順。
 
+## 2026-11-22
+
+- [`0003-native-web-fetch.md`](0003-native-web-fetch.md): egress allowlist の
+  「導入も検討」を実装済み（未設定・空・不正値は `DenyAll` fail-closed）へ更新。
+
 ## 2026-11-18
 
 - [`0002-runtime-agnostic.md`](0002-runtime-agnostic.md): PII の保存時扱いを

@@ -3075,9 +3075,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **local-restore-design.md の verify-backup.sh 記述が現行実装と乖離** — 2026-11-22 対応済み: `config-*.tar` 旧形式検査の注記と未決定事項を「解消済み（共有 lib `payload-descriptors.sh` へ移行、verify-backup.sh は COMPLETE/空 manifest 検査）」へ更新。根拠
   `docs/integration/local-restore-design.md:98-100,339-340`, `infra/scripts/lib/payload-descriptors.sh:36-50` / R2-FG01 / confirmed。
   - 検証: secret-scan exit 0、文書のみ変更のため compile/lint/test は省略。
-- [ ] **ADR-0003 の egress allowlist「導入も検討」が実装済み宣言と矛盾** —
-  `adr/0003-native-web-fetch.md:38-40`, `docs/integration/tool-matrix.md:171-176` /
-  R2-FG01 / likely。
+- [x] **ADR-0003 の egress allowlist「導入も検討」が実装済み宣言と矛盾** — 2026-11-22 対応済み: ADR の注意事項を実装済み（TOML/env の `egress_allowlist`、未設定・空・不正値は `DenyAll` fail-closed）へ更新し tool-matrix を参照。`adr/log.md` に 2026-11-22 の変更記録を追記（AGENTS.md §8 準拠）。根拠
+  `adr/0003-native-web-fetch.md:38-44`, `adr/log.md:5-8`, `docs/integration/tool-matrix.md:171-176` / R2-FG01 / confirmed に格上げ。
+  - 検証: secret-scan exit 0、文書のみ変更のため compile/lint/test は省略。
 - [ ] **ADR-0001 の 1Password チェック項目が移行済み注記と矛盾** —
   `adr/0001-unified-architecture.md:126-131,137` / R2-FG01 / confirmed。
 - [x] **JARVIS_QDRANT_TIMEOUT_SECS が設定テンプレート側で宣言されていない** — 2026-11-22 対応済み: `docs/integration/backup-restore-runbook.md` の「安全原則」直後に設定キー名と既定 30 秒・上書き方法を記載（値自体は書かない）。根拠

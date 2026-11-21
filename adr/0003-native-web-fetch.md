@@ -37,7 +37,10 @@ ADR-0002で「読み取り系ツールはゲートウェイ内のRust実装で�
   新バイナリのデプロイ時も allowlist の同期状態を確認すること。
 - データ持ち出し（URLに秘密を埋めて外部へGET）を防ぐため、
   `requires_approval = true` による人間承認が必須。宛先ドメインの
-  allowlist 導入も検討する。
+  allowlist は実装済み（egress allowlist）。TOML の `egress_allowlist`
+  または `JARVIS_MCP_GW_EGRESS_ALLOWLIST` でホストパターンを設定し、
+  未設定・空・不正値は `DenyAll`（全宛先拒否・fail-closed）となる。
+  詳細は [tool-matrix.md](../docs/integration/tool-matrix.md) を参照。
 - （履歴）承認フロー実装前は `requires_approval = true` の呼び出しは拒否
   されていた。MCP-1 の承認フロー実装後は人間承認を待つ挙動へ変更された
   （下記 2026-11-15 追記を参照）。
