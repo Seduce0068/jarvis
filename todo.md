@@ -2990,9 +2990,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **test-ui REQ-16 が無関係な TC-U10 に誤トレース** — 2026-11-22 対応済み: Traceability の `TC-U10 | REQ-16` を新規 `TC-U20 | REQ-16` へ分離し、Scenarios 節に「ウィンドウ閉鎖時 poller 停止」の gherkin を追加（根拠 `ui/src/approvals.rs:168`）。spec_hash 再計算に伴い UI 証跡を `test-run-20261120-549225f7cc2d.json` へ rename し hash/notes/index を同期。根拠
   `specs/test-ui.md:53,237-244,351-356,375`, `ui/src/approvals.rs:165-202` / R2-FG01 / confirmed。
   - 検証: UI `--check` MATCH、`make check-evidence` ok=6 errors=0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **UI 証跡の risk_items が仕様のリスク表と乖離** —
-  `specs/test-ui.md:100,108`, `evidence/test-run-20261120-020d62ac6029.json:100,181,183` /
-  R1-ST09 / confirmed。check-evidence は id 集合のみ検証。
+- [x] **UI 証跡の risk_items が仕様のリスク表と乖離** — 2026-11-22 対応済み: 証跡の R-2 / R-10 の `description` を仕様の Risk & tier 表（`specs/test-ui.md:100,108`）へ同期。ASVS/controls は仕様側に根拠が無いため証跡現行値を維持（`check-evidence.sh:218` は description/controls を検証対象外と明記）。spec 未変更のため spec_hash は不変。根拠
+  `specs/test-ui.md:100,108`, `evidence/index.md` の run-ui 証跡 / R1-ST09 / confirmed。
+  - 検証: `make check-evidence` ok=6 errors=0、`make ci-local` all gates passed、`make secret-scan` exit 0。差分は description 2行のみ。
 - [ ] **backup 仕様の新規シナリオ（TC-B6/V5/R1/R2）に回帰テストが無い** —
   `specs/test-backup.md:353,358`, `evidence/index.md:18` / R3-TQ01 / confirmed。
 - [ ] **トークン予算の境界値（等号 / 等号+1）が未テスト** —

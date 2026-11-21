@@ -97,7 +97,7 @@
     {
       "id": "R-2",
       "tier": "T1",
-      "description": "期限切れ要求を誤って承認する",
+      "description": "期限切れ要求を誤って承認する / 410 改変本文で Expired を誤表示する",
       "asvs": [],
       "controls": [
         "SP800-53r5.2/AC-3"
@@ -178,7 +178,7 @@
     {
       "id": "R-10",
       "tier": "T1",
-      "description": "承認トークンの scope 混同による自己承認／未設定 scope の誤送信",
+      "description": "scope 誤りでトークンが別 API へ送られる / 未設定 scope で誤送信される",
       "asvs": [
         "v5.0.0-V8.3.1"
       ],
