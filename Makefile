@@ -89,9 +89,10 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は出力しない）
 	@python3 ci/scripts/secret_scan.py
 
+# DEPENDENCY_AUDIT_FETCH が設定されていれば監査スクリプトへ透伝する（CI は 1 で fetch 実行）。
 safety-test: ## レガシー fail-closed とバックアップ検証ロジックを検証
 	@bash ci/scripts/test-legacy-guards.sh
-	@bash ci/scripts/check-dependency-audit.sh
+	@DEPENDENCY_AUDIT_FETCH=$${DEPENDENCY_AUDIT_FETCH:-} bash ci/scripts/check-dependency-audit.sh
 	@bash ci/scripts/test-workflow-pins.sh
 	@bash ci/scripts/test-verify-backup.sh
 	@bash ci/scripts/test-backup-args.sh

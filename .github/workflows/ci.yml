@@ -111,13 +111,12 @@ jobs:
         if ! cargo audit --version 2>/dev/null | grep -Eq '0\.23\.0([^0-9]|$)'; then
           cargo install cargo-audit --version 0.23.0 --locked
         fi
-        DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit
         make check-evidence
         make check-evidence-counts
         make secret-scan
-        make safety-test
-        # I24-E: restore-local.sh の合成フィクスチャ回帰（既定 dry-run・本番非接触）。
-        # safety-test 経由でも走るが CI ゲートとして明示的に列挙する。
-        make test-restore-local
+        # DEPENDENCY_AUDIT_FETCH=1 は safety-test 内の check-dependency-audit.sh へ
+        # 透伝され、advisory DB を refresh してから両 lock を走査する。
+        # test-restore-local も safety-test に含まれるため個別呼び出しは不要（重複回避）。
+        DEPENDENCY_AUDIT_FETCH=1 make safety-test
         bash ci/scripts/test-review-run.sh
         make ui-test

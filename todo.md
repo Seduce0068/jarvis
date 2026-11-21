@@ -3063,8 +3063,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `.editorconfig:17,26`, `Makefile:63` / R1-ST10 / confirmed に格上げ。
 - [ ] **audit.toml と Makefile の cargo-audit バージョンが二重管理** —
   `Makefile:116-121`, `.github/workflows/ci.yml:101-113` / R1-CF02 / confirmed。
-- [ ] **CI で safety-test と個別ゲートが重複実行される** —
-  `.github/workflows/ci.yml:114,117,120`, `Makefile:85-91` / R1-CF02 / confirmed。
+- [x] **CI で safety-test と個別ゲートが重複実行される** — 2026-11-22 対応済み: `Makefile:safety-test` の監査呼び出しで `DEPENDENCY_AUDIT_FETCH` を透伝するよう変更し、ci.yml の個別 `DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit` と `make test-restore-local` の2行を削除。`DEPENDENCY_AUDIT_FETCH=1 make safety-test` の1回で audit（fetch 付き）と restore-local 回帰がともに実行される。root:root 方針や fail-closed 契約は不変。根拠
+  `Makefile:92-99`, `.github/workflows/ci.yml:114-121` / R1-CF02 / confirmed。
+  - 検証: `make -n safety-test` で env 透伝を確認、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、YAML parse OK、`make secret-scan` exit 0、ci.yml に重複ゲート残存なし。
 - [ ] **markdownlint がフックのみで CI にゲートが無い** —
   `hooks.json:62-65,85-89`, `.github/workflows/ci.yml:61-122` / R1-CF02 / confirmed。
 - [ ] **check-workflow-pins の走査対象に ci/*.yml が含まれない** —
