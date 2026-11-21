@@ -1942,8 +1942,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] migration 範囲コメントを through 007 へ統一（2026-11-22）: 007 追加に伴い `jarvis-{policy,migrations,context}.service` の範囲コメント、`build-selfhost.sh:43-45` の migration 列表（001..007）、`docs/integration/remaining-tasks.md:799` の一覧を更新。旧「through 004」は重複エントリ（2件）のため両方を完了扱いにする。
 - [x] pending_embeddings ゲージの遷移後更新 — 2026-11-22 Verify: 既に解消済み（I69-D）。`builder.rs:423-433` の `observe_state_counts()` seam に `PgPendingStore` 実装（:603）があり、`dead_letter` 後（:643）と reconcile 後（:974）で `OUTBOX_STATE_COUNTS_SQL` を再集約し pending/exhausted の2ゲージを publish。`record`/`list` も自前 refresh（:483, :515）。根拠
   `rust/jarvis-context/src/builder.rs:423-433,603,643,974` / verified。コード変更なし。
-- [ ] 証跡の passed 件数が自己申告の手入力（medium）— `cargo test -- --list`
-  または JUnit 出力から機械導出する生成器の導入。
+- [x] 証跡 passed 件数の機械導出 — 2026-11-22 Verify: 既に解消済み（`ci/scripts/generate-evidence.sh`, I69-D/I71-D）。`cargo test -- --list` 由来の件数を機械導出する generator が実装済みで、`--check` モードは実 suite を走らせて証跡 JSON と照合（MATCH/MISMATCH のみ出力、失敗時 fail-closed）。`Makefile:check-evidence-counts` と CI extra_gates に配線済み（2026-11-22 対応）。1991 行目の完了記録も参照。根拠
+  `ci/scripts/generate-evidence.sh:130-158`, `Makefile:107-115`, `.github/workflows/ci.yml:117` / verified。コード変更なし。
 
 - 親が対応: fmt 差分、JSON/YAML 構文確認、全ゲート再検証。
 
