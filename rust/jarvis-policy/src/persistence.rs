@@ -897,11 +897,9 @@ fn decision_from_columns(
             _ => None,
         },
         "denied" => match reason {
-            Some(reason) if !reason.trim().is_empty() => {
-                Some(ApprovalDecision::Denied {
-                    reason: reason.to_owned(),
-                })
-            }
+            Some(reason) if !reason.trim().is_empty() => Some(ApprovalDecision::Denied {
+                reason: reason.to_owned(),
+            }),
             _ => None,
         },
         "expired" => Some(ApprovalDecision::Expired),
