@@ -438,7 +438,9 @@ struct Inner {
     timeout: Duration,
     max_pending: usize,
     entries: RwLock<HashMap<Uuid, Entry>>,
-    /// Additive seam handle. In slice 1 this is always [`NoopPersistence`].
+    /// Additive seam handle. The default is [`NoopPersistence`] (no I/O);
+    /// `with_persistence` injects [`crate::persistence::PgApprovalPersistence`]
+    /// when a `pg_url` is configured (durable CAS + audit in one transaction).
     persistence: Arc<dyn ApprovalPersistence>,
     /// Synchronous authoritative gate re-read at the single pre-commit
     /// boundary (R5-D, refined by I46-A). `None` — used by every pre-existing

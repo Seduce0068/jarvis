@@ -2250,7 +2250,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `ci/scripts/secret_scan.py:17-24,75-117,136-153` / verified。コード変更なし。
 - [x] egress allowlist テストの本番契約整合 — 2026-11-22 Verify: 誤検知。`config.rs:222-224` が「blank/malformed → None → sandbox enforces as deny-all; no unrestricted fallback」と明記し、`egress_allowlist_empty_or_invalid_is_fail_closed`（`:775-`）が空文字・空白・カンマのみ・不正パターンすべてで `None` を期待（本番と同じ fail-closed）。また `egress_allowlist_from_toml_is_honoured`（`:708`）等が `from_config` 経由の実際の経路を検証済み。根拠
   `rust/jarvis-mcp-gw/src/config.rs:222-245,708-740,775-795` / verified。コード変更なし。
-- [ ] pg_url doc が「Slice 1 のみ・接続なし」と古い（low）。
+- [x] pg_url doc の陳腐化 — 2026-11-22 対応済み: `approval.rs:441` の `Inner::persistence` コメント「In slice 1 this is always NoopPersistence」を、既定 `NoopPersistence`（no I/O）＋`with_persistence` が `PgApprovalPersistence`（pg_url 設定時、durable CAS + audit を同一 tx）を注入する現行契約へ更新。`:136-137` / `:537` の実装と整合。根拠
+  `rust/jarvis-policy/src/approval.rs:136-137,441,537` / low → confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 215 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] event の ingress トークン OnceLock テストが順序依存（low）。
 
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
