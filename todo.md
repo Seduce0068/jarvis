@@ -3059,8 +3059,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### 優先度 低
 
-- [ ] **.editorconfig に Rust の indent 指定が無く rustfmt 既定と衝突** —
-  `.editorconfig:6-24`, `Makefile:63` / R1-ST10 / likely。
+- [x] **.editorconfig に Rust の indent 指定が無く rustfmt 既定と衝突** — 2026-11-22 対応済み: `[*.rs] indent_size = 4` を追加し rustfmt 既定（4 スペース）と整合。あわせて `[*.{json,yaml,yml}]` を `[*.{json,jsonc,yaml,yml}]` へ拡張し `opencode.jsonc` も明示的に 2 スペースへ。根拠
+  `.editorconfig:17,26`, `Makefile:63` / R1-ST10 / confirmed に格上げ。
 - [ ] **audit.toml と Makefile の cargo-audit バージョンが二重管理** —
   `Makefile:116-121`, `.github/workflows/ci.yml:101-113` / R1-CF02 / confirmed。
 - [ ] **CI で safety-test と個別ゲートが重複実行される** —
@@ -3081,8 +3081,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   R2-FG01 / likely。
 - [ ] **ADR-0001 の 1Password チェック項目が移行済み注記と矛盾** —
   `adr/0001-unified-architecture.md:126-131,137` / R2-FG01 / confirmed。
-- [ ] **JARVIS_QDRANT_TIMEOUT_SECS が設定テンプレート側で宣言されていない** —
-  `rust/scripts/backup.rs:38,193` / R2-FG02 / likely。
+- [x] **JARVIS_QDRANT_TIMEOUT_SECS が設定テンプレート側で宣言されていない** — 2026-11-22 対応済み: `docs/integration/backup-restore-runbook.md` の「安全原則」直後に設定キー名と既定 30 秒・上書き方法を記載（値自体は書かない）。根拠
+  `rust/scripts/backup.rs:38,193`, `docs/integration/backup-restore-runbook.md:107-113` / R2-FG02 / confirmed に格上げ。
 - [ ] **bootstrap の --skip-opencode が Makefile ターゲットから渡されない** —
   `scripts/bootstrap/bootstrap.rs:43,249`, `Makefile:36,42,45` / R2-FG02 / confirmed。
 - [ ] **deploy.rs の build/restart/logs/status サブコマンドに Makefile ターゲットが無い** —
