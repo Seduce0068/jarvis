@@ -3119,8 +3119,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **有効な隔離コレクションが本番 upload 前に削除される** — 2026-11-22 判定: **却下（既存の本番境界ガードと矛盾）**。子の推奨どおり Step 2b の DELETE を CONFIRM=1 で本番 upload 後に延期するよう変更したが、`make safety-test` が2件失敗（ok=433 fail=2）: 「isolated cleanup HTTP 500 / curl_rc=7 → --apply --confirm: production boundary violated」。既存回帰テストは「隔離 cleanup が失敗したら本番 Qdrant へ一切触れるな」という fail-closed 契約を検証しており、削除を後ろへ移すと cleanup 失敗時に本番適用へ進んでしまう。本番境界ガードの方が安全上の優先度が高いため変更を差し戻し、既存契約を維持（差し戻し後 safety-test ok=435 fail=0 / ci-local all gates passed）。子の指摘する「本番 upload 失敗で隔離コレクションが失われる」は snapshot からの再作成で回避可能なため受け入れない。根拠
   `infra/scripts/restore-local.d/qdrant.sh:94-120`, `ci/scripts/test-legacy-guards.sh`（I24 系 production boundary 回帰） / R2-DI01 → 却下。
   - 検証: 変更適用時に失敗を検出、差し戻しで safety-test 435件すべて pass を確認。
-- [ ] **前回失敗の隔離コレクションが検証を汚染しうる** —
-  `infra/scripts/restore-local.d/qdrant.sh:37-38,63-70,82-93` / R2-DI01 / likely。
+- [x] **前回失敗の隔離コレクションが検証を汚染しうる** — 2026-11-22 対応済み: Step 1 upload の前に Step 0 を追加し、隔離コレクション `${collection}_restore_test` へ GET（body 破棄・ログ出力なし）して 2xx（既存）なら明示 DELETE してから upload、404 ならそのまま upload。curl エラー・不正ステータス・事前 DELETE 失敗は fail() で戻り本番へ進まない（既存の production boundary ガード維持）。既存 Step 1/2a/2b/3 のロジックとログ契約（points_count / 本文非出力）は不変。根拠
+  `infra/scripts/restore-local.d/qdrant.sh:60-83`, `infra/scripts/test-restore-local.sh:304-333` / R2-DI01 / confirmed に格上げ。
+  - 検証: `bash -n` OK、shellcheck exit 0、`make safety-test` ok=435 fail=0（isolated_probe_non2xx / isolated_delete_non2xx 等の失敗注入回帰も通過）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **backup の configs / repos 失敗が warn のみで成功報告** — 2026-11-22 対応済み: `backup_configs` の tar 失敗と `backup_repos` の git bundle 失敗（1件でも）を `require_command_success()` 経由の `anyhow::bail!` で fail-closed 化。warn 文言は維持し、main の "Backup completed successfully" に到達しない。`repos_dir` 未存在は従来どおり任意コンポーネントとして `Ok(())`。pure な `require_command_success` を抽出し境界テスト2件を追加。根拠
   `rust/scripts/backup.rs:259-343,559-576` / R1-ST05 / confirmed。
   - 検証: `rustfmt --check` exit 0（親が自動修正）、`rust-script --test backup.rs` 9 passed / 0 failed、`--help` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。backup.rs は証跡対象外（backup 証跡は test-verify-backup + test-backup-args）のため同期不要。

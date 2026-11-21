@@ -57,6 +57,31 @@ restore_qdrant() {
     return 1
   fi
 
+  # --- Step 0: remove a stale isolated collection from a previous failed run -
+  # Without this, a leftover collection keeps old points and Step 2a's
+  # points_count > 0 check can pass even when this upload did not take effect.
+  # GET the isolated collection (body discarded, never logged): a 2xx means it
+  # exists and must be deleted before upload; 404 means nothing to clean up.
+  # Any other status or curl error fails closed, before production is touched.
+  local stale_code="" stale_rc=0
+  stale_code="$(curl -sS -o /dev/null -w '%{http_code}' \
+    "${isolated_url}")" || stale_rc=$?
+  if [ "$stale_rc" -ne 0 ] || \
+     [[ ! "$stale_code" =~ ^2[0-9][0-9]$ && "$stale_code" != "404" ]]; then
+    fail "Qdrant: isolated collection info request failed (http=${stale_code}, curl_rc=${stale_rc})"
+    return 1
+  fi
+  if [[ "$stale_code" =~ ^2[0-9][0-9]$ ]]; then
+    local stale_del_code="" stale_del_rc=0
+    stale_del_code="$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE \
+      "${isolated_url}")" || stale_del_rc=$?
+    if [ "$stale_del_rc" -ne 0 ] || [[ ! "$stale_del_code" =~ ^2[0-9][0-9]$ ]]; then
+      fail "Qdrant: isolated collection cleanup failed (http=${stale_del_code}, curl_rc=${stale_del_rc})"
+      return 1
+    fi
+    log "Qdrant: stale isolated collection removed before upload"
+  fi
+
   # --- Step 1: upload to the isolated collection (priority=snapshot) --------
   # curl -F supplies its own multipart boundary; do not override Content-Type.
   local upload_code="" upload_rc=0
