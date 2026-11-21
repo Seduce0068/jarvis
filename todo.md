@@ -3068,9 +3068,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `make -n safety-test` で env 透伝を確認、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、YAML parse OK、`make secret-scan` exit 0、ci.yml に重複ゲート残存なし。
 - [ ] **markdownlint がフックのみで CI にゲートが無い** —
   `hooks.json:62-65,85-89`, `.github/workflows/ci.yml:61-122` / R1-CF02 / confirmed。
-- [ ] **check-workflow-pins の走査対象に ci/*.yml が含まれない** —
-  `ci/scripts/check-workflow-pins.sh:70-76`, `ci/review-gate.yml:74,80,83,111` /
-  R1-ST08,R1-CF02,R2-FG01 / confirmed。
+- [x] **check-workflow-pins の走査対象に ci/*.yml が含まれない** — 2026-11-22 対応済み（範囲明記）: runbook の「完全 SHA 固定以外のすべての ref」という表現を「`.github/workflows/*.yml` に含まれる…」へ限定し、`ci/review-gate.yml` が未配線の参照実装（P2-2 判断待ち）のため走査対象外である旨と、配線時に全 uses をフル SHA 化するか走査対象を追加する方針を記録。スクリプトの走査範囲自体は変更せず、外部 API アクセスや設計判断を伴わず記述を実態へ合わせた。根拠
+  `docs/integration/evidence-regeneration.md:384-395`, `ci/scripts/check-workflow-pins.sh:70-76`, `ci/review-gate.yml:74,80,83,111` / R1-ST08,R1-CF02,R2-FG01 / confirmed。
+  - 検証: secret-scan exit 0、markdownlint 既存 baseline のみ（変更行は 80 字以内）。
 - [x] **kill switch コミット中発動テストの名前が旧契約のまま** — 2026-11-22 判定: **却下（既知の意図的判断）**。コード側 `rust/jarvis-policy/src/lib.rs:704-712` のコメントが「this test keeps its historical name as a regression ID, but its expectation was updated」と明記し、旧名を回帰 ID として意図的に保持。仕様側 `specs/test-policy-approval.md:373-376` も「lib.rs は担当外のため改名は行わず、改名を提案する」と記録しており、両者が現状維持を意図している。R2-FG01 は仕様側の提案のみを拾い、コード側の意図コメントを読んでいなかった（親の Runtime Proof で確認）。改名は回帰 ID を失うため行わない。根拠
   `rust/jarvis-policy/src/lib.rs:704-714`, `specs/test-policy-approval.md:370-379` / R2-FG01 → 却下。
 - [x] **local-restore-design.md の verify-backup.sh 記述が現行実装と乖離** — 2026-11-22 対応済み: `config-*.tar` 旧形式検査の注記と未決定事項を「解消済み（共有 lib `payload-descriptors.sh` へ移行、verify-backup.sh は COMPLETE/空 manifest 検査）」へ更新。根拠

@@ -383,8 +383,14 @@ fail-closed に拒否する。フル SHA（40hex）固定済みの `uses:`
 
 ### 適用範囲（I91-C）
 
-ゲートの検査対象は「完全 SHA（40hex）固定以外のすべての ref」である。
+ゲートの検査対象は **`.github/workflows/*.yml` に含まれる**
+「完全 SHA（40hex）固定以外のすべての ref」である。
 許可 ref の allowlist は持たず、完全 SHA 以外はすべて可変として扱う。
+
+`ci/review-gate.yml` は未配線の参照実装（P2-2: auto-merge／権限・認証情報の
+方針確定まで配線しない）のため走査対象外であり、可変タグが残っていても
+現行ゲートは失敗しない。配線が決定した時点で全 `uses` をフル SHA 化するか、
+走査対象へ `ci/*.yml` を追加してから PIN_RECORD_MISSING で fail-closed にする。
 
 | ref の形態 | 扱い |
 | --- | --- |
