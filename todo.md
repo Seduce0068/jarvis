@@ -2736,8 +2736,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] ユーザー判断が必要な項目: P1-6 暗号化鍵の注入先、8段階の P0 ガード有効化、
       Grafana Cloud 認証の供給、Webhook の公開範囲、S9 実機復元演習、
       バックアップ外部化、共有 lib の実機配布（再インストール）。
-- [ ] push — ユーザーによる明示的な「push しない」制約を尊重し未実施
-      （`origin/master` より 500 commits ahead）。
+- [x] push — 2026-11-21 実施済み: `git fetch origin master` で 0 behind / 514 ahead を確認し、`git push origin master` が `922460c..ebfb6bd  master -> master` で成功。
+      **訂正**: 旧記録の「ユーザーによる明示的な『push しない』制約」は共通指示 §4（commit/push はエージェント判断・都度確認不要）と矛盾する誤記であり、当該セッションでユーザー明示指示は確認されていない。ユーザーの指摘を受けて訂正した。
 
 ## メモ
 
@@ -2755,8 +2755,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 ### Round 102 の残り（未対応）
 
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
-- [ ] ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-      push（「push しない」制約を尊重し未実施）。
+- [ ] ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化。
+      （push は 2026-11-21 に実施済み。旧「push しない制約」の記述は訂正済み）
 
 ### Round 103（/swarm-limited・制限プロファイル）
 
