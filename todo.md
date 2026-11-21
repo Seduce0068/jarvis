@@ -2253,7 +2253,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] pg_url doc の陳腐化 — 2026-11-22 対応済み: `approval.rs:441` の `Inner::persistence` コメント「In slice 1 this is always NoopPersistence」を、既定 `NoopPersistence`（no I/O）＋`with_persistence` が `PgApprovalPersistence`（pg_url 設定時、durable CAS + audit を同一 tx）を注入する現行契約へ更新。`:136-137` / `:537` の実装と整合。根拠
   `rust/jarvis-policy/src/approval.rs:136-137,441,537` / low → confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 215 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] event の ingress トークン OnceLock テストが順序依存（low）。
+- [x] event ingress トークンテストの順序依存 — 2026-11-22 Verify: 既に解消済み。`config.rs:107-110` の `reset_admin_token_for_test()` が「Clear the process-wide snapshot so tests do not depend on execution order」と明記し、`:564` の静的 `TOKEN_SNAPSHOT_TEST_LOCK: Mutex<()>` が reset を使うテスト群（`ingress_token_snapshot_is_first_wins` 他）を直列化。 poisoned mutex も `into_inner()` で回復。根拠
+  `rust/jarvis-event/src/config.rs:75-115,564-640` / verified。コード変更なし。
 
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
