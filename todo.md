@@ -2194,8 +2194,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （medium）— 実装するか設計書から要件を削除。
 - [ ] 設計書の「スキップ指定は事前検証から除外しない」が実装と正反対
   （low）— 設計書を CLI help のセマンティクスへ更新。
-- [ ] 681件中約270件が同一の本番未接触アサーションで、ログ不在時に
-  無条件 pass（low）— 代表ケースへ集約し前提ログを必須化。
+- [x] 本番未接触アサーションの集約と前提ログ必須化（重複2件を統合） — 2026-11-22 Verify: 既に解消済み（I80-A / I84-C）。`assert_no_production_contact()`（`:1458`）が代表ケースへ集約され、`:1752` で `I80-A: representative full guard` として1回だけ呼ばれる。`assert_production_boundary()`（`:1495-`）は「前提ログは systemctl-query.log、空なら vacuous pass を禁止して fail」と明記し失敗クラスごとの境界を検証。根拠
+  `infra/scripts/test-restore-local.sh:1458,1482-1500,1752` / verified。コード変更なし。
 - [x] jq モックの empty／prod_empty モードが未使用（low）— case '' 分岐の — **2026-11-22 重複整理**: 同一内容は 2237 行目で完了記録済み。
   回帰を追加。
 - [x] secret_scan.py が追跡ファイル0件で fail-open（medium）— 空集合を — **2026-11-22 重複整理**: 同一内容は 2217 行目で完了記録済み。
@@ -2220,8 +2220,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 76 の残り指摘（未対応）
 
-- [ ] 681件中約270件が同一の本番未接触アサーションで、ログ不在時に
-  無条件 pass（low）— 代表ケースへ集約し前提ログを必須化。
+- [x] 本番未接触アサーションの集約と前提ログ必須化（重複2件を統合） — 2026-11-22 Verify: 既に解消済み（I80-A / I84-C）。`assert_no_production_contact()`（`:1458`）が代表ケースへ集約され、`:1752` で `I80-A: representative full guard` として1回だけ呼ばれる。`assert_production_boundary()`（`:1495-`）は「前提ログは systemctl-query.log、空なら vacuous pass を禁止して fail」と明記し失敗クラスごとの境界を検証。根拠
+  `infra/scripts/test-restore-local.sh:1458,1482-1500,1752` / verified。コード変更なし。
 - [x] jq モックの empty／prod_empty モードが未使用（low）— qdrant.sh の — **2026-11-22 重複整理**: 同一内容は 2237 行目で完了記録済み。
   `case ''` 分岐の回帰を追加。
 - ユーザー判断: P1-6 暗号化鍵、P0 ガード、Grafana、Webhook、S9、
