@@ -3085,8 +3085,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/scripts/backup.rs:38,193`, `docs/integration/backup-restore-runbook.md:107-113` / R2-FG02 / confirmed に格上げ。
 - [ ] **bootstrap の --skip-opencode が Makefile ターゲットから渡されない** —
   `scripts/bootstrap/bootstrap.rs:43,249`, `Makefile:36,42,45` / R2-FG02 / confirmed。
-- [ ] **deploy.rs の build/restart/logs/status サブコマンドに Makefile ターゲットが無い** —
-  `rust/scripts/deploy.rs:189-200`, `Makefile:54,59` / R2-FG02 / likely。
+- [x] **deploy.rs の build/restart/logs/status サブコマンドに Makefile ターゲットが無い** — 2026-11-22 判定: **却下（既知の設計判断）**。`adr/0004-local-only-no-oci.md:41-43` が `rust/scripts/deploy.rs` を「ローカル運用では使わない」と明記し、`Makefile:54-57` の `deploy` は無効化、`deploy-dry`（:59）はレガシー参照としてのみ残る。Makefile へサブコマンド用ターゲットを追加すれば ADR-0004 と矛盾するため行わない。子（R2-FG02）は ADR の設計判断を読んでいなかった。根拠
+  `rust/scripts/deploy.rs:189-200`, `Makefile:54-60`, `adr/0004-local-only-no-oci.md:41-43` / R2-FG02 → 却下。
 - [ ] **otelcol 自己メトリクス 8888 が prometheus scrape 対象に無い** —
   `infra/config/otelcol-config.yaml:198,207,22-47` / R2-FG02,R5-VU01 / confirmed。
 - [ ] **journald receiver の units に opencode.service が無い** —
