@@ -215,6 +215,11 @@ TC-E1（policy 到達不可 fail-closed）と TC-E2
 実機 policy サービスを用いた結合試験は対象外。
 なお TC-E1 / TC-E2 は回帰テストの説明であり、個別の gherkin Scenario
 としては宣言しない（Traceability の行は既存テストとの対応を示す）。
+TC-E3（HA WebSocket の state_changed 解析と非 event 無視）も同じく回帰
+テストでカバー済みである。`rust/jarvis-event/src/sources.rs` の
+`parses_state_changed_event` と `ignores_non_event_messages` が根拠テスト
+であり、Traceability の TC-E3 行はこれらの対応を示す。
+実機 HA サービスを用いた結合試験は対象外。
 
 ### /health 契約 (REQ-18)
 

@@ -1,5 +1,5 @@
 {
-  "spec_hash": "sha256:568915d95563868cbfc05b49d5404d24716b8433489687ef5439167f3139679e",
+  "spec_hash": "sha256:99f75a1efb0c06ab07150d1f6e672bcc7097ee37a89eea5e4c8f5d0c44602d12",
   "timestamp": "2026-11-20T18:51:12+09:00",
   "environment": {
     "os": "Kubuntu 2026.04 LTS (local, x86_64)",
@@ -22,7 +22,7 @@
   "profile": "web-api-l2-moderate",
   "test_basis_ref": {
     "spec_path": "specs/test-event.md",
-    "spec_hash": "sha256:568915d95563868cbfc05b49d5404d24716b8433489687ef5439167f3139679e",
+    "spec_hash": "sha256:99f75a1efb0c06ab07150d1f6e672bcc7097ee37a89eea5e4c8f5d0c44602d12",
     "requirements": [
       "REQ-1",
       "REQ-2",

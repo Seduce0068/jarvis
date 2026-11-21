@@ -2984,9 +2984,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **仕様内の証跡ファイル名・ハッシュが実在値と不一致（2 仕様）** — 2026-11-22 対応済み。根本原因は、仕様本文に自身の `spec_hash` を記載するとその記述自体が hash を変える自己言及的構造だったため、仕様から `spec_hash` 数値と証跡ファイル名を削除し、`evidence/index.md` の `[run-*]` 定義を権威へ集約（UI/policy 両仕様）。spec_hash 再計算に伴い両証跡を `test-run-20261120-035fb8483fb1.json` / `test-run-20261120-24de84a91940.json` へ rename し、`test_basis_ref.spec_hash` / `notes` / index を同期。さらに `Makefile:check-evidence-counts` のファイル名ハードコードを廃し、index の `[run-<name>]:` 定義から動的解決するよう変更（双重管理の解消）。根拠
   `specs/test-ui.md:419-425`, `specs/test-policy-approval.md:419-428`, `evidence/index.md:29-34`, `Makefile:104-114` / R1-ST09 / confirmed。
   - 検証: 5件の `--check` すべて MATCH、`make check-evidence` ok=6 errors=0、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、`make secret-scan` exit 0。git は旧→新ファイルを rename として検出。
-- [ ] **test-event REQ-15 / TC-E3 の Scenario が仕様から欠落** —
-  `specs/test-event.md:52,212-217`, `evidence/test-run-20261120-568915d95563.json:41` /
-  R2-FG01,R3-TQ01 / confirmed。
+- [x] **test-event REQ-15 / TC-E3 の Scenario が仕様から欠落** — 2026-11-22 対応済み: 既存方針（TC-E1/E2 は回帰テスト説明として gherkin を宣言しない）に合わせ、TC-E3 も `rust/jarvis-event/src/sources.rs` の `parses_state_changed_event` / `ignores_non_event_messages` を根拠テストとする回帰対応を明記。spec_hash 再計算に伴い event 証跡を `test-run-20261120-99f75a1efb0c.json` へ rename し hash/notes/index を同期。根拠
+  `specs/test-event.md:210-224`, `evidence/index.md:33`, `rust/jarvis-event/src/sources.rs:395,410` / R2-FG01,R3-TQ01 / confirmed。
+  - 検証: event `--check` MATCH、`make check-evidence` ok=6 errors=0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **test-ui REQ-16 が無関係な TC-U10 に誤トレース** —
   `specs/test-ui.md:53,237-244,369`, `ui/src/approvals.rs:165-202` /
   R2-FG01 / confirmed。
