@@ -2155,8 +2155,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/README.md:212-220`, `rust/jarvis-mcp-gw/src/mcp_server.rs:235-240`, `infra/config/mcp_allowlist.toml:78-81` / R2-FG02 / confirmed。
   - 検証: markdownlint 既存 baseline のみ、`make secret-scan` exit 0。
 - [x] check-evidence のファイル名ハッシュ照合が空サフィックスでスキップ — 2026-11-21 対応済み: 空サフィックスを `HASH_FILENAME_MISSING` で拒否し、tamper ケース `empty_suffix` を追加。`check-evidence` ok=6 errors=0、`test-legacy-guards` ok=102 fail=0、`ci-local` exit 0（low）— fail-closed 化＋tamper ケース。
-- [ ] mcp_allowlist.toml の shell.execute timeout 参照先コメントが誤り
-  （low）。
+- [x] mcp_allowlist.toml の shell.execute timeout 参照先コメント — 2026-11-22 判定: **却下（コメントは実装と整合）**。`:8-14` の NOTE は「clamp 1_000..=15_000 は web.fetch native handler のみ（sandbox.rs:223 の `clamp(1_000,15_000)` と一致）、他ルートは raw timeout_ms」とし、shell.execute を gateway.rs の generic upstream path の例として挙げる。Root 確認: shell.execute はハードコード native handler が無く（grep で sandbox.rs に該当なし）、gateway.rs:597 の `Duration::from_millis(tool_config.timeout_ms)` を通るため参照先は正しい。子の指摘は誤検知。根拠
+  `infra/config/mcp_allowlist.toml:8-14`, `rust/jarvis-mcp-gw/src/sandbox.rs:223`, `rust/jarvis-mcp-gw/src/gateway.rs:597` / root-verified → 却下。コード変更なし。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push。共有 lib の実機配布（再インストール）。
 
