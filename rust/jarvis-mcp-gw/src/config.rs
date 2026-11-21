@@ -82,6 +82,7 @@ pub struct McpGatewayConfig {
     /// Principal identity used for tool calls that arrive over the MCP
     /// server endpoint (`/mcp`). Calls still pass policy and allowlist
     /// checks; the client never chooses the principal.
+    #[serde(default = "default_mcp_principal")]
     pub mcp_principal: String,
     /// Opt-in P0-3 guard: `execute_tool` ignores the caller-supplied wire
     /// principal and uses `mcp_principal` for every policy, allowlist,
@@ -210,6 +211,10 @@ fn default_policy_http_addr() -> String {
     "http://127.0.0.1:8081".to_string()
 }
 
+fn default_mcp_principal() -> String {
+    "opencode".to_string()
+}
+
 /// Normalize a comma-separated egress allowlist into comparable host patterns.
 ///
 /// Both the TOML key and `JARVIS_MCP_GW_EGRESS_ALLOWLIST` supply this value as
@@ -265,7 +270,7 @@ impl Default for McpGatewayConfig {
             policy_http_addr: default_policy_http_addr(),
             approval_api_token: None,
             admin_token: None,
-            mcp_principal: "opencode".into(),
+            mcp_principal: default_mcp_principal(),
             require_server_side_principal: false,
             upstreams: Vec::new(),
             // Unset means deny-all in the fetch path, never unrestricted.
@@ -313,6 +318,24 @@ mcp_principal = "opencode"
 "#;
         let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
         assert_eq!(config.policy_http_addr, "http://127.0.0.1:8081");
+    }
+
+    /// Config files written before the MCP principal key was introduced do
+    /// not contain `mcp_principal`; loading them must still work and fall back
+    /// to the `"opencode"` default supplied by `Default for McpGatewayConfig`.
+    #[test]
+    fn legacy_config_without_mcp_principal_uses_default() {
+        let toml = r#"
+grpc_addr = "127.0.0.1:50052"
+http_addr = "127.0.0.1:8082"
+allowlist_path = "/etc/jarvis/mcp_allowlist.toml"
+sandbox_type = "none"
+sandbox_config = {}
+policy_grpc_addr = "http://127.0.0.1:50051"
+policy_http_addr = "http://127.0.0.1:8081"
+"#;
+        let config: McpGatewayConfig = toml::from_str(toml).expect("legacy config parses");
+        assert_eq!(config.mcp_principal, "opencode");
     }
 
     /// Config files written before the approval token was introduced must

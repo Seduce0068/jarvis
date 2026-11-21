@@ -3126,8 +3126,10 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **install_metrics の OnceLock 警告分岐が実質到達不能（policy / mcp-gw / event）** —
   `rust/jarvis-policy/src/http.rs:28-39`, `rust/jarvis-mcp-gw/src/http.rs:27-29`,
   `rust/jarvis-event/src/http.rs:18-28` / R1-ST01,R1-ST02,R1-ST04 / likely。
-- [ ] **mcp_principal に serde default が無く旧設定ファイルが起動失敗** —
-  `rust/jarvis-mcp-gw/src/config.rs:85` / R1-ST02 / likely。
+- [x] **mcp_principal に serde default が無く旧設定ファイルが起動失敗** — 2026-11-22 対応済み: `#[serde(default = "default_mcp_principal")]` を追加し、`default_mcp_principal()` を新設（`"opencode"` を供給）。`Default for McpGatewayConfig` も同関数を参照するよう変更し単一情報源化。キー省略時の legacy 設定が `"opencode"` へフォールバックする回帰テスト `legacy_config_without_mcp_principal_uses_default` を追加。根拠
+  `rust/jarvis-mcp-gw/src/config.rs:85,210-216,268,319-337` / R1-ST02 / confirmed に格上げ。
+  - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 155 passed / 0 failed / 1 ignored、`make ci-local` all gates passed、`make secret-scan` exit 0。
+  - 親の訂正: 当初 `#[serde(default)]`（=`String::default()` の空文字）で指定したが新規テストが失敗（left=""/right="opencode"）。`default_mcp_principal` を指定する方式へ修正して解消（子 R1-ST02 の推奨が正しかった）。
 - [ ] **default_deny / sandbox_type 等の inert キーを明示** — 既存 P3-7 と
   R1-CF01,R1-ST01 の指摘を統合。設定を読む利用者が誤判断しうる。
 
