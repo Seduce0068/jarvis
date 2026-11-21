@@ -448,8 +448,10 @@ impl KillSwitch {
     /// Returns `Ok(())` when the write succeeded, or when no path is
     /// configured (in-memory operation only). Returns `Err` when a configured
     /// path could not be written; every failure path re-arms the switch
-    /// fail-closed via [`Self::arm`] with [`PERSIST_FAILURE_REASON`]. Callers
-    /// must therefore treat `Err` as "activated but degraded (not durable)".
+    /// fail-closed via [`Self::arm_with_actor`] with [`PERSIST_FAILURE_REASON`],
+    /// keeping the recorded operator (falling back to `"system"` when the
+    /// actor slot is empty). Callers must therefore treat `Err` as
+    /// "activated but degraded (not durable)".
     fn persist(&self) -> Result<()> {
         let Some(path) = &self.state_path else {
             return Ok(());
@@ -459,12 +461,17 @@ impl KillSwitch {
             activated: self.activated.load(Ordering::SeqCst),
             activated_at: self.activated_at.load(Ordering::SeqCst),
             reason,
-            activated_by,
+            // Keep the original slot value for the fail-closed re-arms below
+            // so a persistence error does not overwrite the operator actor.
+            activated_by: activated_by.clone(),
         };
         let bytes = match serde_json::to_vec_pretty(&state) {
             Ok(bytes) => bytes,
             Err(error) => {
-                self.arm(PERSIST_FAILURE_REASON.into());
+                self.arm_with_actor(
+                    PERSIST_FAILURE_REASON.into(),
+                    activated_by.clone().unwrap_or_else(|| "system".into()),
+                );
                 // I50-B: the raw serde error stays in the typed error returned
                 // to the caller; only the fixed kind/message reach tracing.
                 warn!(
@@ -479,7 +486,10 @@ impl KillSwitch {
         if let Some(parent) = path.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
         {
-            self.arm(PERSIST_FAILURE_REASON.into());
+            self.arm_with_actor(
+                PERSIST_FAILURE_REASON.into(),
+                activated_by.clone().unwrap_or_else(|| "system".into()),
+            );
             warn!(
                 error_kind = status_vocabulary::REASON_PERSISTENCE_FAILURE,
                 activated = true,
@@ -491,8 +501,11 @@ impl KillSwitch {
             return Err(error.context(PERSIST_ERROR_CONTEXT));
         }
         if let Err(error) = std::fs::write(path, bytes) {
-            // `arm` never calls `persist`, so this cannot recurse.
-            self.arm(PERSIST_FAILURE_REASON.into());
+            // `arm_with_actor` never calls `persist`, so this cannot recurse.
+            self.arm_with_actor(
+                PERSIST_FAILURE_REASON.into(),
+                activated_by.clone().unwrap_or_else(|| "system".into()),
+            );
             warn!(
                 error_kind = status_vocabulary::REASON_PERSISTENCE_FAILURE,
                 activated = true,
@@ -766,6 +779,35 @@ mod tests {
             "failed persist must leave the switch armed"
         );
         assert_eq!(status.reason.as_deref(), Some(PERSIST_FAILURE_REASON));
+
+        std::fs::remove_file(parent).expect("clean blocker file");
+    }
+
+    /// R2-ER01: a persist failure re-arms the switch fail-closed, but must not
+    /// downgrade the requesting operator to `"system"`. The actor recorded by
+    /// `activate_with_actor` has to survive every fail-closed re-arm path.
+    #[test]
+    fn persist_failure_preserves_activated_by_actor() {
+        let path = temp_path("persist-fail-actor");
+        let switch = KillSwitch::new("admin-token", Some(path.clone()));
+        assert!(!switch.is_activated());
+
+        // A regular file at the parent makes create_dir_all fail, so the
+        // create_dir_all re-arm branch in persist() is exercised.
+        let parent = path.parent().expect("state path has a parent");
+        std::fs::remove_dir_all(parent).expect("remove temp dir");
+        std::fs::write(parent, b"blocker").expect("create blocker file");
+
+        switch.activate_with_actor("maintenance".into(), "admin:alice".into());
+
+        let status = switch.status();
+        assert!(status.activated, "fail-closed must be preserved");
+        assert_eq!(status.reason.as_deref(), Some(PERSIST_FAILURE_REASON));
+        assert_eq!(
+            status.activated_by.as_deref(),
+            Some("admin:alice"),
+            "the operator actor must survive the persist-failure re-arm"
+        );
 
         std::fs::remove_file(parent).expect("clean blocker file");
     }

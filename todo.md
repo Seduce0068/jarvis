@@ -3113,8 +3113,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **レガシー request() が永続化障害をポリシー拒否に変換** — 2026-11-22 対応済み（契約明記・型変更は据え置き）: `approval.rs` の `request()` doc と変換箇所へ「`ApprovalError::Persistence`（一時 DB 障害）も `Denied { reason }` に平坦化されるため、呼び出し側はこれを人間のポリシー拒否と解釈してはならない。インフラ障害と拒否を区別するなら `try_request()` を使う」旨を明記。戻り値型 `ApprovalDecision` を `Result` へ変更するのは本番 `lib.rs:187` と多数のテスト呼び出しに波及する API 契約変更で設計判断が先のため行わない。根拠
   `rust/jarvis-policy/src/approval.rs:599-625`, `src/lib.rs:187` / R2-ER01 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 214 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **kill switch 永続化失敗時に operator 属性が system で上書き** —
-  `rust/jarvis-policy/src/kill_switch.rs:248,335,495` / R2-ER01 / confirmed。
+- [x] **kill switch 永続化失敗時に operator 属性が system で上書き** — 2026-11-22 対応済み: `persist()` の3つの fail-closed 再-arm 経路（serialize / create_dir_all / fs::write 失敗）を `self.arm(PERSIST_FAILURE_REASON)` から `self.arm_with_actor(PERSIST_FAILURE_REASON, <保持 actor>)` へ変更。actor スロットが None の場合のみ従来どおり "system" へフォールバック。reason は固定語彙 `REASON_PERSISTENCE_FAILURE` を維持し、fail-closed / warn / typed error は不変。回帰テスト `persist_failure_preserves_activated_by_actor` を追加。根拠
+  `rust/jarvis-policy/src/kill_switch.rs:451-505,780-800` / R2-ER01 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 215 passed / 0 failed（+1件）、policy 証跡 214→215 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **有効な隔離コレクションが本番 upload 前に削除される** —
   `infra/scripts/restore-local.d/qdrant.sh:95-103,113-120` / R2-DI01 / confirmed。
 - [ ] **前回失敗の隔離コレクションが検証を汚染しうる** —
