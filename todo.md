@@ -2241,8 +2241,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 77 の残り指摘（未対応）
 
-- [ ] flock のコメントが「backup timer とのインリーブを防ぐ」と主張するが
-  バックアップ側はロックを取得しない（medium）— コメント訂正または両側取得。
+- [x] flock と backup timer のコメント — 2026-11-22 Verify: 誤検知（既に正しい記述）。`restore-local.sh:767-770` は「this flock serializes restore-local.sh instances against EACH OTHER only. backup-local.sh does not take this lock, so it does NOT exclude the backup timer. Timer exclusion is the job of stop_services() + verify_stopped_services()」と明記し、子の指摘する過大主張は存在しない。根拠 `infra/scripts/restore-local.sh:765-780` / verified。
 - [x] flock fd のサブプロセス継承 — 2026-11-22 Verify: 既に解消済み（I81-A (b)）。`restore-local.sh:904-913` が module dispatch 前に `exec {LOCK_FD}>&-` で fd を閉じ（bash が動的 fd に FD_CLOEXEC を設定しないため）、`:842-848` で PID + UTC 取得時刻を stale lock 診断 clue としてファイルへ残す。根拠 `infra/scripts/restore-local.sh:842-848,904-913` / verified。
 - [x] 予測可能ロックファイルの inode 変更 — 2026-11-22 Verify: 既に解消済み（I81-A）。`restore-local.sh:51` が既定 `/run/jarvis/restore.lock`（安定パス、権限で保護）、`:825` が `stat -Lc '%d:%i' /proc/self/fd/$LOCK_FD` で取得後に inode 照合し、不一致なら lock を閉じて再取得。明示 LOCK_FILE はテスト用。根拠 `infra/scripts/restore-local.sh:45-57,823-831` / verified。
 - [ ] カウンタ単一化でサマリの意味が「イベント数」→「呼び出し数」へ変化
@@ -2271,8 +2270,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 ### Round 78 の残り指摘（未対応）
 
 - [x] flock の dispatch 前 close トレードオフ — 2026-11-22 Verify: 既に明記済み。`restore-local.sh:844` と `:906-910` のコメントが「fd is closed before module dispatch」「Timer exclusion is unaffected: stop_services() + verify_stopped_services() handle it, not this fd」とトレードオフを説明。設計上の意図であり未実装ではない。根拠 `infra/scripts/restore-local.sh:842-848,904-913` / verified。
-- [ ] stat 照合は TOCTOU を完全に排除するものではない（一次防御は /run 権限、
-  設計書に明記済み）。
+- [x] stat 照合の TOCTOU 制約 — 2026-11-22 判定: **既知の設計制約として記録済み（対応不要）**。TODO 自身が「一次防御は /run 権限、設計書に明記済み」と認めるとおり、I81-A の inode 照合（restore-local.sh:825）は /run 権限による一次防御の上の二段防衛であり、完全排除を狙う設計ではない。根拠 `infra/scripts/restore-local.sh:823-831` / verified。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
