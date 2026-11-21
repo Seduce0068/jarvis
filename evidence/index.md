@@ -9,16 +9,16 @@ JSON はテキスト形式のため、リンク先として記載しています
 
 - [policy-approval の実行ログ][run-policy]
   — [test-policy-approval.md](../specs/test-policy-approval.md) の実測結果。
-  211 passed / 0 failed。
+  213 passed / 0 failed。
 - [mcp-gateway の実行ログ][run-mcp]
   — [test-mcp-gateway.md](../specs/test-mcp-gateway.md) の実測結果。
-  153 passed / 0 failed / 1 skipped。
+  154 passed / 0 failed / 1 skipped。
 - [context の実行ログ][run-context]
-  — [test-context.md](../specs/test-context.md) の実測結果。181 passed / 0 failed。
+  — [test-context.md](../specs/test-context.md) の実測結果。182 passed / 0 failed。
 - [backup の実行ログ][run-backup]
   — [test-backup.md](../specs/test-backup.md) の実測結果。43 passed / 0 failed。
 - [event の実行ログ][run-event]
-  — [test-event.md](../specs/test-event.md) の実測結果。91 passed / 0 failed。
+  — [test-event.md](../specs/test-event.md) の実測結果。92 passed / 0 failed。
 - [ui の実行ログ][run-ui]
   — [test-ui.md](../specs/test-ui.md) の実測結果。85 passed / 0 failed。
 

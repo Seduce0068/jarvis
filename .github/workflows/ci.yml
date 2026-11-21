@@ -113,6 +113,7 @@ jobs:
         fi
         DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit
         make check-evidence
+        make check-evidence-counts
         make secret-scan
         make safety-test
         # I24-E: restore-local.sh の合成フィクスチャ回帰（既定 dry-run・本番非接触）。

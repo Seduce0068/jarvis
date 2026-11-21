@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit check-evidence init-config
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit check-evidence check-evidence-counts init-config
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -72,6 +72,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@bash ci/scripts/check-toml.sh
 	@bash ci/scripts/check-dependency-audit.sh
 	@bash ci/scripts/check-evidence.sh
+	@$(MAKE) check-evidence-counts
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-review-run.sh
 	@bash ci/scripts/test-verify-backup.sh
@@ -100,6 +101,15 @@ timer-status: ## バックアップ timer の状態を表示（読み取り専�
 
 check-evidence: ## テスト仕様とエビデンスのハッシュ一致を検証
 	@bash ci/scripts/check-evidence.sh
+
+# 各証跡 JSON の results と実 cargo suite の導出件数を照合（MATCH/MISMATCH のみ出力）。
+# backup は generate-evidence ターゲットが無いため --check 件数照合の対象外。
+check-evidence-counts: ## 証跡 JSON の results と実 suite の導出件数を照合
+	bash ci/scripts/generate-evidence.sh policy --check evidence/test-run-20261120-f32636593dbe.json
+	bash ci/scripts/generate-evidence.sh mcp --check evidence/test-run-20261120-4dcaeb3768bb.json
+	bash ci/scripts/generate-evidence.sh context --check evidence/test-run-20261120-4eb0d21232f5.json
+	bash ci/scripts/generate-evidence.sh event --check evidence/test-run-20261120-568915d95563.json
+	bash ci/scripts/generate-evidence.sh ui --check evidence/test-run-20261120-020d62ac6029.json
 
 check-shell: ## 全 tracked *.sh の静的解析（bash -n / shellcheck）
 	@bash ci/scripts/check-shell.sh

@@ -277,7 +277,7 @@ PATH 上のスタブで隠すため実 cargo / 実 suite は走らず、一時�
 コピーと合成 JSON だけを使う。検証するのは全 6 ターゲットの `--locked`、
 不正パス（入れ子 / `..` / 不正 hex）の exit 2、不在パスの exit 1、
 実 run 失敗時の `ActualRunDetectedFailure`、MATCH / MISMATCH 分岐である。
-あわせて `docs/` 内の `test-run-<12hex>.json` 参照が実在することも
+あわせて `docs/` 内の `test-run-YYYYMMDD-<12hex>.json` 参照が実在することも
 静的ガードで検証する（`make safety-test` / `make ci-local` 経由で実行）。
 
 ## 実測と JSON の対応（検算手順）
@@ -300,7 +300,7 @@ bash ci/scripts/generate-evidence.sh context --check \
 ```
 
 `--check` に渡せるのは `evidence/` 直下の
-`test-run-<12hex>.json` のみである。`*/*`（入れ子パス）と `*..*`（`..` を含む
+`test-run-YYYYMMDD-<12hex>.json` のみである。`*/*`（入れ子パス）と `*..*`（`..` を含む
 パス）は明示的に拒否され `FAIL: BadEvidencePath` / exit 2 となる。
 形式は正しいがファイルが無い場合は `FAIL: EvidenceFileNotFound` / exit 1。
 実 run が失敗した場合は `FAIL: ActualRunDetectedFailure` / exit 1。

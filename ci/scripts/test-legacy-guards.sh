@@ -1889,7 +1889,7 @@ else
   fail=$((fail+1))
 fi
 
-gen_invoke context --check evidence/nested/test-run-de83a4552e45.json
+gen_invoke context --check evidence/nested/test-run-20261120-de83a4552e45.json
 if [ "$GEN_RC" -eq 2 ] && printf '%s' "$GEN_ERR" | grep -q 'FAIL: BadEvidencePath' \
    && [ ! -s "$CARGO_STUB_LOG" ]; then
   echo "  PASS: generator rejects nested evidence path with exit 2"
@@ -1899,7 +1899,7 @@ else
   fail=$((fail+1))
 fi
 
-gen_invoke context --check evidence/test-run-DEADBEEFDEAD.json
+gen_invoke context --check evidence/test-run-20261120-zzzzzzzzzzzz.json
 if [ "$GEN_RC" -eq 2 ] && printf '%s' "$GEN_ERR" | grep -q 'FAIL: BadEvidencePath'; then
   echo "  PASS: generator rejects non-12-hex evidence filename with exit 2"
   ok=$((ok+1))
@@ -1908,7 +1908,7 @@ else
   fail=$((fail+1))
 fi
 
-gen_invoke context --check evidence/test-run-000000000000.json
+gen_invoke context --check evidence/test-run-20261120-000000000000.json
 if [ "$GEN_RC" -eq 1 ] && printf '%s' "$GEN_ERR" | grep -q 'FAIL: EvidenceFileNotFound'; then
   echo "  PASS: generator reports a missing well-shaped evidence file with exit 1"
   ok=$((ok+1))
@@ -1920,9 +1920,9 @@ fi
 # Synthetic evidence in the temp repo only: passed=10 matches the stub counts,
 # skipped=2 matches the ignored list; the other file forces MISMATCH.
 printf '{"results":{"passed":10,"failed":0,"skipped":2}}\n' \
-  > "$gen_tmp/repo/evidence/test-run-de83a4552e45.json"
+  > "$gen_tmp/repo/evidence/test-run-20261120-de83a4552e45.json"
 printf '{"results":{"passed":9,"failed":0,"skipped":2}}\n' \
-  > "$gen_tmp/repo/evidence/test-run-000000000001.json"
+  > "$gen_tmp/repo/evidence/test-run-20261120-000000000001.json"
 
 # Generation mode must still emit the labelled fragment (12 - 2 = 10 passed).
 gen_invoke context
@@ -1941,7 +1941,7 @@ else
 fi
 
 # --check MATCH: real suite ran, output is MATCH ONLY (no results fragment).
-gen_invoke context --check evidence/test-run-de83a4552e45.json
+gen_invoke context --check evidence/test-run-20261120-de83a4552e45.json
 if [ "$GEN_RC" -eq 0 ] && [ "$GEN_OUT" = 'CHECK: MATCH' ] \
    && grep -qx 'run' "$CARGO_STUB_LOG"; then
   echo "  PASS: generator --check prints CHECK: MATCH after the real run"
@@ -1952,7 +1952,7 @@ else
 fi
 
 # --check MISMATCH: exit 1 with MISMATCH only, still no success fragment.
-gen_invoke context --check evidence/test-run-000000000001.json
+gen_invoke context --check evidence/test-run-20261120-000000000001.json
 if [ "$GEN_RC" -eq 1 ] && [ "$GEN_OUT" = 'CHECK: MISMATCH' ] \
    && grep -qx 'run' "$CARGO_STUB_LOG"; then
   echo "  PASS: generator --check prints CHECK: MISMATCH and exits 1"
@@ -1965,7 +1965,7 @@ fi
 # Real-run failure must be detected and must leave NO success fragment.
 CARGO_STUB_FAIL=1
 export CARGO_STUB_FAIL
-gen_invoke context --check evidence/test-run-de83a4552e45.json
+gen_invoke context --check evidence/test-run-20261120-de83a4552e45.json
 unset CARGO_STUB_FAIL
 if [ "$GEN_RC" -eq 1 ] \
    && printf '%s' "$GEN_ERR" | grep -q 'FAIL: ActualRunDetectedFailure' \
