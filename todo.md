@@ -2296,8 +2296,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （low）— exact pin か共存理由の記録。
 - [ ] rust-script の依存が semver 下限のみでロック無し（medium）—
   exact pin または Makefile + rust-script 例外の明記。
-- [ ] verify サマリ「ok=43」の単位誤記（medium）— 証跡のテスト件数と
-  verify の判定呼び出し数を区別して表記。
+- [x] verify サマリ ok=43 の単位誤記 — 2026-11-22 Verify: 2318 行目で訂正済みの重複エントリ。`evidence/test-run-20261120-c486b0dbe466.json` は「実測 43 passed」（テスト関数数）、verify-backup.sh の `ok=<n>` は判定呼び出し数で別単位。`docs/integration/evidence-regeneration.md:334-343`（I81-D (c)）が「ok+fail をイベント件数として読まない」と明記し区別を担保。根拠
+  `docs/integration/evidence-regeneration.md:334-343`, `evidence/index.md` run-backup / verified。コード変更なし。
 - [ ] テスト集約で失敗時の本番非接触検証が代表1ケースのみに（medium）—
   失敗クラスごとに1件ずつ復活。
 - [ ] test-restore-local が既定ロックパスを使用し /run 経路が CI で未検証
