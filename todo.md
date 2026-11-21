@@ -2047,8 +2047,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   記述子から入力名を導出（P1-6 実施時）。
 - [ ] drift の casbin_policy.csv が JARVIS_DRIFT_POLICY_DIR を無視（low）、
   web.fetch の requires_approval 検査が grep -A8 依存（low）。
-- [ ] dsh.md の「firejail 全面撤去」は過大主張（low）— 実行 fallback のみ撤去、
-  設定値とパッケージは互換のため残存。
+- [x] dsh.md の firejail 記述 — 2026-11-22 Verify: 過大主張は既に解消済み。`dsh.md:51` は「`opencode` CLI 依存の**実行 fallback は撤去済み**」と実行経路に限定した表現で、「firejail 全面撤去」という記述は存在しない。`:54` で設定値 `SandboxType::Firejail` と firejail パッケージが互換のため残存することも明記済み。根拠
+  `docs/integration/dsh.md:51,54`, `adr/0002-runtime-agnostic.md:43,64` / verified。コード変更なし。
 
 - 親が対応: install の sudo 不在フォールバック、`declare -gA`（source 先の
   関数スコープ回避）、shellcheck SC1091、tamper の notes キーワード保持、
