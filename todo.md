@@ -3101,9 +3101,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `otelcol-contrib validate --config=infra/config/otelcol-config.yaml` exit 0（ダミー env 使用）、YAML parse OK（policies = errors/slow/probabilistic）、`make secret-scan` exit 0。
 - [x] **mcp-gw リリースバイナリの SHA256 既知良好値が未記録** — 2026-11-22 判定: **却下（既存の build marker 契約が代替）**。`infra/scripts/build-selfhost.sh:258-280` が clean-tree gate 済みの `BUILD_COMMIT` と各バイナリの SHA-256 を `.jarvis-build-commit` へ記録し、`deploy-mcp-gw-safe.sh:203-229` が HEAD 一致＋SHA-256 一致を fail-closed で検証、`check-deploy-drift.sh:207-208` が repo/installed を照合する。子の「repo/installed が同じ誤バイナリなら見逃す」懸念は、ビルド元を clean-tree + HEAD で縛る marker により既に解消。tracked な固定ハッシュは再ビルドごとの更新忘れで陳腐化するため、導入しない。根拠
   `docs/integration/tool-matrix.md:66,76-81`, `infra/scripts/build-selfhost.sh:258-280`, `infra/scripts/deploy-mcp-gw-safe.sh:203-229` / R5-VU01 → 却下。
-- [ ] **NULL の decided_by / reason が空文字の承認者として再構成される** —
-  `rust/jarvis-policy/src/persistence.rs:886-893`, `rust/migrations/001_initial.sql:47-50` /
-  R2-DI01 / confirmed。
+- [x] **NULL の decided_by / reason が空文字の承認者として再構成される** — 2026-11-22 対応済み: `decision_from_columns` の `approved` アームで `decided_by` が None / trim 後空、`denied` アームで `reason` が None / trim 後空なら `None` を返すよう変更（doc コメントも更新）。捏造された空 actor / reason を権威として返さず呼び出し側の fail-safe 経路へ流す。有効値は Some のまま、expired / 未知ラベルは不変。境界テストを追加。根拠
+  `rust/jarvis-policy/src/persistence.rs:876-907,1284-1345` / R2-DI01 / confirmed。
+  - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 214 passed / 0 failed（+1件）、policy 証跡を 213→214 へ同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **非終端の Pending が終端 decision として永続化され得る** —
   `rust/jarvis-policy/src/persistence.rs:865-896,546-557` / R2-DI01 / likely。
 - [ ] **embedding_dim の既定値が embedding_model と結び付いていない** —

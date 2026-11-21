@@ -877,6 +877,9 @@ fn decision_columns(decision: &ApprovalDecision) -> (&'static str, Option<&str>,
 /// by [`LOAD_DECISION_SQL`] (I38-A). Only a committed row reaches here, but an
 /// unexpected label is treated as "no authoritative decision" (`None`) rather
 /// than fabricating a value — the caller keeps its fail-safe `Expired` path.
+/// The same applies when a committed label is missing its required payload: a
+/// NULL or blank `decided_by` / `reason` must not become an empty approver or
+/// reason (R2-DI01).
 fn decision_from_columns(
     decision: &str,
     decided_by: Option<&str>,
@@ -884,13 +887,23 @@ fn decision_from_columns(
     decided_at: DateTime<Utc>,
 ) -> Option<ApprovalDecision> {
     match decision {
-        "approved" => Some(ApprovalDecision::Approved {
-            approved_by: decided_by.unwrap_or_default().to_owned(),
-            approved_at: decided_at,
-        }),
-        "denied" => Some(ApprovalDecision::Denied {
-            reason: reason.unwrap_or_default().to_owned(),
-        }),
+        "approved" => match decided_by {
+            Some(approved_by) if !approved_by.trim().is_empty() => {
+                Some(ApprovalDecision::Approved {
+                    approved_by: approved_by.to_owned(),
+                    approved_at: decided_at,
+                })
+            }
+            _ => None,
+        },
+        "denied" => match reason {
+            Some(reason) if !reason.trim().is_empty() => {
+                Some(ApprovalDecision::Denied {
+                    reason: reason.to_owned(),
+                })
+            }
+            _ => None,
+        },
         "expired" => Some(ApprovalDecision::Expired),
         _ => None,
     }
@@ -1265,6 +1278,74 @@ mod tests {
             decision_from_columns("unknown", None, None, decided_at),
             None,
             "an unexpected label must not fabricate a decision"
+        );
+    }
+
+    /// A committed label whose required payload is NULL or blank must not be
+    /// rebuilt with a fabricated empty approver/reason (R2-DI01). `None` keeps
+    /// the caller's fail-safe path instead of presenting an empty actor as
+    /// authoritative; valid payloads still reconstruct to `Some`.
+    #[test]
+    fn decision_from_columns_rejects_missing_or_blank_required_payload() {
+        let decided_at = Utc::now();
+
+        assert_eq!(
+            decision_from_columns("approved", None, None, decided_at),
+            None,
+            "NULL decided_by must not become an empty approver"
+        );
+        assert_eq!(
+            decision_from_columns("approved", Some(""), None, decided_at),
+            None,
+            "empty decided_by must be rejected"
+        );
+        assert_eq!(
+            decision_from_columns("approved", Some("   "), None, decided_at),
+            None,
+            "whitespace-only decided_by must be rejected"
+        );
+
+        assert_eq!(
+            decision_from_columns("denied", None, None, decided_at),
+            None,
+            "NULL reason must not become an empty reason"
+        );
+        assert_eq!(
+            decision_from_columns("denied", None, Some(""), decided_at),
+            None,
+            "empty reason must be rejected"
+        );
+        assert_eq!(
+            decision_from_columns("denied", None, Some("   "), decided_at),
+            None,
+            "whitespace-only reason must be rejected"
+        );
+
+        assert_eq!(
+            decision_from_columns("approved", Some("alice"), None, decided_at),
+            Some(ApprovalDecision::Approved {
+                approved_by: "alice".into(),
+                approved_at: decided_at,
+            }),
+            "a valid approver must still round-trip"
+        );
+        assert_eq!(
+            decision_from_columns("denied", None, Some("policy"), decided_at),
+            Some(ApprovalDecision::Denied {
+                reason: "policy".into(),
+            }),
+            "a valid reason must still round-trip"
+        );
+
+        assert_eq!(
+            decision_from_columns("expired", None, None, decided_at),
+            Some(ApprovalDecision::Expired),
+            "expired stays unchanged"
+        );
+        assert_eq!(
+            decision_from_columns("unknown", Some("alice"), Some("policy"), decided_at),
+            None,
+            "unknown labels stay unchanged"
         );
     }
 
