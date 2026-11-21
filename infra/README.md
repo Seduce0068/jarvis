@@ -214,8 +214,9 @@ policy-checked and must have an entry in `/etc/jarvis/mcp_allowlist.toml`
   `JARVIS_MCP_GW_MCP_PRINCIPAL` (default `opencode`) and every
   `tools/call` passes the same policy + allowlist checks as
   `/v1/execute`. The principal is fixed server-side; clients cannot
-  choose it. Entries marked `requires_approval = true` are not listed
-  or executable until an approval flow is connected. The managed OpenCode
+  choose it. Entries marked `requires_approval = true` are still listed in
+  `tools/list` (the schema is advertised to clients); each `tools/call` waits
+  for human approval instead of being hidden. The managed OpenCode
   config in `infra/config/opencode/opencode.jsonc` wires the host up.
 - **Register an upstream MCP server** (gRPC only): the gateway spawns the
   command over stdio, discovers its tools via `tools/list`, and routes

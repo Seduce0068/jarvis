@@ -2151,8 +2151,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   専用名 `JARVIS_RESTORE_FIXTURE_MODE` へ変更し本番で拒否。
 - [ ] 4 crate の env キー→フィールド写像テストが Serialized 上書きで
   形骸化（medium）— 本番 ENV_PREFIX 定数を参照する contract テストへ。
-- [x] infra/README.md の MCP Gateway 節 — 2026-11-22 Verify: 既に現行挙動へ更新済み。`infra/README.md:213` は `tools/list exposes the allowlist entries granted to ...` と承認必須ツールが表示される現行契約を記述（:221 も stdio 経由の discovery を正しく記載）。831 行目の mcp_allowlist.toml コメント更新と同一の是正が反映済み。根拠
-  `infra/README.md:210-222`, `infra/config/mcp_allowlist.toml:81,98,115` / verified。コード変更なし。
+- [x] infra/README.md の MCP Gateway 節 — 2026-11-22 対応済み: 当初「既に更新済み」と誤判定して Verify 記録を書いたが、続く `:216-218` に旧挙動（`requires_approval = true` のツールは not listed）が残っていることを発見し訂正。`tools/list` は `mcp_server.rs:235-240` のとおり全 allowlist 項目を advertise し、呼び出し時に人間承認を待つ現行契約へ README を修正。mcp_allowlist.toml のコメント（831 行目の完了記録）と整合。根拠
+  `infra/README.md:212-220`, `rust/jarvis-mcp-gw/src/mcp_server.rs:235-240`, `infra/config/mcp_allowlist.toml:78-81` / R2-FG02 / confirmed。
+  - 検証: markdownlint 既存 baseline のみ、`make secret-scan` exit 0。
 - [x] check-evidence のファイル名ハッシュ照合が空サフィックスでスキップ — 2026-11-21 対応済み: 空サフィックスを `HASH_FILENAME_MISSING` で拒否し、tamper ケース `empty_suffix` を追加。`check-evidence` ok=6 errors=0、`test-legacy-guards` ok=102 fail=0、`ci-local` exit 0（low）— fail-closed 化＋tamper ケース。
 - [ ] mcp_allowlist.toml の shell.execute timeout 参照先コメントが誤り
   （low）。
