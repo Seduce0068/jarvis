@@ -2202,8 +2202,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   exit 1＋回帰追加。
 - [ ] remaining-tasks.md の PASSWORD_FILE 節（行数ズレ＋「未修正」主張）、
   local-restore-design.md の「自動スクリプト未実装」現在形（low 2件）。
-- [ ] test-review-run.sh の「default backend」テストが既定経路を通っていない
-  （low）— opencode スタブで既定分岐を実検証。
+- [x] test-review-run.sh の既定 backend テスト — 2026-11-22 Verify: 既に解消済み。`ci/scripts/test-review-run.sh:19-26` が「0) true default backend」节で `env -u JARVIS_REVIEW_RUNNER PATH="$tmp:$PATH"` を使い、opencode スタブで `${JARVIS_REVIEW_RUNNER:-opencode}` の既定分岐を実検証（`RUNNER=opencode` / `ARGS=run /review-flow gate-check 42` をアサート）。根拠
+  `ci/scripts/test-review-run.sh:19-26` / verified。コード変更なし。
 
 - 親が対応: I78-A で verifier も role 矛盾を拒否するようになり、I77-A の
   「verifier は受理」期待値を更新、全ゲート再検証。
