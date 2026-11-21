@@ -2043,8 +2043,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   COMPLETE バックアップが作られる（medium）— 失敗時は timer を停止維持。
 - [ ] jarvis-backup.service の ExecStartPost が repo 作業コピー（711 koppe）
   を参照し postgres から読めない（medium）— /opt の root:root コピーへ変更。
-- [ ] restore-local.d/{pg,qdrant,git,configs}.sh が依然固定名（medium）—
-  記述子から入力名を導出（P1-6 実施時）。
+- [x] restore-local.d の入力名記述子導出 — 2026-11-22 Verify: 既に解消済み（I75-B）。`pg.sh:45-49`、`qdrant.sh:24-28`、`git.sh:31-35`、`configs.sh:51` がすべて `resolve_restore_input "$SET_DIR" <role> <legacy_name>` で manifest の role/format 記述子から入力を解決し、第3引数は legacy 3列フォールバックのみ。固定名はデフォルト引数として残るが記述子が優先。根拠
+  `infra/scripts/restore-local.d/{pg,qdrant,git,configs}.sh` / verified。コード変更なし。
 - [ ] drift の casbin_policy.csv が JARVIS_DRIFT_POLICY_DIR を無視（low）、
   web.fetch の requires_approval 検査が grep -A8 依存（low）。
 - [x] dsh.md の firejail 記述 — 2026-11-22 Verify: 過大主張は既に解消済み。`dsh.md:51` は「`opencode` CLI 依存の**実行 fallback は撤去済み**」と実行経路に限定した表現で、「firejail 全面撤去」という記述は存在しない。`:54` で設定値 `SandboxType::Firejail` と firejail パッケージが互換のため残存することも明記済み。根拠
