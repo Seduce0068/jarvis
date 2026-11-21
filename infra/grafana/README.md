@@ -67,3 +67,13 @@ providers:
 
 Grafana Cloud Free does not expose file provisioning, so import the JSON
 manually there.
+
+## Telemetry scope
+
+The journald receiver forwards only the `jarvis-*` services plus the
+migration/backup units, and the Prometheus receiver scrapes the four JARVIS
+HTTP services, Qdrant and the collector itself (`:8888`). `opencode.service`,
+`code-server.service` and `otelcol.service` are intentionally excluded: the
+agent runtime may log prompts and tool arguments, so shipping those journals to
+Grafana Cloud is a separate data-governance decision rather than a missing
+dashboard feed.

@@ -3091,8 +3091,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **otelcol 自己メトリクス 8888 が prometheus scrape 対象に無い** — 2026-11-22 対応済み: `prometheus` receiver の `scrape_configs` に `job_name: 'otelcol'`（target `localhost:8888`、`metrics_path: /metrics`）を追加。`service.telemetry.metrics` の pull reader（127.0.0.1:8888）を scrape し、Collector 自身のドロップ・memory_limiter 活動を Grafana で可視化。根拠
   `infra/config/otelcol-config.yaml:45-53,203-210` / R2-FG02,R5-VU01 / confirmed。
   - 検証: `otelcol-contrib validate --config=...` exit 0（ダミー env 使用）、YAML parse で scrape jobs = policy/mcp-gw/event/context/qdrant/otelcol、`make secret-scan` exit 0。
-- [ ] **journald receiver の units に opencode.service が無い** —
-  `infra/config/otelcol-config.yaml:49-60` / R5-VU01 / likely。
+- [x] **journald receiver の units に opencode.service が無い** — 2026-11-22 判定: **意図的除外として明記（設計判断は据え置き）**。opencode（エージェントランタイム）はプロンプト／ツール引数をログし得るため、その journal を Grafana Cloud（外部）へ送るのはデータガバナンス判断が先。code-server / otelcol も同様に対象外。`otelcol-config.yaml` のコメントと `infra/grafana/README.md` の Telemetry scope 節へ除外理由を記録（receiver の units 自体は変更せず）。根拠
+  `infra/config/otelcol-config.yaml:57-75`, `infra/grafana/README.md:60-70` / R5-VU01 / likely。
+  - 検証: `otelcol-contrib validate` exit 0、`npx markdownlint infra/grafana/README.md` 0 件、`make secret-scan` exit 0。
 - [x] **tail_sampling の jarvis.severity が属性未生成で常に非マッチ** — 2026-11-22 対応済み: repo 全体で `jarvis.severity` を生成する箇所が無い（grep 1件＝ポリシー定義のみ）ため、死んだ `jarvis-critical` ポリシーを削除し理由をコメント化。tail-sampling policies は OR 評価で、重要トレースは既に `errors`（status.code ERROR）ポリシーが捕捉していたため挙動は不変。属性生成を新設する設計判断は避けた。根拠
   `infra/config/otelcol-config.yaml:137-142` / R2-FG02 / confirmed。
   - 検証: `otelcol-contrib validate --config=infra/config/otelcol-config.yaml` exit 0（ダミー env 使用）、YAML parse OK（policies = errors/slow/probabilistic）、`make secret-scan` exit 0。

@@ -66,6 +66,11 @@ receivers:
       - jarvis-migrations.service
       - jarvis-backup.service
       - jarvis-backup.timer
+      # Intentionally excluded: opencode.service (agent runtime) may log prompts
+      # and tool arguments; code-server.service (interactive IDE) and
+      # otelcol.service (this collector) are also out of scope. Sending their
+      # journals to Grafana Cloud is a separate data-governance decision, not
+      # an observability gap to close silently.
 
 processors:
   # Batch processor for efficient export
