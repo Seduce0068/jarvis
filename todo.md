@@ -2987,9 +2987,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **test-event REQ-15 / TC-E3 の Scenario が仕様から欠落** — 2026-11-22 対応済み: 既存方針（TC-E1/E2 は回帰テスト説明として gherkin を宣言しない）に合わせ、TC-E3 も `rust/jarvis-event/src/sources.rs` の `parses_state_changed_event` / `ignores_non_event_messages` を根拠テストとする回帰対応を明記。spec_hash 再計算に伴い event 証跡を `test-run-20261120-99f75a1efb0c.json` へ rename し hash/notes/index を同期。根拠
   `specs/test-event.md:210-224`, `evidence/index.md:33`, `rust/jarvis-event/src/sources.rs:395,410` / R2-FG01,R3-TQ01 / confirmed。
   - 検証: event `--check` MATCH、`make check-evidence` ok=6 errors=0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **test-ui REQ-16 が無関係な TC-U10 に誤トレース** —
-  `specs/test-ui.md:53,237-244,369`, `ui/src/approvals.rs:165-202` /
-  R2-FG01 / confirmed。
+- [x] **test-ui REQ-16 が無関係な TC-U10 に誤トレース** — 2026-11-22 対応済み: Traceability の `TC-U10 | REQ-16` を新規 `TC-U20 | REQ-16` へ分離し、Scenarios 節に「ウィンドウ閉鎖時 poller 停止」の gherkin を追加（根拠 `ui/src/approvals.rs:168`）。spec_hash 再計算に伴い UI 証跡を `test-run-20261120-549225f7cc2d.json` へ rename し hash/notes/index を同期。根拠
+  `specs/test-ui.md:53,237-244,351-356,375`, `ui/src/approvals.rs:165-202` / R2-FG01 / confirmed。
+  - 検証: UI `--check` MATCH、`make check-evidence` ok=6 errors=0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **UI 証跡の risk_items が仕様のリスク表と乖離** —
   `specs/test-ui.md:100,108`, `evidence/test-run-20261120-020d62ac6029.json:100,181,183` /
   R1-ST09 / confirmed。check-evidence は id 集合のみ検証。

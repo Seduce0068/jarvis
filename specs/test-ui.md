@@ -345,6 +345,14 @@ Scenario: TC-U19 410 の共有本文確認と fail-closed
   Then status 端点へのアクセスを行わない
 ```
 
+```gherkin
+Scenario: TC-U20 ウィンドウ閉鎖時の poller 停止
+  Given approvals view の poller が起動している
+  When ウィンドウ閉鎖イベントを受信する
+  Then poller は停止し後続のpollを行わない
+  Then リソースリークを起こさない
+```
+
 ## Traceability
 
 | Scenario | Req | ASVS | 800-53 | CC | Technique | Tier |
@@ -366,7 +374,7 @@ Scenario: TC-U19 410 の共有本文確認と fail-closed
 | TC-U9 | REQ-13 | v5.0.0-V13.1.3 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-U10 | REQ-14 | v5.0.0-V2.2.1 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T3 |
 | TC-U10 | REQ-15 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.3 | T3 |
-| TC-U10 | REQ-16 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T3 |
+| TC-U20 | REQ-16 | - | SP800-53r5.2/CM-7 | ATE_FUN.1 | 5.2.8 | T3 |
 | TC-U11 | REQ-17 | - | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-U12 | REQ-18 | - | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-U13 | REQ-19 | v5.0.0-V14.2.1 | SP800-53r5.2/SC-8 | ATE_FUN.1 | 5.2.6 | T1 |
