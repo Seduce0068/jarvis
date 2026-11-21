@@ -108,6 +108,10 @@ pub struct PolicyConfig {
     /// Default false keeps the legacy in-memory + warn-only behavior.
     #[serde(default)]
     pub require_approval_persistence: bool,
+    /// Legacy compatibility key, parsed but intentionally inert: authorization
+    /// is always deny-by-default and `PolicyEngine::new` warns if this is false.
+    /// See `lib.rs` (`default_deny = false is ignored`) and the test
+    /// `default_deny_is_kept_for_compatibility`. Do not read this as a switch.
     pub default_deny: bool,
 }
 

@@ -3139,8 +3139,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-mcp-gw/src/config.rs:85,210-216,268,319-337` / R1-ST02 / confirmed に格上げ。
   - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 155 passed / 0 failed / 1 ignored、`make ci-local` all gates passed、`make secret-scan` exit 0。
   - 親の訂正: 当初 `#[serde(default)]`（=`String::default()` の空文字）で指定したが新規テストが失敗（left=""/right="opencode"）。`default_mcp_principal` を指定する方式へ修正して解消（子 R1-ST02 の推奨が正しかった）。
-- [ ] **default_deny / sandbox_type 等の inert キーを明示** — 既存 P3-7 と
-  R1-CF01,R1-ST01 の指摘を統合。設定を読む利用者が誤判断しうる。
+- [x] **default_deny / sandbox_type 等の inert キーを明示** — 2026-11-22 対応済み: `rust/jarvis-policy/src/config.rs:111` の `default_deny` フィールドへ「legacy compatibility key, parsed but intentionally inert / authorization is always deny-by-default / lib.rs の warn と回帰テストを参照 / スイッチとして読むな」の doc コメントを追加。`sandbox_type` / `sandbox_config` は既に field doc（:60-65）と起動時 warn（:199-202）で明示済みのため変更なし。根拠
+  `rust/jarvis-policy/src/config.rs:109-119`, `rust/jarvis-mcp-gw/src/config.rs:60-65,199-202` / R1-CF01,R1-ST01 / confirmed。
+  - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 213 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
 
 ### メモ（要判断・却下）
 
