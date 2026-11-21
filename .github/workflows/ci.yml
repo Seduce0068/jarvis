@@ -103,13 +103,16 @@ jobs:
         # and is intentionally left unchanged. Common guidance §5 ("consider the
         # shared side first") was evaluated; because that side is outside this
         # repository's scope, the caller-side extra_gates is the chosen fix.
-        # Version is pinned to 0.23.0 (measured locally via `cargo audit
-        # --version`) so advisory parsing and gate results stay reproducible;
-        # --locked freezes the installer's transitive dependencies. The version
-        # probe makes this idempotent on reused runners: skip when the exact
-        # pinned version is already present, otherwise install it.
-        if ! cargo audit --version 2>/dev/null | grep -Eq '0\.23\.0([^0-9]|$)'; then
-          cargo install cargo-audit --version 0.23.0 --locked
+        # Version comes from the Makefile's CARGO_AUDIT_VERSION (single source
+        # of truth; locally measured via `cargo audit --version`). Advisory
+        # parsing and gate results stay reproducible; --locked freezes the
+        # installer's transitive dependencies. The version probe makes this
+        # idempotent on reused runners: skip when the exact pinned version is
+        # already present, otherwise install it.
+        AUDIT_VERSION="$(make -s print-cargo-audit-version)"
+        AUDIT_REGEX="$(printf '%s' "$AUDIT_VERSION" | sed 's/\./\\./g')"
+        if ! cargo audit --version 2>/dev/null | grep -Eq "${AUDIT_REGEX}([^0-9]|$)"; then
+          cargo install cargo-audit --version "$AUDIT_VERSION" --locked
         fi
         make check-evidence
         make check-evidence-counts

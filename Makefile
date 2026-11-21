@@ -1,8 +1,9 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-server-minimal bootstrap-server-minimal-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit check-evidence check-evidence-counts init-config
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-server-minimal bootstrap-server-minimal-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit print-cargo-audit-version check-evidence check-evidence-counts init-config
 
 # 既定値
+CARGO_AUDIT_VERSION ?= 0.23.0
 JARVIS_ROOT ?= $(HOME)/jarvis
 HOST ?= jarvis-host
 # Portable bash lookup: Termux has no /bin/bash, Ubuntu has /bin/bash or /usr/bin/bash.
@@ -135,8 +136,12 @@ check-toml: ## 全 tracked *.toml の構文検証（tomllib/tomli、値は出力
 
 # I94-A: cargo-audit が未導入の場合は AUDIT_TOOL_MISSING で fail-closed となる。
 # ローカルでは自動 install しない（fail-closed 契約を維持するため）。未導入時は
-# 下記の固定バージョンで手動導入し、`cargo audit --version` が一致することを確認する。
-#   cargo install cargo-audit --version 0.23.0 --locked
+# CARGO_AUDIT_VERSION（既定 0.23.0）で手動導入し、`cargo audit --version` が
+# 一致することを確認する。CI は print-cargo-audit-version で同じ値を参照する。
+#   cargo install cargo-audit --version $(CARGO_AUDIT_VERSION) --locked
+print-cargo-audit-version: ## CI install step が参照する固定バージョンを出力
+	@printf '%s\n' '$(CARGO_AUDIT_VERSION)'
+
 check-dependency-audit: ## rust/ui 両 Cargo.lock の既知脆弱性を監査（cargo-audit 必須・fail-closed）
 	@bash ci/scripts/check-dependency-audit.sh
 

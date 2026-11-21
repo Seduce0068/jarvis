@@ -3061,8 +3061,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] **.editorconfig に Rust の indent 指定が無く rustfmt 既定と衝突** — 2026-11-22 対応済み: `[*.rs] indent_size = 4` を追加し rustfmt 既定（4 スペース）と整合。あわせて `[*.{json,yaml,yml}]` を `[*.{json,jsonc,yaml,yml}]` へ拡張し `opencode.jsonc` も明示的に 2 スペースへ。根拠
   `.editorconfig:17,26`, `Makefile:63` / R1-ST10 / confirmed に格上げ。
-- [ ] **audit.toml と Makefile の cargo-audit バージョンが二重管理** —
-  `Makefile:116-121`, `.github/workflows/ci.yml:101-113` / R1-CF02 / confirmed。
+- [x] **audit.toml と Makefile の cargo-audit バージョンが二重管理** — 2026-11-22 対応済み: Makefile に `CARGO_AUDIT_VERSION ?= 0.23.0` と `print-cargo-audit-version` ターゲットを追加し、ci.yml の install step が `make -s print-cargo-audit-version` から値を取得して probe 用 regex と `cargo install --version` に使用するよう変更（ci.yml 側の 0.23.0 ハードコードを削除）。バージョン更新は Makefile 1箇所で済む。根拠
+  `Makefile:6,136-145`, `.github/workflows/ci.yml:101-117` / R1-CF02 / confirmed。
+  - 検証: `make -s print-cargo-audit-version` → `0.23.0`、probe regex 仿真 OK、`make ci-local` all gates passed、YAML parse OK、`make secret-scan` exit 0、ci.yml に 0.23.0 ハードコード残存なし。
 - [x] **CI で safety-test と個別ゲートが重複実行される** — 2026-11-22 対応済み: `Makefile:safety-test` の監査呼び出しで `DEPENDENCY_AUDIT_FETCH` を透伝するよう変更し、ci.yml の個別 `DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit` と `make test-restore-local` の2行を削除。`DEPENDENCY_AUDIT_FETCH=1 make safety-test` の1回で audit（fetch 付き）と restore-local 回帰がともに実行される。root:root 方針や fail-closed 契約は不変。根拠
   `Makefile:92-99`, `.github/workflows/ci.yml:114-121` / R1-CF02 / confirmed。
   - 検証: `make -n safety-test` で env 透伝を確認、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、YAML parse OK、`make secret-scan` exit 0、ci.yml に重複ゲート残存なし。
