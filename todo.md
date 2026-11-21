@@ -1940,8 +1940,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] 隔離 DB `jarvis_restore_test` の後始末 — 2026-11-22 Verify: 既に解消済み。`infra/scripts/restore-local.d/pg.sh:22-26` の後始末ポリシーどおり、検証成功時に `:121-128` で DROP し `ISOLATED_DB_CREATED=0` を export。CREATE 後の異常終了は `restore-local.sh:644-656` の `on_exit` が `ISOLATED_DB_CREATED=1` を見て片付け、`:893` で trap 登録済み（`--keep-isolated-db` は明示保持の opt-in）。2回目の復元が不能になる懸念は解消済み。根拠
   `infra/scripts/restore-local.d/pg.sh:22-26,93-96,121-128`, `infra/scripts/restore-local.sh:644-656,665,893` / verified。コード変更なし。
 - [x] migration 範囲コメントを through 007 へ統一（2026-11-22）: 007 追加に伴い `jarvis-{policy,migrations,context}.service` の範囲コメント、`build-selfhost.sh:43-45` の migration 列表（001..007）、`docs/integration/remaining-tasks.md:799` の一覧を更新。旧「through 004」は重複エントリ（2件）のため両方を完了扱いにする。
-- [ ] pending_embeddings ゲージが dead_letter / exhausted / remove 後に
-  更新されず未処理件数を過大報告（low）。
+- [x] pending_embeddings ゲージの遷移後更新 — 2026-11-22 Verify: 既に解消済み（I69-D）。`builder.rs:423-433` の `observe_state_counts()` seam に `PgPendingStore` 実装（:603）があり、`dead_letter` 後（:643）と reconcile 後（:974）で `OUTBOX_STATE_COUNTS_SQL` を再集約し pending/exhausted の2ゲージを publish。`record`/`list` も自前 refresh（:483, :515）。根拠
+  `rust/jarvis-context/src/builder.rs:423-433,603,643,974` / verified。コード変更なし。
 - [ ] 証跡の passed 件数が自己申告の手入力（medium）— `cargo test -- --list`
   または JUnit 出力から機械導出する生成器の導入。
 
