@@ -3050,8 +3050,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **stale_after を超過した OCI 設計文書が draft のまま** — 2026-11-22 対応済み: frontmatter の `status` を `draft` → `superseded` へ変更し、期限超過済みの `stale_after` を削除。本文冒頭の `**Status: incorporated.**`（旧構成の参照資料）および `docs/architecture/index.md:15-16` の「旧構成の参照資料」という位置づけと整合。OKF 準拠（残る日時は RFC 3339 オフセット付き）を維持。根拠
   `docs/architecture/opencode-v2-oci-code-server.md:18`, `docs/architecture/index.md:15-16` / R1-ST09 / confirmed。
   - 検証: secret-scan exit 0、markdownlint は既存 baseline（:25, 252 文字）のみで変更行に新規違反なし。`report.md` / `calc.rs` / `dist/` は未変更のため `rust-script calc.rs` の再実行は不要（docs/architecture/AGENTS.md の対象外）。
-- [ ] **バックアップ再設計メモのブロッカー節が解消済み決定を未解決と提示** —
-  `docs/integration/backup-redesign-notes.md:143-148` / R5-VU01 / confirmed。
+- [x] **バックアップ再設計メモのブロッカー節が解消済み決定を未解決と提示** — 2026-11-22 対応済み: ブロッカー節を「2026-11-17 解消、履歴として保持」へ改題し、保存先（BK-1 で `/var/lib/postgresql/jarvis-backups` に決定）、認証/暗号化（bws 集約＋P1-6 は外部化時に検討）、復旧検証（restore-local + 47 tests、残りは S9 実機演習）、timer（実機 active/enabled）の各現行状態を明記。現行 state は remaining-tasks.md / backup-restore-runbook.md を正とするようリンク追加。根拠
+  `docs/integration/backup-redesign-notes.md:143-153`, `docs/integration/remaining-tasks.md:316` / R5-VU01 / confirmed。
+  - 検証: secret-scan exit 0、markdownlint 既存 baseline（:110 等）のみで変更行に新規違反なし。文書のみ変更のため compile/lint/test は省略。
 - [ ] **期限内切れ表示の承認要求でも承認 / 却下ボタンが有効** —
   `ui/README.md:69-72`, `docs/integration/evidence-regeneration.md:88-90` /
   R5-VU01 / confirmed。policy 側は 410 を返す契約と矛盾。
