@@ -2141,8 +2141,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/scripts/lib/payload-descriptors.sh:122-141`, `infra/scripts/verify-backup.sh:152-157`, `infra/scripts/test-restore-local.sh:1755-` / verified。コード変更なし。
 - [x] payload_format_check の fail-open 懸念 — 2026-11-22 Verify: 既に解消済み（I77-B / I79-A）。`payload-descriptors.sh:12-26,169-179` の契約どおり、placeholder `on_payload_check` は no-op だが hook 未装填（`PAYLOAD_CHECK_HOOK_INSTALLED=0`）なら `payload_format_check()` が rc=2 で fail-closed。判定は戻り値（0=ok / 1=verdict mismatch / 2=hook 未装填）で伝播し、呼び出し側は rc>=1 を失敗扱い（hook は log-only で counter を持たない）。根拠
   `infra/scripts/lib/payload-descriptors.sh:12-26,169-183`, `infra/scripts/verify-backup.sh:83-88` / verified。コード変更なし。
-- [ ] root 固定の restore が git アーカイブを root:root で展開し koppe 所有
-  repo を編集不能にする（medium）— --no-same-owner／対象所有者での展開。
+- [x] git アーカイブ展開の owner 対策 — 2026-11-22 Verify: 既に解消済み（I77-C）。`restore-local.d/git.sh:22-24` が「root 実行 + tar 既定の owner 復元で koppe 所有ファイルが root:root になる問題への対策用（repo 既存 owner と展開エントリ）」と明記し `repo_owner` / `tar_entry` / `chown_target` を用意、`:99-102` が `tar -xzf ... --no-same-owner` で展開し本番側で既存 owner へ chownする契約を実装。根拠
+  `infra/scripts/restore-local.d/git.sh:20-28,96-110` / verified。コード変更なし。
 - [x] curl/psql/jq モックの fail-closed 分岐検証 — 2026-11-22 Verify: 既に解消済み（I80-A / I84-C）。`test-restore-local.sh:1553-1631` の `inject_fail <curl_mode> <psql_mode> <jq_mode> <confirm> <label> <fragment> <scope>` が失敗クラス（isolated / prod_db 等）と CONFIRM 0/1 の両方で呼ばれ、`:33-36` のコメントが「非ゼロ exit + 固定 fail 語彙のみ」「本番境界を1件チェック」と契約を明記。MOCK_*_MODE（`:215`）で各ツールの失敗を注入可能。`make safety-test` ok=435 fail=0。根拠
   `infra/scripts/test-restore-local.sh:33-36,215,1553-1631` / verified。コード変更なし。
 - [x] MOCK_LOG の本番迂回懸念 — 2026-11-22 判定: **却下（本番コードは MOCK_LOG を参照しない）**。`MOCK_LOG` は `test-restore-local.sh:150,219,280,296,340` 等でテスト用ログディレクトリとして使われ、モック psql/curl/jq は `$tmp/bin/` の一時 Perl/bash スタブ。本番 `infra/scripts/restore-local.d/pg.sh` は `psql` を直接呼ぶだけで MOCK_LOG 参照は grep 0件。よって本番が MOCK_LOG 設定によってテストモード化することはなく、改名しても挙動は変わらない。I86-C（`:44`）で psql モックの分岐漏れは対応済み。根拠
