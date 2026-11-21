@@ -3044,9 +3044,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **ADR-0001 の Consequences / Neutral が OCI 前提のまま** —
   `adr/0001-unified-architecture.md:100,104-105,169`, `adr/0004:50-52` /
   R1-DR01 / confirmed。
-- [ ] **report.md の月間使用時間式と calc.rs の単位ラベルが結論と乖離** —
-  `docs/architecture/report.md:79-83`, `docs/architecture/calc.rs:125-130,237-240` /
-  R1-DR01 / confirmed。
+- [x] **report.md の月間使用時間式と calc.rs の単位ラベルが結論と乖離** — 2026-11-22 対応済み: `report.md` の「月間使用時間 / H_monthly」を「月間リソース時間（OCPU-hours / GB-hours）/ H_resource」へ、`calc.rs` の LaTeX 出力 `\text{ hours}` を `\text{ OCPU-hours}` へ修正。計算値（1584 OCPU-hours）は不変でラベルのみ。根拠
+  `docs/architecture/report.md:79-83`, `docs/architecture/calc.rs:125-130,237` / R1-DR01 / confirmed。
+  - 検証: `rust-script calc.rs` exit 0（1584 OCPU-hours 不変）、`npx markdownlint report.md` 0 件、`make ci-local` all gates passed、`make secret-scan` exit 0。docs/architecture/AGENTS.md の検証プロトコルに従い report.md / calc.rs のみ変更、dist/ は未変更。
 - [x] **stale_after を超過した OCI 設計文書が draft のまま** — 2026-11-22 対応済み: frontmatter の `status` を `draft` → `superseded` へ変更し、期限超過済みの `stale_after` を削除。本文冒頭の `**Status: incorporated.**`（旧構成の参照資料）および `docs/architecture/index.md:15-16` の「旧構成の参照資料」という位置づけと整合。OKF 準拠（残る日時は RFC 3339 オフセット付き）を維持。根拠
   `docs/architecture/opencode-v2-oci-code-server.md:18`, `docs/architecture/index.md:15-16` / R1-ST09 / confirmed。
   - 検証: secret-scan exit 0、markdownlint は既存 baseline（:25, 252 文字）のみで変更行に新規違反なし。`report.md` / `calc.rs` / `dist/` は未変更のため `rust-script calc.rs` の再実行は不要（docs/architecture/AGENTS.md の対象外）。

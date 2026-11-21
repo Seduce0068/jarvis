@@ -236,7 +236,7 @@ fn main() {
     println!();
     println!("Monthly OCPU hours:");
     println!("$$");
-    println!("H_{{OCPU}} = OCPU_{{total}} \\times 24 \\times 30 = {:.2} \\times 720 = {:.0} \\text{{ hours}}", total_ocpus, monthly_ocpu_hours);
+    println!("H_{{OCPU}} = OCPU_{{total}} \\times 24 \\times 30 = {:.2} \\times 720 = {:.0} \\text{{ OCPU-hours}}", total_ocpus, monthly_ocpu_hours);
     println!("$$");
     println!();
     println!("Cost projection (if exceeding free tier):");

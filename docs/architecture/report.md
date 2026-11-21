@@ -76,10 +76,10 @@ $$
 U_{resource} = \frac{Resource_{total}}{Resource_{limit}} \times 100\%
 $$
 
-月間使用時間 (24/7 稼働前提)：
+月間リソース時間 (24/7 稼働前提、OCPU-hours / GB-hours)：
 
 $$
-H_{monthly} = Resource_{total} \times 24 \times 30
+H_{resource} = Resource_{total} \times 24 \times 30
 $$
 
 無料枠超過時のコスト試算 (東京リージョン従量課金)：
