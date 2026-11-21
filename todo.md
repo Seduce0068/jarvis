@@ -2147,8 +2147,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   失敗注入モックを追加。
 - [ ] MOCK_LOG が本番の postgres precondition と psql ラッパを迂回（low）—
   専用名 `JARVIS_RESTORE_FIXTURE_MODE` へ変更し本番で拒否。
-- [ ] 4 crate の env キー→フィールド写像テストが Serialized 上書きで
-  形骸化（medium）— 本番 ENV_PREFIX 定数を参照する contract テストへ。
+- [x] env キー写像テストの ENV_PREFIX contract 化 — 2026-11-22 対応済み: 3クレートのテスト内ローカル prefix 再定義を削除し本番定数へ統一（`policy.rs:24` / `context.rs:18` / `event.rs:19` の `ENV_PREFIX` を `use super::*` 経由で参照）。jarvis-mcp-gw は既に本番定数参照で変更不要。アサーション・件数・Serialized ロジックは不変。根拠
+  `rust/jarvis-{policy,context,event}/src/config.rs` / verified。
+  - 検証: `cargo fmt --all -- --check` exit 0、4クレート `cargo test --lib --locked` すべて pass（policy 215 / context 182 / event 92 / mcp-gw 155、件数不変）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] infra/README.md の MCP Gateway 節 — 2026-11-22 対応済み: 当初「既に更新済み」と誤判定して Verify 記録を書いたが、続く `:216-218` に旧挙動（`requires_approval = true` のツールは not listed）が残っていることを発見し訂正。`tools/list` は `mcp_server.rs:235-240` のとおり全 allowlist 項目を advertise し、呼び出し時に人間承認を待つ現行契約へ README を修正。mcp_allowlist.toml のコメント（831 行目の完了記録）と整合。根拠
   `infra/README.md:212-220`, `rust/jarvis-mcp-gw/src/mcp_server.rs:235-240`, `infra/config/mcp_allowlist.toml:78-81` / R2-FG02 / confirmed。
   - 検証: markdownlint 既存 baseline のみ、`make secret-scan` exit 0。

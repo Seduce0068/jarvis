@@ -525,10 +525,9 @@ policy_grpc_addr = "http://127.0.0.1:50051"
     /// is mutated; the env-style key is merged as a figment value.
     #[test]
     fn admin_token_env_key_maps_to_field() {
-        const PREFIX: &str = "JARVIS_EVENT_";
         const KEY: &str = "JARVIS_EVENT_ADMIN_TOKEN";
         let field = KEY
-            .strip_prefix(PREFIX)
+            .strip_prefix(ENV_PREFIX)
             .expect("key uses the event env prefix")
             .to_ascii_lowercase();
         assert_eq!(field, "admin_token");

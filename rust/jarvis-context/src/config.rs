@@ -919,7 +919,6 @@ max_context_tokens = 8000
     /// is mutated; the env-style key is merged as a figment value.
     #[test]
     fn admin_token_env_key_maps_to_field() {
-        const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
         const ENV_KEY: &str = "JARVIS_CONTEXT_ADMIN_TOKEN";
 
         let field = ENV_KEY
@@ -1017,7 +1016,6 @@ max_context_tokens = 8000
     /// OS env var is mutated; the env-style key is merged as a figment value.
     #[test]
     fn pg_url_env_key_overrides_configured_url() {
-        const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
         const ENV_KEY: &str = "JARVIS_CONTEXT_PG_URL";
 
         let field = ENV_KEY
@@ -1077,7 +1075,6 @@ max_context_tokens = 8000
     /// figment value models the env override without mutating the OS env.
     #[test]
     fn embedding_dim_env_key_maps_to_field() {
-        const ENV_PREFIX: &str = "JARVIS_CONTEXT_";
         const ENV_KEY: &str = "JARVIS_CONTEXT_EMBEDDING_DIM";
 
         let field = ENV_KEY

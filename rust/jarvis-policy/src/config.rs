@@ -478,7 +478,6 @@ default_deny = true
     /// provider, so no OS env var is read or written by this test.
     #[test]
     fn env_flag_name_maps_to_strict_guard_field() {
-        const ENV_PREFIX: &str = "JARVIS_POLICY_";
         const ENV_FLAG: &str = "JARVIS_POLICY_REQUIRE_KILL_SWITCH_ADMIN_TOKEN";
 
         let field = ENV_FLAG
@@ -588,7 +587,6 @@ default_deny = true
     /// `load()`. As in the other env test, no OS env var is mutated.
     #[test]
     fn approval_admin_token_env_key_maps_to_field() {
-        const ENV_PREFIX: &str = "JARVIS_POLICY_";
         const ENV_KEY: &str = "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN";
 
         let field = ENV_KEY
@@ -754,17 +752,16 @@ default_deny = true
     /// by a `Serialized` value merged last.
     #[test]
     fn env_key_maps_to_state_path_guard_flag() {
-        const PREFIX: &str = "JARVIS_POLICY_";
         const ENV_KEY: &str = "JARVIS_POLICY_REQUIRE_KILL_SWITCH_STATE_PATH";
 
         let field = ENV_KEY
-            .strip_prefix(PREFIX)
+            .strip_prefix(ENV_PREFIX)
             .expect("key uses the policy env prefix")
             .to_ascii_lowercase();
         assert_eq!(field, "require_kill_switch_state_path");
 
         let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
-            .merge(Env::prefixed(PREFIX).only(&[field.as_str()]))
+            .merge(Env::prefixed(ENV_PREFIX).only(&[field.as_str()]))
             .merge(Serialized::default(field.as_str(), true))
             .extract()
             .expect("env-style key merges into the guard field");
@@ -775,17 +772,16 @@ default_deny = true
     /// the same provider chain.
     #[test]
     fn env_key_maps_to_state_path_field() {
-        const PREFIX: &str = "JARVIS_POLICY_";
         const ENV_KEY: &str = "JARVIS_POLICY_KILL_SWITCH_STATE_PATH";
 
         let field = ENV_KEY
-            .strip_prefix(PREFIX)
+            .strip_prefix(ENV_PREFIX)
             .expect("key uses the policy env prefix")
             .to_ascii_lowercase();
         assert_eq!(field, "kill_switch_state_path");
 
         let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
-            .merge(Env::prefixed(PREFIX).only(&[field.as_str()]))
+            .merge(Env::prefixed(ENV_PREFIX).only(&[field.as_str()]))
             .merge(Serialized::default(
                 field.as_str(),
                 "/var/lib/jarvis/kill-switch.json",
@@ -1007,17 +1003,16 @@ default_deny = true
     /// `load()`. No OS env var is mutated; a `Serialized` value is merged last.
     #[test]
     fn env_key_maps_to_pg_url_field() {
-        const PREFIX: &str = "JARVIS_POLICY_";
         const ENV_KEY: &str = "JARVIS_POLICY_PG_URL";
 
         let field = ENV_KEY
-            .strip_prefix(PREFIX)
+            .strip_prefix(ENV_PREFIX)
             .expect("key uses the policy env prefix")
             .to_ascii_lowercase();
         assert_eq!(field, "pg_url");
 
         let config: PolicyConfig = Figment::from(Toml::string(&base_toml()))
-            .merge(Env::prefixed(PREFIX).only(&[field.as_str()]))
+            .merge(Env::prefixed(ENV_PREFIX).only(&[field.as_str()]))
             .merge(Serialized::default(
                 field.as_str(),
                 "postgres://127.0.0.1:5432/jarvis",
