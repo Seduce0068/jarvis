@@ -3110,8 +3110,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **embedding_dim の既定値が embedding_model と結び付いていない** — 2026-11-22 判定: **起動時照合で fail-closed のため据え置き**。`config.rs:653-658` で「Must match the output dimension of embedding_model」と明記済み。`builder.rs:991-995` の `ensure_collection(config.embedding_dim)` と `memory::check_existing_dimension`（回帰テスト :2151-2155）が起動時に実次元を照合し、不一致なら明確なエラーで起動失敗する。つまり 768 次元モデルだけを指定して dim 省略しても黙って進まず起動時に検出される。完全な「モデル→次元レジストリ」導入は `embedding_dim` を `Option<usize>` へ変更する広範な設定型変更を伴い、リスクに見合わないため行わない。根拠
   `rust/jarvis-context/src/config.rs:29-38,653-658`, `src/builder.rs:991-995,2151-2155` / R2-DI01 / confirmed → 据え置き。
   - 検証: 関連コードと回帰テストの所在を grep で確認。コード変更なし。
-- [ ] **レガシー request() が永続化障害をポリシー拒否に変換** —
-  `rust/jarvis-policy/src/approval.rs:610,618,90` / R2-ER01 / confirmed。
+- [x] **レガシー request() が永続化障害をポリシー拒否に変換** — 2026-11-22 対応済み（契約明記・型変更は据え置き）: `approval.rs` の `request()` doc と変換箇所へ「`ApprovalError::Persistence`（一時 DB 障害）も `Denied { reason }` に平坦化されるため、呼び出し側はこれを人間のポリシー拒否と解釈してはならない。インフラ障害と拒否を区別するなら `try_request()` を使う」旨を明記。戻り値型 `ApprovalDecision` を `Result` へ変更するのは本番 `lib.rs:187` と多数のテスト呼び出しに波及する API 契約変更で設計判断が先のため行わない。根拠
+  `rust/jarvis-policy/src/approval.rs:599-625`, `src/lib.rs:187` / R2-ER01 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 214 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **kill switch 永続化失敗時に operator 属性が system で上書き** —
   `rust/jarvis-policy/src/kill_switch.rs:248,335,495` / R2-ER01 / confirmed。
 - [ ] **有効な隔離コレクションが本番 upload 前に削除される** —

@@ -604,9 +604,13 @@ impl ApprovalStore {
     ///
     /// Queue exhaustion is mapped here to a legacy
     /// `Denied { reason: QUEUE_FULL_REASON }` decision so existing callers keep
-    /// their `ApprovalDecision` return type. Callers that must distinguish
-    /// infrastructure exhaustion from a policy deny should use
-    /// [`ApprovalStore::try_request`] instead.
+    /// their `ApprovalDecision` return type. Every other error — including the
+    /// transient [`ApprovalError::Persistence`] (e.g. a temporarily unavailable
+    /// database) — is likewise flattened into `Denied { reason: <error text> }`.
+    /// A caller reading that decision MUST NOT treat it as a human/operator
+    /// policy denial. Callers that must distinguish infrastructure conditions
+    /// (retry later) from a real policy deny should use
+    /// [`ApprovalStore::try_request`], which returns the typed error instead.
     pub async fn request(&self, request: ApprovalRequest) -> ApprovalDecision {
         match self.try_request(request).await {
             Ok(decision) => decision,
@@ -614,7 +618,10 @@ impl ApprovalStore {
                 reason: QUEUE_FULL_REASON.into(),
             },
             // Other variants predate the queue-full split and were always
-            // reported as a denied decision by this legacy wrapper.
+            // reported as a denied decision by this legacy wrapper. NOTE:
+            // ApprovalError::Persistence lands here too, so a transient DB
+            // failure is indistinguishable from a policy deny at this layer.
+            // Use try_request() when that distinction matters (see method doc).
             Err(error) => ApprovalDecision::Denied {
                 reason: error.to_string(),
             },
