@@ -143,12 +143,7 @@ fn main() -> Result<()> {
 }
 
 fn valid_backup_date(date: &str) -> bool {
-    date.len() == 15
-        && date.as_bytes()[8] == b'-'
-        && date
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| index == 8 || byte.is_ascii_digit())
+    chrono::NaiveDateTime::parse_from_str(date, "%Y%m%d-%H%M%S").is_ok()
 }
 
 // Keep these names identical to the ones used by the restore functions below;
@@ -218,6 +213,18 @@ mod tests {
         assert!(!valid_backup_date("latest"));
         assert!(!valid_backup_date("20261009_120000"));
         assert!(!valid_backup_date("2026100x-120000"));
+    }
+
+    #[test]
+    fn rejects_out_of_calendar_range_dates() {
+        // 月13
+        assert!(!valid_backup_date("20261301-120000"));
+        // 日32
+        assert!(!valid_backup_date("20261232-120000"));
+        // 時25
+        assert!(!valid_backup_date("20261009-250000"));
+        // 2026年2月30日は存在しない
+        assert!(!valid_backup_date("20260230-120000"));
     }
 
     #[test]
@@ -329,6 +336,7 @@ fn find_latest_backup(
         .filter_map(|file| {
             file.strip_prefix("pg-")
                 .and_then(|s| s.strip_suffix(".sql.gz"))
+                .filter(|date_str| valid_backup_date(date_str))
         })
         .max()
         .context("No latest backup found")?

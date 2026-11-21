@@ -3122,8 +3122,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **dead_lettered_at の部分インデックスが reconcile 選択と逆** —
   `rust/migrations/005_pending_embeddings_dead_letter.sql:9-15,26-28` /
   R1-ST05 / likely。
-- [ ] **valid_backup_date がカレンダー範囲を検証せず latest が文字列比較** —
-  `rust/scripts/restore.rs:145-152,102-115,321-340` / R1-ST05 / confirmed。
+- [x] **valid_backup_date がカレンダー範囲を検証せず latest が文字列比較** — 2026-11-22 対応済み: `valid_backup_date` を `chrono::NaiveDateTime::parse_from_str(date, "%Y%m%d-%H%M%S").is_ok()` による厳密検証へ変更（既存 chrono =0.4.45 依存を利用）。`find_latest_backup` の候補にも `valid_backup_date` フィルタを追加し、不正日付のファイル名を最新選択から除外（辞書順 max() は維持）。カレンダー境界テスト（月13/日32/時25/存在しない日）を追加。根拠
+  `rust/scripts/restore.rs:145-147,211-228,334-343` / R1-ST05 / confirmed。
+  - 検証: `rustfmt --check` exit 0、`rust-script --test restore.rs` 6 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。子のテスト件数予測（6→7）は誤りだったが実テスト内容は正しい。restore.rs は証跡対象外のため同期不要。
 - [x] **Gateway が書き込み専用の config クローンを保持** — 2026-11-22 対応済み: `Gateway` 構造体から未使用の `config` フィールドと `#[allow(dead_code)]` を削除し、`Gateway::new` を `(allowlist, sandbox)` の2引数へ変更。`lib.rs:68` とテスト内2箇所（gateway.rs:835/1301、子が親の調査を訂正）も更新。残る3フィールドはすべて本番利用され dead_code 警告なし。根拠
   `rust/jarvis-mcp-gw/src/gateway.rs:227-243,835,1301`, `src/lib.rs:68` / R1-ST02 / confirmed。
   - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 155 passed / 1 ignored（件数不変）、`make ci-local` all gates passed、`make secret-scan` exit 0。
