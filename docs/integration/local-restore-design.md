@@ -299,9 +299,10 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
    使い捨て DB / コレクション / ディレクトリで全コンポーネントを復元し、
    検証結果を記録。本番適用はユーザー承認後に行う（エージェント判断外）。
 
-## 未決定事項
+## 未決定事項と決定記録
 
 - **複数 PostgreSQL DB のバックアップ／復元（Round 87 発掘、Round 95 差し戻し）**
+  - **決定済み（2026-11-21）**: 現行は単一DB契約を維持し、追加ペイロード拡張は行わない。下記は判断経緯の記録。
   - 現状: `jarvis-migrations.service` は `JARVIS_CONTEXT_PG_URL` と
     `JARVIS_POLICY_PG_URL` の両方へ同一 migration set を適用するが、
     `backup-local.sh` は `pg_dump -d jarvis` のみ、`restore-local.d/pg.sh` も
@@ -333,7 +334,8 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
 - 本番 PostgreSQL の上書き方式: `DROP/CREATE` か、新規 DB 復元後の alias/接続切替か。
 - 本番 Qdrant の上書き方式: 同一コレクションへの API 復元か、新規コレクション +
   alias 切替か（snapshot の互換性は作成元と同一 minor 以降という制約あり）。
-- config 復元時の所有者/パーミッション（現行実機値は未確認）。
+- config 復元時の所有者/パーミッション — 決定済み: `configs.sh` の
+  `EXPECTED_CONFIG_MODE` 単一表（root:root 0644）。
 - git 作業ツリーの上書きポリシー（clean 时必须か、常に新規ディレクトリか）。
 - `COMPLETE` の無いレガシーセットの扱い（既定拒否 + `--allow-legacy` で合意済みか）。
 - ~~verify-backup.sh の `config-*.tar` 検査の現行形式対応~~ — 解消済み。

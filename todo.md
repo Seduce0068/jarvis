@@ -2196,7 +2196,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （low）— 設計書を CLI help のセマンティクスへ更新。
 - [ ] 681件中約270件が同一の本番未接触アサーションで、ログ不在時に
   無条件 pass（low）— 代表ケースへ集約し前提ログを必須化。
-- [ ] jq モックの empty／prod_empty モードが未使用（low）— case '' 分岐の
+- [x] jq モックの empty／prod_empty モードが未使用（low）— case '' 分岐の — **2026-11-22 重複整理**: 同一内容は 2237 行目で完了記録済み。
   回帰を追加。
 - [x] secret_scan.py が追跡ファイル0件で fail-open（medium）— 空集合を — **2026-11-22 重複整理**: 同一内容は 2217 行目で完了記録済み。
   exit 1＋回帰追加。
@@ -2222,7 +2222,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [ ] 681件中約270件が同一の本番未接触アサーションで、ログ不在時に
   無条件 pass（low）— 代表ケースへ集約し前提ログを必須化。
-- [ ] jq モックの empty／prod_empty モードが未使用（low）— qdrant.sh の
+- [x] jq モックの empty／prod_empty モードが未使用（low）— qdrant.sh の — **2026-11-22 重複整理**: 同一内容は 2237 行目で完了記録済み。
   `case ''` 分岐の回帰を追加。
 - ユーザー判断: P1-6 暗号化鍵、P0 ガード、Grafana、Webhook、S9、
   バックアップ外部化、push、共有 lib の実機配布（再インストール）。
@@ -2366,7 +2366,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   in-flight 解放の全経路を回帰で担保。
 - [ ] root の /run ロック成功枝に回帰が無い（low）、psql モックが sudo 経路を
   通らない（medium）、Qdrant コレクション名がハードコード（low）。
-- [ ] CI の記録 SHA がコメント止まりで自動照合が無い／上流 v1 が未署名（low）。
+- [x] CI の記録 SHA がコメント止まりで自動照合が無い／上流 v1 が未署名（low）。 — **2026-11-22 重複整理**: 同一内容は 2390 行目で完了記録済み。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
@@ -2642,7 +2642,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       DB_NAME 上書きが pg.sh:29 で無視される low も同時に解消する。
 - [ ] smoke-mcp-gw.sh:90-94 の /health が 200 degraded 本文を合格させる
       （medium、子が途中終了）— deploy と同じ契約へ。
-- [ ] reconcile_pending の同時実行制御なし（low）— advisory lock または
+- [x] reconcile_pending の同時実行制御なし（low）— advisory lock または — **2026-11-22 重複整理**: 同一内容は 2668 行目で完了記録済み。
       条件付き UPDATE。
 - [ ] mcp_allowlist.toml:9-13 の行番号陳腐化、CONTEXT_TOKEN_HEADER 重複、
       hickory/rsa 等 major 更新待ち29件（再評価 2026-12-20）。
@@ -3035,8 +3035,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **ADR-0004 がバックアップ保存先を「未解決」と記載したまま** —
   `adr/0004-local-only-no-oci.md:44-47`, `docs/integration/remaining-tasks.md:308` /
   R1-DR01 / confirmed。BK-1 で決着済み。
-- [ ] **local-restore-design.md の「未決定事項」に決定済み項目が混在** —
-  `docs/integration/local-restore-design.md:302,320-332` / R1-DR01 / confirmed。
+- [x] **local-restore-design.md の「未決定事項」に決定済み項目が混在** — 2026-11-22 対応済み: 見出しを「未決定事項と決定記録」へ変更し、複数DB項目に「決定済み（2026-11-21）: 単一DB契約を維持」を明記、config owner/mode も `configs.sh` の `EXPECTED_CONFIG_MODE` 単一表（root:root 0644）で決定済みと記録。真に未決定の項目（本番PG/Qdrant上書き方式・git作業ツリー・レガシーセット）はそのまま残存。根拠
+  `docs/integration/local-restore-design.md:302-338`, `infra/scripts/restore-local.d/configs.sh:133` / R1-DR01 / confirmed。
+  - 検証: secret-scan exit 0、`make ci-local` all gates passed、markdownlint 既存 baseline のみ（変更行は 80 字以内へ調整）。
 - [ ] **ADR-0001 の Consequences / Neutral が OCI 前提のまま** —
   `adr/0001-unified-architecture.md:100,104-105,169`, `adr/0004:50-52` /
   R1-DR01 / confirmed。
