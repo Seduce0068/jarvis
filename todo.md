@@ -1988,8 +1988,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **smoke-mcp-gw.sh の inputSchema 検証が旧契約を固定** — 2026-11-22 確認: 既に解消済みの陈腐エントリ。`infra/scripts/smoke-mcp-gw.sh:148-162` の `read_schema_ok()` は filesystem.read に対して `'.' in desc and 'default' in desc.lower() and not required` を検証し、`mcp_server.rs:85-88` の description（`(optional; defaults to ".")`）+ required 無しという現行契約と整合している。deploy-mcp-gw-safe.sh のスモークが失敗する懸念は解消済み。根拠
   `infra/scripts/smoke-mcp-gw.sh:148-162,198-204`, `rust/jarvis-mcp-gw/src/mcp_server.rs:81-93` / verified。
   - 検証: 両ファイルを実読し契約が一致することを確認。コード変更なし。
-- [ ] generate-evidence.sh が failed=0 を固定出力（medium）— 実測 run から
-  failed を導出するモード追加、または --list 断片を「予測値」と明示。
+- [x] generate-evidence.sh の failed=0 固定出力 — 2026-11-22 確認: 既に解消済み。生成モードの断片は `ci/scripts/generate-evidence.sh:123-125` で「failed=0 は --list 由来の予測値であり実測ではない／--list は failing test を検出できない／適用前に実 suite を実行し --check で実 run も照合」と明示（I71-D）。`--check` モードは実 suite を実行し、exit 非0なら `ActualRunDetectedFailure` で fail-closed（:130-138）。TODO の推奨（予測値の明示／実 run 照合）は両方とも充足。根拠
+  `ci/scripts/generate-evidence.sh:116-138` / verified。コード変更なし。
 - [ ] restore_configs が owner/mode を明示せず root:root 0600 方針から
   漂移（medium）— allowlist6対象の期待 owner/mode を単一表で定義し
   install で是正。
