@@ -3107,9 +3107,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **非終端の Pending が終端 decision として永続化され得る** — 2026-11-22 判定: **現状の呼び出し経路では到達しないため据え置き（防御的ガードは不要）**。`commit_decision` の呼び出しは `persistence.rs:738`（外部の終端決着をコミット）と `:858`（期限切れを `ApprovalDecision::Expired` でコミット）の2箇所のみで、いずれも `Pending` を渡さない。`decision_columns` は `Pending` を `"pending"` に写像するが、`decision_from_columns` が未知ラベルとして `None` を返すため fail-safe 側へ流れる。`ApprovalError` 新バリアント追加は http.rs の網羅 match と HTTP 契約変更を伴いリスクに見合わないため行わない。根拠
   `rust/jarvis-policy/src/persistence.rs:522-528,738,858,865-896` / R2-DI01 / likely → 据え置き。
   - 検証: 呼び出し元 grep で2箇所とも終端決定であることを確認。コード変更なし。
-- [ ] **embedding_dim の既定値が embedding_model と結び付いていない** —
-  `rust/jarvis-context/src/config.rs:29-38,654-658`, `src/builder.rs:994-999` /
-  R2-DI01 / confirmed。
+- [x] **embedding_dim の既定値が embedding_model と結び付いていない** — 2026-11-22 判定: **起動時照合で fail-closed のため据え置き**。`config.rs:653-658` で「Must match the output dimension of embedding_model」と明記済み。`builder.rs:991-995` の `ensure_collection(config.embedding_dim)` と `memory::check_existing_dimension`（回帰テスト :2151-2155）が起動時に実次元を照合し、不一致なら明確なエラーで起動失敗する。つまり 768 次元モデルだけを指定して dim 省略しても黙って進まず起動時に検出される。完全な「モデル→次元レジストリ」導入は `embedding_dim` を `Option<usize>` へ変更する広範な設定型変更を伴い、リスクに見合わないため行わない。根拠
+  `rust/jarvis-context/src/config.rs:29-38,653-658`, `src/builder.rs:991-995,2151-2155` / R2-DI01 / confirmed → 据え置き。
+  - 検証: 関連コードと回帰テストの所在を grep で確認。コード変更なし。
 - [ ] **レガシー request() が永続化障害をポリシー拒否に変換** —
   `rust/jarvis-policy/src/approval.rs:610,618,90` / R2-ER01 / confirmed。
 - [ ] **kill switch 永続化失敗時に operator 属性が system で上書き** —
