@@ -2244,8 +2244,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] flock と backup timer のコメント — 2026-11-22 Verify: 誤検知（既に正しい記述）。`restore-local.sh:767-770` は「this flock serializes restore-local.sh instances against EACH OTHER only. backup-local.sh does not take this lock, so it does NOT exclude the backup timer. Timer exclusion is the job of stop_services() + verify_stopped_services()」と明記し、子の指摘する過大主張は存在しない。根拠 `infra/scripts/restore-local.sh:765-780` / verified。
 - [x] flock fd のサブプロセス継承 — 2026-11-22 Verify: 既に解消済み（I81-A (b)）。`restore-local.sh:904-913` が module dispatch 前に `exec {LOCK_FD}>&-` で fd を閉じ（bash が動的 fd に FD_CLOEXEC を設定しないため）、`:842-848` で PID + UTC 取得時刻を stale lock 診断 clue としてファイルへ残す。根拠 `infra/scripts/restore-local.sh:842-848,904-913` / verified。
 - [x] 予測可能ロックファイルの inode 変更 — 2026-11-22 Verify: 既に解消済み（I81-A）。`restore-local.sh:51` が既定 `/run/jarvis/restore.lock`（安定パス、権限で保護）、`:825` が `stat -Lc '%d:%i' /proc/self/fd/$LOCK_FD` で取得後に inode 照合し、不一致なら lock を閉じて再取得。明示 LOCK_FILE はテスト用。根拠 `infra/scripts/restore-local.sh:45-57,823-831` / verified。
-- [ ] カウンタ単一化でサマリの意味が「イベント数」→「呼び出し数」へ変化
-  （low）— runbook 明記＋サマリ値の回帰。
+- [x] カウンタ単一化のサマリ単位 — 2026-11-22 Verify: runbook 明記済み（I81-D (c)）。`docs/integration/evidence-regeneration.md:334-343` が「verify-backup.sh の result: ok/fail はペイロード／呼び出し単位の判定数。カウンタ単一化後は 1 ペイロードへの完全性・フォーマット・ロール判定が各 1 件加算。旧来の『イベント数』とは一致しないので ok+fail をイベント件数として読まない」と明記。サマリ挙動は safety-test / check-evidence の既存ゲートで回帰担保。根拠
+  `docs/integration/evidence-regeneration.md:334-343` / verified。コード変更なし。
 - [ ] secret_scan が部分走査（サブディレクトリ実行）を検出できず OK になる
   （medium）— repo root から git -C で走査対象を固定。
 - [ ] egress allowlist のテストが本番と逆の「空=無制限」を固定（medium）—
