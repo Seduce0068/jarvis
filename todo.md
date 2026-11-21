@@ -3072,9 +3072,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   R1-ST08,R1-CF02,R2-FG01 / confirmed。
 - [x] **kill switch コミット中発動テストの名前が旧契約のまま** — 2026-11-22 判定: **却下（既知の意図的判断）**。コード側 `rust/jarvis-policy/src/lib.rs:704-712` のコメントが「this test keeps its historical name as a regression ID, but its expectation was updated」と明記し、旧名を回帰 ID として意図的に保持。仕様側 `specs/test-policy-approval.md:373-376` も「lib.rs は担当外のため改名は行わず、改名を提案する」と記録しており、両者が現状維持を意図している。R2-FG01 は仕様側の提案のみを拾い、コード側の意図コメントを読んでいなかった（親の Runtime Proof で確認）。改名は回帰 ID を失うため行わない。根拠
   `rust/jarvis-policy/src/lib.rs:704-714`, `specs/test-policy-approval.md:370-379` / R2-FG01 → 却下。
-- [ ] **local-restore-design.md の verify-backup.sh 記述が現行実装と乖離** —
-  `docs/integration/local-restore-design.md:98-100,339-340`,
-  `infra/scripts/lib/payload-descriptors.sh:36-50` / R2-FG01 / confirmed。
+- [x] **local-restore-design.md の verify-backup.sh 記述が現行実装と乖離** — 2026-11-22 対応済み: `config-*.tar` 旧形式検査の注記と未決定事項を「解消済み（共有 lib `payload-descriptors.sh` へ移行、verify-backup.sh は COMPLETE/空 manifest 検査）」へ更新。根拠
+  `docs/integration/local-restore-design.md:98-100,339-340`, `infra/scripts/lib/payload-descriptors.sh:36-50` / R2-FG01 / confirmed。
+  - 検証: secret-scan exit 0、文書のみ変更のため compile/lint/test は省略。
 - [ ] **ADR-0003 の egress allowlist「導入も検討」が実装済み宣言と矛盾** —
   `adr/0003-native-web-fetch.md:38-40`, `docs/integration/tool-matrix.md:171-176` /
   R2-FG01 / likely。

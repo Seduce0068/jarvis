@@ -95,9 +95,9 @@ status: "draft"
   `bws.env` / `*.env` / token / `otelcol-config.yaml` は対象外。
 - git は `--skip-git` またはリポジトリ未検出時に生成されない**任意**コンポーネント。
 - `COMPLETE` は全ステップ成功後にのみ書かれる完了マーカー（`backup-local.sh:211-213`）。
-- 注意: `verify-backup.sh:110-119` の `config-*.tar` 検査は旧ディレクトリ形式の
-  レガシーであり、現行の `config-<basename>` には一致しない。
-  設定の権威ある根拠はマニフェスト記載である。
+- 設定ペイロードの形式判定は共有 lib `infra/scripts/lib/payload-descriptors.sh` が
+  `config-*` を正しく扱う（解消済み）。`verify-backup.sh` は COMPLETE マーカーと
+  空マニフェストの検査を行い、権威ある根拠はマニフェスト記載である。
 
 ### 必須コンポーネントの定義
 
@@ -336,8 +336,8 @@ DB テーブル数 / Qdrant `points_count` / config 差分 / `git status` を再
 - config 復元時の所有者/パーミッション（現行実機値は未確認）。
 - git 作業ツリーの上書きポリシー（clean 时必须か、常に新規ディレクトリか）。
 - `COMPLETE` の無いレガシーセットの扱い（既定拒否 + `--allow-legacy` で合意済みか）。
-- [verify-backup.sh](../../infra/scripts/verify-backup.sh) の `config-*.tar` 検査を
-  現行形式へ修正するか、レガシー検査として残すか。
+- ~~verify-backup.sh の `config-*.tar` 検査の現行形式対応~~ — 解消済み。
+  形式判定は共有 lib `payload-descriptors.sh` へ移行済み。
 - ツールの配置先と配布方法（repo 内実行か `/opt/jarvis/scripts` への install か）。
 - `restore.rs` の完全削除タイミング（今回は非推奨保持を決定済み）。
 - 本番上書き前の退避先の具体 path と保持期間。
