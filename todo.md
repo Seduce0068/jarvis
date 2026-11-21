@@ -2143,8 +2143,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/scripts/lib/payload-descriptors.sh:12-26,169-183`, `infra/scripts/verify-backup.sh:83-88` / verified。コード変更なし。
 - [ ] root 固定の restore が git アーカイブを root:root で展開し koppe 所有
   repo を編集不能にする（medium）— --no-same-owner／対象所有者での展開。
-- [ ] curl/psql/jq モックが常に成功し fail-closed 分岐が未検証（medium）—
-  失敗注入モックを追加。
+- [x] curl/psql/jq モックの fail-closed 分岐検証 — 2026-11-22 Verify: 既に解消済み（I80-A / I84-C）。`test-restore-local.sh:1553-1631` の `inject_fail <curl_mode> <psql_mode> <jq_mode> <confirm> <label> <fragment> <scope>` が失敗クラス（isolated / prod_db 等）と CONFIRM 0/1 の両方で呼ばれ、`:33-36` のコメントが「非ゼロ exit + 固定 fail 語彙のみ」「本番境界を1件チェック」と契約を明記。MOCK_*_MODE（`:215`）で各ツールの失敗を注入可能。`make safety-test` ok=435 fail=0。根拠
+  `infra/scripts/test-restore-local.sh:33-36,215,1553-1631` / verified。コード変更なし。
 - [ ] MOCK_LOG が本番の postgres precondition と psql ラッパを迂回（low）—
   専用名 `JARVIS_RESTORE_FIXTURE_MODE` へ変更し本番で拒否。
 - [x] env キー写像テストの ENV_PREFIX contract 化 — 2026-11-22 対応済み: 3クレートのテスト内ローカル prefix 再定義を削除し本番定数へ統一（`policy.rs:24` / `context.rs:18` / `event.rs:19` の `ENV_PREFIX` を `use super::*` 経由で参照）。jarvis-mcp-gw は既に本番定数参照で変更不要。アサーション・件数・Serialized ロジックは不変。根拠
