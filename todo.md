@@ -2137,9 +2137,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 73 の残り指摘（未対応）
 
-- [ ] 共有 lib の role 解決と basename 判定が不一致（medium）— role=other の
-  config-* が検証は通るが restore_configs が黙ってスキップ。role 解決を
-  共有関数へ集約し、矛盾行を検証時に fail-closed。
+- [x] 共有 lib の role 解決と basename 判定 — 2026-11-22 Verify: 既に解消済み（I77-A/I78-A）。`payload-descriptors.sh:122-141` の `resolved_role_for()` が単一 role 解決を行い、明示 `role=other` に config-* / git*.tar.gz の basename が合わなければ rc=1 で fail-closed。`verify-backup.sh:152-157` と `restore-local.sh:276` が同じ resolver を共有し、`test-restore-local.sh:1755-` が「role=other config-*/git* rejected before stop」を回帰固定。根拠
+  `infra/scripts/lib/payload-descriptors.sh:122-141`, `infra/scripts/verify-backup.sh:152-157`, `infra/scripts/test-restore-local.sh:1755-` / verified。コード変更なし。
 - [ ] payload_format_check がグローバル hook 経由のみで既定 no-op（low）—
   上書き忘れで破損ペイロードが無視される fail-open。hook 装填 assert または
   戻り値での判定伝播。
