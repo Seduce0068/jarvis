@@ -3123,9 +3123,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/scripts/restore.rs:145-152,102-115,321-340` / R1-ST05 / confirmed。
 - [ ] **Gateway が書き込み専用の config クローンを保持** —
   `rust/jarvis-mcp-gw/src/gateway.rs:229,243`, `src/lib.rs:52` / R1-ST02 / confirmed。
-- [ ] **install_metrics の OnceLock 警告分岐が実質到達不能（policy / mcp-gw / event）** —
-  `rust/jarvis-policy/src/http.rs:28-39`, `rust/jarvis-mcp-gw/src/http.rs:27-29`,
-  `rust/jarvis-event/src/http.rs:18-28` / R1-ST01,R1-ST02,R1-ST04 / likely。
+- [x] **install_metrics の OnceLock 警告分岐が実質到達不能（policy / mcp-gw / event）** — 2026-11-22 対応済み: 3クレートとも `install_metrics()` の先頭で `METRICS_HANDLE.get().is_some()` を检查し、既存文言の warn を出して `Ok(())` で早期リターンするよう変更。到達不能だった `set(..).is_err()` 分岐を削除し `let _ = METRICS_HANDLE.set(handle);` に置換。policy は理由コメントも追加。根拠
+  `rust/jarvis-policy/src/http.rs:34-56`, `rust/jarvis-mcp-gw/src/http.rs:27-36`, `rust/jarvis-event/src/http.rs:22-30` / R1-ST01,R1-ST02,R1-ST04 / confirmed に格上げ。
+  - 検証: `cargo fmt --all --check` exit 0、3クレートの `cargo test --lib --locked`（policy 213 / mcp-gw 155 / event 92）すべて 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **mcp_principal に serde default が無く旧設定ファイルが起動失敗** — 2026-11-22 対応済み: `#[serde(default = "default_mcp_principal")]` を追加し、`default_mcp_principal()` を新設（`"opencode"` を供給）。`Default for McpGatewayConfig` も同関数を参照するよう変更し単一情報源化。キー省略時の legacy 設定が `"opencode"` へフォールバックする回帰テスト `legacy_config_without_mcp_principal_uses_default` を追加。根拠
   `rust/jarvis-mcp-gw/src/config.rs:85,210-216,268,319-337` / R1-ST02 / confirmed に格上げ。
   - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 155 passed / 0 failed / 1 ignored、`make ci-local` all gates passed、`make secret-scan` exit 0。

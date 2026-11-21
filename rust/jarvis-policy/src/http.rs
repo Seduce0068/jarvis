@@ -32,11 +32,18 @@ const METRIC_APPROVAL_PENDING: &str = "jarvis_approval_pending";
 /// are registered here, once, so `/metrics` renders them (at 0) even before
 /// the first scrape; their values are refreshed in the `/metrics` handler.
 pub fn install_metrics() -> anyhow::Result<()> {
-    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
-    if METRICS_HANDLE.set(handle).is_err() {
+    // Detect a second call before touching the process-global recorder: once a
+    // recorder is installed, `install_recorder()?` bails out early, which made
+    // the former `set(..).is_err()` warning unreachable.
+    if METRICS_HANDLE.get().is_some() {
         tracing::warn!("metrics recorder already installed; keeping the first handle");
         return Ok(());
     }
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
+    // Only this function writes `METRICS_HANDLE`, after a successful install,
+    // so a concurrent second caller either sees `Some` above or fails the
+    // recorder install itself; the former `is_err()` branch was unreachable.
+    let _ = METRICS_HANDLE.set(handle);
     metrics::describe_gauge!(
         METRIC_KILL_SWITCH_ACTIVATED,
         "Whether the policy kill switch is activated (1) or not (0)"
