@@ -3127,9 +3127,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **deploy.rs と restore.rs で管理サービス一覧が一致しない** — 2026-11-22 判定: **意図的な差分として明記（設計判断は据え置き）**。`deploy.rs::SERVICES`（5サービス: JARVIS 4 + otelcol）はバイナリ配布とその unit 再起動のみ対象。対して `restore.rs` の停止リスト（DB 利用5サービス）と再起動リスト（7サービス: +code-server/otelcol）は、本番 DB 書き換えに伴い旧データを消費した全サービスを再起動する必要がある目的差によるもの。単一共通定数へ集約すると restore での停止漏れ／deploy での不要な再起動を生むため避け、両ファイルへ「リストを統合しない理由」のコメントを追加した。根拠
   `rust/scripts/deploy.rs:20-31`, `rust/scripts/restore.rs:380-392,541-557` / R1-ST05 / likely。
   - 検証: `rust-script --test deploy.rs` 11 passed / `restore.rs` 6 passed、`make ci-local` all gates passed、`make secret-scan` exit 0。`rustfmt --check` は既存の :550 行に無関係な整形差分があるが、今回のコメント追加に起因しないため未修正（範囲外変更を避ける）。
-- [ ] **dead_lettered_at の部分インデックスが reconcile 選択と逆** —
-  `rust/migrations/005_pending_embeddings_dead_letter.sql:9-15,26-28` /
-  R1-ST05 / likely。
+- [x] **dead_lettered_at の部分インデックスが reconcile 選択と逆** — 2026-11-22 対応済み: 新規 `rust/migrations/007_pending_embeddings_active_index.sql` を追加し、選択を支援しない 005 の `idx_pending_embeddings_dead_lettered_at`（`WHERE dead_lettered_at IS NOT NULL`）を削除、選択クエリ（`LIST_PENDING_SQL`: `WHERE dead_lettered_at IS NULL ... ORDER BY created_at ASC LIMIT $1`）を支援する `idx_pending_embeddings_active ON (created_at) WHERE dead_lettered_at IS NULL` を作成（冪等性維持・既存 001〜006 は不変で sqlx checksum 影響なし）。追随として policy/migrations/context 各 service の範囲コメントを through 007 へ、remaining-tasks.md の migration 一覧を 001〜007 の7版＋`sqlx::migrate!()` 最終 applier の実態へ更新。根拠
+  `rust/migrations/007_pending_embeddings_active_index.sql`, `rust/jarvis-context/src/builder.rs:267-272`, `infra/systemd/jarvis-{policy,migrations,context}.service` / R1-ST05 / confirmed に格上げ。
+  - 検証: `systemd-analyze verify` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **valid_backup_date がカレンダー範囲を検証せず latest が文字列比較** — 2026-11-22 対応済み: `valid_backup_date` を `chrono::NaiveDateTime::parse_from_str(date, "%Y%m%d-%H%M%S").is_ok()` による厳密検証へ変更（既存 chrono =0.4.45 依存を利用）。`find_latest_backup` の候補にも `valid_backup_date` フィルタを追加し、不正日付のファイル名を最新選択から除外（辞書順 max() は維持）。カレンダー境界テスト（月13/日32/時25/存在しない日）を追加。根拠
   `rust/scripts/restore.rs:145-147,211-228,334-343` / R1-ST05 / confirmed。
   - 検証: `rustfmt --check` exit 0、`rust-script --test restore.rs` 6 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。子のテスト件数予測（6→7）は誤りだったが実テスト内容は正しい。restore.rs は証跡対象外のため同期不要。

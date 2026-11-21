@@ -793,12 +793,15 @@ CI が動かない間は `make ci-local`（後述）で同一ゲートをロー�
 - [001_initial.sql](../../rust/migrations/001_initial.sql):67 の kill switch
   初期行のみ `INSERT ... ON CONFLICT DO NOTH`。
 - sqlx は workspace に存在し `migrate` feature も有効
-  （[Cargo.toml](../../rust/Cargo.toml):73）。ただし `sqlx::migrate!` の
-  呼び出しや `_sqlx_migrations` を触るコードはなく、適用履歴は未管理。
-- `rust/migrations/` は現行 001〜005 の 5 版（`001_initial.sql`、
+  （[Cargo.toml](../../rust/Cargo.toml):73）。`jarvis-context::builder.rs` が
+  `sqlx::migrate!()` を呼ぶ最終 applier であり、`_sqlx_migrations` による
+  適用履歴管理も有効（2026-11-19 対応済み。旧「未管理」記述は履歴）。
+- `rust/migrations/` は現行 001〜007 の 7 版（`001_initial.sql`、
   `002_pending_embeddings.sql`、`003_audit_decided_by.sql`、
   `004_pending_embeddings_retry.sql`、
-  `005_pending_embeddings_dead_letter.sql`）が存在する。
+  `005_pending_embeddings_dead_letter.sql`、
+  `006_memories_source_text.sql`、
+  `007_pending_embeddings_active_index.sql`）が存在する。
 - migration を追加したら jarvis-policy / jarvis-context / jarvis-migrations
   各 unit の範囲コメントとこの Runbook を同一コミットで更新すること。
 

@@ -1,7 +1,7 @@
 [Unit]
 Description=JARVIS shared DB migrations (sqlx)
 Documentation=https://github.com/Seduce0068/jarvis
-# Pre-flight applier for shared migrations (001 and later, through 005), not
+# Pre-flight applier for shared migrations (001 and later, through 007), not
 # the authoritative owner: jarvis-context.service embeds the same
 # migrations via `sqlx::migrate!()` and is the final applier (the migrations
 # embedded in the context binary are authoritative). This oneshot applies them
