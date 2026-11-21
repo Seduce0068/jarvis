@@ -1994,8 +1994,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/scripts/restore-local.d/configs.sh:133-159,191-` / verified。コード変更なし。
 - [ ] P1-6 暗号化導入時に verify/restore のペイロード名・形式ハードコード
   がゲートを停止（medium）— manifest に format/encryption/signature 記述子。
-- [ ] dsh.md / remaining-tasks.md の firejail・Cedar informational・
-  build-selfhost.sh:47 参照などの古い記述（low 4件）。
+- [x] dsh.md / remaining-tasks.md の旧記述4件 — 2026-11-22 Verify: すべて更新済み。(1) `dsh.md:54` は firejail 実行 fallback 撤去済み・設定値のみ互換残存と明記、(2) `dsh.md:109-110` は「firejail フォールバック失敗」を 2026-11-15 時点の履歴と注記、(3) `remaining-tasks.md:610` は Cedar schema が informational でなく Strict 検証強制と明記、(4) `build-selfhost.sh:47` は 007 まで更新済み（先ラウンド対応）。根拠
+  `docs/integration/dsh.md:54,106-112`, `docs/integration/remaining-tasks.md:606-614`, `infra/scripts/build-selfhost.sh:43-47` / verified。コード変更なし。
 
 - 親が対応: 全ゲート再検証（restore 60件 pass）。
 
