@@ -2139,9 +2139,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] 共有 lib の role 解決と basename 判定 — 2026-11-22 Verify: 既に解消済み（I77-A/I78-A）。`payload-descriptors.sh:122-141` の `resolved_role_for()` が単一 role 解決を行い、明示 `role=other` に config-* / git*.tar.gz の basename が合わなければ rc=1 で fail-closed。`verify-backup.sh:152-157` と `restore-local.sh:276` が同じ resolver を共有し、`test-restore-local.sh:1755-` が「role=other config-*/git* rejected before stop」を回帰固定。根拠
   `infra/scripts/lib/payload-descriptors.sh:122-141`, `infra/scripts/verify-backup.sh:152-157`, `infra/scripts/test-restore-local.sh:1755-` / verified。コード変更なし。
-- [ ] payload_format_check がグローバル hook 経由のみで既定 no-op（low）—
-  上書き忘れで破損ペイロードが無視される fail-open。hook 装填 assert または
-  戻り値での判定伝播。
+- [x] payload_format_check の fail-open 懸念 — 2026-11-22 Verify: 既に解消済み（I77-B / I79-A）。`payload-descriptors.sh:12-26,169-179` の契約どおり、placeholder `on_payload_check` は no-op だが hook 未装填（`PAYLOAD_CHECK_HOOK_INSTALLED=0`）なら `payload_format_check()` が rc=2 で fail-closed。判定は戻り値（0=ok / 1=verdict mismatch / 2=hook 未装填）で伝播し、呼び出し側は rc>=1 を失敗扱い（hook は log-only で counter を持たない）。根拠
+  `infra/scripts/lib/payload-descriptors.sh:12-26,169-183`, `infra/scripts/verify-backup.sh:83-88` / verified。コード変更なし。
 - [ ] root 固定の restore が git アーカイブを root:root で展開し koppe 所有
   repo を編集不能にする（medium）— --no-same-owner／対象所有者での展開。
 - [ ] curl/psql/jq モックが常に成功し fail-closed 分岐が未検証（medium）—
