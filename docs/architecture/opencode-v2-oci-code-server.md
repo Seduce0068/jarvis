@@ -15,8 +15,7 @@ tags:
 generated:
   by: "GPT-5.6 Sol"
   at: "2026-10-04T13:23:00+09:00"
-status: "draft"
-stale_after: "2026-11-04T13:23:00+09:00"
+status: "superseded"
 ---
 
 > **Status: incorporated.** This report is an input to ADR-0001 and is kept
