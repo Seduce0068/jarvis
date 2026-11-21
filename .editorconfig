@@ -14,11 +14,14 @@ trim_trailing_whitespace = true
 [*.{sh,bash}]
 indent_size = 4
 
+[*.rs]
+indent_size = 4
+
 [*.md]
 trim_trailing_whitespace = false
 
 [Makefile]
 indent_style = tab
 
-[*.{json,yaml,yml}]
+[*.{json,jsonc,yaml,yml}]
 indent_size = 2

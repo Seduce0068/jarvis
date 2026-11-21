@@ -104,6 +104,13 @@ Qdrant は**停止せず HTTP API で復元**する。`restore-local.sh` は Qdr
 **注**: 上記 3 の「サービス停止」に Qdrant は含まれない。HTTP API 復元では起動したままにする
 （「現行推奨: restore-local」の不変条件を参照）。
 
+### バックアップ時のタイムアウト設定
+
+`rust/scripts/backup.rs` の Qdrant スナップショット取得は、環境変数
+`JARVIS_QDRANT_TIMEOUT_SECS` でタイムアウト秒数を上書きできる（未設定時は
+既定 30 秒）。値はここに記載せず、運用時に必要な場合のみ設定する。
+設定する場合はバックアップ実行ユーザーの環境へ渡すこと。
+
 ## バックアップsetの選択
 
 ```bash
