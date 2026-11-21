@@ -2174,8 +2174,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] verify-backup.sh の role resolver 統一 — 2026-11-22 Verify: 既に解消済み。`verify-backup.sh:159` が `resolved_role_for "$name" "$role"` を実際に呼び、`:78` のコメントが「I77-A single role resolver ... shared with restore-local.sh's verify_set() and resolve_restore_input() so all three scripts resolve a row's role the same way (I78-A)」と明記。3スクリプト（verify-backup / restore-local の verify_set / resolve_restore_input）で統一済み。根拠
   `infra/scripts/verify-backup.sh:78,152-159` / verified。コード変更なし。
-- [ ] git.sh:33-36 の resolver rc=2 が警告付き成功スキップ（pre-stop
-  ゲートが先に失敗するため通常フローでは到達不能だが防御的改善の余地）。
+- [x] git.sh resolver rc=2 の fail-closed 化 — 2026-11-22 Verify: 既に解消済み（I78-B）。`restore-local.d/git.sh:36-43` が `resolve_restore_input` の rc=2（absent）も rc=1（不正 role/複数一致/ファイル不在）も fail-closed に変更し、「従来の rc=2 警告付き成功スキップは古い checkout を残すため廃止」と明記。resolver 不在時（`:31-34`）も fail。根拠
+  `infra/scripts/restore-local.d/git.sh:30-45` / verified。コード変更なし。
 - ユーザー判断項目は従前どおり（P1-6／P0 ガード／Grafana／Webhook／S9／
   バックアップ外部化／push／共有 lib の実機配布）。
 
