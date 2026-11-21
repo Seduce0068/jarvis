@@ -6,6 +6,9 @@ ADR ディレクトリに変更を加えたコミットの記録。日付見出�
 
 - [`0003-native-web-fetch.md`](0003-native-web-fetch.md): egress allowlist の
   「導入も検討」を実装済み（未設定・空・不正値は `DenyAll` fail-closed）へ更新。
+- [`0001-unified-architecture.md`](0001-unified-architecture.md): Phase 0 の
+  1Password CLI 項目を、コア4サービスの bws 移行済みと `otelcol`（P0-7）未確定
+  の分居へ注記更新（チェック状態は未チェックを維持）。
 
 ## 2026-11-18
 

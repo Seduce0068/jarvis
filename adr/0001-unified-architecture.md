@@ -134,7 +134,7 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 - [x] この ADR 承認・マージ
 - [ ] OpenTofu で OCI A1 VM + Tailscale 疎通 — **非適用（ADR-0004: OCI 不使用、ローカル運用）**
-- [ ] 1Password CLI 設定・秘密情報注入確認 — **要再評価（現行は `bws` 利用、`otelcol` 等の移行状況は要確認）**
+- [ ] 1Password CLI 設定・秘密情報注入確認 — コア4サービスは `bws run` + `/etc/jarvis/bws.env` へ移行済み（2026-11-17 更新メモ参照）。残るは `otelcol` の認証情報供給経路（**P0-7**、未確定）のため、項目全体は未チェックを維持する。
 
 ### Phase 1: 開発環境 + Agent Runtime (Week 1-2)
 

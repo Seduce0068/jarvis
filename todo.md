@@ -3078,8 +3078,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **ADR-0003 の egress allowlist「導入も検討」が実装済み宣言と矛盾** — 2026-11-22 対応済み: ADR の注意事項を実装済み（TOML/env の `egress_allowlist`、未設定・空・不正値は `DenyAll` fail-closed）へ更新し tool-matrix を参照。`adr/log.md` に 2026-11-22 の変更記録を追記（AGENTS.md §8 準拠）。根拠
   `adr/0003-native-web-fetch.md:38-44`, `adr/log.md:5-8`, `docs/integration/tool-matrix.md:171-176` / R2-FG01 / confirmed に格上げ。
   - 検証: secret-scan exit 0、文書のみ変更のため compile/lint/test は省略。
-- [ ] **ADR-0001 の 1Password チェック項目が移行済み注記と矛盾** —
-  `adr/0001-unified-architecture.md:126-131,137` / R2-FG01 / confirmed。
+- [x] **ADR-0001 の 1Password チェック項目が移行済み注記と矛盾** — 2026-11-22 対応済み: Phase 0 のチェック項目を「コア4サービスは bws run + /etc/jarvis/bws.env へ移行済み、残るは otelcol の認証供給経路（P0-7 未確定）」と注記を分離。完全移行ではないためチェック状態は `[ ]` を維持（ADR の決定内容・status は変更せず）。adr/log.md に 2026-11-22 の記録を追記。根拠
+  `adr/0001-unified-architecture.md:126-131,137`, `adr/log.md:5-10` / R2-FG01 / confirmed に格上げ。
+  - 検証: secret-scan exit 0、文書のみ変更のため compile/lint/test は省略。
 - [x] **JARVIS_QDRANT_TIMEOUT_SECS が設定テンプレート側で宣言されていない** — 2026-11-22 対応済み: `docs/integration/backup-restore-runbook.md` の「安全原則」直後に設定キー名と既定 30 秒・上書き方法を記載（値自体は書かない）。根拠
   `rust/scripts/backup.rs:38,193`, `docs/integration/backup-restore-runbook.md:107-113` / R2-FG02 / confirmed に格上げ。
 - [ ] **bootstrap の --skip-opencode が Makefile ターゲットから渡されない** —
