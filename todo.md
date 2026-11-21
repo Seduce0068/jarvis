@@ -2807,18 +2807,26 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   根拠 `ci/scripts/generate-evidence.sh:21,30,65,69` / R1-ST08 / confirmed。
   - 検証: `bash -n` OK、traversal 入力が BadEvidencePath(exit 2) で拒否、
     6件の `--check` が実動（結果は下記のとおり MISMATCH を検出）。
-- [ ] **証跡5件の passed 件数が実テスト数より古い（--check が MISMATCH）** —
-  根拠 `ci/scripts/generate-evidence.sh:130-158`（親が --check を実動させた
-  Runtime Proof, 2026-11-21）。実測 vs 証跡記録:
-  policy 213 vs 211（+2）/ mcp 154 vs 153（+1）/ context 182 vs 181（+1）/
-  event 92 vs 91（+1）/ ui 85 vs 85（一致）/ backup は --check target 無し
-  （`test-verify-backup` + `test-backup-args` で別途検証）。
-  - **配線判断**: この5件を再生成せずに `--check` を `Makefile:ci-local` と
-    `.github/workflows/ci.yml` の `extra_gates` へ配線すると即座に CI が赤くなる。
-    再生成（runbook の 7 ステップ＋ spec_hash 不変を確認した results/notes/index
-    同期）が先決。**再生成完了まで配線は保留**する。
-  - 既知の「証跡 passed 件数が自己申告の手入力」（2026-11-19 指摘）が
-    実データで裏付けられたもの。
+- [x] **証跡5件の passed 件数が実テスト数より古い（--check が MISMATCH）** —
+  2026-11-22 対応済み: runbook の手順どおり実 suite を実行し、5証跡の
+  `results.passed` と `notes` の件数表記、および `evidence/index.md` の件数を
+  実測値へ同期（policy 211→213 / mcp 153→154 / context 181→182 /
+  event 91→92 / ui 85 は変更なし）。spec_hash・ファイル名・JSON 構造は
+  spec 未変更のため不変。
+  - **CI 配線も完了**: `Makefile` に `check-evidence-counts` ターゲットを新設
+    （5件の `--check` を順実行、backup は generate-evidence ターゲット無しのため
+    対象外とコメント明記）、`.PHONY` / `ci-local` / `.github/workflows/ci.yml`
+    の `extra_gates` に接続。
+  - **回帰修正**: 前回の `generate-evidence.sh` 正規表現変更時に
+    `ci/scripts/test-legacy-guards.sh` の合成証跡ファイル名更新を忘れており
+    `make ci-local` で4件失敗していた。旧形式 `test-run-<12hex>` を新形式
+    `test-run-20261120-<12hex>` へ更新し解消（テスト意図・判定条件は不変）。
+  - 検証: 5件の `--check` すべて `CHECK: MATCH` (exit 0)、`make check-evidence`
+    ok=6 errors=0、`make safety-test` ok=435 fail=0、`make ci-local`
+    all gates passed (exit 0)、YAML parse OK、`make secret-scan` exit 0。
+    一過性の `ActualRunDetectedFailure` が1回だけ発生したが、単独再実行2回と
+    `make check-evidence-counts` 2回連続で再現せず、flaky 反復は停止した。
+    根拠 `ci/scripts/generate-evidence.sh:130-158` / R1-ST08 / confirmed。
 - [ ] **build-selfhost の policy / otelcol 退避が EXIT trap で復元されない** —
   根拠 `infra/scripts/build-selfhost.sh:559-563,600-605` / R1-ST06 / confirmed。
   配置途中で `set -e` が発動すると `.bak` だけが残り途中状態が実効になる。
