@@ -3048,9 +3048,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **report.md の月間使用時間式と calc.rs の単位ラベルが結論と乖離** —
   `docs/architecture/report.md:79-83`, `docs/architecture/calc.rs:125-130,237-240` /
   R1-DR01 / confirmed。
-- [ ] **stale_after を超過した OCI 設計文書が draft のまま** —
-  `docs/architecture/opencode-v2-oci-code-server.md:18-19`,
-  `docs/architecture/index.md:15-16` / R1-ST09 / confirmed。
+- [x] **stale_after を超過した OCI 設計文書が draft のまま** — 2026-11-22 対応済み: frontmatter の `status` を `draft` → `superseded` へ変更し、期限超過済みの `stale_after` を削除。本文冒頭の `**Status: incorporated.**`（旧構成の参照資料）および `docs/architecture/index.md:15-16` の「旧構成の参照資料」という位置づけと整合。OKF 準拠（残る日時は RFC 3339 オフセット付き）を維持。根拠
+  `docs/architecture/opencode-v2-oci-code-server.md:18`, `docs/architecture/index.md:15-16` / R1-ST09 / confirmed。
+  - 検証: secret-scan exit 0、markdownlint は既存 baseline（:25, 252 文字）のみで変更行に新規違反なし。`report.md` / `calc.rs` / `dist/` は未変更のため `rust-script calc.rs` の再実行は不要（docs/architecture/AGENTS.md の対象外）。
 - [ ] **バックアップ再設計メモのブロッカー節が解消済み決定を未解決と提示** —
   `docs/integration/backup-redesign-notes.md:143-148` / R5-VU01 / confirmed。
 - [ ] **期限内切れ表示の承認要求でも承認 / 却下ボタンが有効** —
@@ -3070,9 +3070,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **check-workflow-pins の走査対象に ci/*.yml が含まれない** —
   `ci/scripts/check-workflow-pins.sh:70-76`, `ci/review-gate.yml:74,80,83,111` /
   R1-ST08,R1-CF02,R2-FG01 / confirmed。
-- [ ] **kill switch コミット中発動テストの名前が旧契約のまま** —
-  `rust/jarvis-policy/src/lib.rs:714`, `specs/test-policy-approval.md:370-379` /
-  R2-FG01 / confirmed。`kill_switch_during_commit_is_not_published` の改名。
+- [x] **kill switch コミット中発動テストの名前が旧契約のまま** — 2026-11-22 判定: **却下（既知の意図的判断）**。コード側 `rust/jarvis-policy/src/lib.rs:704-712` のコメントが「this test keeps its historical name as a regression ID, but its expectation was updated」と明記し、旧名を回帰 ID として意図的に保持。仕様側 `specs/test-policy-approval.md:373-376` も「lib.rs は担当外のため改名は行わず、改名を提案する」と記録しており、両者が現状維持を意図している。R2-FG01 は仕様側の提案のみを拾い、コード側の意図コメントを読んでいなかった（親の Runtime Proof で確認）。改名は回帰 ID を失うため行わない。根拠
+  `rust/jarvis-policy/src/lib.rs:704-714`, `specs/test-policy-approval.md:370-379` / R2-FG01 → 却下。
 - [ ] **local-restore-design.md の verify-backup.sh 記述が現行実装と乖離** —
   `docs/integration/local-restore-design.md:98-100,339-340`,
   `infra/scripts/lib/payload-descriptors.sh:36-50` / R2-FG01 / confirmed。
