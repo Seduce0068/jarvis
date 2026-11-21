@@ -2248,8 +2248,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `docs/integration/evidence-regeneration.md:334-343` / verified。コード変更なし。
 - [x] secret_scan の CWD 非依存化 — 2026-11-22 Verify: 既に解消済み。`ci/scripts/secret_scan.py:17-24,75-117,136-153` が `repo_root()` + `git -C <root>` で走査対象をリポジトリルートへ固定し、index-count check が `tracked_files()` の CWD 誘発縮小を回帰検知（不一致で fail-closed）。コメントが「repo_root() + -C root が一次防御、index count は回帰ガード」と役割を明記。根拠
   `ci/scripts/secret_scan.py:17-24,75-117,136-153` / verified。コード変更なし。
-- [ ] egress allowlist のテストが本番と逆の「空=無制限」を固定（medium）—
-  from_config 経由に統一。
+- [x] egress allowlist テストの本番契約整合 — 2026-11-22 Verify: 誤検知。`config.rs:222-224` が「blank/malformed → None → sandbox enforces as deny-all; no unrestricted fallback」と明記し、`egress_allowlist_empty_or_invalid_is_fail_closed`（`:775-`）が空文字・空白・カンマのみ・不正パターンすべてで `None` を期待（本番と同じ fail-closed）。また `egress_allowlist_from_toml_is_honoured`（`:708`）等が `from_config` 経由の実際の経路を検証済み。根拠
+  `rust/jarvis-mcp-gw/src/config.rs:222-245,708-740,775-795` / verified。コード変更なし。
 - [ ] pg_url doc が「Slice 1 のみ・接続なし」と古い（low）。
 - [ ] event の ingress トークン OnceLock テストが順序依存（low）。
 
