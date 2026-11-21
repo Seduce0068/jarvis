@@ -3104,8 +3104,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **NULL の decided_by / reason が空文字の承認者として再構成される** — 2026-11-22 対応済み: `decision_from_columns` の `approved` アームで `decided_by` が None / trim 後空、`denied` アームで `reason` が None / trim 後空なら `None` を返すよう変更（doc コメントも更新）。捏造された空 actor / reason を権威として返さず呼び出し側の fail-safe 経路へ流す。有効値は Some のまま、expired / 未知ラベルは不変。境界テストを追加。根拠
   `rust/jarvis-policy/src/persistence.rs:876-907,1284-1345` / R2-DI01 / confirmed。
   - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 214 passed / 0 failed（+1件）、policy 証跡を 213→214 へ同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **非終端の Pending が終端 decision として永続化され得る** —
-  `rust/jarvis-policy/src/persistence.rs:865-896,546-557` / R2-DI01 / likely。
+- [x] **非終端の Pending が終端 decision として永続化され得る** — 2026-11-22 判定: **現状の呼び出し経路では到達しないため据え置き（防御的ガードは不要）**。`commit_decision` の呼び出しは `persistence.rs:738`（外部の終端決着をコミット）と `:858`（期限切れを `ApprovalDecision::Expired` でコミット）の2箇所のみで、いずれも `Pending` を渡さない。`decision_columns` は `Pending` を `"pending"` に写像するが、`decision_from_columns` が未知ラベルとして `None` を返すため fail-safe 側へ流れる。`ApprovalError` 新バリアント追加は http.rs の網羅 match と HTTP 契約変更を伴いリスクに見合わないため行わない。根拠
+  `rust/jarvis-policy/src/persistence.rs:522-528,738,858,865-896` / R2-DI01 / likely → 据え置き。
+  - 検証: 呼び出し元 grep で2箇所とも終端決定であることを確認。コード変更なし。
 - [ ] **embedding_dim の既定値が embedding_model と結び付いていない** —
   `rust/jarvis-context/src/config.rs:29-38,654-658`, `src/builder.rs:994-999` /
   R2-DI01 / confirmed。
