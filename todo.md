@@ -3083,8 +3083,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: secret-scan exit 0、文書のみ変更のため compile/lint/test は省略。
 - [x] **JARVIS_QDRANT_TIMEOUT_SECS が設定テンプレート側で宣言されていない** — 2026-11-22 対応済み: `docs/integration/backup-restore-runbook.md` の「安全原則」直後に設定キー名と既定 30 秒・上書き方法を記載（値自体は書かない）。根拠
   `rust/scripts/backup.rs:38,193`, `docs/integration/backup-restore-runbook.md:107-113` / R2-FG02 / confirmed に格上げ。
-- [ ] **bootstrap の --skip-opencode が Makefile ターゲットから渡されない** —
-  `scripts/bootstrap/bootstrap.rs:43,249`, `Makefile:36,42,45` / R2-FG02 / confirmed。
+- [x] **bootstrap の --skip-opencode が Makefile ターゲットから渡されない** — 2026-11-22 対応済み: 既存4ターゲットの挙動は維持し、新規に `bootstrap-server-minimal` / `bootstrap-server-minimal-dry` を追加して `--skip-opencode --skip-android-mcp` を渡す（同種の未配線だった `--skip-android-mcp` も併せて解消）。`.PHONY` も更新。根拠
+  `scripts/bootstrap/bootstrap.rs:43-45,249,303`, `Makefile:3,42-49` / R2-FG02 / confirmed。
+  - 検証: `make -n` で両オプションの受け渡しを確認、`make bootstrap-server-minimal-dry` exit 0（導入步骤スキップ）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **deploy.rs の build/restart/logs/status サブコマンドに Makefile ターゲットが無い** — 2026-11-22 判定: **却下（既知の設計判断）**。`adr/0004-local-only-no-oci.md:41-43` が `rust/scripts/deploy.rs` を「ローカル運用では使わない」と明記し、`Makefile:54-57` の `deploy` は無効化、`deploy-dry`（:59）はレガシー参照としてのみ残る。Makefile へサブコマンド用ターゲットを追加すれば ADR-0004 と矛盾するため行わない。子（R2-FG02）は ADR の設計判断を読んでいなかった。根拠
   `rust/scripts/deploy.rs:189-200`, `Makefile:54-60`, `adr/0004-local-only-no-oci.md:41-43` / R2-FG02 → 却下。
 - [ ] **otelcol 自己メトリクス 8888 が prometheus scrape 対象に無い** —

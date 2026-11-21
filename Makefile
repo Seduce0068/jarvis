@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit check-evidence check-evidence-counts init-config
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-server-minimal bootstrap-server-minimal-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit check-evidence check-evidence-counts init-config
 
 # 既定値
 JARVIS_ROOT ?= $(HOME)/jarvis
@@ -38,6 +38,12 @@ bootstrap-server: ## サーバー(Linux/VPS)をブートストラップ
 
 bootstrap-server-dry: ## サーバーブートストラップ (ドライラン)
 	@rust-script scripts/bootstrap/bootstrap.rs --target server --source-root . --dry-run --root $(JARVIS_ROOT)
+
+bootstrap-server-minimal: ## サーバーブートストラップ (opencode/android-mcp 導入をスキップ)
+	@rust-script scripts/bootstrap/bootstrap.rs --target server --source-root . --skip-opencode --skip-android-mcp --root $(JARVIS_ROOT)
+
+bootstrap-server-minimal-dry: ## サーバーブートストラップのドライラン (opencode/android-mcp スキップ)
+	@rust-script scripts/bootstrap/bootstrap.rs --target server --source-root . --dry-run --skip-opencode --skip-android-mcp --root $(JARVIS_ROOT)
 
 bootstrap-termux: ## Termux(Android)をブートストラップ
 	@rust-script scripts/bootstrap/bootstrap.rs --target termux --source-root . --root $(JARVIS_ROOT)
