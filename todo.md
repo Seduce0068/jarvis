@@ -2641,8 +2641,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       （medium、子が途中終了）— deploy と同じ契約へ。
 - [x] reconcile_pending の同時実行制御なし（low）— advisory lock または — **2026-11-22 重複整理**: 同一内容は 2668 行目で完了記録済み。
       条件付き UPDATE。
-- [ ] mcp_allowlist.toml:9-13 の行番号陳腐化、CONTEXT_TOKEN_HEADER 重複、
-      hickory/rsa 等 major 更新待ち29件（再評価 2026-12-20）。
+- [x] mcp_allowlist.toml 行番号・CONTEXT_TOKEN_HEADER 重複 — 2026-11-22 Verify: 両方解消済み。(1) `infra/config/mcp_allowlist.toml:9-14` が「Line numbers are intentionally omitted to avoid drifting」と明記し行番号陳腐化を回避。(2) `CONTEXT_TOKEN_HEADER` は `jarvis-core/src/lib.rs:19` の `JARVIS_CONTEXT_TOKEN_HEADER` に集約され、context 側は alias（grpc.rs:9）＋core 定数との一致テスト（lib.rs:403）で重複を解消。根拠 `infra/config/mcp_allowlist.toml:9-14`, `rust/jarvis-core/src/lib.rs:19,400-403`, `rust/jarvis-context/src/{config.rs:942,grpc.rs:9}` / verified。
+- [ ] hickory / rsa / rmcp 等 major 更新待ち29件（再評価 2026-12-20）— ユーザー判断・外部依存の更新判断待ち。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
