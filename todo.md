@@ -3115,8 +3115,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/scripts/restore-local.d/qdrant.sh:95-103,113-120` / R2-DI01 / confirmed。
 - [ ] **前回失敗の隔離コレクションが検証を汚染しうる** —
   `infra/scripts/restore-local.d/qdrant.sh:37-38,63-70,82-93` / R2-DI01 / likely。
-- [ ] **backup の configs / repos 失敗が warn のみで成功報告** —
-  `rust/scripts/backup.rs:259-281,284-321` / R1-ST05 / confirmed。
+- [x] **backup の configs / repos 失敗が warn のみで成功報告** — 2026-11-22 対応済み: `backup_configs` の tar 失敗と `backup_repos` の git bundle 失敗（1件でも）を `require_command_success()` 経由の `anyhow::bail!` で fail-closed 化。warn 文言は維持し、main の "Backup completed successfully" に到達しない。`repos_dir` 未存在は従来どおり任意コンポーネントとして `Ok(())`。pure な `require_command_success` を抽出し境界テスト2件を追加。根拠
+  `rust/scripts/backup.rs:259-343,559-576` / R1-ST05 / confirmed。
+  - 検証: `rustfmt --check` exit 0（親が自動修正）、`rust-script --test backup.rs` 9 passed / 0 failed、`--help` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。backup.rs は証跡対象外（backup 証跡は test-verify-backup + test-backup-args）のため同期不要。
 - [ ] **deploy.rs と restore.rs で管理サービス一覧が一致しない** —
   `rust/scripts/deploy.rs:20-27`, `restore.rs:373-385,537-555` / R1-ST05 / likely。
 - [ ] **dead_lettered_at の部分インデックスが reconcile 選択と逆** —

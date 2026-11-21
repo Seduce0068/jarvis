@@ -256,6 +256,20 @@ fn backup_qdrant(backup_dir: &Path, date: &str) -> Result<()> {
     Ok(())
 }
 
+/// Turns a non-zero external command status into a hard error so a failed
+/// `tar` / `git bundle` can never be reported as a successful backup.
+///
+/// The `success` flag is passed in instead of an `ExitStatus` so this stays a
+/// pure function and the fail-closed path can be unit-tested without actually
+/// executing external commands.
+fn require_command_success(command: &str, success: bool, status: &str) -> Result<()> {
+    if success {
+        Ok(())
+    } else {
+        anyhow::bail!("{command} failed with status {status}; aborting backup")
+    }
+}
+
 fn backup_configs(backup_dir: &Path, date: &str) -> Result<()> {
     info!("Backing up configuration files...");
     let output_file = backup_dir.join(format!("configs-{}.tar.gz", date));
@@ -272,12 +286,12 @@ fn backup_configs(backup_dir: &Path, date: &str) -> Result<()> {
         .status()
         .context("Failed to run tar")?;
 
-    if status.success() {
-        info!("Config backup completed: {}", output_file.display());
-    } else {
+    if !status.success() {
         warn!("Config backup partially failed");
     }
+    require_command_success("Config backup (tar)", status.success(), &status.to_string())?;
 
+    info!("Config backup completed: {}", output_file.display());
     Ok(())
 }
 
@@ -309,11 +323,16 @@ fn backup_repos(backup_dir: &Path, date: &str) -> Result<()> {
                 .status()
                 .context("Failed to run git bundle")?;
 
-            if status.success() {
-                info!("Repo backup completed: {}", output_file.display());
-            } else {
+            if !status.success() {
                 warn!("Failed to backup repo: {}", repo_name);
             }
+            require_command_success(
+                &format!("Repo backup ({repo_name}, git bundle)"),
+                status.success(),
+                &status.to_string(),
+            )?;
+
+            info!("Repo backup completed: {}", output_file.display());
         }
     }
 
@@ -531,5 +550,25 @@ mod tests {
     fn require_snapshot_name_uses_first_snapshot() {
         let response = snapshot_response(r#"{"result":[{"name":"first"},{"name":"second"}]}"#);
         assert_eq!(require_snapshot_name(&response).unwrap(), "first");
+    }
+
+    #[test]
+    fn require_command_success_accepts_success() {
+        assert!(
+            require_command_success("tar", true, "exit status: 0").is_ok(),
+            "a successful command must not fail the backup"
+        );
+    }
+
+    #[test]
+    fn require_command_success_rejects_failure() {
+        assert!(
+            require_command_success("tar", false, "exit status: 2").is_err(),
+            "a failed tar must fail the backup"
+        );
+        assert!(
+            require_command_success("git bundle", false, "exit status: 1").is_err(),
+            "a failed repo bundle must fail the backup"
+        );
     }
 }
