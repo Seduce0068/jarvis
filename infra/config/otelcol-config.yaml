@@ -134,11 +134,11 @@ processors:
         type: latency
         latency:
           threshold_ms: 5000
-      - name: jarvis-critical
-        type: string_attribute
-        string_attribute:
-          key: "jarvis.severity"
-          values: ["critical", "high"]
+      # I104-B: the former `jarvis-critical` policy keyed on `jarvis.severity`,
+      # but no span producer in this repo emits that attribute (grep: 1 hit,
+      # the policy itself). Tail-sampling policies are OR-evaluated, so critical
+      # traces were already retained by the `errors` policy (status.code ERROR).
+      # The dead policy was removed instead of inventing a severity source.
       - name: probabilistic
         type: probabilistic
         probabilistic:

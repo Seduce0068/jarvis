@@ -3092,8 +3092,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/config/otelcol-config.yaml:198,207,22-47` / R2-FG02,R5-VU01 / confirmed。
 - [ ] **journald receiver の units に opencode.service が無い** —
   `infra/config/otelcol-config.yaml:49-60` / R5-VU01 / likely。
-- [ ] **tail_sampling の jarvis.severity が属性未生成で常に非マッチ** —
-  `infra/config/otelcol-config.yaml:137,140,89` / R2-FG02 / confirmed。
+- [x] **tail_sampling の jarvis.severity が属性未生成で常に非マッチ** — 2026-11-22 対応済み: repo 全体で `jarvis.severity` を生成する箇所が無い（grep 1件＝ポリシー定義のみ）ため、死んだ `jarvis-critical` ポリシーを削除し理由をコメント化。tail-sampling policies は OR 評価で、重要トレースは既に `errors`（status.code ERROR）ポリシーが捕捉していたため挙動は不変。属性生成を新設する設計判断は避けた。根拠
+  `infra/config/otelcol-config.yaml:137-142` / R2-FG02 / confirmed。
+  - 検証: `otelcol-contrib validate --config=infra/config/otelcol-config.yaml` exit 0（ダミー env 使用）、YAML parse OK（policies = errors/slow/probabilistic）、`make secret-scan` exit 0。
 - [ ] **mcp-gw リリースバイナリの SHA256 既知良好値が未記録** —
   `docs/integration/tool-matrix.md:66,76-81` / R5-VU01 / confirmed。
 - [ ] **NULL の decided_by / reason が空文字の承認者として再構成される** —
