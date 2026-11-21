@@ -1937,8 +1937,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   合わせ、新規2ケース（ヘッダ無し・ペイロード無し／自明ファイルのみ）で
   exit 1 を追加。値・パス非出力、実バックアップ先は非接触。検証は親が実施
   （回帰は 23→25 件、証跡の passed 29→31 は親が再生成）。
-- [ ] 隔離 DB `jarvis_restore_test` が後始末されず2回目の復元が不能
-  （medium）— Qdrant と対称に DROP、失敗経路も trap で片付け。
+- [x] 隔離 DB `jarvis_restore_test` の後始末 — 2026-11-22 Verify: 既に解消済み。`infra/scripts/restore-local.d/pg.sh:22-26` の後始末ポリシーどおり、検証成功時に `:121-128` で DROP し `ISOLATED_DB_CREATED=0` を export。CREATE 後の異常終了は `restore-local.sh:644-656` の `on_exit` が `ISOLATED_DB_CREATED=1` を見て片付け、`:893` で trap 登録済み（`--keep-isolated-db` は明示保持の opt-in）。2回目の復元が不能になる懸念は解消済み。根拠
+  `infra/scripts/restore-local.d/pg.sh:22-26,93-96,121-128`, `infra/scripts/restore-local.sh:644-656,665,893` / verified。コード変更なし。
 - [x] migration 範囲コメントを through 007 へ統一（2026-11-22）: 007 追加に伴い `jarvis-{policy,migrations,context}.service` の範囲コメント、`build-selfhost.sh:43-45` の migration 列表（001..007）、`docs/integration/remaining-tasks.md:799` の一覧を更新。旧「through 004」は重複エントリ（2件）のため両方を完了扱いにする。
 - [ ] pending_embeddings ゲージが dead_letter / exhausted / remove 後に
   更新されず未処理件数を過大報告（low）。
