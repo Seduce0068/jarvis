@@ -2190,8 +2190,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] 共有 lib の verdict 強制契約 — 2026-11-22 Verify: 既に解消済み（I79-A）。`payload-descriptors.sh:18-26,169-178` の契約どおり hook は log-only でカウンタを持たず、呼び出し側が `payload_format_check()` の戻り値（0=ok / 1=verdict mismatch / 2=hook 未装填）で判定。実際の呼び出し側 `verify-backup.sh:185-191` と `restore-local.sh:436-439` が `format_rc -ge 1` で fail 加算（rc=2 はさらに ERROR 表示）、rc==1 も fail-closed。根拠
   `infra/scripts/lib/payload-descriptors.sh:18-26,169-178`, `infra/scripts/verify-backup.sh:184-191`, `infra/scripts/restore-local.sh:434-439` / verified。コード変更なし。
-- [ ] 設計書が必須とする flock 同時実行防止が restore-local.sh に未実装
-  （medium）— 実装するか設計書から要件を削除。
+- [x] restore-local.sh の flock 同時実行防止 — 2026-11-22 Verify: 既に解消済み（I81-A）。`restore-local.sh:765-800` の main() entry gate が `flock` でインスタンス間を直列化（既定 `/run/jarvis/restore.lock`、明示 LOCK_FILE 上書き可、`/run` 不可時 `/tmp` フォールバック＋WARN、flock 不在時 fail-closed）。設計書要件は実装で充足。根拠
+  `infra/scripts/restore-local.sh:45-57,765-800` / verified。コード変更なし。
 - [ ] 設計書の「スキップ指定は事前検証から除外しない」が実装と正反対
   （low）— 設計書を CLI help のセマンティクスへ更新。
 - [x] 本番未接触アサーションの集約と前提ログ必須化（重複2件を統合） — 2026-11-22 Verify: 既に解消済み（I80-A / I84-C）。`assert_no_production_contact()`（`:1458`）が代表ケースへ集約され、`:1752` で `I80-A: representative full guard` として1回だけ呼ばれる。`assert_production_boundary()`（`:1495-`）は「前提ログは systemctl-query.log、空なら vacuous pass を禁止して fail」と明記し失敗クラスごとの境界を検証。根拠
