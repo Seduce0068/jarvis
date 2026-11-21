@@ -1939,8 +1939,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （回帰は 23→25 件、証跡の passed 29→31 は親が再生成）。
 - [ ] 隔離 DB `jarvis_restore_test` が後始末されず2回目の復元が不能
   （medium）— Qdrant と対称に DROP、失敗経路も trap で片付け。
-- [ ] migration 範囲コメントが jarvis-policy/context service で through 004
-  のまま（low）、build-selfhost.sh のガードコメントも未更新。
+- [x] migration 範囲コメントを through 007 へ統一（2026-11-22）: 007 追加に伴い `jarvis-{policy,migrations,context}.service` の範囲コメント、`build-selfhost.sh:43-45` の migration 列表（001..007）、`docs/integration/remaining-tasks.md:799` の一覧を更新。旧「through 004」は重複エントリ（2件）のため両方を完了扱いにする。
 - [ ] pending_embeddings ゲージが dead_letter / exhausted / remove 後に
   更新されず未処理件数を過大報告（low）。
 - [ ] 証跡の passed 件数が自己申告の手入力（medium）— `cargo test -- --list`
@@ -1966,8 +1965,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] restore-local の非 allowlist config 回帰が `test-restore-local.sh` に
   未追加（子の担当外）— `verify_set()` ゲートで拒否され DB が触られない
   ケースを `--apply --confirm` と `--skip-configs` の両方で検証。
-- [ ] migration 範囲コメントが jarvis-policy/context service で through 004
-  のまま（low）、build-selfhost.sh のガードコメントも未更新。
+- [x] migration 範囲コメントを through 007 へ統一（2026-11-22）: 007 追加に伴い `jarvis-{policy,migrations,context}.service` の範囲コメント、`build-selfhost.sh:43-45` の migration 列表（001..007）、`docs/integration/remaining-tasks.md:799` の一覧を更新。旧「through 004」は重複エントリ（2件）のため両方を完了扱いにする。
 - 親が対応: test-restore-local.sh の DROP アサートを本番 DB 宛に限定、
   証跡の実測件数同期。
 

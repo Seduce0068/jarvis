@@ -40,8 +40,9 @@ fi
 # `sqlx::migrate!()` in jarvis-context embeds rust/migrations into the binary
 # at build time, while jarvis-migrations.service applies the same SQL from
 # /opt/jarvis/rust/migrations as a pre-flight. The current shared set is
-# 001..005: 001_initial, 002_pending_embeddings, 003_audit_decided_by,
-# 004_pending_embeddings_retry, 005_pending_embeddings_dead_letter. The set
+# 001..007: 001_initial, 002_pending_embeddings, 003_audit_decided_by,
+# 004_pending_embeddings_retry, 005_pending_embeddings_dead_letter,
+# 006_memories_source_text, 007_pending_embeddings_active_index. The set
 # embedded in the binary and the *.sql files globbed here must be from the
 # same commit. sqlx records a per-migration checksum in _sqlx_migrations, so
 # a binary/source mismatch makes context fail at startup ("migration ... was
