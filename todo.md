@@ -2145,8 +2145,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   repo を編集不能にする（medium）— --no-same-owner／対象所有者での展開。
 - [x] curl/psql/jq モックの fail-closed 分岐検証 — 2026-11-22 Verify: 既に解消済み（I80-A / I84-C）。`test-restore-local.sh:1553-1631` の `inject_fail <curl_mode> <psql_mode> <jq_mode> <confirm> <label> <fragment> <scope>` が失敗クラス（isolated / prod_db 等）と CONFIRM 0/1 の両方で呼ばれ、`:33-36` のコメントが「非ゼロ exit + 固定 fail 語彙のみ」「本番境界を1件チェック」と契約を明記。MOCK_*_MODE（`:215`）で各ツールの失敗を注入可能。`make safety-test` ok=435 fail=0。根拠
   `infra/scripts/test-restore-local.sh:33-36,215,1553-1631` / verified。コード変更なし。
-- [ ] MOCK_LOG が本番の postgres precondition と psql ラッパを迂回（low）—
-  専用名 `JARVIS_RESTORE_FIXTURE_MODE` へ変更し本番で拒否。
+- [x] MOCK_LOG の本番迂回懸念 — 2026-11-22 判定: **却下（本番コードは MOCK_LOG を参照しない）**。`MOCK_LOG` は `test-restore-local.sh:150,219,280,296,340` 等でテスト用ログディレクトリとして使われ、モック psql/curl/jq は `$tmp/bin/` の一時 Perl/bash スタブ。本番 `infra/scripts/restore-local.d/pg.sh` は `psql` を直接呼ぶだけで MOCK_LOG 参照は grep 0件。よって本番が MOCK_LOG 設定によってテストモード化することはなく、改名しても挙動は変わらない。I86-C（`:44`）で psql モックの分岐漏れは対応済み。根拠
+  `infra/scripts/test-restore-local.sh:44,150,214-240`, `infra/scripts/restore-local.d/pg.sh`（MOCK_LOG 参照なし） / root-verified → 却下。コード変更なし。
 - [x] env キー写像テストの ENV_PREFIX contract 化 — 2026-11-22 対応済み: 3クレートのテスト内ローカル prefix 再定義を削除し本番定数へ統一（`policy.rs:24` / `context.rs:18` / `event.rs:19` の `ENV_PREFIX` を `use super::*` 経由で参照）。jarvis-mcp-gw は既に本番定数参照で変更不要。アサーション・件数・Serialized ロジックは不変。根拠
   `rust/jarvis-{policy,context,event}/src/config.rs` / verified。
   - 検証: `cargo fmt --all -- --check` exit 0、4クレート `cargo test --lib --locked` すべて pass（policy 215 / context 182 / event 92 / mcp-gw 155、件数不変）、`make ci-local` all gates passed、`make secret-scan` exit 0。
