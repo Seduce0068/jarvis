@@ -3116,8 +3116,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **kill switch 永続化失敗時に operator 属性が system で上書き** — 2026-11-22 対応済み: `persist()` の3つの fail-closed 再-arm 経路（serialize / create_dir_all / fs::write 失敗）を `self.arm(PERSIST_FAILURE_REASON)` から `self.arm_with_actor(PERSIST_FAILURE_REASON, <保持 actor>)` へ変更。actor スロットが None の場合のみ従来どおり "system" へフォールバック。reason は固定語彙 `REASON_PERSISTENCE_FAILURE` を維持し、fail-closed / warn / typed error は不変。回帰テスト `persist_failure_preserves_activated_by_actor` を追加。根拠
   `rust/jarvis-policy/src/kill_switch.rs:451-505,780-800` / R2-ER01 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 215 passed / 0 failed（+1件）、policy 証跡 214→215 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **有効な隔離コレクションが本番 upload 前に削除される** —
-  `infra/scripts/restore-local.d/qdrant.sh:95-103,113-120` / R2-DI01 / confirmed。
+- [x] **有効な隔離コレクションが本番 upload 前に削除される** — 2026-11-22 判定: **却下（既存の本番境界ガードと矛盾）**。子の推奨どおり Step 2b の DELETE を CONFIRM=1 で本番 upload 後に延期するよう変更したが、`make safety-test` が2件失敗（ok=433 fail=2）: 「isolated cleanup HTTP 500 / curl_rc=7 → --apply --confirm: production boundary violated」。既存回帰テストは「隔離 cleanup が失敗したら本番 Qdrant へ一切触れるな」という fail-closed 契約を検証しており、削除を後ろへ移すと cleanup 失敗時に本番適用へ進んでしまう。本番境界ガードの方が安全上の優先度が高いため変更を差し戻し、既存契約を維持（差し戻し後 safety-test ok=435 fail=0 / ci-local all gates passed）。子の指摘する「本番 upload 失敗で隔離コレクションが失われる」は snapshot からの再作成で回避可能なため受け入れない。根拠
+  `infra/scripts/restore-local.d/qdrant.sh:94-120`, `ci/scripts/test-legacy-guards.sh`（I24 系 production boundary 回帰） / R2-DI01 → 却下。
+  - 検証: 変更適用時に失敗を検出、差し戻しで safety-test 435件すべて pass を確認。
 - [ ] **前回失敗の隔離コレクションが検証を汚染しうる** —
   `infra/scripts/restore-local.d/qdrant.sh:37-38,63-70,82-93` / R2-DI01 / likely。
 - [x] **backup の configs / repos 失敗が warn のみで成功報告** — 2026-11-22 対応済み: `backup_configs` の tar 失敗と `backup_repos` の git bundle 失敗（1件でも）を `require_command_success()` 経由の `anyhow::bail!` で fail-closed 化。warn 文言は維持し、main の "Backup completed successfully" に到達しない。`repos_dir` 未存在は従来どおり任意コンポーネントとして `Ok(())`。pure な `require_command_success` を抽出し境界テスト2件を追加。根拠
