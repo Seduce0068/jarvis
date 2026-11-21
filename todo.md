@@ -2041,7 +2041,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   チェック、runbook の3コマンドを権限付き形へ統一。
 - [ ] Persistent=true の timer を失敗経路で無条件 restart すると、壊れた DB の
   COMPLETE バックアップが作られる（medium）— 失敗時は timer を停止維持。
-- [ ] jarvis-backup.service の ExecStartPost が repo 作業コピー（711 koppe）
+- [x] jarvis-backup.service の ExecStartPost が repo 作業コピー（711 koppe） — **2026-11-22 重複整理**: 既に解消済み。`jarvis-backup.service:25` の ExecStartPost は `/opt/jarvis/scripts/verify-backup.sh`（root:root コピー）を参照し、repo 作業コピー（711 koppe）ではない。825 行目の Wants= 対応記録も参照。
   を参照し postgres から読めない（medium）— /opt の root:root コピーへ変更。
 - [x] restore-local.d の入力名記述子導出 — 2026-11-22 Verify: 既に解消済み（I75-B）。`pg.sh:45-49`、`qdrant.sh:24-28`、`git.sh:31-35`、`configs.sh:51` がすべて `resolve_restore_input "$SET_DIR" <role> <legacy_name>` で manifest の role/format 記述子から入力を解決し、第3引数は legacy 3列フォールバックのみ。固定名はデフォルト引数として残るが記述子が優先。根拠
   `infra/scripts/restore-local.d/{pg,qdrant,git,configs}.sh` / verified。コード変更なし。
@@ -2324,7 +2324,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 80 の残り指摘（未対応）
 
-- [ ] `ci/review-gate.yml`（未配線の reference）に actions/checkout@v4 が
+- [x] `ci/review-gate.yml`（未配線の reference）に actions/checkout@v4 が — **2026-11-22 重複整理**: 既に解消済み。2342 行目で `ci/review-gate.yml` の checkout@v4 4箇所をフル SHA 固定＋未配線 reference の明記済み。
       4箇所残存 — 未配線を理由に明示除外するか別タスクで SHA 固定。
 - [ ] reqwest 0.13 統一は cargo check/test を伴う別タスク（現状は exact pin
       で解決版を固定、共存理由を記録済み）。
@@ -2354,7 +2354,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `patterns: HashMap` を要求するパースに失敗し既定6パターンのみが有効。
   `[patterns]` 配下へ移動＋実設定のパース回帰を追加。
 - [x] 証跡 generator／UI README／Makefile:test に --locked が無い（medium）。 — **2026-11-22 重複整理**: 同一内容は 2378 行目で完了記録済み。
-- [ ] policy/event の起動検証テストが env 存在で早期 return し vacuous pass
+- [x] policy/event の起動検証テストが env 存在で早期 return し vacuous pass — **2026-11-22 重複整理**: 既に解消済み。2377 行目で policy/event 起動検証テストの env 非依存化（vacuous pass 解消）と egress 境界回帰4件を追加済み。
   （medium）— Serialized で明示値をマージして常にアサート。
 - [ ] egress ホスト長 253/254・ラベル長 63/64 の境界回帰が無い（low）。
 - [ ] ContextConfig の Debug が pg_url を redact せず userinfo がダンプされる
