@@ -2188,8 +2188,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 75 の残り指摘（未対応）
 
-- [ ] 共有 lib が「戻り値で verdict を強制できる」と主張しつつ3呼び出し側が
-  rc=1 を無視（medium）— `format_rc -ge 1` で fail 加算、hook は記録専用に。
+- [x] 共有 lib の verdict 強制契約 — 2026-11-22 Verify: 既に解消済み（I79-A）。`payload-descriptors.sh:18-26,169-178` の契約どおり hook は log-only でカウンタを持たず、呼び出し側が `payload_format_check()` の戻り値（0=ok / 1=verdict mismatch / 2=hook 未装填）で判定。実際の呼び出し側 `verify-backup.sh:185-191` と `restore-local.sh:436-439` が `format_rc -ge 1` で fail 加算（rc=2 はさらに ERROR 表示）、rc==1 も fail-closed。根拠
+  `infra/scripts/lib/payload-descriptors.sh:18-26,169-178`, `infra/scripts/verify-backup.sh:184-191`, `infra/scripts/restore-local.sh:434-439` / verified。コード変更なし。
 - [ ] 設計書が必須とする flock 同時実行防止が restore-local.sh に未実装
   （medium）— 実装するか設計書から要件を削除。
 - [ ] 設計書の「スキップ指定は事前検証から除外しない」が実装と正反対
