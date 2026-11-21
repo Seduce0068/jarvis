@@ -1926,7 +1926,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 65 の残り指摘（未対応）
 
-- [ ] **restore-local の config allowlist 検証が本番 DB/Qdrant 上書き後**
+- [x] **restore-local の config allowlist 検証が本番 DB/Qdrant 上書き後** — **2026-11-22 重複整理**: 同一内容は 1952 行目で完了記録済み。
   （confirmed high）— `configs.sh:62` の検査を `verify_set()` の必須ゲート
   （stop_services より前）へ移動。`--skip-configs` 時も通过させる。
 - [x] verify-backup.sh の legacy 経路がペイロード0件を受理（confirmed medium / I69-B）—
@@ -1962,7 +1962,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 66 の残り指摘（未対応）
 
-- [ ] restore-local の非 allowlist config 回帰が `test-restore-local.sh` に
+- [x] restore-local の非 allowlist config 回帰が `test-restore-local.sh` に — **2026-11-22 重複整理**: 同一内容は 1974 行目で完了記録済み。
   未追加（子の担当外）— `verify_set()` ゲートで拒否され DB が触られない
   ケースを `--apply --confirm` と `--skip-configs` の両方で検証。
 - [x] migration 範囲コメントを through 007 へ統一（2026-11-22）: 007 追加に伴い `jarvis-{policy,migrations,context}.service` の範囲コメント、`build-selfhost.sh:43-45` の migration 列表（001..007）、`docs/integration/remaining-tasks.md:799` の一覧を更新。旧「through 004」は重複エントリ（2件）のため両方を完了扱いにする。
@@ -2033,7 +2033,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 69 の残り指摘（未対応）
 
-- [ ] **timer が active だが disabled だと停止されない**（confirmed high）—
+- [x] **timer が active だが disabled だと停止されない**（confirmed high）— — **2026-11-22 重複整理**: 同一内容は 2059 行目で完了記録済み。
   `inventory_services()` の is-enabled && is-active 前提。timer は is-active
   のみで停止対象にし、停止後 inactive を確認。
 - [ ] **復元実行ユーザー前提が postgres(0700 backup_dir) と systemctl(root)
@@ -2198,7 +2198,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   無条件 pass（low）— 代表ケースへ集約し前提ログを必須化。
 - [ ] jq モックの empty／prod_empty モードが未使用（low）— case '' 分岐の
   回帰を追加。
-- [ ] secret_scan.py が追跡ファイル0件で fail-open（medium）— 空集合を
+- [x] secret_scan.py が追跡ファイル0件で fail-open（medium）— 空集合を — **2026-11-22 重複整理**: 同一内容は 2217 行目で完了記録済み。
   exit 1＋回帰追加。
 - [ ] remaining-tasks.md の PASSWORD_FILE 節（行数ズレ＋「未修正」主張）、
   local-restore-design.md の「自動スクリプト未実装」現在形（low 2件）。
@@ -2356,7 +2356,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `pii_patterns.toml` がトップレベルキーで14パターンを定義するが
   `patterns: HashMap` を要求するパースに失敗し既定6パターンのみが有効。
   `[patterns]` 配下へ移動＋実設定のパース回帰を追加。
-- [ ] 証跡 generator／UI README／Makefile:test に --locked が無い（medium）。
+- [x] 証跡 generator／UI README／Makefile:test に --locked が無い（medium）。 — **2026-11-22 重複整理**: 同一内容は 2378 行目で完了記録済み。
 - [ ] policy/event の起動検証テストが env 存在で早期 return し vacuous pass
   （medium）— Serialized で明示値をマージして常にアサート。
 - [ ] egress ホスト長 253/254・ラベル長 63/64 の境界回帰が無い（low）。
@@ -2449,13 +2449,13 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 87 の残り指摘（未対応・次ラウンド優先）
 
-- [ ] **RustSec 既知脆弱版38件**（confirmed high）— `cargo audit --no-fetch`
+- [x] **RustSec 既知脆弱版38件**（confirmed high）— `cargo audit --no-fetch` — **2026-11-22 重複整理**: 同一内容は 2475 行目で完了記録済み。
   実測。patch 版あり: tokio 1.53.3 / rustls 0.23.46 / rustls-webpki 0.103.16 /
   webpki-roots 1.0.10 / rustix 1.1.6 / pulldown-cmark 0.13.6 / ctutils 0.4.4 /
   ui heapless 0.9.4。major 更新要: hickory 0.26 / rsa 0.10 / rmcp 3.9。
 - [ ] CI / Makefile に cargo audit ゲートが無い（medium）— 両 lock を対象に
   extra_gates / ci-local へ追加、advisory DB 更新方針と ignore 運用を決定。
-- [ ] **OTel traces filter が全 Rust スパンをドロップ**（confirmed high）—
+- [x] **OTel traces filter が全 Rust スパンをドロップ**（confirmed high）— — **2026-11-22 重複整理**: 同一内容は 2483 行目で完了記録済み。
   `otelcol-config.yaml:99-104` の include（`jarvis.*` 等）が実スパン名
   （`check` / `process_event` / `approve_approval`）と不一致。include 拡張または
   スパン名変更＋E2E 検証。
@@ -2580,7 +2580,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       DONE と報告（中）— スクリプト側にも degraded 検出と rollback。
 - [ ] deploy.rs のヘルスゲートが固定5秒＋1回プローブで低速起動を誤判定
       （中）— 上限付きリトライ（20回×0.5s 等）へ。
-- [ ] drift が casbin_model.conf の内容・owner/mode を未検査（中）。
+- [x] drift が casbin_model.conf の内容・owner/mode を未検査（中）。 — **2026-11-22 重複整理**: 同一内容は 2591 行目で完了記録済み。
 - [x] ui/README.md:39 と remaining-tasks.md:288 の clippy 例へ
       undocumented_unsafe_blocks を追加。
 - [x] policy 仕様へ 410 Gone、3仕様へ /health degraded 契約を反映、
@@ -2663,7 +2663,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 96 の残り指摘（未対応）
 
-- [ ] 両 DB バックアップギャップ（high）— 子実装は既存回帰と矛盾したため
+- [x] 両 DB バックアップギャップ（high）— 子実装は既存回帰と矛盾したため — **2026-11-22 重複整理**: 同一内容は 2725 行目で完了記録済み。
       差し戻し済み。manifest role と verify/restore を整合させた再設計が必要。
 - [x] reconcile_pending の同時実行制御（low）→ mark_failed を条件付き UPDATE
       （`attempts <= $2`）へ、古いスナップショットの上書きを防止。
@@ -2680,7 +2680,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 97 の残り指摘（未対応）
 
-- [ ] 両 DB バックアップギャップ（high）— manifest role と verify/restore を
+- [x] 両 DB バックアップギャップ（high）— manifest role と verify/restore を — **2026-11-22 重複整理**: 同一内容は 2725 行目で完了記録済み。
       整合させた再設計が必要（前回の子実装は既存回帰と矛盾し差し戻し済み）。
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
@@ -2696,7 +2696,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 98 の残り指摘（未対応）
 
-- [ ] 両 DB バックアップギャップ（high）— 設計判断が必要のため一旦保留。
+- [x] 両 DB バックアップギャップ（high）— 設計判断が必要のため一旦保留。 — **2026-11-22 重複整理**: 同一内容は 2725 行目で完了記録済み。
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
@@ -2711,7 +2711,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 99 の残り指摘（未対応）
 
-- [ ] 両 DB バックアップギャップ（high）— 設計判断待ち。判断材料は
+- [x] 両 DB バックアップギャップ（high）— 設計判断待ち。判断材料は — **2026-11-22 重複整理**: 同一内容は 2725 行目で完了記録済み。
       `local-restore-design.md` に整備済み。
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
