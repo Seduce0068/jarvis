@@ -3088,8 +3088,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `make -n` で両オプションの受け渡しを確認、`make bootstrap-server-minimal-dry` exit 0（導入步骤スキップ）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **deploy.rs の build/restart/logs/status サブコマンドに Makefile ターゲットが無い** — 2026-11-22 判定: **却下（既知の設計判断）**。`adr/0004-local-only-no-oci.md:41-43` が `rust/scripts/deploy.rs` を「ローカル運用では使わない」と明記し、`Makefile:54-57` の `deploy` は無効化、`deploy-dry`（:59）はレガシー参照としてのみ残る。Makefile へサブコマンド用ターゲットを追加すれば ADR-0004 と矛盾するため行わない。子（R2-FG02）は ADR の設計判断を読んでいなかった。根拠
   `rust/scripts/deploy.rs:189-200`, `Makefile:54-60`, `adr/0004-local-only-no-oci.md:41-43` / R2-FG02 → 却下。
-- [ ] **otelcol 自己メトリクス 8888 が prometheus scrape 対象に無い** —
-  `infra/config/otelcol-config.yaml:198,207,22-47` / R2-FG02,R5-VU01 / confirmed。
+- [x] **otelcol 自己メトリクス 8888 が prometheus scrape 対象に無い** — 2026-11-22 対応済み: `prometheus` receiver の `scrape_configs` に `job_name: 'otelcol'`（target `localhost:8888`、`metrics_path: /metrics`）を追加。`service.telemetry.metrics` の pull reader（127.0.0.1:8888）を scrape し、Collector 自身のドロップ・memory_limiter 活動を Grafana で可視化。根拠
+  `infra/config/otelcol-config.yaml:45-53,203-210` / R2-FG02,R5-VU01 / confirmed。
+  - 検証: `otelcol-contrib validate --config=...` exit 0（ダミー env 使用）、YAML parse で scrape jobs = policy/mcp-gw/event/context/qdrant/otelcol、`make secret-scan` exit 0。
 - [ ] **journald receiver の units に opencode.service が無い** —
   `infra/config/otelcol-config.yaml:49-60` / R5-VU01 / likely。
 - [x] **tail_sampling の jarvis.severity が属性未生成で常に非マッチ** — 2026-11-22 対応済み: repo 全体で `jarvis.severity` を生成する箇所が無い（grep 1件＝ポリシー定義のみ）ため、死んだ `jarvis-critical` ポリシーを削除し理由をコメント化。tail-sampling policies は OR 評価で、重要トレースは既に `errors`（status.code ERROR）ポリシーが捕捉していたため挙動は不変。属性生成を新設する設計判断は避けた。根拠

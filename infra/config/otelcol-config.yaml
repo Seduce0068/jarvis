@@ -46,6 +46,14 @@ receivers:
           static_configs:
             - targets: ['localhost:6333']
 
+        # I105-B: scrape the collector's own telemetry (service.telemetry.metrics
+        # pull reader on 127.0.0.1:8888) so drops and memory_limiter activity are
+        # visible in Grafana instead of the collector monitoring only others.
+        - job_name: 'otelcol'
+          static_configs:
+            - targets: ['localhost:8888']
+          metrics_path: '/metrics'
+
   # journald receiver for JARVIS systemd units
   # 全サービスが journal へ出力するため /var/log/jarvis/*.log は空だった。
   journald:
