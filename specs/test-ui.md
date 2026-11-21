@@ -417,8 +417,10 @@ TC-U19 は [policy_client.rs](../ui/src/policy_client.rs) の
 
 ### エビデンス再生成手順（親が実行）
 
-本仕様の変更で `spec_hash` が変わるため、
-`evidence/test-run-20261120-eb2d4b97ba30.json` は古くなる。
+本仕様の変更で `spec_hash` が変わるため、対応する証跡は再生成対象となる。
+現行の証跡ファイル名は [evidence/index.md](../evidence/index.md) の ui 行を
+参照する（仕様本文には spec_hash とファイル名を記載しない。記載するとその
+記述自体が spec_hash を変えてしまうため）。
 [再生成 Runbook](../docs/integration/evidence-regeneration.md) の 7 ステップに
 従い、親が以下を実行する（本エージェントは証跡を変更しない）。
 `test-policy-approval.md` の変更に伴う policy 証跡も同時に再生成対象である。

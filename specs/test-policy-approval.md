@@ -419,8 +419,9 @@ policy source 不在 → 正常の順に判定し、3 種類の共有固定本�
 
 ### エビデンス再生成（完了済み）
 
-現行証跡は `evidence/test-run-20261120-f32635cab7e6.json`
-（`spec_hash` `sha256:f32635cab7e689de95b3a77fe9ec2eababff62a8c9bbda0707091d7cc4d48968`）。
+現行証跡は [evidence/index.md](../evidence/index.md) の policy 行を参照する。
+spec_hash および証跡ファイル名の接頭辞は証跡 JSON 側が権威とし、
+仕様本文には記載しない（記載するとその記述自体が spec_hash を変えてしまうため）。
 再生成は完了済みであり、存在しない旧ファイル名を「再生成手順」として残さないこと。
 
 本タスクで TC-D3 に `I103-D` 契約マーカーを追加したため、親が

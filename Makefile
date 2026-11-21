@@ -104,12 +104,15 @@ check-evidence: ## テスト仕様とエビデンスのハッシュ一致を検�
 
 # 各証跡 JSON の results と実 cargo suite の導出件数を照合（MATCH/MISMATCH のみ出力）。
 # backup は generate-evidence ターゲットが無いため --check 件数照合の対象外。
+# 証跡ファイル名は evidence/index.md の [run-<name>]: 定義から解決する（双重管理を避ける）。
 check-evidence-counts: ## 証跡 JSON の results と実 suite の導出件数を照合
-	bash ci/scripts/generate-evidence.sh policy --check evidence/test-run-20261120-f32636593dbe.json
-	bash ci/scripts/generate-evidence.sh mcp --check evidence/test-run-20261120-4dcaeb3768bb.json
-	bash ci/scripts/generate-evidence.sh context --check evidence/test-run-20261120-4eb0d21232f5.json
-	bash ci/scripts/generate-evidence.sh event --check evidence/test-run-20261120-568915d95563.json
-	bash ci/scripts/generate-evidence.sh ui --check evidence/test-run-20261120-020d62ac6029.json
+	@for name in policy mcp context event ui; do \
+	  file=$$(sed -n "s/^\[run-$$name\]: //p" evidence/index.md); \
+	  if [ -z "$$file" ] || [ ! -f "evidence/$$file" ]; then \
+	    echo "FAIL: EVIDENCE_REF_MISSING $$name" >&2; exit 1; \
+	  fi; \
+	  bash ci/scripts/generate-evidence.sh "$$name" --check "evidence/$$file" || exit 1; \
+	done
 
 check-shell: ## 全 tracked *.sh の静的解析（bash -n / shellcheck）
 	@bash ci/scripts/check-shell.sh

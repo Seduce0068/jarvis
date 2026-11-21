@@ -2981,10 +2981,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **tokio-tungstenite 0.21.0 が古い TLS スタックを保持** —
   `rust/jarvis-event/Cargo.toml:54`, `rust/Cargo.lock:4910-4923,3796-3806` /
   R4-DP01 / confirmed。0.26 系への更新で rustls 0.22 系統を排除できる。
-- [ ] **仕様内の証跡ファイル名・ハッシュが実在値と不一致（2 仕様）** —
-  `specs/test-ui.md:421`, `specs/test-policy-approval.md:422-424`,
-  `evidence/index.md:29` / R1-ST09 / confirmed。
-  実在は `test-run-20261120-f32636593dbe.json`。check-evidence の監視外。
+- [x] **仕様内の証跡ファイル名・ハッシュが実在値と不一致（2 仕様）** — 2026-11-22 対応済み。根本原因は、仕様本文に自身の `spec_hash` を記載するとその記述自体が hash を変える自己言及的構造だったため、仕様から `spec_hash` 数値と証跡ファイル名を削除し、`evidence/index.md` の `[run-*]` 定義を権威へ集約（UI/policy 両仕様）。spec_hash 再計算に伴い両証跡を `test-run-20261120-035fb8483fb1.json` / `test-run-20261120-24de84a91940.json` へ rename し、`test_basis_ref.spec_hash` / `notes` / index を同期。さらに `Makefile:check-evidence-counts` のファイル名ハードコードを廃し、index の `[run-<name>]:` 定義から動的解決するよう変更（双重管理の解消）。根拠
+  `specs/test-ui.md:419-425`, `specs/test-policy-approval.md:419-428`, `evidence/index.md:29-34`, `Makefile:104-114` / R1-ST09 / confirmed。
+  - 検証: 5件の `--check` すべて MATCH、`make check-evidence` ok=6 errors=0、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、`make secret-scan` exit 0。git は旧→新ファイルを rename として検出。
 - [ ] **test-event REQ-15 / TC-E3 の Scenario が仕様から欠落** —
   `specs/test-event.md:52,212-217`, `evidence/test-run-20261120-568915d95563.json:41` /
   R2-FG01,R3-TQ01 / confirmed。
