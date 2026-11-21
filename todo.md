@@ -1990,9 +1990,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: 両ファイルを実読し契約が一致することを確認。コード変更なし。
 - [x] generate-evidence.sh の failed=0 固定出力 — 2026-11-22 確認: 既に解消済み。生成モードの断片は `ci/scripts/generate-evidence.sh:123-125` で「failed=0 は --list 由来の予測値であり実測ではない／--list は failing test を検出できない／適用前に実 suite を実行し --check で実 run も照合」と明示（I71-D）。`--check` モードは実 suite を実行し、exit 非0なら `ActualRunDetectedFailure` で fail-closed（:130-138）。TODO の推奨（予測値の明示／実 run 照合）は両方とも充足。根拠
   `ci/scripts/generate-evidence.sh:116-138` / verified。コード変更なし。
-- [ ] restore_configs が owner/mode を明示せず root:root 0600 方針から
-  漂移（medium）— allowlist6対象の期待 owner/mode を単一表で定義し
-  install で是正。
+- [x] restore_configs の owner/mode 方針（重複エントリ2件を統合） — 2026-11-22 確認: 既に解消済み。`infra/scripts/restore-local.d/configs.sh:133-159` の `EXPECTED_CONFIG_MODE` が allowlist 6対象＋全 unit の期待 owner/mode（root:root 0644）を単一表で定義し、`expected_config_mode()` アクセサ経由で restore_configs / build / deploy の3経路が参照（:2093 の既存完了記録も参照）。旧「0600 方針」は現在の 0644 契約へ既に更新済み。根拠
+  `infra/scripts/restore-local.d/configs.sh:133-159,191-` / verified。コード変更なし。
 - [ ] P1-6 暗号化導入時に verify/restore のペイロード名・形式ハードコード
   がゲートを停止（medium）— manifest に format/encryption/signature 記述子。
 - [ ] dsh.md / remaining-tasks.md の firejail・Cedar informational・
@@ -2018,8 +2017,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] P1-6 暗号化導入時に verify/restore のペイロード名・形式ハードコードが
   ゲートを停止（medium）— manifest に format/encryption/signature 記述子。
   過去のラウンドから継続、ユーザー判断（暗号化鍵の注入先）を含む。
-- [ ] restore_configs の owner/mode 方針漂移（medium）— allowlist6対象の
-  期待 owner/mode を単一表で定義し install で是正。
+- [x] restore_configs の owner/mode 方針（重複エントリ2件を統合） — 2026-11-22 確認: 既に解消済み。`infra/scripts/restore-local.d/configs.sh:133-159` の `EXPECTED_CONFIG_MODE` が allowlist 6対象＋全 unit の期待 owner/mode（root:root 0644）を単一表で定義し、`expected_config_mode()` アクセサ経由で restore_configs / build / deploy の3経路が参照（:2093 の既存完了記録も参照）。旧「0600 方針」は現在の 0644 契約へ既に更新済み。根拠
+  `infra/scripts/restore-local.d/configs.sh:133-159,191-` / verified。コード変更なし。
 - 親が対応: build-selfhost.sh:402 の sudo install root 所有化（chown 修正の
   残余リスク）、全ゲート再検証。
 
