@@ -542,6 +542,11 @@ fn restart_services() -> Result<()> {
     info!("Restarting services...");
     run_sudo(&["systemctl", "daemon-reload"], "systemctl daemon-reload")?;
 
+    // Intentionally broader than the stop list above and deploy.rs::SERVICES:
+    // restore rewrites the production DB, so every service that consumed the
+    // old data (opencode, code-server) and the telemetry collector must be
+    // restarted, not only the ones that were stopped before the rewrite.
+    // Do not collapse these lists into one shared constant.
     for service in [
         "jarvis-policy",
         "jarvis-mcp-gw",

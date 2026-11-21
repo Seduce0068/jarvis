@@ -3118,8 +3118,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **backup の configs / repos 失敗が warn のみで成功報告** — 2026-11-22 対応済み: `backup_configs` の tar 失敗と `backup_repos` の git bundle 失敗（1件でも）を `require_command_success()` 経由の `anyhow::bail!` で fail-closed 化。warn 文言は維持し、main の "Backup completed successfully" に到達しない。`repos_dir` 未存在は従来どおり任意コンポーネントとして `Ok(())`。pure な `require_command_success` を抽出し境界テスト2件を追加。根拠
   `rust/scripts/backup.rs:259-343,559-576` / R1-ST05 / confirmed。
   - 検証: `rustfmt --check` exit 0（親が自動修正）、`rust-script --test backup.rs` 9 passed / 0 failed、`--help` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。backup.rs は証跡対象外（backup 証跡は test-verify-backup + test-backup-args）のため同期不要。
-- [ ] **deploy.rs と restore.rs で管理サービス一覧が一致しない** —
-  `rust/scripts/deploy.rs:20-27`, `restore.rs:373-385,537-555` / R1-ST05 / likely。
+- [x] **deploy.rs と restore.rs で管理サービス一覧が一致しない** — 2026-11-22 判定: **意図的な差分として明記（設計判断は据え置き）**。`deploy.rs::SERVICES`（5サービス: JARVIS 4 + otelcol）はバイナリ配布とその unit 再起動のみ対象。対して `restore.rs` の停止リスト（DB 利用5サービス）と再起動リスト（7サービス: +code-server/otelcol）は、本番 DB 書き換えに伴い旧データを消費した全サービスを再起動する必要がある目的差によるもの。単一共通定数へ集約すると restore での停止漏れ／deploy での不要な再起動を生むため避け、両ファイルへ「リストを統合しない理由」のコメントを追加した。根拠
+  `rust/scripts/deploy.rs:20-31`, `rust/scripts/restore.rs:380-392,541-557` / R1-ST05 / likely。
+  - 検証: `rust-script --test deploy.rs` 11 passed / `restore.rs` 6 passed、`make ci-local` all gates passed、`make secret-scan` exit 0。`rustfmt --check` は既存の :550 行に無関係な整形差分があるが、今回のコメント追加に起因しないため未修正（範囲外変更を避ける）。
 - [ ] **dead_lettered_at の部分インデックスが reconcile 選択と逆** —
   `rust/migrations/005_pending_embeddings_dead_letter.sql:9-15,26-28` /
   R1-ST05 / likely。

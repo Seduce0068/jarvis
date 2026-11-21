@@ -18,6 +18,10 @@ use std::process::{Command, Stdio};
 use tracing::{info, warn};
 
 /// Services managed by this deploy script (build + restart + logs + status).
+/// Deliberately distinct from restore.rs's stop/restart lists: this script only
+/// ships built binaries and restarts their units. It does not stop DB clients
+/// or the agent runtime, because no database is rewritten here. Do not merge
+/// these lists just to make them identical -- see restore.rs:stop/restart.
 const SERVICES: [&str; 5] = [
     "jarvis-policy",
     "jarvis-mcp-gw",
