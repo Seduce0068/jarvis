@@ -3121,8 +3121,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   R1-ST05 / likely。
 - [ ] **valid_backup_date がカレンダー範囲を検証せず latest が文字列比較** —
   `rust/scripts/restore.rs:145-152,102-115,321-340` / R1-ST05 / confirmed。
-- [ ] **Gateway が書き込み専用の config クローンを保持** —
-  `rust/jarvis-mcp-gw/src/gateway.rs:229,243`, `src/lib.rs:52` / R1-ST02 / confirmed。
+- [x] **Gateway が書き込み専用の config クローンを保持** — 2026-11-22 対応済み: `Gateway` 構造体から未使用の `config` フィールドと `#[allow(dead_code)]` を削除し、`Gateway::new` を `(allowlist, sandbox)` の2引数へ変更。`lib.rs:68` とテスト内2箇所（gateway.rs:835/1301、子が親の調査を訂正）も更新。残る3フィールドはすべて本番利用され dead_code 警告なし。根拠
+  `rust/jarvis-mcp-gw/src/gateway.rs:227-243,835,1301`, `src/lib.rs:68` / R1-ST02 / confirmed。
+  - 検証: `cargo fmt --all --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 155 passed / 1 ignored（件数不変）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **install_metrics の OnceLock 警告分岐が実質到達不能（policy / mcp-gw / event）** — 2026-11-22 対応済み: 3クレートとも `install_metrics()` の先頭で `METRICS_HANDLE.get().is_some()` を检查し、既存文言の warn を出して `Ok(())` で早期リターンするよう変更。到達不能だった `set(..).is_err()` 分岐を削除し `let _ = METRICS_HANDLE.set(handle);` に置換。policy は理由コメントも追加。根拠
   `rust/jarvis-policy/src/http.rs:34-56`, `rust/jarvis-mcp-gw/src/http.rs:27-36`, `rust/jarvis-event/src/http.rs:22-30` / R1-ST01,R1-ST02,R1-ST04 / confirmed に格上げ。
   - 検証: `cargo fmt --all --check` exit 0、3クレートの `cargo test --lib --locked`（policy 213 / mcp-gw 155 / event 92）すべて 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。

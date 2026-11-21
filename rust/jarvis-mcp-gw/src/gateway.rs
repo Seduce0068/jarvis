@@ -224,9 +224,7 @@ fn resolve_target<'a>(
     })
 }
 
-#[allow(dead_code)]
 pub struct Gateway {
-    config: crate::config::McpGatewayConfig,
     allowlist: Arc<crate::allowlist::AllowList>,
     sandbox: Arc<crate::sandbox::Sandbox>,
     /// Upstream MCP servers keyed by registration name.
@@ -235,12 +233,10 @@ pub struct Gateway {
 
 impl Gateway {
     pub async fn new(
-        config: crate::config::McpGatewayConfig,
         allowlist: Arc<crate::allowlist::AllowList>,
         sandbox: Arc<crate::sandbox::Sandbox>,
     ) -> Result<Self> {
         Ok(Self {
-            config,
             allowlist,
             sandbox,
             servers: RwLock::new(HashMap::new()),
@@ -836,7 +832,7 @@ requires_approval = false
         };
         let allowlist = Arc::new(crate::allowlist::AllowList::new(&config).await.unwrap());
         let sandbox = Arc::new(crate::sandbox::Sandbox::new(&config).await.unwrap());
-        Gateway::new(config, allowlist, sandbox).await.unwrap()
+        Gateway::new(allowlist, sandbox).await.unwrap()
     }
 
     /// Register `name` with a mock liveness probe instead of a real child
@@ -1302,7 +1298,7 @@ requires_approval = false
         };
         let allowlist = Arc::new(crate::allowlist::AllowList::new(&config).await.unwrap());
         let sandbox = Arc::new(crate::sandbox::Sandbox::new(&config).await.unwrap());
-        let gateway = Gateway::new(config, allowlist, sandbox).await.unwrap();
+        let gateway = Gateway::new(allowlist, sandbox).await.unwrap();
 
         assert!(gateway.servers.read().await.is_empty());
     }
