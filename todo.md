@@ -3013,9 +3013,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **非推奨レガシースクリプトが本番デプロイで配布され続ける** —
   `rust/scripts/backup.rs:16-23`, `rust/scripts/restore.rs:15-22`,
   `rust/scripts/deploy.rs:508-528` / R1-ST05 / confirmed。
-- [ ] **restore.rs の Qdrant HTTP クライアントに timeout 設定が無い** —
-  `rust/scripts/backup.rs:35-38,192-206`, `rust/scripts/restore.rs:454-462` /
-  R1-ST05 / confirmed。backup 側の `JARVIS_QDRANT_TIMEOUT_SECS` が未反映。
+- [x] **restore.rs の Qdrant timeout 設定** — 2026-11-22 対応済み。backup.rs:192-206 と同じ枠組みを restore.rs へ追加: `QDRANT_HTTP_TIMEOUT_SECS=30` / `JARVIS_QDRANT_TIMEOUT_SECS` 定数、pure `qdrant_http_timeout_from(raw: Option<&str>) -> Duration`（不正値・0 は既定 30 秒）、`build_qdrant_client()` を `Client::builder().timeout(...).build()` に。`Client::new()` を置換。upload URL・multipart・エラー語彙は不変。回帰 `qdrant_http_timeout_falls_back_to_default` を追加（None/0/非数→30s、45→45s）。根拠
+  `rust/scripts/restore.rs:39,42-45,471-495,515,258-280` / V-82 / confirmed。
+  - 検証: `rustfmt --edition 2024 --check` exit 0、`rust-script --test rust/scripts/restore.rs` 7 passed（+1、rust-script は証跡対象外）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **restore_postgres の DROP→CREATE→psql が非アトミック** —
   `rust/scripts/restore.rs:360-435,533-555` / R1-ST05 / confirmed。
 - [ ] **restore_configs がダウンロード tar を検証なしで `/` に展開**
