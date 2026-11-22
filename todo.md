@@ -1674,7 +1674,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   reconcile / f64→f32 キャスト経路へ `validate_embedding` を適用。〔Round 57 で対応済み〕
 - [x] REQ 集合ゲートの全 evidence 検証 — 2026-11-22 並列 Verify（V-13）: 既に解消済み。`check-evidence.sh:80-83` の evi_reqs_entries はリストで、全 evidence 走査（:233）で各 requirements を記録し、比較ループ（:494-504）が entries 全件を for で回して set 一致を検証（REQ_SET_MISMATCH:<spec>:<evi_file>）。tamper 回帰（test-legacy-guards.sh:726-789）も存在。
 - [ ] OTel SDK ガードがより詳細な RUST_LOG ターゲット指定で上書き可能（low）。
+  - 2026-11-22 並列 Verify（V-16）: **未解決（confirmed）**。4サービスとも `EnvFilter::new(RUST_LOG)` の後に `OTEL_SDK_LOG_GUARD=[opentelemetry_sdk=warn,...]` を add_directive するだけで、`RUST_LOG=opentelemetry_sdk::trace=debug` のようなより長い target 付き指定は「等価」でないため共存しサブツリーで debug が勝つ（tracing-subscriber 0.3.23 の DirectiveSet::add は Equal 時のみ置換、Ord は target 長優先）。回帰は RUST_LOG=debug の1件のみ。 victIM には事業者側の明示設定が必要で low。
 - [ ] サイズ境界が content/source/metadata のみ（low）— payload / query /
+  - 2026-11-22 並列 Verify（V-17, :1708 と同一）: **未解決（confirmed）**。共有バリデータは MAX_CONTENT_BYTES / MAX_SOURCE_BYTES / MAX_METADATA_BYTES / MAX_METADATA_DEPTH / MAX_SEARCH_LIMIT のみで payload / query / event_type / correlation_id 用の定数・検証が無い。context HTTP は event_type/payload/correlation_id を無検証で UnifiedEvent へ渡し、search_memory も query を無検証。event も HTTP/gRPC とも無検証透過。BareJson の 413 は axum の 2MiB ボディ全体制限で個別フィールド境界の代用にならない。I57-C 回帰は content/source/metadata と深い metadata の4ケースのみ。
   event_type / correlation_id にも上限を追加。
 - [ ] 発掘: policy/mcp-gw/event の JsonRejection 未対応、event の生 anyhow
   ログ、UI の expires_at 境界不一致、backup-preflight の BK-4 表記、
@@ -1704,7 +1706,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   410/Expired 分離、または winner が Pending/Expired なら失敗表示。〔Round 58 で対応済み〕
 - [x] skipped 正当化が "ignored" 部分文字列一致（low）、index 件数検証が
   reference-style リンクのみ（low）。〔Round 58 で対応済み〕
-- [ ] mcp-gw の http_error() が `{error:#}` で anyhow チェーンを OTLP へ。
+- [x] mcp-gw http_error() の anyhow チェーン — 2026-11-22 並列 Verify（V-18）: 子は `http.rs:371-377` の `format!("{error:#}")` が main.rs:284-288 の OTLP exporter 併設 subscriber へ流れることを confirmed と判定（3166-3167 行目の speculative メモを格上げ）。ただし「Internal はクライアントへ固定メッセージ、詳細は tracing ログへ隔離」は型ベースエラー分類（R1 対応）の意図的な設計判断であり、OTLP はそのログ経路の一部。機微情報は PII フィルタ／fixed vocabulary の方針で別途制御するため、コード変更は行わず設計判断として記録のみ更新。
 - [ ] サイズ境界が payload/query/event_type/correlation_id に未適用（low）。
 
 - 親が対応: fmt 差分、Cargo.lock 更新（offline）、tracing field 形式依存
@@ -1842,6 +1844,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   を要求、またはシナリオ別 pass 数を記録。〔Round 63 で対応済み〕
 - [x] migration pre-flight unit コメントが「through 004」のまま（low）。〔Round 63 で対応済み〕
 - [ ] `overflow_warning_records_event_metadata_without_payload` が並列実行時
+  - 2026-11-22 並列 Verify（V-19）: **未解決（confirmed）**。当該テスト（event/normalizer.rs:713-747）はローカル LogBuffer＋thread-local subscriber を使い、context 側の `static CAPTURE_LOCK: Mutex<()>`（builder.rs:3593 / pii.rs:352）による直列化が無い（別クレート）。positive control（:736-739）はあるが直列化ではない。兄弟テストの span capture 諦止＋SUBSCRIBER_PROBE も当該テストには未適用。
   にフレーキ（tracing ログキャプチャ競合）— 再実行で pass、構造修正は未実施。
 
 - 親が対応: fmt 差分、I64-A pristine 一時ツリーへの evidence/index.md
@@ -1861,7 +1864,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 63 の残り指摘（未対応）
 
-- [ ] Round 61 の4証跡の notes に BareJson／415／413／no-leak キーワードが
+- [x] Round 61 の4証跡の notes キーワード — 2026-11-22 並列 Verify（V-20）: 既に解消済み（1877-1878 行目の完了記録）。4証跡（policy/mcp/context/event）の notes に BareJson / 415 / 413 / 400 / no-leak が含まれ、各 spec の I61-A 契約ステップで検出されるキーワード数以上に出現。`check-evidence.sh:102,127,377` の CONTRACT_KEYWORDS 比較＋SCENARIO_STEP_UNCOVERED（baseline 例外なし）が担保。—
   未同期（medium）— 現在 `BASELINE_CONTRACT_STEPS` で grandfather 中。
   notes へ実測キーワードを追記し baseline を削除して strict 化する。
 - [x] status_label の 413/415 丸め — 2026-11-22 並列 Verify（V-11）: 既に解消済み（1881-1882 行目の完了記録）。`jarvis-core/src/lib.rs:134` の単一定義が 413 => "413"（:145）/ 415 => "415"（:146）を返し、"other" はフォールバックに限定。pinn テスト（:621,632-633）が固定バケットを検証し、4サービスは core 関数を呼ぶだけ。
