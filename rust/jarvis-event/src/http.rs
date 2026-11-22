@@ -187,7 +187,10 @@ fn router_with_admin_token(normalizer: Arc<Normalizer>, token: Option<String>) -
 }
 
 /// Count every HTTP request so `/metrics` exposes more than an empty page.
-async fn track_metrics(
+///
+/// `pub(crate)` so sibling modules (e.g. the 8085 webhook router in
+/// `normalizer.rs`) can layer the same middleware; not part of the public API.
+pub(crate) async fn track_metrics(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {

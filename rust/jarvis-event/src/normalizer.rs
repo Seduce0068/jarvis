@@ -190,7 +190,8 @@ impl Normalizer {
             .route("/webhook/android", post(android_webhook))
             .route("/webhook/gmail", post(gmail_webhook))
             .route("/webhook/calendar", post(calendar_webhook))
-            .with_state(this.clone());
+            .with_state(this.clone())
+            .layer(axum::middleware::from_fn(crate::http::track_metrics));
 
         let listener = tokio::net::TcpListener::bind(&this.config.webhook_addr).await?;
         info!("Webhook server listening on {}", this.config.webhook_addr);
@@ -660,6 +661,36 @@ mod tests {
             SRC.matches(attribute).count(),
             4,
             "every webhook handler must skip the raw payload in its span"
+        );
+    }
+
+    /// R2: the 8085 webhook Router must be counted by the same
+    /// `jarvis_http_requests_total` middleware already wired on the 8083 HTTP
+    /// router. A dynamic counter assertion would require a process-global
+    /// recorder (test binaries never run `main`'s `install_metrics`), so guard
+    /// the wiring at the source level. The slice is limited to
+    /// `start_webhook_server`'s Router construction, so the literals in this
+    /// test live outside it and cannot create a false positive.
+    #[test]
+    fn webhook_router_layers_track_metrics_after_with_state() {
+        const SRC: &str = include_str!("normalizer.rs");
+        const FN_MARKER: &str = "pub async fn start_webhook_server";
+        const LAYER: &str = ".layer(axum::middleware::from_fn(crate::http::track_metrics))";
+
+        let at = SRC.find(FN_MARKER).expect("start_webhook_server exists");
+        let tail = &SRC[at..];
+        let serve_at = tail.find("axum::serve").expect("webhook serve call exists");
+        let body = &tail[..serve_at]; // Router construction only.
+
+        let with_state_at = body
+            .find(".with_state(")
+            .expect("webhook Router has with_state");
+        let layer_at = body
+            .find(LAYER)
+            .expect("webhook Router must layer track_metrics middleware");
+        assert!(
+            layer_at > with_state_at,
+            "track_metrics must be layered after with_state so state is preserved"
         );
     }
 

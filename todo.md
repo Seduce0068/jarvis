@@ -2805,12 +2805,13 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **HA トークン失効が Fatal 扱いで listener を永久停止** —
   `rust/jarvis-event/src/sources.rs:81,124-126`, `src/lib.rs:86-90` /
   R1-ST04 / confirmed。/health は 200 のまま再起動まで回復しない。
-- [ ] **Webhook Router にリクエスト計測ミドルウェアが未配線** —
-  `rust/jarvis-event/src/normalizer.rs:187-193`, `src/http.rs:191,194-207` /
-  R1-ST04 / confirmed。8085 の 400/413/415 がメトリクスに現れない。
+  - 2026-11-22 並列 Verify（V-106）: 未解決（confirmed）。sources.rs:127-129 で auth_invalid が ListenFailure::Fatal、:81 で return Err してループ脱出。doc（:164-170）が「invalid token stops the listener」と設計意図を明記。health は opencode 到達性のみ判定（http.rs:297-298）で listener は再起動まで復帰しない。Transient 化は設計判断。
+- [x] Webhook Router のリクエスト計測配線 — 2026-11-22 対応済み。`http.rs:193` の track_metrics を pub(crate) 化し、`normalizer.rs:187-194` の start_webhook_server Router に `.layer(axum::middleware::from_fn(crate::http::track_metrics))` を追加（http.rs の router_with_admin_token と同じ配線順）。8085 の4 webhook リクエストも `jarvis_http_requests_total{service,status}` に計測される。静的回帰 `webhook_router_layers_track_metrics_after_with_state` を追加。ルート／ハンドラ／BareJson 契約は不変。根拠 `rust/jarvis-event/src/{http.rs:189-205,normalizer.rs:187-194,667-695}` / V-107 / confirmed。
+  - 検証: fmt exit 0、event 95 passed（+1）+ integration 6 passed、証跡 94→95 同期し `--check` 5件 MATCH、clippy -D warnings exit 0。
 - [ ] **Android / HA の外部クライアントが生成されるだけで未配線** —
   `rust/jarvis-event/src/lib.rs:25-31,67-68`, `src/sources.rs:37-63,313-334` /
   R1-ST04 / confirmed。既存 P3-10 は `Normalizer` 側の削除で、`EventNormalizer` は別。
+  - 2026-11-22 並列 Verify（V-108）: 未解決（confirmed）。AndroidClient は lib.rs:67-68 で生成・保持されるが参照ゼロで spawn もなし（#[allow(dead_code)] 付与）。HA は WebSocket listen_events のみ配線済みで REST get_state/call_service は未使用。配線は設計判断。
 - [ ] **gRPC EmitEvent レスポンスに event_id が無く HTTP と非対称**
   - 2026-11-22 並列 Verify（V-66）: 未解決（confirmed）。proto EmitEventResponse は `bool success` のみ（event.proto:18-20）、gRPC ハンドラも success=true のみ（grpc.rs:157）。HTTP 側は event_id: String を返す（http.rs:40-44,71-77）。proto 変更を伴うため設計判断案件。
  —
@@ -2824,6 +2825,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 94 passed（+1）、event 証跡 93→94 同期し `--check` 5件すべて MATCH、`cargo clippy -p jarvis-event --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **OpenCode dispatch / セッション生成の HTTP 成功経路にテストが無い** —
   `rust/jarvis-event/src/opencode.rs:77-175,204-306` / R1-ST04 / confirmed。
+  - 2026-11-22 並列 Verify（V-109）: 未解決（confirmed）。opencode.rs:204-307 のテストは format_prompt と upstream_error のみで、session 生成＋prompt POST の成功経路なし。HTTP モック依存（wiremock 等）の導入が必要で設計判断。
 - [ ] **kill switch の activated_by が公開経路で依然 "system"** —
   `rust/jarvis-policy/src/kill_switch.rs:241-248,280-286`, `src/lib.rs:249-251` /
   R1-ST01 / confirmed。既存 622 行の対応は `activate_with_actor` 追加のみ。
@@ -2954,6 +2956,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 ### 優先度 低
 
   - 2026-11-22 並列 Verify（V-100）: 未解決（confirmed）。UI の is_expired は表示のみ（approvals.rs:436-439 のコメントが display-only と明記）でボタンの disabled ガードなし、decide にも expires_at 检查なし。policy 側 410 で事後 fail-closed だが UI 事前ガードは未実装。
+  - 2026-11-22 並列 Verify（V-110 再確認）: 未解決（confirmed）。is_expired（expires_at < now）は policy 側 decided_at > deadline と数学的に同一で、既存 predicate 回帰を disabled に結びつければ整合可能。ただし GPUI の disabled バインディング API が repo 内に使用例無く未確認、display-only コメント/README 更新も必要で設計判断。
 - [x] **.editorconfig に Rust の indent 指定が無く rustfmt 既定と衝突** — 2026-11-22 対応済み: `[*.rs] indent_size = 4` を追加し rustfmt 既定（4 スペース）と整合。あわせて `[*.{json,yaml,yml}]` を `[*.{json,jsonc,yaml,yml}]` へ拡張し `opencode.jsonc` も明示的に 2 スペースへ。根拠
   `.editorconfig:17,26`, `Makefile:63` / R1-ST10 / confirmed に格上げ。
 - [x] **audit.toml と Makefile の cargo-audit バージョンが二重管理** — 2026-11-22 対応済み: Makefile に `CARGO_AUDIT_VERSION ?= 0.23.0` と `print-cargo-audit-version` ターゲットを追加し、ci.yml の install step が `make -s print-cargo-audit-version` から値を取得して probe 用 regex と `cargo install --version` に使用するよう変更（ci.yml 側の 0.23.0 ハードコードを削除）。バージョン更新は Makefile 1箇所で済む。根拠
