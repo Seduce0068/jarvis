@@ -2913,16 +2913,22 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **PG コミット後に outbox 記録が失敗すると再試行マーカーが消える** —
   `rust/jarvis-context/src/builder.rs:646-656,1063-1089` /
   R2-DI01 / likely。memories INSERT と outbox record が非原子的。
-- [ ] **pending_embeddings の embedding JSON 破損が無警告で空ベクトル化** —
+- [ ] **pending_embeddings の embedding JSON 破損が無警告で空ベクトル化**
+  - 2026-11-22 並列 Verify（V-71）: 未解決（confirmed）。PgPendingStore::list（builder.rs:523-525）が serde_json::from_value::<Vec<f32>> を unwrap_or_default で空ベクトル化、warn/Err なし。dead-letter 分類は非有限かつ設定次元一致のみ（:317-319,821-826）で JSON 破損は対象外。回帰も JSON 破損直接与えなし。空ベクトルは dim チェックで Qdrant 到達前に止まる（最悪の upsert は防止）。
+ —
   `rust/jarvis-context/src/builder.rs:521-526,712-723,888-907` /
   R1-ST03 / confirmed。dead-letter 分類と回帰テストが必要。
-- [ ] **max_context_tokens が event.payload でバイパスされる** —
+- [ ] **max_context_tokens が event.payload でバイパスされる**
+  - 2026-11-22 並列 Verify（V-72）: 未解決（confirmed）。apply_token_budget は全体バイトで超過判定するが削減対象は memories/recent のみで event.payload は温存（builder.rs:1018-1052）。payload 単体が budget 超過なら truncate 後も超過。HTTP/gRPC も payload サイズ検証なし。テスト oversized_context_drops_memory_arrays_but_keeps_event_data が event 温存を明示的に期待しており設計判断が絡む。
+ —
   `rust/jarvis-context/src/builder.rs:1018-1052,1285-1305`, `src/http.rs:91-97` /
   R1-ST03 / confirmed。payload にサイズ上限が無く設定名と保証が一致しない。
-- [ ] **Qdrant ヒットのスコア欠落時に 0.0 をでっち上げる** —
-  `rust/jarvis-context/src/builder.rs:90-107,1732-1751` /
-  R1-ST03 / confirmed。`attach_scores` の None 契約と矛盾。
-- [ ] **トークンヘッダ整合性チェックが自己比較で vacuous** —
+- [x] **Qdrant ヒットのスコア欠落を None 保持へ修正** — 2026-11-22 対応済み。`search_vectors`（builder.rs:1717-1752）の戻り scores を `HashMap<Uuid, Option<f32>>` へ変更し、:1752 を `scores.get(&entry.id).copied().flatten()` にして欠落を 0.0 に化けさせない。attach_scores も Option 型へ整合させ、実スコア Some(0.0) はそのまま保持。回帰 `attach_scores_keeps_explicit_none_from_qdrant` を追加し、既存2テストも Option リテラルへ更新。根拠
+  `rust/jarvis-context/src/builder.rs:96-107,1154-1190,1717-1752,3525-3565` / V-73 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 183 passed（+1）、context 証跡 182→183 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
+- [ ] **トークンヘッダ整合性チェックが自己比較で vacuous**
+  - 2026-11-22 並列 Verify（V-74）: 未解決（confirmed）。grpc.rs:9 の alias import と :71-74/:395-401 の debug_assert/テストは別名 vs 元定数の自己比較。独立リテラル pin（core:415 / config.rs:942-943）は定数値の固定のみで env キー名／HTTP ヘッダ名の横断照合ではない（そもそもヘッダ名用 env キーは未定義）。
+ —
   `rust/jarvis-context/src/grpc.rs:9,68-74,393-401`, `src/http.rs:14,160,698-701` /
   R1-ST03 / confirmed。既存 959 行の共有定数化の後にエイリアス同士の
   比較だけが残った。
@@ -2962,7 +2968,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **policy check 失敗ログの固定語彙化** — 2026-11-22 対応済み。`PolicyClient::is_allowed`（client.rs:57-64）の tracing から endpoint / principal / action / resource / `error = ?error` を削除し `error_kind = "policy_check_failed"` のみへ変更。`check()`:92 の with_context も固定文字列化し、endpoint を anyhow チェーンへ埋め込まないようにした（構造体の endpoint フィールドも削除）。回帰 `unreachable_policy_logs_fixed_vocabulary_only` は tonic/hyper の TRACE 混入で flaky になったため静的契約検査方式へ変更（動的 capture を避ける）。fail-closed 戻り値は不変。根拠
   `rust/jarvis-policy/src/client.rs:24-41,55-64,92,275-310` / V-69 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 218 passed（+1）、event 証跡は政策 217→218 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-policy --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **gRPC CheckResponse.reason が PolicyClient で捨てられる** —
+- [ ] **gRPC CheckResponse.reason が PolicyClient で捨てられる**
+  - 2026-11-22 並列 Verify（V-75）: 未解決（confirmed）。proto CheckResponse に string reason=2 が存在し（policy.proto:25、additive field）gRPC も設定して返す（grpc.rs:117-124）が、PolicyClient::check() は allowed のみ取り出し（client.rs:75,88-93）。HTTP は reason を返すため非対称。proto コメントは旧クライアント無視を許容と明記。
+ —
   `rust/jarvis-policy/proto/policy.proto:19-25`, `src/grpc.rs:121-124`,
   `src/client.rs:91-97` / R1-ST01 / confirmed。HTTP と transport 間で非対称。
 - [x] **gRPC ExecuteTool の serde エラー固定語彙化** — 2026-11-22 対応済み。`invalid_args_json_status(_error)`（grpc.rs:33-49）を追加し serde_json::Error を読まず `tracing::debug!(error_kind = jarvis_core::INVALID_JSON_BODY_ERROR_KIND, field = "args", "invalid client input")` を出力。ExecuteTool は `map_err(invalid_args_json_status)`（:158-159）へ変更し、生エラー出力を削除。Status は `invalid_argument(safe_client_error_text("invalid tool arguments"))` でクライアント契約不変。policy の I97-D パターンと整合。根拠

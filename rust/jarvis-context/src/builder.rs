@@ -95,12 +95,12 @@ fn reorder_by_ids(entries: Vec<MemoryEntry>, ids: &[Uuid]) -> Vec<MemoryEntry> {
 /// `None`, which stays distinguishable from a genuine zero score.
 fn attach_scores(
     entries: Vec<MemoryEntry>,
-    scores: &std::collections::HashMap<Uuid, f32>,
+    scores: &std::collections::HashMap<Uuid, Option<f32>>,
 ) -> Vec<MemoryEntry> {
     entries
         .into_iter()
         .map(|mut entry| {
-            entry.score = scores.get(&entry.id).copied();
+            entry.score = scores.get(&entry.id).copied().flatten();
             entry
         })
         .collect()
@@ -1154,7 +1154,7 @@ impl Builder {
         )
         .await?;
         let ids: Vec<Uuid> = results.iter().map(|(id, _)| *id).collect();
-        let scores: std::collections::HashMap<Uuid, f32> = results.into_iter().collect();
+        let scores: std::collections::HashMap<Uuid, Option<f32>> = results.into_iter().collect();
 
         // Fetch full entries from PostgreSQL, then reassemble in Qdrant's
         // relevance order (P1-1). Expired rows are excluded by SQL and filtered
@@ -1711,15 +1711,16 @@ pub mod memory {
         }
     }
 
-    /// Return Qdrant hits as `(memory id, similarity score)` pairs in relevance
-    /// order. The score is captured here because the later PostgreSQL refetch
-    /// only returns row columns and cannot reconstruct it (P1-1).
+    /// Return Qdrant hits as `(memory id, optional similarity score)` pairs in
+    /// relevance order. The score is captured here because the later PostgreSQL
+    /// refetch only returns row columns and cannot reconstruct it (P1-1). An id
+    /// without a usable score keeps `None` instead of a fabricated `0.0`.
     pub async fn search_vectors(
         client: &Qdrant,
         collection: &str,
         embedding: &[f32],
         limit: usize,
-    ) -> Result<Vec<(Uuid, f32)>> {
+    ) -> Result<Vec<(Uuid, Option<f32>)>> {
         let response = discard_qdrant_error(
             client
                 .search_points(
@@ -1729,12 +1730,12 @@ pub mod memory {
                 .await,
         )?;
 
-        let scores: HashMap<Uuid, f32> = response
+        let scores: HashMap<Uuid, Option<f32>> = response
             .result
             .iter()
             .filter_map(|scored| {
                 let id = parse_point_id(scored_point_id(scored).as_deref())?;
-                Some((id, scored.score))
+                Some((id, Some(scored.score)))
             })
             .collect();
         let points = response
@@ -1747,7 +1748,7 @@ pub mod memory {
         // contributes a foreign score to a valid id.
         Ok(entries_from_raw_points(points)
             .into_iter()
-            .map(|entry| (entry.id, scores.get(&entry.id).copied().unwrap_or(0.0)))
+            .map(|entry| (entry.id, scores.get(&entry.id).copied().flatten()))
             .collect())
     }
 }
@@ -3521,7 +3522,8 @@ mod ordering_tests {
         let b = Uuid::new_v4();
         let c = Uuid::new_v4();
         let fetched = vec![entry(c), entry(a), entry(b)];
-        let scores = std::collections::HashMap::from([(a, 0.9_f32), (b, 0.5), (c, 0.7)]);
+        let scores =
+            std::collections::HashMap::from([(a, Some(0.9_f32)), (b, Some(0.5)), (c, Some(0.7))]);
 
         let ordered = attach_scores(reorder_by_ids(fetched, &[b, a, c]), &scores);
 
@@ -3538,9 +3540,23 @@ mod ordering_tests {
     fn attach_scores_distinguishes_zero_from_missing() {
         let ranked = Uuid::new_v4();
         let unranked = Uuid::new_v4();
-        let scores = std::collections::HashMap::from([(ranked, 0.0_f32)]);
+        let scores = std::collections::HashMap::from([(ranked, Some(0.0_f32))]);
 
         let attached = attach_scores(vec![entry(ranked), entry(unranked)], &scores);
+
+        assert_eq!(attached[0].score, Some(0.0));
+        assert_eq!(attached[1].score, None);
+    }
+
+    /// C60-R2-01: a score that Qdrant could not supply is carried as `None`
+    /// all the way to `MemoryEntry`; it must never be fabricated as `0.0`.
+    #[test]
+    fn attach_scores_keeps_explicit_none_from_qdrant() {
+        let ranked = Uuid::new_v4();
+        let unscored = Uuid::new_v4();
+        let scores = std::collections::HashMap::from([(ranked, Some(0.0_f32)), (unscored, None)]);
+
+        let attached = attach_scores(vec![entry(ranked), entry(unscored)], &scores);
 
         assert_eq!(attached[0].score, Some(0.0));
         assert_eq!(attached[1].score, None);
