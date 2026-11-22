@@ -490,7 +490,8 @@ generated:
 - [x] axum 0.7 と 0.8 が workspace 内で二重解決 — 2026-11-19 調査済み: 原因は tonic 0.14.6 が axum 0.8.9 を要求（tower-http 0.6.11 は axum 非依存で仮説は否定）。axum 0.8 更新は4 crate・146参照の破壊的変更、tonic downgrade は gRPC 一式の連鎖変更となるため**現状維持**と判断し、根拠とリスクを `rust/Cargo.toml` のコメントに記録 / `rust/Cargo.toml:79` / R4-DP1 / confirmed
 - [x] 配線済み review-gate が PR ではなく既定ブランチを検証 — 2026-11-19 対応済み: 未配線の参照実装 `ci/review-gate.yml` の3ステージ checkout に `refs/pull/<number>/head` を追加（workflow_dispatch は `pr_number` 入力）。auto-merge・権限・認証情報の方針は据え置き、YAML 有効 / R1-AR4 / confirmed（未配線の参照実装は既存 P2-2 の判断を維持）
 - [x] レビューゲートのシグナル解析が `grep ... || true` で fail-open — 2026-11-19 対応済み: `fail_closed()` / `count_findings()` を導入し解析エラー・信号ファイル不在で `verdict=UNKNOWN` かつジョブ失敗。merge-gate / auto-merge は APPROVE/CONDITIONAL のみ通過。未配線方針は維持 / `ci/review-gate.yml:145-148` / R2-ER4 / likely（未配線）
-- [ ] cloud-init が NOPASSWD root + docker グループ / 固定 DB パスワード — `infra/opentofu/cloud-init.yaml:41-43,133` / R3-AU3 / confirmed（ADR-0004 で未使用のレガシー、削除判断は既存 P3-5 に委譲）
+- [ ] cloud-init が NOPASSWD root + docker グループ / 固定 DB パスワード —
+  - 2026-11-22 並列 Verify（V-21）: 設定は未是正（cloud-init.yaml:41,43,133）だが ADR-0004:30-34 で OpenTofu/OCI は未使用レガシー凍結。P3-5 の未完了はライセンス方針のみで cloud-init を吸収した記録は無く、削除／是正判断は P3-5 の設計判断待ちとして現状維持。 `infra/opentofu/cloud-init.yaml:41-43,133` / R3-AU3 / confirmed（ADR-0004 で未使用のレガシー、削除判断は既存 P3-5 に委譲）
 - [x] デプロイスクリプトが全 unit を単一ユーザーへ書き換え — 2026-11-19 対応済み: policy/mcp-gw/event/context の4サービスは User/Group をテンプレート宣言どおり保持し、その他5ユニットのみ従来の置換を適用（認可境界の権限分離を維持） / `infra/scripts/build-selfhost.sh:40-42` / R3-AU3 / confirmed
 - [x] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — 2026-11-19 対応済み: allowlist と同じ枠組みで `MISSING (deployed)` / `MISSING (repo)` と danger=1 を設定。既存回帰22 tests pass / `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
 - [x] `install-mcp-gateway.sh` のヘルス確認が HTTP ステータスを検証せずロールバックしない — 2026-11-19 対応済み: `curl -fsS -w '%{http_code}'` で 200 を明示検証し、失敗時は既存のロールバックフローへ。本文/トークンは出力せず、bash -n OK / `infra/scripts/install-mcp-gateway.sh:28` / R4-DR3 / confirmed
@@ -1370,6 +1371,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] 新規コレクション作成時に実次元を読み戻さず `Ok(())`（low）—
   create_collection 後も collection_info で検証。〔Round 47 で対応済み〕
 - [ ] persistence の構造ガードが `tracing::` 文字列計数（low）— AST ベース
+  - 2026-11-22 並列 Verify（V-25）: 未解決。persistence.rs:1651-1668 の include_str! + `production.matches("tracing::").count()==2` 文字列計数のまま、syn/quote 等の dev-dependency なし（Cargo.toml:56-59）。型境界 I47-A（DbOperation enum）は既存だがガード自体の AST 化ではない。依存追加を伴うため設計判断案件として現状維持。
   または型境界での強制へ変更。
 
 - 親が対応: ureq 3 の `Error::StatusCode`（ボディ破棄）に対応するため
@@ -2331,11 +2333,10 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] `ci/review-gate.yml`（未配線の reference）に actions/checkout@v4 が — **2026-11-22 重複整理**: 既に解消済み。2342 行目で `ci/review-gate.yml` の checkout@v4 4箇所をフル SHA 固定＋未配線 reference の明記済み。
       4箇所残存 — 未配線を理由に明示除外するか別タスクで SHA 固定。
-- [ ] reqwest 0.13 統一は cargo check/test を伴う別タスク（現状は exact pin
-      で解決版を固定、共存理由を記録済み）。
-- [ ] rust-script 各スクリプトのメタブロックを exact pin 化し、rust-script
-      自体のバージョンも固定（Makefile には方針記録済み）。
+- [x] reqwest 0.13 統一（重複整理） — 2026-11-22 並列 Verify（V-22）: 2349-2351 行目の完了記録（見送り判断）の重複。rust/Cargo.toml:108-134 に exact pin =1.19.0 と共存理由（rmcp/testcontainers が 0.12 固定、0.13.5 は qdrant-client + otel 由来で major 重複は広範）を記録済み。-root 重複として完了扱い。
+- [x] rust-script メタブロック exact pin（重複整理） — 2026-11-22 並列 Verify（V-23）: 2301-2302 / 2321-2322 / 2352-2353 行目の完了記録の重複。4スクリプト（backup/deploy/restore/bootstrap）のメタ依存9件は =x.y.z で pin、clap/hostname は Makefile:23-26 に保留理由、方針は Makefile:15-35 に記録済み。rust-script 自体のバージョン固定は Makefile:27-34 の方針＋「CI で固定されず手動特権経路に留まる」注記どまり（自動固定は未対応だが方針記録済みで本指摘は充足）。
 - [ ] prod_db scope の同一モジュール内後続 psql は未検出（low・任意）。
+  - 2026-11-22 並列 Verify（V-24）: 未解決。assert_production_boundary()（test-restore-local.sh:1499-1500,1520）が scope='prod_db' のとき db_patterns をスキップし、prod_stage():1613/1631 が後続 psql を検査しない。距離→SQL トークン改善は別件（:2052）のみ。低優先・任意のため現状維持。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
