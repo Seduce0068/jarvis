@@ -2692,11 +2692,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] allowlist timeout_ms の起動時検証 — 2026-11-23 方針委譲で対応済み。AllowList::new（allowlist.rs:64-75）が 1..=60000 範囲を検査し範囲外を bail! で拒否。ハンドラごとの clamp（web.fetch のみ）は現行契約として維持。回帰 new_validates_timeout_ms_range を追加。根拠 `rust/jarvis-mcp-gw/src/allowlist.rs:64-75,287-332` / V-81。
 - [x] safe_client_error_text の語彙網羅 — 2026-11-23 方針委譲で対応済み。http.rs:351-366 に git timed out / git failed / sensitive file / path is a directory / path escapes workspace の固定語彙を加法（生パス・stderr・引数は破棄）。stat/read 系は既存回帰契約で据え置き。回帰 uncovered_git_and_path_errors_map_to_fixed_vocabulary_without_leaking_details を追加。根拠 `rust/jarvis-mcp-gw/src/http.rs:351-366,823-858` / V-114。
-- [ ] **kill_switch の暗号プリミティブが gateway から流用され比較も二重実装**
-  - 2026-11-22 並列 Verify（V-48）: 未解決（confirmed）。kill_switch.rs:98-107 に constant_time_eq 集約済みだが、mcp-gw の grpc.rs:116-124 / http.rs:103-111 が fixed_size_digest_eq をローカル二重定義し XOR fold も自前実装。jarvis-core には集約先が無く、共有化・集約は未実施（定数時間性自体は確保）。
- —
-  `rust/jarvis-mcp-gw/src/grpc.rs:72-73,98-106`, `http.rs:97-103` /
-  R1-AR01 / confirmed。jarvis-core への集約が必要。
+- [ ] **kill_switch の暗号プリミティブ配置**（部分解消） — 2026-11-23 確認: 「比較の二重実装」は解消済み。constant_time_eq は jarvis-core へ集約（ラウンド93）、gateway の fixed_size_digest_eq は jarvis_policy::kill_switch::sha256_digest を流用し XOR fold は core 共有 primitive（固定語彙回帰 :912-984 で検証）。残るは sha256_digest の置き場所（policy から core へ移すべきか）で、他クレートから実利用があるため再エクスポート設計の判断待ち（公開モジュール過剰項目と同一）。定数時間性・セキュリティ上の問題は無し。
 - [x] 承認期限の共通化 — 2026-11-23 方針委譲で対応済み。jarvis-core の `DEFAULT_APPROVAL_TIMEOUT_SECS` を単一情報源とし、policy config.rs は alias、mcp-gw approval.rs は `as i64` 由来に変更。既定値 300 と compile-time assert は不変。根拠 `rust/jarvis-core/src/lib.rs:73-83`, `rust/jarvis-policy/src/config.rs:35-44`, `rust/jarvis-mcp-gw/src/approval.rs:35-48` / V-92。
 - [x] allowlist/Casbin 二層契約の明文化 — 2026-11-23 方針委譲で対応済み（単一情報源化は採用しない）。V-146 調査で実効は policy(Cedar/Casbin) と allowlist の AND（積集合）で fail-open ではないと判明。lib.rs:136-145 の「allowlist が single source of truth」という矛盾コメントを「第2の独立 deny 層、実効は両者の積集合、片方のみの grant は実行を許可しない」へ修正。同梱設定の13件差分は意図的重複として明記。単一情報源化は実効権限変更を伴うため不採用（方針記録）。コード挙動不変でテスト件数不変。根拠 V-146。
 - [x] Cedar 実行時 context の schema 検証 — 2026-11-23 方針委譲で対応済み。cedar_schema.cedarschema:60-113 の5 action に4属性（tool/principal/resource: String, requires_approval: Bool）を required 宣言。CedarEngine が schema を保持し is_authorized（policy.rs:227-235）が Context::from_json_value へ schema を渡す（Request::new は None 維持）。Cedar 4.13 の文字列→Bool 暗黙昇格を塞ぐ JSON 型事前検証（:60-77）も追加。management API/reload で保持 schema 同期。schema 無しでは従来挙動維持。互換性変更（4属性以外の直接 context は fail-closed deny）をコメント明記。回帰 +2。根拠 V-147。
@@ -2813,10 +2809,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **install-mcp-gateway.sh のロールバック fail-closed 化** — 2026-11-22 対応済み。`rollback()`（install-mcp-gateway.sh:49-60）に else 分支を追加し、退避ファイル不在時は `rm -f "$dst"` で今回配置した新バイナリを明示削除。deploy-mcp-gw-safe.sh:87-91 と同じ枠組みで、「何も戻さず新バイナリが残ったまま再起動／drift 検査へ進む」経路を遮断。根拠
   `infra/scripts/install-mcp-gateway.sh:49-60`, `infra/scripts/deploy-mcp-gw-safe.sh:84-94` / V-53 / confirmed。
   - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **Qdrant 本番反映の「evacuating old collection」ログに実処理が伴わない**
-  - 2026-11-22 並列 Verify（V-68）: 未解決（confirmed）。qdrant.sh:136 が退避をログするが実処理は同一コレクションへの snapshot upload＋points_count 再検証のみ（:138-167）。旧 collection のコピー／新規作成／alias 切替／DELETE は無く、コードコメントと design doc:334-336,345 も未決定を明記。pg.sh:136-151 の実退避と差がある。
- —
-  `infra/scripts/restore-local.d/qdrant.sh:106-116` / R1-ST06 / confirmed。
+- [x] Qdrant 退避ログの実態反映 — 2026-11-23 方針委譲で対応済み（ラウンド92 C92-R2-03）。qdrant.sh:143 のログを「evacuation not implemented, overwriting same collection in place」へ訂正し、ヘッダコメント（:17-22）と本番適用ブロック（:139-143）に「退避は未実装、priority=snapshot で同一コレクション上書き、新規＋alias 切替は設計未決定」方針を明記。コレクション名をログから除去し固定語彙維持。根拠 `infra/scripts/restore-local.d/qdrant.sh:17-22,139-143` / V-68。
 - [x] **hooks.json の Rust post-edit フックが repo root で cargo を実行** — 2026-11-21 対応済み: matcher `**/*.rs` を `rust/**/*.rs` と `ui/**/*.rs` に分割し、それぞれ `cd rust && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings` / `cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings` を実行（Makefile:63,66 と同一引数）。JSON parse OK、post-edit matchers = ['**/*.ts', 'rust/**/*.rs', 'ui/**/*.rs', '**/*.md'] / 根拠
   `hooks.json:57-64`, `rust/Cargo.toml:1`, `ui/Cargo.toml:1` /
   R1-ST08,R1-ST10,R1-CF02 / confirmed。
