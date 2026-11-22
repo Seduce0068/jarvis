@@ -2035,9 +2035,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 70 の残り指摘（未対応）
 
-- [ ] Round 69 の新規仕様シナリオ4件（TC-B6 / TC-V5 / TC-R1 / TC-R2）に
-  自動テストが無く証跡がカバレッジを虚偽主張（medium）— 7列 manifest／
-  未知記述子／role 導出の回帰追加＋シナリオ別 pass のゲート化。
+- [x] Round 69 の新規仕様シナリオ4件の証跡反映 — 2026-11-22 対応済み。仕様（specs/test-backup.md:167,213,226,234 の TC-B6/TC-V5/TC-R1/TC-R2）と回帰（test-verify-backup.sh:319-365 / test-restore-local.sh:1135-1246）は追加済みで、spec_hash（c486b0dbe466）は現行仕様と一致（再生成済み）。backup 証跡 notes に4シナリオ参照を追記して可読性を補完。値は不変、CONTRACT_KEYWORDS には含まれないためゲート結果も不変。根拠
+  `specs/test-backup.md:167,213,226,234,353-356`, `evidence/test-run-20261120-c486b0dbe466.json` / V-90 / confirmed。
+  - 検証: `make check-evidence` ok=6 errors=0、`make check-evidence-counts` 5件すべて MATCH。
 - [x] 必須ペイロード検査の manifest role 依存 — 2026-11-22 並列 Verify（V-01）: 既に解消済み。必須存在判定は実 basename（is_pg_payload/is_qdrant_payload/is_config_payload）から導出し、`verify-backup.sh:173-181` / `restore-local.sh:420-431` が has_pg/has_qdrant/has_config を立てる（`payload-descriptors.sh:83-104`）。`resolved_role_for()` が未知 role=rc2・role/basename 矛盾=rc1 で fail-closed（`:122-141`）。回帰 `test-verify-backup.sh:396-400` が readme.txt への role=postgres 付与を ROLE MISMATCH exit 1 で検証。2090-2091 行目の完了記録と整合。—
   Runtime Proof: postgres 欠落／truncated が format=raw role=postgres で
   exit 0。role と basename の整合強制＋footer 検査を role に紐付け。
@@ -2264,8 +2264,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/scripts/{backup,restore,deploy}.rs` の cargo メタブロック, `todo.md:2317,2347-2348` / verified。コード変更なし。
 - [x] verify サマリ ok=43 の単位誤記 — 2026-11-22 Verify: 2318 行目で訂正済みの重複エントリ。`evidence/test-run-20261120-c486b0dbe466.json` は「実測 43 passed」（テスト関数数）、verify-backup.sh の `ok=<n>` は判定呼び出し数で別単位。`docs/integration/evidence-regeneration.md:334-343`（I81-D (c)）が「ok+fail をイベント件数として読まない」と明記し区別を担保。根拠
   `docs/integration/evidence-regeneration.md:334-343`, `evidence/index.md` run-backup / verified。コード変更なし。
-- [ ] テスト集約で失敗時の本番非接触検証が代表1ケースのみに（medium）—
-  失敗クラスごとに1件ずつ復活。
+- [x] 失敗時本番非接触検証の代表集約 — 2026-11-22 並列 Verify（V-89）: 既に解消済み（I80-A/I84-C）。test-restore-local.sh:1482-1507 の assert_production_boundary() が失敗クラス別（isolated/prod_db/prod_qdrant）に境界を検査し、前提ログ非空を必須化。inject_fail():1555-1580 が全失敗モードから境界チェックを呼び、8a〜8d 全部が経由、代表 8e の完全検証も維持。
 - [x] test-restore-local のロックパス — 2026-11-22 並列 Verify（V-07）: 既に解消済み（I84-D/I86-B）。`test-restore-local.sh:444` が全 run_driver 呼び出しで LOCK_FILE を一時的領域へ注入し既定パス不使用。`:652-703` が /run 相当を `elif true` へ sed 差し替えて dry-run 検証（lock 選択 :681、/tmp 不使用 :697-700、psql/systemctl 非呼び出し :702-703）、`:593-650` / `:705-750` が /run 不在・mkdir 失敗の両枝を固定。Makefile:87,100 と ci.yml:123 が CI 実行を担保。
   （low）— LOCK_FILE を一時パスへ。
 - [x] secret_scan index クロスチェックの主張限定 — 2026-11-22 Verify: 既に解消済み。`ci/scripts/secret_scan.py:21-26` が「index-count check is only a regression guard on tracked_files(); it compares against a second git -C <root> ls-files --cached call, which returns the same cached index today, so it is NOT an independent detector of CWD-induced shrinking」と自己和集の性質を正直に明記し、一次防御は `:17-20` の `repo_root()` + `git -C` と分離。子の推奨「主張を限定」は充足。根拠
@@ -2495,8 +2494,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 91 の残り指摘（未対応／次ラウンド候補）
 
-- [ ] mcp-gw testing.rs の固定 /tmp パス（pid+AtomicU64 未対応、
-      medium）— 残存する並走競合経路。
+- [x] mcp-gw testing.rs の固定 /tmp パス — 2026-11-22 並列 Verify（V-88）: 既に解消済み（todo.md:2500-2501,2508-2509 の Round 92 記録と整合）。testing.rs:11,14 の AtomicU64 + pid + temp_dir() による unique_temp_dir()（:20-26）でユニーク化済み、固定 /tmp パスは残存しない。
 - [x] approval.rs / http.rs / policy/http.rs のデッドラインなし承認ポーリング
       4箇所＋testing.rs の固定 /tmp → Round 92 で解消。
 - [x] event の OpenCode URL を config 側で解決し公開 getter 経由で probe
@@ -2512,10 +2510,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 92 の残り指摘（未対応・次ラウンド優先）
 
-- [ ] policy 仕様に 410 Gone（期限切れ承認）の HTTP 契約が未反映（中）—
-      REQ-10＋Scenario＋Traceability 追加、証跡再生成、両 index 同期。
-- [ ] 3仕様（event/context/mcp-gw）に下流連動 /health の degraded 契約が
-      未反映（中）— REQ＋Scenario＋Traceability 追加、証跡再生成。
+- [x] policy 仕様の 410 Gone 契約 — 2026-11-22 並列 Verify（V-86）: 既に解消済み。specs/test-policy-approval.md:47 の REQ-10、TC-D3（:292/:295）、Traceability（:347）に 410 Gone + 固定本文 APPROVAL_EXPIRED_BODY を明記。実装 http.rs:754 が Expired→GONE 写像、:709 が固定本文参照、:2687 が回帰検証。証跡 notes（:196）・specs/index.md:10 にも反映済み。
+- [x] 3仕様の /health degraded 契約 — 2026-11-22 並列 Verify（V-87）: 既に解消済み（todo.md:2529-2530 の完了記録と整合）。3仕様に I103-D Round 93 契約マーカー・REQ・Scenario TC-HC1〜3・Traceability を追加済み、各 http.rs の固定 degraded 本文と整合、4証跡 notes も HEALTH_*_BODY キーワードを充足。
 - [ ] mcp-gw /health が allowlist 経由で upstream 登録を判定し、登録済みだが
       allowlist 未掲載だと永続 503 誤判定（中）— Gateway の実際の登録数を
       直接公開して照合。

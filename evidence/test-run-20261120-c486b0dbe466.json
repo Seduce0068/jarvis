@@ -191,5 +191,5 @@
     "independent_execution": false
   },
   "conformance": "tailored",
-  "notes": "集計対象を make test-verify-backup と make test-backup-args の両ゲートへ拡大し、仕様の件数表記を実測へ同期した。REQ-18 / TC-B5（--retain-days の欠落・非整数・0以下の exit 2 拒否）のケースを結果に含む。実測 43 passed。カバレッジ・ミューテーションは未測定。make safety-test（legacy guards）は本エビデンスの集計対象外。"
+  "notes": "集計対象を make test-verify-backup と make test-backup-args の両ゲートへ拡大し、仕様の件数表記を実測へ同期した。REQ-18 / TC-B5（--retain-days の欠落・非整数・0以下の exit 2 拒否）のケースを結果に含む。実測 43 passed。カバレッジ・ミューテーションは未測定。make safety-test（legacy guards）は本エビデンスの集計対象外。 仕様シナリオ TC-B6（manifest 記述子の既定値）/ TC-V5（記述子駆動の形式検査と fail-closed）/ TC-R1（必須ロールを記述子から導出）/ TC-R2（未知記述子の拒否と P1-6 接続点）は test-verify-backup.sh / test-restore-local.sh の既存 checks で検証済み。"
 }
