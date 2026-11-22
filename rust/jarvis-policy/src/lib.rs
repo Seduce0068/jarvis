@@ -10,7 +10,7 @@ pub mod kill_switch;
 pub mod persistence;
 pub mod policy;
 
-pub use client::PolicyClient;
+pub use client::{CheckOutcome, PolicyClient};
 pub use persistence::PgApprovalPersistence;
 
 use anyhow::Result;

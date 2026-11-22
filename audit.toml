@@ -7,6 +7,13 @@
 # is explicit and version-controlled. No values, tokens, or host-specific
 # paths are stored.
 #
+# 監査範囲の注記:
+#   本 gate（ci/scripts/check-dependency-audit.sh）が cargo audit するのは
+#   rust/Cargo.lock と ui/Cargo.lock のみである。rust-script の各 .rs 先頭
+#   `/// ```cargo` メタブロックで宣言される直接依存はこれら lock に載らず、
+#   本監査の対象外である。その exact pin 方針はルート Makefile（I84-A /
+#   I85-C）に記録済みであり、ここでは値や秘密情報を記載しない。
+#
 # 一時 ignore の根拠（Round 87/88 実測）:
 #   patch 版が無い major 更新待ちのため、アップグレード完了まで抑制する。
 #   patch 版のある 8 件（tokio / rustls 0.23 / rustls-webpki 0.103 /

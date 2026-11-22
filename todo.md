@@ -2312,15 +2312,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       4箇所残存 — 未配線を理由に明示除外するか別タスクで SHA 固定。
 - [x] reqwest 0.13 統一（重複整理） — 2026-11-22 並列 Verify（V-22）: 2349-2351 行目の完了記録（見送り判断）の重複。rust/Cargo.toml:108-134 に exact pin =1.19.0 と共存理由（rmcp/testcontainers が 0.12 固定、0.13.5 は qdrant-client + otel 由来で major 重複は広範）を記録済み。-root 重複として完了扱い。
 - [x] rust-script メタブロック exact pin（重複整理） — 2026-11-22 並列 Verify（V-23）: 2301-2302 / 2321-2322 / 2352-2353 行目の完了記録の重複。4スクリプト（backup/deploy/restore/bootstrap）のメタ依存9件は =x.y.z で pin、clap/hostname は Makefile:23-26 に保留理由、方針は Makefile:15-35 に記録済み。rust-script 自体のバージョン固定は Makefile:27-34 の方針＋「CI で固定されず手動特権経路に留まる」注記どまり（自動固定は未対応だが方針記録済みで本指摘は充足）。
-- [ ] prod_db scope の同一モジュール内後続 psql は未検出（low・任意）。
-  - 2026-11-22 並列 Verify（V-24）: 未解決。assert_production_boundary()（test-restore-local.sh:1499-1500,1520）が scope='prod_db' のとき db_patterns をスキップし、prod_stage():1613/1631 が後続 psql を検査しない。距離→SQL トークン改善は別件（:2052）のみ。低優先・任意のため現状維持。
-  push、共有 lib の実機配布。
-
-- 親が対応: restore コピードライバへの module 複製、shellcheck SC2016、
-  全ゲート再検証。
-
-### Round 81（R4 で修正済み）
-
+- [x] prod_db scope の後続 psql 検出 — 2026-11-23 方針委譲で対応済み。test-restore-local.sh の assert_production_boundary() が psql.log の本番 DB パターン行数をカウントし、prod_db は 1 行許容・2 行以上 fail、isolated/prod_qdrant は従来どおり 0 行必須。多段 psql 呼び出し分岐は prod_db_multi スコープで行数のみ除外。根拠 `infra/scripts/test-restore-local.sh:49-52,1493-1502,1529-1558,1640-1657` / V-24。回帰 ok=435 fail=0。
 - [x] `ci/review-gate.yml` の checkout@v4 4箇所をフル SHA 固定（v4 併記）、
   未配線 reference である旨を先頭コメントへ明記。
 - [x] reqwest 0.13 統一は見送り（rmcp/testcontainers が 0.12 を固定しており
@@ -2801,10 +2793,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-context/src/config.rs:40-46,68-76`, `src/http.rs:207,221-236` /
   R1-ST03 / confirmed。
   - 2026-11-22 並列 Verify（V-105）: 未解決（confirmed）。context 内で config.rs:46 と http.rs:221 の constant_time_eq が二重定義（config.rs:43 の「Shared by HTTP middleware and gRPC ingress」コメントと矛盾）。gateway も fixed_size_digest_eq をローカル定義し jarvis-core 集約先なし。定数時間性自体は各実装で確保。共有化は設計判断。
-- [ ] **HA トークン失効が Fatal 扱いで listener を永久停止** —
-  `rust/jarvis-event/src/sources.rs:81,124-126`, `src/lib.rs:86-90` /
-  R1-ST04 / confirmed。/health は 200 のまま再起動まで回復しない。
-  - 2026-11-22 並列 Verify（V-106）: 未解決（confirmed）。sources.rs:127-129 で auth_invalid が ListenFailure::Fatal、:81 で return Err してループ脱出。doc（:164-170）が「invalid token stops the listener」と設計意図を明記。health は opencode 到達性のみ判定（http.rs:297-298）で listener は再起動まで復帰しない。Transient 化は設計判断。
+- [x] HA トークン失効の Transient 化 — 2026-11-23 方針委譲で対応済み。sources.rs:130-132,201-207 が auth_invalid を ListenFailure::Transient{subscribed:false} に再分類し backoff 付き再接続へ。doc（:70-72,164-171,193-200）も新契約へ更新。設定 URL エラーの Fatal は維持、トークン値は固定語彙ログのみ。回帰 +1。根拠 `rust/jarvis-event/src/sources.rs:70-72,130-132,164-207,547-562` / V-106。
 - [x] Webhook Router のリクエスト計測配線 — 2026-11-22 対応済み。`http.rs:193` の track_metrics を pub(crate) 化し、`normalizer.rs:187-194` の start_webhook_server Router に `.layer(axum::middleware::from_fn(crate::http::track_metrics))` を追加（http.rs の router_with_admin_token と同じ配線順）。8085 の4 webhook リクエストも `jarvis_http_requests_total{service,status}` に計測される。静的回帰 `webhook_router_layers_track_metrics_after_with_state` を追加。ルート／ハンドラ／BareJson 契約は不変。根拠 `rust/jarvis-event/src/{http.rs:189-205,normalizer.rs:187-194,667-695}` / V-107 / confirmed。
   - 検証: fmt exit 0、event 95 passed（+1）+ integration 6 passed、証跡 94→95 同期し `--check` 5件 MATCH、clippy -D warnings exit 0。
 - [ ] **Android / HA の外部クライアントが生成されるだけで未配線** —
@@ -2837,11 +2826,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **policy check 失敗ログの固定語彙化** — 2026-11-22 対応済み。`PolicyClient::is_allowed`（client.rs:57-64）の tracing から endpoint / principal / action / resource / `error = ?error` を削除し `error_kind = "policy_check_failed"` のみへ変更。`check()`:92 の with_context も固定文字列化し、endpoint を anyhow チェーンへ埋め込まないようにした（構造体の endpoint フィールドも削除）。回帰 `unreachable_policy_logs_fixed_vocabulary_only` は tonic/hyper の TRACE 混入で flaky になったため静的契約検査方式へ変更（動的 capture を避ける）。fail-closed 戻り値は不変。根拠
   `rust/jarvis-policy/src/client.rs:24-41,55-64,92,275-310` / V-69 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 218 passed（+1）、event 証跡は政策 217→218 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-policy --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **gRPC CheckResponse.reason が PolicyClient で捨てられる**
-  - 2026-11-22 並列 Verify（V-75）: 未解決（confirmed）。proto CheckResponse に string reason=2 が存在し（policy.proto:25、additive field）gRPC も設定して返す（grpc.rs:117-124）が、PolicyClient::check() は allowed のみ取り出し（client.rs:75,88-93）。HTTP は reason を返すため非対称。proto コメントは旧クライアント無視を許容と明記。
- —
-  `rust/jarvis-policy/proto/policy.proto:19-25`, `src/grpc.rs:121-124`,
-  `src/client.rs:91-97` / R1-ST01 / confirmed。HTTP と transport 間で非対称。
+- [x] CheckResponse.reason の活用 — 2026-11-23 方針委譲で対応済み。PolicyClient::check_with_reason()（client.rs:124-148）が allowed と固定語彙 reason（CheckOutcome{allowed, reason:&'static str}、未知値は "unknown" に縮約）を返す。既存 check() は薄いラッパでシグネチャ・fail-closed 契約不変。lib.rs:13 で再エクスポート。回帰 +1。根拠 `rust/jarvis-policy/src/{client.rs:105-148,264-299,lib.rs:13}` / V-75。
 - [x] **gRPC ExecuteTool の serde エラー固定語彙化** — 2026-11-22 対応済み。`invalid_args_json_status(_error)`（grpc.rs:33-49）を追加し serde_json::Error を読まず `tracing::debug!(error_kind = jarvis_core::INVALID_JSON_BODY_ERROR_KIND, field = "args", "invalid client input")` を出力。ExecuteTool は `map_err(invalid_args_json_status)`（:158-159）へ変更し、生エラー出力を削除。Status は `invalid_argument(safe_client_error_text("invalid tool arguments"))` でクライアント契約不変。policy の I97-D パターンと整合。根拠
   `rust/jarvis-mcp-gw/src/grpc.rs:33-49,158-159,425-491` / V-43 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 160 passed（+1）、mcp 証跡 159→160 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
@@ -2853,18 +2838,10 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/config/opencode/opencode.jsonc:10-14`, `rust/jarvis-mcp-gw/src/http.rs:75-81` /
   R3-AU01 / likely。
 - [ ] **verify と restore で legacy バックアップ set の受入条件が非対称** — 2026-11-22 並列 Verify（V-84）: 未解決（confirmed）。verify-backup.sh:103-112 は created_at が無い set を legacy として自動受け入れ（COMPLETE なしでも fail 加算せず）、restore-local.sh:365-372 は `--allow-legacy`（:199）が無いと失敗扱い。記述子・ロール判定自体は共有 lib で解消済み（I78-A）だが、COMPLETE マーカー受入条件だけ非対称。restore 側は破壊操作前のゲートとして厳格にする設計判断があり、DEFAULT を緩めるのは判断待ち。
-- [ ] **audit.toml の旧 rustls 残存原因が axum 0.7 と誤記**
-  - 2026-11-22 並列 Verify（V-67）: 未解決（confirmed）。audit.toml:51-53 が原因を axum 0.7 とするが、axum 0.7.9 は rustls 系を依存しない。実際は tokio-tungstenite 0.21.0（rust/Cargo.lock:4910-4923, jarvis-event/Cargo.toml:54 の直接依存）が rustls 0.22.4 / rustls-webpki 0.102.8 を固定。コメント訂正は安全に可能。
- —
-  `audit.toml:51-53`, `rust/Cargo.lock:144-175,4910-4923` / R4-DP01 / confirmed。
-  axum 0.7.9 の依存に rustls は無く、実態は tokio-tungstenite 0.21 系統。
+- [x] audit.toml の旧 rustls 原因記述 — 2026-11-23 確認: 既に訂正済み（audit.toml:58-62 が原因を tokio-tungstenite 0.21.0 と明記し「axum 0.7 ではない」と記載）。差分なし。
 - [x] 依存監査ゲートの git 不在時 UNVERIFIED — 2026-11-22 対応済み。`check-dependency-audit.sh` のローカルパスで git が無い／DB が git-backed でない場合に `else unverified AUDIT_DB_UNVERIFIED` を追加。コメント（:96-97）と実装が整合。git 有り・DB 鮮度正常時は従来どおり走査。根拠 `ci/scripts/check-dependency-audit.sh:94-117` / V-115 / confirmed。
   - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make check-dependency-audit` ok=2、`make ci-local` all gates passed。
-- [ ] **rust-script のマニフェスト依存が Cargo.lock 監査の対象外**
-  - 2026-11-22 並列 Verify（V-51）: 未解決（confirmed）。check-dependency-audit.sh:40,122-126 は rust/Cargo.lock と ui/Cargo.lock のみ。rust-script メタブロックの clap="4.5" / hostname="0.3" は両 lock に不在で、実行時に解決されるバージョンは固定も監査もされない。
- —
-  `ci/scripts/check-dependency-audit.sh:39-40,122-126`,
-  `rust/scripts/{deploy,backup,restore}.rs` / R4-DP01 / confirmed。
+- [x] rust-script メタ依存の監査範囲明記 — 2026-11-23 方針委譲で対応済み。audit.toml:10-15 と check-dependency-audit.sh:11 に「cargo audit 対象は rust/Cargo.lock と ui/Cargo.lock のみ、rust-script の cargo メタブロック依存は対象外・exact pin 方針は Makefile に記録済み」を明記。fail-closed ロジック不変、`make check-dependency-audit` ok=2。
 - [x] audit.toml 再評価日の期限検証 — 2026-11-22 対応済み。`check-dependency-audit.sh:85-104` が `# 再評価日: <RFC3339>` をパースし、現在日時が超過なら `AUDIT_IGNORE_EXPIRED`、行欠落・パース不能も fail-closed（`AUDIT_REVIEW_DATE_MISSING` / `AUDIT_REVIEW_DATE_INVALID`）。値は失敗出力に含めない。現在 2026-11-23 は期限 2026-12-20 前でゲート結果不変。根拠 `ci/scripts/check-dependency-audit.sh:12-15,35-41,85-104` / V-116 / confirmed。
   - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make check-dependency-audit` ok=2、`make ci-local` all gates passed。
 - [ ] **tokio-tungstenite 0.21.0 が古い TLS スタックを保持** —
@@ -2897,10 +2874,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-mcp-gw/src/grpc.rs:98,102,288`, `specs/test-mcp-gateway.md:284` /
   R3-TQ01 / likely。
   - 2026-11-22 並列 Verify（V-99）: 未解決（confirmed）。constant_time_eq / fixed_size_digest_eq 自体は 32 バイト XOR fold の定時間実装だが、回帰は戻り値・status・トークン非開示のみで、タイミング計測／実装静的検査なし。実装は安全でテスト品質の課題。
-- [ ] **backup.rs / deploy.rs の unit test がどのゲートからも実行されない** —
-  `Makefile:62,164,170,172`, `rust/scripts/backup.rs:423`, `rust/scripts/deploy.rs:647` /
-  R2-FG02 / confirmed。
-  - 2026-11-22 並列 Verify（V-101）: 未解決（confirmed）。rust-script --test は Makefile:197 の restore.rs のみで、ci-local/safety-test/backup-preflight と両 workflow からは未呼び出し。backup.rs:459 / deploy.rs:665 の #[test] は未実行（手動 pass 実績あり）。test-rust-scripts ターゲット追加＋ゲート配線で改善可能だが CI ランナーの rust-script 導入・pin が前提。
+- [x] rust-script unit test のゲート配線 — 2026-11-23 方針委譲で対応済み。Makefile に test-rust-scripts（backup/deploy/restore の rust-script --test・fail-closed）を追加し ci-local / safety-test から呼ぶ。CI ランナーは rust-script 未導入・pin 未確定のため extra_gates には未追加（方針で明記）。根拠 `Makefile:3,32-35,89,103,198-206` / V-101。`make test-rust-scripts` exit 0。
 - [x] **deploy のヘルスゲートが otelcol の 13133 を検査しない** — 2026-11-21 対応済み: `HEALTH_PORTS` を `[u16; 5] = [8081, 8082, 8083, 8084, 13133]` へ拡張し、コメントも実態（4 required services + otelcol health_check）へ更新。otelcol 停止時も `evaluate_health_checks` が fail-closed で "Deployment completed" を阻止 / 根拠
   `rust/scripts/deploy.rs:43-45`, `infra/config/otelcol-config.yaml:7` /
   R1-ST05,R2-FG02 / confirmed。

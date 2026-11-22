@@ -68,9 +68,14 @@ impl HomeAssistantClient {
     /// forwards each received event through `event_tx`. Submission is
     /// non-blocking: a full queue logs a warning and drops the event (see
     /// [`crate::normalizer::try_emit_event`]). Transient failures are retried
-    /// with exponential backoff; an invalid token stops the listener.
+    /// with exponential backoff; an invalid token is classified as transient
+    /// too and retried, since credentials may be refreshed out of band.
     pub async fn listen_events(&self, event_tx: mpsc::Sender<UnifiedEvent>) -> Result<()> {
-        let url = websocket_url(&self.base_url)?;
+        // An invalid configured URL is unrecoverable: keep the pre-existing
+        // fatal behavior (stop the listener) via an explicit classification.
+        let url = websocket_url(&self.base_url)
+            .map_err(ListenFailure::Fatal)
+            .map_err(ListenFailure::into_error)?;
         let mut backoff = INITIAL_RECONNECT_BACKOFF;
         loop {
             match self.listen_once(&url, &event_tx).await {
@@ -122,15 +127,8 @@ impl HomeAssistantClient {
         let auth = read_json(&mut socket)
             .await
             .map_err(|error| ListenFailure::transient(error, false))?;
-        match auth["type"].as_str() {
-            Some("auth_ok") => {}
-            Some("auth_invalid") => {
-                return Err(ListenFailure::Fatal(rejected_token_error(&auth)));
-            }
-            _ => {
-                let error = unexpected_auth_response_error(&auth);
-                return Err(ListenFailure::transient(error, false));
-            }
+        if let Some(failure) = classify_auth_response(&auth) {
+            return Err(failure);
         }
 
         // 2. Subscribe to state_changed events.
@@ -161,18 +159,53 @@ impl HomeAssistantClient {
     }
 }
 
+#[derive(Debug)]
 enum ListenFailure {
-    /// Unrecoverable failure (e.g. invalid access token); stop listening.
+    /// Unrecoverable failure (e.g. an invalid configured URL); stop listening.
     Fatal(anyhow::Error),
     /// Transient failure; `subscribed` reports whether the connection had
-    /// completed the subscription before failing. The underlying error is
-    /// deliberately not carried: only fixed-vocabulary tokens are logged.
+    /// completed the subscription before failing. An invalid token (the WebSocket
+    /// equivalent of HTTP 401/403) is classified here as well and retried with
+    /// backoff, since credentials may be refreshed out of band. The underlying
+    /// error is deliberately not carried: only fixed-vocabulary tokens are logged.
     Transient { subscribed: bool },
 }
 
 impl ListenFailure {
     fn transient(_error: impl Into<anyhow::Error>, subscribed: bool) -> Self {
         Self::Transient { subscribed }
+    }
+
+    /// Convert a fatal failure into the error returned by `listen_events`.
+    ///
+    /// Transient failures never leave the reconnect loop; the fallback keeps
+    /// this conversion total without recording any error payload.
+    fn into_error(self) -> anyhow::Error {
+        match self {
+            Self::Fatal(error) => error,
+            Self::Transient { subscribed } => anyhow::anyhow!(
+                "transient failure escaped reconnect loop (subscribed={subscribed})"
+            ),
+        }
+    }
+}
+
+/// Pure classification of the Home Assistant auth handshake response.
+///
+/// Returns `None` on `auth_ok`, otherwise the reconnect decision. `auth_invalid`
+/// (the WebSocket equivalent of HTTP 401/403) is deliberately classified as
+/// [`ListenFailure::Transient`] with `subscribed: false`: the listener retries
+/// with backoff instead of stopping permanently, since credentials may be
+/// refreshed out of band. Only the fixed-vocabulary response label is read;
+/// no token value or error body is inspected or logged.
+fn classify_auth_response(auth: &Value) -> Option<ListenFailure> {
+    match auth["type"].as_str() {
+        Some("auth_ok") => None,
+        Some("auth_invalid") => Some(ListenFailure::transient(rejected_token_error(auth), false)),
+        _ => Some(ListenFailure::transient(
+            unexpected_auth_response_error(auth),
+            false,
+        )),
     }
 }
 
@@ -509,5 +542,22 @@ mod tests {
             "source metadata missing: {logs}"
         );
         assert!(logs.contains("bytes="), "length metadata missing: {logs}");
+    }
+
+    #[test]
+    fn auth_invalid_is_classified_transient_not_fatal() {
+        let auth = json!({
+            "type": "auth_invalid",
+            "message": "ha-token-value-must-never-be-classified",
+        });
+        let failure = classify_auth_response(&auth).expect("auth_invalid is a rejection");
+        assert!(
+            matches!(failure, ListenFailure::Transient { subscribed: false }),
+            "auth_invalid must be retried with backoff, not stop the listener: {failure:?}"
+        );
+        assert!(
+            !matches!(failure, ListenFailure::Fatal(_)),
+            "auth_invalid must never be classified as fatal: {failure:?}"
+        );
     }
 }

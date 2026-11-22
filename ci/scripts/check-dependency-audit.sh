@@ -8,6 +8,7 @@
 # [advisories].ignore and passes every one of them explicitly as `--ignore`,
 # so an ignore is never implicit and audit.toml stays the single source of
 # truth for documented suppressions.
+# Scope: only the two lockfiles above are audited; rust-script cargo meta-block deps are out of scope (exact-pin policy recorded in Makefile).
 #
 # Fixed fail-closed vocabulary (no values or secrets in failure output):
 #   BAD_USAGE, AUDIT_TOOL_MISSING, AUDIT_CONFIG_MISSING,

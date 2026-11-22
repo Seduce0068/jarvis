@@ -46,6 +46,10 @@
 #     最終 argv を記録・検証する。
 #   - I86-D: 本番の ${JARVIS_QDRANT_COLLECTION:-jarvis_memories} 契約を
 #     モックと境界チェックで共有し、カスタム名ケースを1件追加する。
+#   - I24-E/C92B-R2-01: assert_production_boundary() の prod_db scope で
+#     db_patterns を完全スキップせず、psql.log の本番 DB パターン行数が 1 以下
+#     であることを要求する（2 行以上で fail）。本番 DB が多段に呼ばれる失敗
+#     クラスは prod_db_multi scope へ切り替え、誤検知を避ける。
 #
 # 安全境界:
 #   - フィクスチャは mktemp -d 配下にのみ生成し、EXIT トラップで破棄する。
@@ -1486,8 +1490,14 @@ assert_service_invariants() { # label [premise-file]
 # すり抜けていた。ここでは 1 ケースにつき 1 アサーションだけを追加し、
 # 失敗クラスごとに「そのクラスで許される本番接触」以外を検出する:
 #   isolated   : 隔離段の失敗（8a/8b）。本番 DB / 本番コレクションの両方を禁止。
-#   prod_db    : PostgreSQL 本番段の失敗（8c）。psql.log の本番パターンのみ許容し、
+#   prod_db    : PostgreSQL 本番段の失敗（8c）。psql.log の本番 DB パターン行数は
+#                1 以下を要求し、2 行以上で fail（最初の 1 回だけ許容）。
 #                本番コレクション (curl) / qdrant / enable/disable は禁止。
+#   prod_db_multi: 本番 DB への psql が複数回発生する失敗クラス
+#                （prod_restore_fail / prod_count_fail / prod_count_bad /
+#                 prod_count_zero は DROP → 復元 → 件数取得 → ロールバックが
+#                 連鎖する）。行数制限のみを外し、本番コレクション / qdrant /
+#                 enable/disable の不変条件は prod_db と同一に検査する。
 #   prod_qdrant: Qdrant 本番段の失敗（8d, --skip-db）。curl の本番パターンのみ
 #                許容し、本番 DB / qdrant / enable/disable は禁止。
 # 前提ログは verify_set 通過後に inventory_services() が必ず生成する
@@ -1516,13 +1526,35 @@ assert_production_boundary() { # label scope
     done
   fi
 
-  # 本番 DB パターンは prod_db クラス以外では一切禁止。
-  if [ "$scope" != 'prod_db' ] && [ -f "$tmp/logs/psql.log" ]; then
+  # 本番 DB パターンの検査。
+  #   isolated / prod_qdrant : 本番 DB 接触ゼロ（従来どおり 1 行でも拒否）。
+  #   prod_db                : 最初の 1 行は許容し、2 行目以降を検出して fail。
+  #   prod_db_multi          : 本番 DB が多段に呼ばれる失敗クラスは行数制限を外す
+  #                            （サービス/curl の不変条件は全スコープ共通で検査）。
+  if [ -f "$tmp/logs/psql.log" ]; then
+    local -a db_grep_args=()
     for pattern in "${db_patterns[@]}"; do
-      if grep -E -- "$pattern" "$tmp/logs/psql.log" >/dev/null 2>&1; then
-        violations+=("psql.log:$pattern")
-      fi
+      db_grep_args+=(-e "$pattern")
     done
+    local db_hits
+    db_hits="$(grep -E -c "${db_grep_args[@]}" "$tmp/logs/psql.log" 2>/dev/null || true)"
+    [ -n "$db_hits" ] || db_hits=0
+    case "$scope" in
+      prod_db)
+        if [ "$db_hits" -gt 1 ]; then
+          violations+=("psql.log: production DB pattern lines=$db_hits (allowed<=1)")
+        fi
+        ;;
+      prod_db_multi)
+        # 複数回呼び出しが契約上生じるクラスは行数制限を外す。
+        :
+        ;;
+      *)
+        if [ "$db_hits" -ne 0 ]; then
+          violations+=("psql.log: production DB pattern lines=$db_hits (allowed=0)")
+        fi
+        ;;
+    esac
   fi
 
   # 本番コレクション パスは prod_qdrant クラス以外では一切禁止。
@@ -1606,6 +1638,8 @@ both() {
 # I84-C: green --apply 経路にも本番境界チェック（scope=isolated）を戻し、
 # --confirm の失敗経路には失敗クラスに対応する scope を渡す。scope は
 # --skip-db の有無から導出する（8d の Qdrant 本番段は --skip-db を伴う）。
+# I24-E/C92B-R2-01: 本番 DB が複数回呼ばれる psql 失敗モードは prod_db_multi
+# を使い、prod_db の「1 回だけ許容」行数ガードの誤検知を避ける。
 prod_stage() {
   local curl_mode="$1" psql_mode="$2" jq_mode="$3" label="$4" fragment="$5"
   shift 5
@@ -1614,6 +1648,14 @@ prod_stage() {
   for e in "${extra[@]}"; do
     [ "$e" = '--skip-db' ] && scope='prod_qdrant'
   done
+  # 本番 DB への psql が DROP → 復元 → 件数取得 → ロールバックと連鎖する
+  # モードは prod_db の「1 行だけ許容」ガードを誤って発火させるため、
+  # 複数回呼び出しを想定した prod_db_multi へ切り替える。
+  case "$psql_mode" in
+    prod_restore_fail|prod_count_fail|prod_count_bad|prod_count_zero)
+      if [ "$scope" = 'prod_db' ]; then scope='prod_db_multi'; fi
+      ;;
+  esac
   local code=0 out=""
   rm -f -- "$tmp/logs"/*.log "$tmp/logs/jq.calls"
   MOCK_CURL_MODE="$curl_mode"

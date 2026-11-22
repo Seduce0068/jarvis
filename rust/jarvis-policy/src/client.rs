@@ -12,12 +12,48 @@ use tonic::transport::Channel;
 
 use crate::grpc::proto::CheckRequest;
 use crate::grpc::proto::policy_service_client::PolicyServiceClient;
+use crate::http::check_reasons;
 
 /// Deadline for a policy check.
 ///
 /// Local gRPC calls complete in microseconds; the bound only matters when the
 /// policy service is wedged. A timed-out check is denied.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Fixed fallback when a server's reason is not a token this client knows
+/// (for example, an older server that leaves the additive field empty).
+const UNKNOWN_REASON: &str = "unknown";
+
+/// Allow decision plus the policy service's fixed-vocabulary reason.
+///
+/// This is the client-side counterpart of the HTTP/gRPC check classification:
+/// `reason` is always one of the tokens from [`crate::http::check_reasons`] (or
+/// `"unknown"` for an unrecognized value). Raw transport errors and caller
+/// input never reach this field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CheckOutcome {
+    /// Whether the policy engine explicitly allowed the request.
+    pub allowed: bool,
+    /// Fixed, non-sensitive classification supplied by the policy service.
+    pub reason: &'static str,
+}
+
+/// Map an untrusted wire string onto the policy service's closed reason set.
+///
+/// The server is the authority for the classification; this allowlist makes
+/// sure the client never carries an arbitrary (or caller-influenced) string
+/// forward. Fail-closed evaluation errors are already labelled by the server
+/// with a fixed reason, so no raw error text is ever observed here either.
+fn classify_reason(reason: &str) -> &'static str {
+    match reason {
+        check_reasons::ALLOWED => check_reasons::ALLOWED,
+        check_reasons::KILL_SWITCH => check_reasons::KILL_SWITCH,
+        check_reasons::RBAC_DENIED => check_reasons::RBAC_DENIED,
+        check_reasons::CEDAR_DENIED => check_reasons::CEDAR_DENIED,
+        check_reasons::EVALUATION_ERROR => check_reasons::EVALUATION_ERROR,
+        _ => UNKNOWN_REASON,
+    }
+}
 
 /// Client for the `jarvis.policy.v1.PolicyService` endpoint.
 #[derive(Clone)]
@@ -73,6 +109,25 @@ impl PolicyClient {
         resource: &str,
         context: &serde_json::Value,
     ) -> Result<bool> {
+        Ok(self
+            .check_with_reason(principal, action, resource, context)
+            .await?
+            .allowed)
+    }
+
+    /// Raw check that also returns the server's fixed-vocabulary reason.
+    ///
+    /// This mirrors [`Self::check`] but keeps the additive `reason` from the
+    /// proto response instead of discarding it, so callers can choose whether
+    /// they need the classification. Fail-closed behavior on transport and
+    /// protocol errors is unchanged: the error is still surfaced to the caller.
+    pub async fn check_with_reason(
+        &self,
+        principal: &str,
+        action: &str,
+        resource: &str,
+        context: &serde_json::Value,
+    ) -> Result<CheckOutcome> {
         let mut client = PolicyServiceClient::new(self.channel.clone());
         // I14-B: the context is sent verbatim. Null normalization now happens
         // once at the policy-side boundary (`without_nulls`, shared with the
@@ -90,7 +145,10 @@ impl PolicyClient {
             .await
             .with_context(|| "policy check RPC failed")?
             .into_inner();
-        Ok(response.allowed)
+        Ok(CheckOutcome {
+            allowed: response.allowed,
+            reason: classify_reason(&response.reason),
+        })
     }
 }
 
@@ -195,6 +253,50 @@ mod tests {
                 .expect("check runs"),
             "the shipped policy does not grant git.commit to jarvis"
         );
+
+        std::fs::remove_dir_all(dir).expect("clean temp dir");
+    }
+
+    /// Regression: `check_with_reason` must surface both the server's decision
+    /// and its fixed-vocabulary reason, while `check` keeps its plain `bool`
+    /// API. No raw error or caller input may appear in the reason.
+    #[tokio::test]
+    async fn check_with_reason_returns_allowed_and_fixed_reason() {
+        let (client, _engine, dir) = start_server("reasons").await;
+        let context = serde_json::json!({});
+
+        let allowed = client
+            .check_with_reason("jarvis", "execute", "tool:filesystem.read", &context)
+            .await
+            .expect("check with reason runs");
+        assert!(allowed.allowed);
+        assert_eq!(allowed.reason, crate::http::check_reasons::ALLOWED);
+
+        let denied = client
+            .check_with_reason("jarvis", "execute", "tool:no.such.tool", &context)
+            .await
+            .expect("check with reason runs");
+        assert!(!denied.allowed);
+        assert_eq!(denied.reason, crate::http::check_reasons::RBAC_DENIED);
+        assert!(
+            matches!(
+                denied.reason,
+                crate::http::check_reasons::ALLOWED
+                    | crate::http::check_reasons::KILL_SWITCH
+                    | crate::http::check_reasons::RBAC_DENIED
+                    | crate::http::check_reasons::CEDAR_DENIED
+                    | crate::http::check_reasons::EVALUATION_ERROR
+            ),
+            "reason must stay inside the server's fixed vocabulary"
+        );
+        assert!(!denied.reason.contains("tool:"));
+
+        // The legacy method still returns a plain bool with the same decision.
+        let legacy: bool = client
+            .check("jarvis", "execute", "tool:filesystem.read", &context)
+            .await
+            .expect("check runs");
+        assert_eq!(legacy, allowed.allowed);
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");
     }

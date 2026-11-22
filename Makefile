@@ -1,6 +1,6 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-server-minimal bootstrap-server-minimal-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit print-cargo-audit-version check-evidence check-evidence-counts init-config
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-server-minimal bootstrap-server-minimal-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-rust-scripts test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit print-cargo-audit-version check-evidence check-evidence-counts init-config
 
 # 既定値
 CARGO_AUDIT_VERSION ?= 0.23.0
@@ -29,9 +29,10 @@ help: ## ヘルプ表示
 # 明示し、`rust-script --version` が一致することを手動ゲートで確認する。更新は
 # 意図的な変更として記録し、各メタブロックの pin と同時に見直す（ローカルの
 # インストール／キャッシュ上の解決版は 0.36.0）。
-# 補足: `make ci-local` は rust-script を実行せず（cargo ゲート + シェル/
-# Python ゲートのみ）、rust-script 自体のバージョンも CI で固定されていないため、
-# この drift は現状 CI ではなく手動の特権操作経路に留まる。
+# 補足: ローカルの `make ci-local` / `make safety-test` は test-rust-scripts 経由で
+# rust-script --test を実行する（backup/deploy/restore・1 件でも失敗すれば非ゼロ）。
+# 一方 CI ランナーには rust-script が未導入で本体バージョンの pin も未確定のため、
+# ci.yml の extra_gates には追加しない（スコープ外）。
 # 更新時はこのコメントと各スクリプトのメタブロックを同時に見直すこと。
 
 bootstrap-server: ## サーバー(Linux/VPS)をブートストラップ
@@ -85,6 +86,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@bash ci/scripts/test-verify-backup.sh
 	@bash ci/scripts/test-backup-args.sh
 	@bash infra/scripts/test-restore-local.sh
+	@$(MAKE) test-rust-scripts
 	@echo "ci-local: all gates passed"
 
 secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は出力しない）
@@ -98,6 +100,7 @@ safety-test: ## レガシー fail-closed とバックアップ検証ロジック
 	@bash ci/scripts/test-verify-backup.sh
 	@bash ci/scripts/test-backup-args.sh
 	@bash infra/scripts/test-restore-local.sh
+	@$(MAKE) test-rust-scripts
 
 timer-status: ## バックアップ timer の状態を表示（読み取り専用）
 	@echo "== backup timer status =="
@@ -192,9 +195,14 @@ lint: ## Rust script の整形・起動確認
 	@rust-script scripts/utils/phone-status-json.rs --help >/dev/null
 	@rust-script config/shell-locale.rs >/dev/null
 
+test-rust-scripts: ## rust-script 単体テスト（backup/deploy/restore・失敗時は非ゼロ終了）
+	@rust-script --test rust/scripts/backup.rs
+	@rust-script --test rust/scripts/deploy.rs
+	@rust-script --test rust/scripts/restore.rs
+
 test: ## Rust workspace と rust-script のテスト
 	@cd rust && cargo test --workspace --locked
-	@rust-script --test rust/scripts/restore.rs
+	@$(MAKE) test-rust-scripts
 	@TERMUX_VERSION=test rust-script scripts/bootstrap/bootstrap.rs --target termux --dry-run --skip-android-mcp --source-root . --root "$(JARVIS_ROOT)"
 
 clean: ## 生成物削除 (注意: 設定ファイルも消える)
