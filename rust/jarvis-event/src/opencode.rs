@@ -208,6 +208,11 @@ mod tests {
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
+    // loopback HTTP モック用（新規依存なし・既存の TcpListener パターンを流用）
+    use std::io::{BufRead, BufReader, Read};
+    use std::net::{TcpListener, TcpStream};
+    use std::time::Instant;
+
     fn sample_event() -> UnifiedEvent {
         UnifiedEvent {
             id: uuid::Uuid::nil(),
@@ -302,6 +307,144 @@ mod tests {
         assert!(
             logs.contains("status=401"),
             "summary missing from logs: {logs}"
+        );
+    }
+
+    /// R2 Runtime Proof: dispatch の成功経路が loopback OpenCode スタブに対して
+    /// セッションを1回だけ生成し、整形済み prompt を届けることを検証する。
+    /// 実サービスや外部ネットワークには一切接続しない。
+    #[tokio::test]
+    async fn dispatch_creates_one_session_and_posts_formatted_prompt() {
+        /// 1リクエスト（request line + body）を読み取る最小 HTTP パーサ。
+        fn read_request(stream: &mut TcpStream) -> (String, String) {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            let mut request_line = String::new();
+            reader
+                .read_line(&mut request_line)
+                .expect("read request line");
+            let mut content_length = 0usize;
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).expect("read header") == 0
+                    || header == "\r\n"
+                    || header == "\n"
+                {
+                    break;
+                }
+                if let Some((name, value)) = header.split_once(':')
+                    && name.eq_ignore_ascii_case("content-length")
+                {
+                    content_length = value.trim().parse().expect("valid content length");
+                }
+            }
+            let mut body = vec![0u8; content_length];
+            if content_length > 0 {
+                reader.read_exact(&mut body).expect("read body");
+            }
+            (
+                request_line.trim_end().to_string(),
+                String::from_utf8_lossy(&body).into_owned(),
+            )
+        }
+
+        fn respond_ok(stream: &mut TcpStream, body: &str) {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write response");
+            stream.flush().expect("flush response");
+        }
+
+        const SESSION_ID: &str = "test-session-r2";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        let base_url = format!("http://{}", listener.local_addr().expect("local addr"));
+
+        // セッション生成と最初の prompt POST を捌き、各リクエストを記録する。
+        // 期限を設けることで dispatch が早期失敗しても join() がハングしない。
+        let server = std::thread::spawn(move || {
+            let mut captured: Vec<(String, String)> = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            listener.set_nonblocking(true).expect("set nonblocking");
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(5)))
+                            .expect("set read timeout");
+                        let (line, body) = read_request(&mut stream);
+                        let is_prompt = line.contains("/prompt");
+                        captured.push((line, body));
+                        if is_prompt {
+                            respond_ok(&mut stream, "{}");
+                            break;
+                        }
+                        respond_ok(
+                            &mut stream,
+                            &format!("{{\"data\":{{\"id\":\"{}\"}}}}", SESSION_ID),
+                        );
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        if Instant::now() >= deadline {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => panic!("accept failed: {err}"),
+                }
+            }
+            captured
+        });
+
+        let config = crate::config::EventConfig {
+            opencode_url: base_url,
+            opencode_location: "/tmp/jarvis-opencode-test".into(),
+            ..Default::default()
+        };
+        let client = OpenCodeClient::new(&config).expect("build client");
+        let event = sample_event();
+        let context = json!({"memories": [{"text": "kitchen light was on"}]});
+
+        client
+            .dispatch(&event, &context)
+            .await
+            .expect("dispatch succeeds against loopback stub");
+
+        let requests = server.join().expect("mock server thread");
+        assert_eq!(
+            requests.len(),
+            2,
+            "expected session creation + one prompt, got {requests:?}"
+        );
+
+        let session_creations = requests
+            .iter()
+            .filter(|(line, _)| line.starts_with("POST /api/session "))
+            .count();
+        assert_eq!(
+            session_creations, 1,
+            "session must be created exactly once and reused: {requests:?}"
+        );
+
+        let (prompt_line, prompt_body) = requests
+            .iter()
+            .find(|(line, _)| line.contains("/prompt"))
+            .expect("prompt request recorded");
+        assert_eq!(
+            prompt_line.as_str(),
+            format!("POST /api/session/{}/prompt HTTP/1.1", SESSION_ID).as_str(),
+            "prompt must target the created session"
+        );
+        assert!(
+            prompt_body.contains("type: state_changed"),
+            "prompt missing event type: {prompt_body}"
+        );
+        assert!(
+            prompt_body.contains("correlation_id: 01JTESTCONTEXT"),
+            "prompt missing correlation id: {prompt_body}"
         );
     }
 }

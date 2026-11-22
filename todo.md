@@ -2742,9 +2742,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **error_kind の EventError 分岐の回帰追加** — 2026-11-22 対応済み。`error_kind_maps_every_variant_to_its_fixed_token`（normalizer.rs:826-884）を追加し HomeAssistant / AndroidMcp / Context（EventError 経由＋bare ContextError） / Config / Grpc / Serialization / other を直接 `error_kind()` へ渡して固定トークンをアサート。EventError::Http は reqwest::Error の公開コンストラクタが無く network I/O も使えないため既存 include_str! 静的検査でカバーする旨をコメント明記。根拠
   `rust/jarvis-event/src/normalizer.rs:47-66,826-884` / R1-ST04 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 94 passed（+1）、event 証跡 93→94 同期し `--check` 5件すべて MATCH、`cargo clippy -p jarvis-event --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **OpenCode dispatch / セッション生成の HTTP 成功経路にテストが無い** —
-  `rust/jarvis-event/src/opencode.rs:77-175,204-306` / R1-ST04 / confirmed。
-  - 2026-11-22 並列 Verify（V-109）: 未解決（confirmed）。opencode.rs:204-307 のテストは format_prompt と upstream_error のみで、session 生成＋prompt POST の成功経路なし。HTTP モック依存（wiremock 等）の導入が必要で設計判断。
+- [x] OpenCode dispatch 成功経路の回帰 — 2026-11-23 方針委譲で対応済み。opencode.rs:316-437 に loopback TcpListener モック（新規依存なし、http.rs の既存パターン流用）で POST /api/session（id 返却）と POST /api/session/{id}/prompt（200）を模擬し、dispatch が Ok(())・prompt 本文に format_prompt 由来キーワードが含まれる・session 生成が1回だけ（再利用）を検証。サーバスレッドは join で-cleanup。回帰 +1。根拠 V-109。
 - [ ] **kill switch の activated_by が公開経路で依然 "system"** —
   `rust/jarvis-policy/src/kill_switch.rs:241-248,280-286`, `src/lib.rs:249-251` /
   R1-ST01 / confirmed。既存 622 行の対応は `activate_with_actor` 追加のみ。
