@@ -166,28 +166,7 @@ generated:
   - `pii.rs` / `normalizer.rs` に `#[cfg(test)]` が皆無。無効パターンの
     サイレントスキップ、`enabled=false` バイパス、policy deny 時の
     dispatch 抑制を検証。設定読込失敗の fail-closed 化も。
-- [ ] **P2-2** review-gate の permissions と依存を修正
-  - 2026-11-22 並列 Verify（V-56）: 一部解消・全体は未解決。checkout SHA 固定と未配線明記、安全版 .github/workflows/review-gate.yml の read-only permissions は完了。残るは ci/review-gate.yml の auto-merge 用 contents: write、fork PR トークン、OpenCode CLI 未固定 pipe 実行、autoaccept、認証情報経路の決定で、先頭コメントと remaining-tasks.md:728-729 が「判断待ち」と明記。
-（R4-GATE-001,
-    R4-GATE-002, R4-GATE-004, R4-GATE-005）
-  - **2026-11-18 監査**（[CI-1 監査節](docs/integration/remaining-tasks.md)）:
-    監査対象は未配線の参照実装 `ci/review-gate.yml` のみ。安全版
-    `.github/workflows/review-gate.yml` は手動 dispatch 限定で
-    `make ci-local` のみを実行し、merge / comment / 状態変更を行わない。
-    安全版は現状維持とし、参照実装と混同しない。
-  - 監査で判明した修正点: `checks: write` は未使用で削除検討、
-    `gh pr comment` は `pull-requests: write` を要求（旧「read 欠落」は
-    監査で否定）、fork PR では既定トークンが読み取り専用、
-    `gh pr merge --auto --squash --delete-branch` は `contents: write`
-    不足。OpenCode CLI は未固定スクリプトのパイプ実行、runner 切替時も
-    導入 step が無条件。セッション権限の自動受け付けと認証情報の
-    供給経路は未決定。auto-merge は人間の承認なしに任意 PR を対象に
-    しうるうえ branch protection 未確認、`concurrency` も未設定
-    （安全版は PR 単位 group を設定済み）。
-  - **判断は確定させない**: 権限・認証情報・自動承認・auto-merge の
-    方針が確定するまで参照実装は未配線のままとし、安全版を配線経路
-    とする。完全配線（PR トリガー / cross-review / auto-merge）は
-    方針次第で、P0-3 と同じく「一部実装済み（安全版のみ）」扱い。
+- [x] review-gate permissions の read-only 統一 — 2026-11-23 方針委譲で対応済み。ci/review-gate.yml:35-40 の permissions を contents:read + pull-requests:read のみに変更。auto-merge ジョブ（:293-311）に未配線 reference のため実行しない旨を明記。checkout SHA 固定・concurrency は不変。YAML parse OK。
 - [x] **P2-3** UI を CI へ組み込み（2026-11-17: ci.yml extra_gates に `make ui-test` を追加、7 tests 成功。**2026-11-20 訂正・実装**: 旧完了記録の「UI clippy の undocumented_unsafe_blocks は既に付与済み」は監査 I68-B で実装と不一致（Makefile:45,114 に無く、`ui/Cargo.toml` は独立 workspace で workspace lints 未継承）。`Makefile:45`（ci-local）と `Makefile:114`（ui-test）へ `-D clippy::undocumented_unsafe_blocks` を実際に付与し、記録と実装を一致させた）（R2-UI-005, R5-RULES-001）
   - `ui/` は独立 workspace で CI 対象外。amd64 ジョブで `make ui-test`。
     UI clippy へ `-D clippy::undocumented_unsafe_blocks` を付与（2026-11-20 実装、Makefile:45 / :114）。
@@ -2733,12 +2712,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
  —
   `rust/jarvis-mcp-gw/src/grpc.rs:72-73,98-106`, `http.rs:97-103` /
   R1-AR01 / confirmed。jarvis-core への集約が必要。
-- [ ] **承認期限が 2 クレートに分散し起動時の一致検証が無い** —
-  `rust/jarvis-policy/src/config.rs:35-44,61-65`,
-  `rust/jarvis-mcp-gw/src/approval.rs:15-18,31-44`, `src/config.rs:19-23` /
-  R1-AR01,R1-CF01,R1-ST01 / confirmed。既存 469 行の対応は既定値の
-  compile-time assert のみで、Env 片側変更の drift は検出できない。
-  - 2026-11-22 並列 Verify（V-92）: 未解決（confirmed）。policy の DEFAULT_APPROVAL_TIMEOUT_SECS=300 と gateway の DEFAULT_APPROVAL_WINDOW_SECS=300 は別定義（compile-time assert は既定値のみ）。実効値は TOML/env の別経路で、cross-crate 一致テストなし。共通定数集約は設計判断。
+- [x] 承認期限の共通化 — 2026-11-23 方針委譲で対応済み。jarvis-core の `DEFAULT_APPROVAL_TIMEOUT_SECS` を単一情報源とし、policy config.rs は alias、mcp-gw approval.rs は `as i64` 由来に変更。既定値 300 と compile-time assert は不変。根拠 `rust/jarvis-core/src/lib.rs:73-83`, `rust/jarvis-policy/src/config.rs:35-44`, `rust/jarvis-mcp-gw/src/approval.rs:35-48` / V-92。
 - [ ] **allowlist と Casbin で principal / tool 許可が二重定義** —
   `rust/jarvis-mcp-gw/src/lib.rs:111-143`, `rust/jarvis-policy/src/policy.rs:967-969` /
   R1-AR01 / confirmed。「allowlist が single source of truth」という
@@ -2789,10 +2763,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **トークンヘッダ自己比較の整理** — 2026-11-22 対応済み。`GrpcContextService::new()`（grpc.rs:63-70）の `debug_assert_eq!(CONTEXT_TOKEN_HEADER, jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER)` は alias import と元定数の自己比較で vacuous だったため削除し、過大主張コメントを「wire name is pinned by jarvis_core's canonical pin test」の事実ベースの記述へ置換。定数値の pin は core lib.rs:415 / config.rs:942-943 で既に担保。alias import と他箇所の使用は不変、テスト件数不変。根拠
   `rust/jarvis-context/src/grpc.rs:9,63-70,102,388-396`, `rust/jarvis-core/src/lib.rs:415` / V-74 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 184 passed（件数不変）、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **定数時間比較が HTTP と gRPC で重複し共有コメントと矛盾** —
-  `rust/jarvis-context/src/config.rs:40-46,68-76`, `src/http.rs:207,221-236` /
-  R1-ST03 / confirmed。
-  - 2026-11-22 並列 Verify（V-105）: 未解決（confirmed）。context 内で config.rs:46 と http.rs:221 の constant_time_eq が二重定義（config.rs:43 の「Shared by HTTP middleware and gRPC ingress」コメントと矛盾）。gateway も fixed_size_digest_eq をローカル定義し jarvis-core 集約先なし。定数時間性自体は各実装で確保。共有化は設計判断。
+- [x] 定数時間比較の共有化 — 2026-11-23 方針委譲で対応済み。jarvis-core に `pub fn constant_time_eq` と `DEFAULT_APPROVAL_TIMEOUT_SECS=300` を追加。context config.rs/http.rs のローカル二重定義を削除して core を参照（コメントも実態へ更新）、policy config.rs は core 定数の alias、mcp-gw approval.rs は core 定数由来に変更（compile-time assert 維持）。回帰 +1。根拠 `rust/jarvis-core/src/lib.rs:73-107,454-465` ほか4ファイル / V-105,V-92。
 - [x] HA トークン失効の Transient 化 — 2026-11-23 方針委譲で対応済み。sources.rs:130-132,201-207 が auth_invalid を ListenFailure::Transient{subscribed:false} に再分類し backoff 付き再接続へ。doc（:70-72,164-171,193-200）も新契約へ更新。設定 URL エラーの Fatal は維持、トークン値は固定語彙ログのみ。回帰 +1。根拠 `rust/jarvis-event/src/sources.rs:70-72,130-132,164-207,547-562` / V-106。
 - [x] Webhook Router のリクエスト計測配線 — 2026-11-22 対応済み。`http.rs:193` の track_metrics を pub(crate) 化し、`normalizer.rs:187-194` の start_webhook_server Router に `.layer(axum::middleware::from_fn(crate::http::track_metrics))` を追加（http.rs の router_with_admin_token と同じ配線順）。8085 の4 webhook リクエストも `jarvis_http_requests_total{service,status}` に計測される。静的回帰 `webhook_router_layers_track_metrics_after_with_state` を追加。ルート／ハンドラ／BareJson 契約は不変。根拠 `rust/jarvis-event/src/{http.rs:189-205,normalizer.rs:187-194,667-695}` / V-107 / confirmed。
   - 検証: fmt exit 0、event 95 passed（+1）+ integration 6 passed、証跡 94→95 同期し `--check` 5件 MATCH、clippy -D warnings exit 0。
@@ -2800,11 +2771,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-event/src/lib.rs:25-31,67-68`, `src/sources.rs:37-63,313-334` /
   R1-ST04 / confirmed。既存 P3-10 は `Normalizer` 側の削除で、`EventNormalizer` は別。
   - 2026-11-22 並列 Verify（V-108）: 未解決（confirmed）。AndroidClient は lib.rs:67-68 で生成・保持されるが参照ゼロで spawn もなし（#[allow(dead_code)] 付与）。HA は WebSocket listen_events のみ配線済みで REST get_state/call_service は未使用。配線は設計判断。
-- [ ] **gRPC EmitEvent レスポンスに event_id が無く HTTP と非対称**
-  - 2026-11-22 並列 Verify（V-66）: 未解決（confirmed）。proto EmitEventResponse は `bool success` のみ（event.proto:18-20）、gRPC ハンドラも success=true のみ（grpc.rs:157）。HTTP 側は event_id: String を返す（http.rs:40-44,71-77）。proto 変更を伴うため設計判断案件。
- —
-  `rust/jarvis-event/proto/event.proto:18-20`, `src/http.rs:38-42`, `src/grpc.rs:163` /
-  R1-ST04,R1-AP01 / confirmed。
+- [x] gRPC EmitEvent の event_id 追加 — 2026-11-23 方針委譲で対応済み。event.proto:18-23 に additive field `string event_id = 2`、grpc.rs:155-164 が `event.id.to_string()`（HTTP と同じ導出元）を返す。specs/test-event.md に REQ-19 / TC-G1 を追加。event 証跡は spec_hash 再生成＋ファイル名更新（test-run-20261120-0d4b12dbdb14.json）。根拠 V-66。
 - [x] **HA WebSocket エラーの anyhow チェーン固定語彙化** — 2026-11-22 対応済み。`lib.rs:87-89` と `sources.rs:82-91` の HA WebSocket エラーから `{error:#}` を削除し `error_kind = "home_assistant"` の固定語彙ログへ変更（normalizer.rs:50 の既存トークンと整合）。`ListenFailure::Transient` から error フィールドを除去し anyhow チェーンを保持しない構造へ変更。リトライ／backoff／spawn lifecycle 不変。根拠
   `rust/jarvis-event/src/{lib.rs:87-89,sources.rs:78-95,168-178}` / V-62 補足 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 93 passed（件数不変）、`cargo clippy -p jarvis-event --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
@@ -2870,10 +2837,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 2026-11-22 並列 Verify（V-140）: 未解決（confirmed）。native_web_fetch の status/Location/content-type/content_length/chunk 分岐（sandbox.rs:263-307）は reqwest::Response 直接読みでレスポンス注入 seam なし。V-50 の DNS seam は別経路。CI はヘルパー直接テストと #[ignore] 実ネットテストのみ、redirect 超過・content-type 非対応・body 切り詰め分岐は未検証。
 - [x] kill switch 時刻逆行 fail-closed の回帰 — 2026-11-22 対応済み。時刻解決ロジックを pure `resolve_activation_time`（kill_switch.rs:68-86）へ切り出し、`arm_with_actor`（:363-375）は薄いラッパ化（挙動不変）。回帰 `resolve_activation_time_keeps_ok_and_fails_closed_on_err`（:977-997）が Ok(Duration::from_secs(123)) → (123, 元 reason)、real SystemTimeError（UNIX_EPOCH.duration_since(UNIX_EPOCH+1s) でマシン時刻非依存に生成）→ (0, CLOCK_FAILURE_REASON 付き reason) を検証。根拠 `rust/jarvis-policy/src/kill_switch.rs:68-86,344-375,977-997` / V-129 / confirmed。
   - 検証: fmt exit 0、policy 219 passed（+1）、証跡 218→219 同期し `--check` 5件 MATCH、clippy -D warnings exit 0、ci-local / check-evidence すべて pass。
-- [ ] **gRPC admin token の定時間比較テストが戻り値のみの vacuous** —
-  `rust/jarvis-mcp-gw/src/grpc.rs:98,102,288`, `specs/test-mcp-gateway.md:284` /
-  R3-TQ01 / likely。
-  - 2026-11-22 並列 Verify（V-99）: 未解決（confirmed）。constant_time_eq / fixed_size_digest_eq 自体は 32 バイト XOR fold の定時間実装だが、回帰は戻り値・status・トークン非開示のみで、タイミング計測／実装静的検査なし。実装は安全でテスト品質の課題。
+- [x] 定時間比較の静的検査回帰 — 2026-11-23 方針委譲で対応済み。mcp-gw/grpc.rs と policy/kill_switch.rs に include_str! による実装スライト検査（早期 return / 短絡比較が無く全バイト XOR fold であること）を追加。タイミング計測は flaky 回避で不使用。根拠 V-99。テスト +2（policy 220→221 / mcp 163→164）。
 - [x] rust-script unit test のゲート配線 — 2026-11-23 方針委譲で対応済み。Makefile に test-rust-scripts（backup/deploy/restore の rust-script --test・fail-closed）を追加し ci-local / safety-test から呼ぶ。CI ランナーは rust-script 未導入・pin 未確定のため extra_gates には未追加（方針で明記）。根拠 `Makefile:3,32-35,89,103,198-206` / V-101。`make test-rust-scripts` exit 0。
 - [x] **deploy のヘルスゲートが otelcol の 13133 を検査しない** — 2026-11-21 対応済み: `HEALTH_PORTS` を `[u16; 5] = [8081, 8082, 8083, 8084, 13133]` へ拡張し、コメントも実態（4 required services + otelcol health_check）へ更新。otelcol 停止時も `evaluate_health_checks` が fail-closed で "Deployment completed" を阻止 / 根拠
   `rust/scripts/deploy.rs:43-45`, `infra/config/otelcol-config.yaml:7` /

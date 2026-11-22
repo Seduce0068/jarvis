@@ -32,10 +32,14 @@ pub use jarvis_core::approval::ApprovalDecision as ApprovalOutcome;
 /// set this to the same value as the policy side's `approval_timeout_secs`.
 const APPROVAL_WINDOW_ENV: &str = "JARVIS_MCP_GW_APPROVAL_WINDOW_SECS";
 
-/// Default approval window, in seconds. Must be set to the same value as
-/// `jarvis_policy::config::DEFAULT_APPROVAL_TIMEOUT_SECS` (300): the gateway's
-/// `expires_at` and the policy-side expiry describe the same deadline.
-const DEFAULT_APPROVAL_WINDOW_SECS: i64 = 300;
+/// Default approval window, in seconds, derived from the shared core constant.
+///
+/// `jarvis_core::DEFAULT_APPROVAL_TIMEOUT_SECS` (300) is the single source of
+/// truth that `jarvis_policy::config::DEFAULT_APPROVAL_TIMEOUT_SECS` aliases:
+/// the gateway's `expires_at` and the policy-side expiry describe the same
+/// deadline. The compile-time assert below keeps the cross-crate agreement
+/// checkable instead of relying on two hand-maintained literals.
+const DEFAULT_APPROVAL_WINDOW_SECS: i64 = jarvis_core::DEFAULT_APPROVAL_TIMEOUT_SECS as i64;
 
 // Compile-time guard against the two defaults drifting apart.
 const _: () = assert!(

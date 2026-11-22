@@ -9,16 +9,16 @@ JSON はテキスト形式のため、リンク先として記載しています
 
 - [policy-approval の実行ログ][run-policy]
   — [test-policy-approval.md](../specs/test-policy-approval.md) の実測結果。
-  220 passed / 0 failed。
+  221 passed / 0 failed。
 - [mcp-gateway の実行ログ][run-mcp]
   — [test-mcp-gateway.md](../specs/test-mcp-gateway.md) の実測結果。
-  163 passed / 0 failed / 1 skipped。
+  164 passed / 0 failed / 1 skipped。
 - [context の実行ログ][run-context]
   — [test-context.md](../specs/test-context.md) の実測結果。191 passed / 0 failed。
 - [backup の実行ログ][run-backup]
   — [test-backup.md](../specs/test-backup.md) の実測結果。43 passed / 0 failed。
 - [event の実行ログ][run-event]
-  — [test-event.md](../specs/test-event.md) の実測結果。96 passed / 0 failed。
+  — [test-event.md](../specs/test-event.md) の実測結果。97 passed / 0 failed。
 - [ui の実行ログ][run-ui]
   — [test-ui.md](../specs/test-ui.md) の実測結果。85 passed / 0 failed。
 
@@ -30,5 +30,5 @@ JSON はテキスト形式のため、リンク先として記載しています
 [run-mcp]: test-run-20261120-4dcaeb3768bb.json
 [run-context]: test-run-20261120-4eb0d21232f5.json
 [run-backup]: test-run-20261120-c486b0dbe466.json
-[run-event]: test-run-20261120-99f75a1efb0c.json
+[run-event]: test-run-20261120-0d4b12dbdb14.json
 [run-ui]: test-run-20261120-549225f7cc2d.json

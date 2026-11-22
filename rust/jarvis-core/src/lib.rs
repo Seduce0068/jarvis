@@ -70,6 +70,42 @@ pub const ALREADY_DECIDED_409_BODY: &str = "approval request already decided";
 /// consumers.
 pub const APPROVAL_EXPIRED_BODY: &str = "approval request expired";
 
+/// Default human approval deadline, in seconds (300).
+///
+/// This is the single source of truth for the approval window: the policy
+/// service's `approval_timeout_secs` default aliases this constant, and the
+/// MCP gateway derives `DEFAULT_APPROVAL_WINDOW_SECS` from it at compile time.
+/// The gateway builds `expires_at` from its window while policy expires the
+/// request with its timeout, so a one-sided default change silently drifts the
+/// effective deadline. 300 seconds is the long-standing deployed value on both
+/// sides; lifting it here preserves behavior and turns the agreement into a
+/// compile-time fact rather than a comment.
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
+
+/// Compare two strings in constant time, with no early exit on a mismatch.
+///
+/// The loop covers the longer input and pads the shorter one, so neither a
+/// content mismatch nor a length mismatch short-circuits. This is the one
+/// primitive used by the context HTTP gate and gRPC ingress (and the same
+/// shape used by the other token gates). Moved here unchanged from
+/// `jarvis-context` so no transport keeps a private copy that can drift.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    let max = a.len().max(b.len());
+    let mut diff = a.len() ^ b.len();
+    for (x, y) in a
+        .iter()
+        .map(Some)
+        .chain(std::iter::repeat(None))
+        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
+        .take(max)
+    {
+        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
+    }
+    diff == 0
+}
+
 /// Closed field vocabulary of the policy service's `GET /health` wire contract
 /// (I62-C). A healthy service answers `200 {"status":"ok"}` (no `reason` key);
 /// a degraded service answers `503 {"status":"degraded","reason":<reason>}`.
@@ -413,6 +449,19 @@ mod tests {
     #[test]
     fn context_token_header_pins_the_wire_contract() {
         assert_eq!(JARVIS_CONTEXT_TOKEN_HEADER, "x-jarvis-context-token");
+    }
+
+    /// The shared comparator must accept only an exact match. A content
+    /// mismatch, a length mismatch in either direction, and the empty-vs-
+    /// non-empty case all stay rejected. Pure function: no log capture needed.
+    #[test]
+    fn constant_time_eq_matches_only_identical_strings() {
+        assert!(constant_time_eq("token", "token"));
+        assert!(constant_time_eq("", ""));
+        assert!(!constant_time_eq("token", "Token"));
+        assert!(!constant_time_eq("token", "token-extra"));
+        assert!(!constant_time_eq("token-extra", "token"));
+        assert!(!constant_time_eq("token", ""));
     }
 
     /// Single canonical pin of the gateway's fixed internal-failure wording.

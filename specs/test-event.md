@@ -53,10 +53,16 @@ status: draft
 | REQ-16 | `/v1/events` はキュー満杯時に WARN を出し 503 を返す |
 | REQ-17 | gRPC `EmitEvent` はキュー満杯時に WARN を出し RESOURCE_EXHAUSTED を返す |
 | REQ-18 | `/health` は HEALTH_OK_BODY(200) または HEALTH_OPENCODE_UNAVAILABLE_BODY(503) のみを返し、未知本文は fail-closed |
+| REQ-19 | gRPC `EmitEvent` は `event_id` に投入イベントの正規化済み UUID 文字列を返し、HTTP の `emit_response()` と同じ値にする |
 
 REQ-18 の固定本文は共通の `HEALTH_OK_BODY` と本サービス固有の
 `HEALTH_OPENCODE_UNAVAILABLE_BODY` の 2 種類に閉じる。監視側はこの 2 本文への
 完全一致以外を不完全 probe として fail-closed に倒す。
+
+REQ-19 の `event_id` は proto の additive field (`string event_id = 2`) として
+運び、旧クライアントは未知フィールドを無視して従来どおり動作する。
+gRPC は `UnifiedEvent::id.to_string()` を、HTTP の `emit_response()` も同じく
+`UnifiedEvent::id.to_string()` を返すため、値の導出元は共通である。
 
 ## Risk & tier
 
@@ -207,6 +213,16 @@ Scenario: TC-B6 gRPC の満杯時 RESOURCE_EXHAUSTED
   Then ハンドラはブロックせず後続 RPC を処理できる
 ```
 
+### gRPC レスポンス契約 (REQ-19)
+
+```gherkin
+Scenario: TC-G1 gRPC EmitEvent の event_id エコー
+  Given 有効な UUID の id を持つ EmitEventRequest がある
+  When gRPC の EmitEvent RPC を呼ぶ
+  Then success は true でレスポンスの event_id は入力 id と一致する
+  Then event_id は HTTP の /v1/events と同じ正規化済み UUID 文字列である
+```
+
 ### 異常系・入口 (REQ-13〜REQ-15)
 
 TC-E1（policy 到達不可 fail-closed）と TC-E2
@@ -270,6 +286,7 @@ Scenario: TC-HC3 未知本文の fail-closed 拒否
 | TC-B4 | REQ-12 | v5.0.0-V16.5.3 | SP800-53r5.2/SI-4 | ATE_FUN.1 | 5.4.1 | T2 |
 | TC-B5 | REQ-16 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.3 | T1 |
 | TC-B6 | REQ-17 | v5.0.0-V2.4.1 | SP800-53r5.2/SC-5 | ATE_FUN.1 | 5.2.3 | T1 |
+| TC-G1 | REQ-19 | v5.0.0-V16.2.4 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.12 | T3 |
 | TC-E1 | REQ-13 | v5.0.0-V8.3.1 | SP800-53r5.2/AC-3 | ATE_FUN.1 | 5.4.1 | T1 |
 | TC-E2 | REQ-14 | v5.0.0-V16.2.4 | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.1 | T3 |
 | TC-E3 | REQ-15 | - | SP800-53r5.2/AU-3 | ATE_FUN.1 | 5.2.9 | T2 |
@@ -281,6 +298,7 @@ ASVS / SP 800-53 に直接対応しない行は `-` とした (空欄ではな�
 REQ-1〜REQ-15 と TC-W1〜W4 / TC-B1〜B4 / TC-E1〜E3 を網羅する。
 REQ-16 / REQ-17 と TC-B5 / TC-B6 は満杯時の API 拒否契約を網羅する。
 REQ-18 と TC-HC1〜TC-HC3 は `/health` の固定本文契約を網羅する。
+REQ-19 と TC-G1 は gRPC `EmitEvent` のレスポンス `event_id` 契約を網羅する。
 
 ## 既存テストとの対応
 
@@ -311,8 +329,17 @@ reason `opencode_unavailable` を保持する。core 側の pin は
 停止側へ倒すことを検証する。policy 専用の health 契約
 （`specs/test-ui.md:80-84`）は変更しない。
 
+gRPC の `EmitEvent` レスポンスは [grpc.rs](../rust/jarvis-event/src/grpc.rs) の
+`emit_event` が構築し、HTTP の `emit_response` と同じく
+`UnifiedEvent::id.to_string()` を `event_id` に設定する（proto の
+`string event_id = 2` は additive field）。根拠テストは
+`emit_event_response_returns_the_request_id` で、入力 id とレスポンスの
+`event_id` の一致を検証する。本変更に伴う `spec_hash` の再生成と証跡同期は
+親が行い、本エージェントは証跡を変更しない。
+
 本タスクで `I103-D` 契約マーカー（TC-HC1〜HC3）を追加し、上記の未閉鎖
 gherkin ブロックを本文へ戻したため `Scenario:` 宣言は 14 → 13 行になった。
+その後の REQ-19 / TC-G1 追加により、現在の `Scenario:` 宣言は 14 行である。
 `spec_hash` の変更に伴う証跡再生成と、`notes` への
 `HEALTH_OK_BODY` / `HEALTH_OPENCODE_UNAVAILABLE_BODY` / `fail-closed` の
 明記は親が行う。本エージェントは証跡を変更しない。

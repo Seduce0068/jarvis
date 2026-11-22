@@ -12,6 +12,7 @@ use axum::{
 };
 use jarvis_core::{
     BareJson, HEALTH_OK_BODY, JARVIS_CONTEXT_TOKEN_HEADER, MemoryEntry, UnifiedEvent,
+    constant_time_eq,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
@@ -189,6 +190,10 @@ impl AuthState {
 /// token is configured, every route except [`HEALTH_PATH`] requires the exact
 /// value in [`ADMIN_TOKEN_HEADER`]. Neither the expected nor the supplied value
 /// is ever logged.
+///
+/// The comparison uses [`constant_time_eq`] from `jarvis-core`, the same shared
+/// primitive as the gRPC ingress gate; the former transport-local copy (and
+/// its stale "mirrors the gate" claim) is gone.
 async fn require_admin_token(
     State(auth): State<AuthState>,
     request: axum::extract::Request,
@@ -210,29 +215,6 @@ async fn require_admin_token(
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
     Ok(next.run(request).await)
-}
-
-/// Compare two tokens without an early exit on the first mismatch.
-///
-/// The loop always covers the longer input and pads the shorter one, so
-/// neither a content mismatch nor a length mismatch short-circuits. This
-/// mirrors the gate in `jarvis-policy`; no extra crate and no `unsafe` is
-/// needed.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    let max = a.len().max(b.len());
-    let mut diff = a.len() ^ b.len();
-    for (x, y) in a
-        .iter()
-        .map(Some)
-        .chain(std::iter::repeat(None))
-        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
-        .take(max)
-    {
-        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
-    }
-    diff == 0
 }
 
 #[derive(Debug, Deserialize)]

@@ -153,8 +153,15 @@ impl EventService for GrpcEventService {
         // acknowledged with `success: true`. Auth stays first so unauthenticated
         // callers cannot probe the validation rules.
         let event = event_from_request(&req)?;
+        // Capture the canonical id before `event` moves into the queue so the
+        // reply carries the same value as HTTP's `emit_response`:
+        // `UnifiedEvent::id.to_string()`.
+        let event_id = event.id.to_string();
         submit_event(&self.normalizer.event_sender(), event)?;
-        Ok(Response::new(EmitEventResponse { success: true }))
+        Ok(Response::new(EmitEventResponse {
+            success: true,
+            event_id,
+        }))
     }
 }
 
@@ -333,5 +340,63 @@ mod tests {
             event.timestamp,
             chrono::DateTime::from_timestamp(-1, 0).expect("valid timestamp")
         );
+    }
+
+    /// Fail-closed ports for the full-handler regression: the queued event is
+    /// consumed by the worker task, but the deny gate stops it before any
+    /// network call (no OpenCode dispatch, no policy/context service).
+    struct DenyAllPolicyGate;
+
+    #[async_trait::async_trait]
+    impl crate::ports::PolicyGate for DenyAllPolicyGate {
+        async fn is_allowed(
+            &self,
+            _principal: &str,
+            _action: &str,
+            _resource: &str,
+            _context: &serde_json::Value,
+        ) -> bool {
+            false
+        }
+    }
+
+    struct EmptyContextProvider;
+
+    #[async_trait::async_trait]
+    impl crate::ports::ContextProvider for EmptyContextProvider {
+        async fn build_context(&self, _event: &UnifiedEvent) -> anyhow::Result<serde_json::Value> {
+            Ok(json!({}))
+        }
+    }
+
+    #[tokio::test]
+    async fn emit_event_response_returns_the_request_id() {
+        let config = crate::config::EventConfig::default();
+        let opencode =
+            Arc::new(crate::opencode::OpenCodeClient::new(&config).expect("opencode client"));
+        let normalizer = Normalizer::new(
+            config,
+            Arc::new(DenyAllPolicyGate),
+            opencode,
+            Arc::new(EmptyContextProvider),
+        )
+        .await
+        .expect("normalizer");
+        // Private fields are visible from this child module; setting the token
+        // explicitly keeps the test independent of the host environment.
+        let service = GrpcEventService {
+            normalizer: Arc::new(normalizer),
+            admin_token: None,
+        };
+
+        let req = valid_request();
+        let expected_id = req.id.clone();
+        let response = service
+            .emit_event(Request::new(req))
+            .await
+            .expect("emit accepted");
+        let body = response.into_inner();
+        assert!(body.success);
+        assert_eq!(body.event_id, expected_id);
     }
 }

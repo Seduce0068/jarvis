@@ -34,7 +34,9 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
+  pull-requests: read
+  # C93-R2-02: unified to fully read-only. This is an unwired reference
+  # pipeline; comment/merge writes are intentionally not granted.
   # `checks: write` was never used by any step; removed per CI-1 audit.
 
 # Cancel superseded runs for the same PR (the wired safe workflow already
@@ -289,6 +291,8 @@ jobs:
           fi
 
   # Auto-merge when all stages pass
+  # C93-R2-02: 未配線 reference のため auto-merge は実行しない。
+  # 参考実装として残すのみで、.github/workflows/ へは配線しないこと。
   auto-merge:
     name: Auto Merge
     needs: [gate-check, cross-review, merge-gate]
@@ -301,6 +305,10 @@ jobs:
       - name: Enable auto-merge
         if: github.event.pull_request || github.event.inputs.pr_number
         run: |
+          # C93-R2-02: 未配線 reference のため auto-merge は実行しない。
+          # 仮に配線してもトップレベル permissions は read-only
+          # （contents:read / pull-requests:read）であり、contents:write /
+          # pull-requests:write が無いため gh pr merge は権限不足で失敗する。
           PR="${{ github.event.pull_request.number || github.event.inputs.pr_number }}"
           gh pr merge "$PR" --auto --squash --delete-branch
         env:

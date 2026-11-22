@@ -5,6 +5,7 @@ use figment::{
     Figment,
     providers::{Env, Format, Toml},
 };
+use jarvis_core::constant_time_eq;
 use serde::{Deserialize, Serialize};
 
 /// Absolute default location of the context TOML. The former CWD-relative
@@ -37,34 +38,16 @@ fn default_embedding_dim() -> usize {
     384
 }
 
-/// Compare two token byte strings without an early exit on the first mismatch.
-///
-/// The loop covers the longer input and pads the shorter one, so neither a
-/// content mismatch nor a length mismatch short-circuits. Shared by the HTTP
-/// middleware and the gRPC ingress gate; no extra crate and no `unsafe` is
-/// needed.
-fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
-    let max = a.len().max(b.len());
-    let mut diff = a.len() ^ b.len();
-    for (x, y) in a
-        .iter()
-        .map(Some)
-        .chain(std::iter::repeat(None))
-        .zip(b.iter().map(Some).chain(std::iter::repeat(None)))
-        .take(max)
-    {
-        diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
-    }
-    diff == 0
-}
-
 /// Authorize a presented token against the configured value.
 ///
 /// A missing/blank configured token keeps the legacy unauthenticated loopback
 /// path. A missing or non-UTF-8 presented value is never valid when a token is
 /// configured. Neither value is logged.
+///
+/// The comparison goes through [`jarvis_core::constant_time_eq`], the shared
+/// primitive used by this gRPC ingress gate, the context HTTP middleware and
+/// the other JARVIS token gates. No transport-local definition remains, so a
+/// one-sided edit cannot silently change the comparison semantics.
 pub(crate) fn token_matches(expected: Option<&str>, presented: Option<&str>) -> bool {
     let Some(expected) = expected.map(str::trim).filter(|t| !t.is_empty()) else {
         return true;

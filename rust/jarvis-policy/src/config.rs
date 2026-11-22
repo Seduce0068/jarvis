@@ -34,14 +34,14 @@ fn resolve_config_path(override_path: Option<String>) -> String {
 
 /// Default human approval deadline, in seconds.
 ///
-/// Keep this value identical to the gateway's
-/// `JARVIS_MCP_GW_APPROVAL_WINDOW_SECS` default (300 in
-/// `jarvis-mcp-gw/src/approval.rs`). The gateway derives `expires_at` from its
-/// window while this service expires the request using
-/// `approval_timeout_secs`; if the two values differ, the effective deadline
-/// silently drifts. **Both sides must be set to the same value** — when
-/// changing one, change the other.
-pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = 300;
+/// Aliased from [`jarvis_core::DEFAULT_APPROVAL_TIMEOUT_SECS`], the single
+/// source of truth also used by the gateway's `DEFAULT_APPROVAL_WINDOW_SECS`.
+/// The gateway derives `expires_at` from its window while this service expires
+/// the request using `approval_timeout_secs`; a one-sided value change used to
+/// silently drift the effective deadline. Keeping the alias here preserves the
+/// existing `jarvis_policy::config::DEFAULT_APPROVAL_TIMEOUT_SECS` path while
+/// making the agreement a compile-time fact instead of a comment.
+pub const DEFAULT_APPROVAL_TIMEOUT_SECS: u64 = jarvis_core::DEFAULT_APPROVAL_TIMEOUT_SECS;
 
 /// Unknown keys are rejected at load time: a one-character typo of an opt-in
 /// guard such as `require_approval_api_token` must not silently leave it at

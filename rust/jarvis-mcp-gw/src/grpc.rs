@@ -908,4 +908,83 @@ requires_approval = false
             assert!(!status.message().contains(leaked), "leaked '{leaked}'");
         }
     }
+
+    /// TC-E2 static contract for the gRPC token gate: `fixed_size_digest_eq`
+    /// must fold every byte of two fixed-size digests with no data-dependent
+    /// early exit. Timing measurement is intentionally avoided (flaky); the
+    /// implementation's own source is inspected via `include_str!` instead.
+    ///
+    /// Every search needle lives in this test, after the function in the file,
+    /// while the inspected slice is bounded by the function's own braces — so
+    /// the test cannot match itself. The existing behaviour regressions stay
+    /// unchanged; this one pins the constant-time shape only.
+    #[test]
+    fn fixed_size_digest_eq_source_has_no_early_exit() {
+        const SOURCE: &str = include_str!("grpc.rs");
+
+        fn impl_slice(source: &'static str) -> &'static str {
+            let start = source
+                .find("fn fixed_size_digest_eq")
+                .expect("fixed_size_digest_eq definition must exist");
+            let tail = &source[start..];
+            let end = tail.find("\n}").expect("function closing brace must exist");
+            &tail[..end + 2]
+        }
+
+        fn fold_body_slice(source: &'static str) -> &'static str {
+            let body = impl_slice(source);
+            let for_pos = body.find("for ").expect("XOR fold loop must exist");
+            let loop_source = &body[for_pos..];
+            let open_rel = loop_source
+                .find('{')
+                .expect("loop body opening brace must exist");
+            let open = for_pos + open_rel + 1;
+            let close_rel = body[open..]
+                .find('}')
+                .expect("loop body closing brace must exist");
+            &body[open..open + close_rel]
+        }
+
+        let body = impl_slice(SOURCE);
+        let fold_body = fold_body_slice(SOURCE);
+
+        // Both operands are `[u8; 32]`: input length is absorbed by the digest
+        // and the comparison always covers exactly 32 bytes.
+        assert_eq!(
+            body.matches("[u8; 32]").count(),
+            2,
+            "both operands must be fixed 32-byte digests: {body}"
+        );
+        assert!(
+            body.contains("a.iter().zip(b.iter())"),
+            "loop must traverse both digests in full: {body}"
+        );
+        // No early exit and no truncated traversal.
+        for forbidden in ["return", "break", "continue", ".take(", "len()"] {
+            assert!(
+                !body.contains(forbidden),
+                "early exit or truncated traversal '{forbidden}': {body}"
+            );
+        }
+        // The only `==` is the post-loop result check, never a per-byte branch.
+        assert!(!body.contains("!="), "mismatch branch via '!=': {body}");
+        assert_eq!(
+            body.matches("==").count(),
+            1,
+            "only the final result check may use '==': {body}"
+        );
+        assert!(body.contains("diff == 0"), "result check missing: {body}");
+        for forbidden in ["==", "!=", "return", "break", "continue"] {
+            assert!(
+                !fold_body.contains(forbidden),
+                "per-byte short-circuit '{forbidden}' in XOR fold: {fold_body}"
+            );
+        }
+        // The loop must XOR-fold every byte into one accumulator.
+        assert!(fold_body.contains("^"), "XOR fold missing: {fold_body}");
+        assert!(
+            fold_body.contains("|="),
+            "XOR must be folded into the accumulator: {fold_body}"
+        );
+    }
 }

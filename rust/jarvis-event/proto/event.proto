@@ -17,4 +17,7 @@ message EmitEventRequest {
 
 message EmitEventResponse {
   bool success = 1;
+  // Additive field: old clients ignore unknown fields and keep working.
+  // Mirrors the HTTP `/v1/events` response's canonical event id string.
+  string event_id = 2;
 }
