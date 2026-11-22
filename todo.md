@@ -2898,19 +2898,29 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **承認 wire DTO が共有型の外で再実装されている** —
   `rust/jarvis-mcp-gw/src/approval.rs:97-153`, `jarvis-policy/src/policy.rs:68-74` /
   R1-AR01 / confirmed。`ApprovalDecision` は共有済みだが request/outcome が重複。
-- [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能** —
+- [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能**
+  - 2026-11-22 並列 Verify（V-76）: 未解決（confirmed）。pub mod は変更なし。一部は pub(crate) 化済み（context/config.rs:86 validation 等）だが builder.rs:1329 の pub mod memory / :1338,:1381 の create_pg_pool/create_qdrant_client は外部未参照で pub(crate) 化可能。ただし grpc::proto や kill_switch::sha256_digest 等は他クレートから実利用があり、安易な pub(crate) 化はビルド破壊。API 再編（pub use 追加）を伴う設計判断案件。
+ —
   `rust/jarvis-policy/src/lib.rs:4-14`, `rust/jarvis-mcp-gw/src/lib.rs:3-15` /
   R1-AR01 / confirmed。
-- [ ] **outbox バックオフ CAS が古い attempts を上書きしうる** —
+- [ ] **outbox バックオフ CAS が古い attempts を上書きしうる**
+  - 2026-11-22 並列 Verify（V-77）: 未解決（confirmed）。mark_failed（builder.rs:583-584）の `WHERE id=$1 AND attempts <= $2` は不変、GREATEST／厳密比較／FOR UPDATE／next_retry_at 単調ガードなし。attempts の巻き戻し自体は WHERE で防がれるが、同値再書込みで next_retry_at が早い時刻へ後退する余地が残る。CAS 回帰テストなし。
+ —
   `rust/jarvis-context/src/builder.rs:340,558,561` / R2-ER01 / confirmed。
   既存 2672 行の `attempts <= $2` 条件が並行更新に弱い。
-- [ ] **Qdrant と outbox の二重失敗で元の障害 identity が失われる** —
+- [ ] **Qdrant と outbox の二重失敗で元の障害 identity が失われる**
+  - 2026-11-22 並列 Verify（V-78）: 未解決（confirmed）。store_memory_with_sinks（builder.rs:668-679）で Qdrant エラーは warn に残るが outbox.record 失敗時に .context(...)? が early return し元エラーが返り値から破棄。上層 error_kind は outbox 由来を other 扱い。二重失敗注入回帰なし。
+ —
   `rust/jarvis-context/src/builder.rs:646,652,1064` / R2-ER01 / confirmed。
   PG 行のみ永続化されベクターも outbox も無い孤立行が残る。
-- [ ] **古い pending_embeddings 行が新鲜なベクトルを Qdrant で上書き** —
+- [ ] **古い pending_embeddings 行が新鲜なベクトルを Qdrant で上書き**
+  - 2026-11-22 並列 Verify（V-79）: 未解決（confirmed）。PendingEmbedding に created_at/version が無く（:375-393）、record は ON CONFLICT DO UPDATE で created_at=NOW() のみ（:474-486）、remove は id のみの無条件 DELETE（:563-568）。remove 失敗は warn のみで、古い行が残ると次回 reconcile で旧ベクトルが Qdrant を上書きしうる。競合防止は未実装。
+ —
   `rust/jarvis-context/src/builder.rs:630-643,454-480,712-715,946-955` /
   R2-DI01 / likely。outbox.remove 失敗時に世代照合が無い。
-- [ ] **PG コミット後に outbox 記録が失敗すると再試行マーカーが消える** —
+- [ ] **PG コミット後に outbox 記録が失敗すると再試行マーカーが消える**
+  - 2026-11-22 並列 Verify（V-80）: 未解決（confirmed）。store_memory（builder.rs:1076-1112）が memories INSERT を先に実行、store_memory_with_sinks の outbox.record 失敗（:674-677）で補償（ロールバック／再キュー）なし。PG 行のみ永続化され pending_embeddings も無い孤立行となり reconcile が拾えない。トランザクション化またはコミット前 outbox 挿入が必要で設計判断案件。
+ —
   `rust/jarvis-context/src/builder.rs:646-656,1063-1089` /
   R2-DI01 / likely。memories INSERT と outbox record が非原子的。
 - [x] **pending_embeddings の embedding JSON 破損の可視化** — 2026-11-22 対応済み。pure helper `parse_embedding_json`（builder.rs:321-333）を追加しデコード失敗を None として検出。`PgPendingStore::list`（:535-547）が None 分岐で `error_kind = "embedding_json_parse_failed"` の固定語彙 warn を発行（JSON 値／serde エラー／row id は非出力）。挙動（空ベクトルで re-embed 経路へ流す）と dead-letter 分類は不変。回帰 `corrupt_embedding_json_is_detected_for_warning` を追加。根拠
