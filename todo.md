@@ -2944,9 +2944,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **HA WebSocket エラーの anyhow チェーン固定語彙化** — 2026-11-22 対応済み。`lib.rs:87-89` と `sources.rs:82-91` の HA WebSocket エラーから `{error:#}` を削除し `error_kind = "home_assistant"` の固定語彙ログへ変更（normalizer.rs:50 の既存トークンと整合）。`ListenFailure::Transient` から error フィールドを除去し anyhow チェーンを保持しない構造へ変更。リトライ／backoff／spawn lifecycle 不変。根拠
   `rust/jarvis-event/src/{lib.rs:87-89,sources.rs:78-95,168-178}` / V-62 補足 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 93 passed（件数不変）、`cargo clippy -p jarvis-event --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **error_kind の EventError 分岐が本番経路で到達不能** —
-  `rust/jarvis-event/src/error.rs:5-27`, `src/normalizer.rs:47-66,801-804` /
-  R1-ST04 / confirmed。7 分岐中 6 分岐が vacuous。
+- [x] **error_kind の EventError 分岐の回帰追加** — 2026-11-22 対応済み。`error_kind_maps_every_variant_to_its_fixed_token`（normalizer.rs:826-884）を追加し HomeAssistant / AndroidMcp / Context（EventError 経由＋bare ContextError） / Config / Grpc / Serialization / other を直接 `error_kind()` へ渡して固定トークンをアサート。EventError::Http は reqwest::Error の公開コンストラクタが無く network I/O も使えないため既存 include_str! 静的検査でカバーする旨をコメント明記。根拠
+  `rust/jarvis-event/src/normalizer.rs:47-66,826-884` / R1-ST04 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 94 passed（+1）、event 証跡 93→94 同期し `--check` 5件すべて MATCH、`cargo clippy -p jarvis-event --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **OpenCode dispatch / セッション生成の HTTP 成功経路にテストが無い** —
   `rust/jarvis-event/src/opencode.rs:77-175,204-306` / R1-ST04 / confirmed。
 - [ ] **kill switch の activated_by が公開経路で依然 "system"** —

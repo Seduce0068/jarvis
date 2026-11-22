@@ -825,6 +825,65 @@ mod tests {
         );
     }
 
+    /// R2: exercise every `error_kind()` branch directly. The only statically
+    /// covered branch is `EventError::Http`: `reqwest::Error` has no public
+    /// constructor, and the crate's `blocking`/network paths are unavailable in
+    /// this unit-test context, so that arm stays guarded by the existing
+    /// `include_str!` source-level checks above. All other variants are built
+    /// and passed through `error_kind()` below.
+    #[test]
+    fn error_kind_maps_every_variant_to_its_fixed_token() {
+        let serialization = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let context = jarvis_context::error::ContextError::Pii("probe".into());
+
+        let cases: Vec<(anyhow::Error, &str)> = vec![
+            (
+                anyhow::Error::from(crate::error::EventError::HomeAssistant("x".into())),
+                "home_assistant",
+            ),
+            (
+                anyhow::Error::from(crate::error::EventError::AndroidMcp("x".into())),
+                "android_mcp",
+            ),
+            (
+                anyhow::Error::from(crate::error::EventError::Context(context)),
+                "context",
+            ),
+            (
+                anyhow::Error::from(crate::error::EventError::Config(anyhow::anyhow!("x"))),
+                "config",
+            ),
+            (
+                anyhow::Error::from(crate::error::EventError::Grpc(tonic::Status::internal("x"))),
+                "grpc",
+            ),
+            (
+                anyhow::Error::from(crate::error::EventError::Serialization(serialization)),
+                "serialization",
+            ),
+            // EventError::Http is covered by the `include_str!` source check
+            // in `processing_failure_log_keeps_correlation_ids_and_drops_payload`:
+            // reqwest::Error cannot be constructed here without network I/O.
+            (
+                anyhow::Error::from(crate::error::EventError::Context(
+                    jarvis_context::error::ContextError::Config(anyhow::anyhow!("x")),
+                )),
+                "context",
+            ),
+            // Bare ContextError (without the EventError wrapper) hits the
+            // second downcast branch.
+            (
+                anyhow::Error::from(jarvis_context::error::ContextError::Pii("probe".into())),
+                "context",
+            ),
+            (anyhow::anyhow!("plain"), "other"),
+        ];
+
+        for (err, expected) in cases {
+            assert_eq!(error_kind(&err), expected, "unexpected kind for {err:?}");
+        }
+    }
+
     /// Injected ports that record calls and always deny, so no event is
     /// dispatched to OpenCode (no network I/O in these regression tests).
     struct SeamProbe {
