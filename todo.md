@@ -2913,11 +2913,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **PG コミット後に outbox 記録が失敗すると再試行マーカーが消える** —
   `rust/jarvis-context/src/builder.rs:646-656,1063-1089` /
   R2-DI01 / likely。memories INSERT と outbox record が非原子的。
-- [ ] **pending_embeddings の embedding JSON 破損が無警告で空ベクトル化**
-  - 2026-11-22 並列 Verify（V-71）: 未解決（confirmed）。PgPendingStore::list（builder.rs:523-525）が serde_json::from_value::<Vec<f32>> を unwrap_or_default で空ベクトル化、warn/Err なし。dead-letter 分類は非有限かつ設定次元一致のみ（:317-319,821-826）で JSON 破損は対象外。回帰も JSON 破損直接与えなし。空ベクトルは dim チェックで Qdrant 到達前に止まる（最悪の upsert は防止）。
- —
-  `rust/jarvis-context/src/builder.rs:521-526,712-723,888-907` /
-  R1-ST03 / confirmed。dead-letter 分類と回帰テストが必要。
+- [x] **pending_embeddings の embedding JSON 破損の可視化** — 2026-11-22 対応済み。pure helper `parse_embedding_json`（builder.rs:321-333）を追加しデコード失敗を None として検出。`PgPendingStore::list`（:535-547）が None 分岐で `error_kind = "embedding_json_parse_failed"` の固定語彙 warn を発行（JSON 値／serde エラー／row id は非出力）。挙動（空ベクトルで re-embed 経路へ流す）と dead-letter 分類は不変。回帰 `corrupt_embedding_json_is_detected_for_warning` を追加。根拠
+  `rust/jarvis-context/src/builder.rs:321-333,535-547,3286-3310` / V-71 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 184 passed（+1）、context 証跡 183→184 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **max_context_tokens が event.payload でバイパスされる**
   - 2026-11-22 並列 Verify（V-72）: 未解決（confirmed）。apply_token_budget は全体バイトで超過判定するが削減対象は memories/recent のみで event.payload は温存（builder.rs:1018-1052）。payload 単体が budget 超過なら truncate 後も超過。HTTP/gRPC も payload サイズ検証なし。テスト oversized_context_drops_memory_arrays_but_keeps_event_data が event 温存を明示的に期待しており設計判断が絡む。
  —

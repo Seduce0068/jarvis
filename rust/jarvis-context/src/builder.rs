@@ -318,6 +318,20 @@ fn is_unrecoverable_poison(stored: &[f32], embedding_dim: usize) -> bool {
     is_non_finite_vector(stored) && embedding_dim > 0 && stored.len() == embedding_dim
 }
 
+/// Decode a stored `pending_embeddings.embedding` JSON column (C61-R2-01).
+///
+/// Returns `None` only when decoding fails. The JSON value and the `serde`
+/// error are consumed here and never retained, so `list` can emit exactly one
+/// fixed-vocabulary warning without any untrusted payload, row id or error
+/// chain reaching a log record. Keeping the decision pure makes the corrupt
+/// branch directly testable without a thread-local tracing subscriber.
+///
+/// `None` maps to the same empty vector as before, so the re-embed/retry path
+/// is unchanged; only the previously silent conversion is now observable.
+fn parse_embedding_json(value: Value) -> Option<Vec<f32>> {
+    serde_json::from_value::<Vec<f32>>(value).ok()
+}
+
 /// Exponential backoff after `attempts` failures: `2^attempts` minutes, capped
 /// at [`MAX_RETRY_BACKOFF_MINUTES`]. The exponent is clamped before shifting so
 /// even a hostile/corrupt attempt count cannot overflow. Pure, so the policy is
@@ -521,8 +535,16 @@ impl PendingStore for PgPendingStore {
         rows.into_iter()
             .map(|row| {
                 let embedding_json: Value = row.get(3);
-                let embedding =
-                    serde_json::from_value::<Vec<f32>>(embedding_json).unwrap_or_default();
+                let embedding = match parse_embedding_json(embedding_json) {
+                    Some(embedding) => embedding,
+                    None => {
+                        warn!(
+                            error_kind = "embedding_json_parse_failed",
+                            "pending embedding row has a corrupt embedding JSON; using empty vector"
+                        );
+                        Vec::new()
+                    }
+                };
                 Ok(PendingEmbedding {
                     id: row.get(0),
                     content: row.get(1),
@@ -3258,6 +3280,32 @@ mod tests {
         assert!(
             LIST_PENDING_SQL.contains("next_retry_at IS NULL OR next_retry_at <= NOW()"),
             "deferred rows must only be selected when due: {LIST_PENDING_SQL}"
+        );
+    }
+
+    /// C61-R2-01: a corrupt embedding JSON used to be silently turned into an
+    /// empty vector. The pure helper exposes the failing branch so `list` can
+    /// emit one fixed-vocabulary warning; no log capture is needed here. The
+    /// empty vector still flows into the re-embed/retry path as before.
+    #[test]
+    fn corrupt_embedding_json_is_detected_for_warning() {
+        assert!(
+            parse_embedding_json(json!("not-an-array")).is_none(),
+            "a JSON string is not a vector and must take the warn branch"
+        );
+        assert!(
+            parse_embedding_json(json!([0.1, "oops"])).is_none(),
+            "a partially invalid array must take the warn branch"
+        );
+        assert_eq!(
+            parse_embedding_json(json!([])),
+            Some(Vec::new()),
+            "a valid empty array is not corrupt"
+        );
+        assert_eq!(
+            parse_embedding_json(json!([1.0, 2.0, 3.0])),
+            Some(vec![1.0_f32, 2.0, 3.0]),
+            "a valid vector must still decode unchanged"
         );
     }
 
