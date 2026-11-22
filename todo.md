@@ -3000,10 +3000,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `rustfmt --edition 2024 --check` exit 0、`rust-script --test rust/scripts/restore.rs` 7 passed（+1、rust-script は証跡対象外）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **restore_postgres の DROP→CREATE→psql が非アトミック** —
   `rust/scripts/restore.rs:360-435,533-555` / R1-ST05 / confirmed。
-- [ ] **restore_configs がダウンロード tar を検証なしで `/` に展開**
-  - 2026-11-22 並列 Verify（V-55）: 未解決（confirmed）。rust/scripts/restore.rs:475-494 が configs tar を検証なしで `tar -xzf -C /`（:488-491）。I77-C の検証は infra/scripts/restore-local.d/git.sh の git アーカイブ用で config tar には未適用。現行 restore-local.d/configs.sh は別経路（allowlist 個別コピー）で tar 展開を使わない。
- —
-  `rust/scripts/restore.rs:467-486,342-358` / R1-ST05 / likely。
+- [x] レガシー restore_configs の tar 展開 — 2026-11-22 判定: **実行経路が塞がれた凍結レガシーにつき対応不要（V-55 再評価）**。`rust/scripts/restore.rs:13-28` が「DEPRECATED / OCI+rclone+op 前提の旧方式」「実行経路は既に塞がれています」「参照用に残す既存コードであり挙動・テストは変更しないでください」と明記。`infra/scripts/restore.sh:1-20` が fail-closed（exit 2）で起動不能を確認。現行経路は `restore-local.d/configs.sh` の allowlist 個別ファイルコピーで tar 展開なし。設計判断（ADR-0004 レガシー凍結）として現状維持。
 - [ ] **release profile の strip=true + panic=abort で本番クラッシュ痕跡が失われる**
   - 2026-11-22 並列 Verify（V-52）: 未解決（confirmed）。rust/Cargo.toml:157-161 の strip/panic 不変、build-selfhost.sh:201 も上書きオプションなし。RUST_BACKTRACE / LimitCORE / coredump 設定は repo 全体で未確認。バイナリサイズ vs デバッグ性の設計判断。
  —
