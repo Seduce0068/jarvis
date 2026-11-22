@@ -27,6 +27,7 @@ generated:
 ## P0: 認証・承認・シークレット（至急）
 
 - [ ] **P0-1** 承認 API の既定無認証を解消（R1-AUTH-001）
+  - 2026-11-22 並列 Verify（V-121）: 未解決（opt-in 実装済み・本番有効化待ち）。require_approval_api_token は serde default=false（config.rs:84-85）、ガード true 時のみ未設定トークンで 503 fail-closed（http.rs:297-305）。回帰は整備済み（:1782-2016）。残るは実機 policy.env へのトークン注入＋フラグ true 化（ユーザー判断）。
   - **2026-11-18 一部対応**: opt-in strict ガード実装済み。本番有効化は残る。
     `require_approval_api_token`（既定 `false`）が `true` のとき、トークン
     未設定なら承認 endpoints は 503 で fail-closed
@@ -42,6 +43,7 @@ generated:
     `approval.rs:76-78`）。設定すると全承認ツールが 401 で fail-closed
     になる可用性障害も併発している。
 - [ ] **P0-3** `/v1/execute` と gRPC の principal 自己申告を廃止（R1-AUTH-003）
+  - 2026-11-22 並列 Verify（V-122）: 未解決（opt-in 実装済み・既定反転待ち）。require_server_side_principal=true のとき server 管理 mcp_principal で上書き（lib.rs:99-107）するが既定 false（config.rs:87-91）。policy_context の caller 引数遮断（lib.rs:26-47）は別問題で対応済み。既定値反転は本番運用判断（todo.md:2630-2633 で却下記録あり）。
   - 呼び出し側が `opencode` 等を名乗れり、承認も自分で通せば実質任意操作。
     `/mcp` と同様にサーバ側固定または認証済み Identity から導出
     (`http.rs:28-33`, `grpc.rs:19-32`, `lib.rs:62-103`)。
@@ -63,6 +65,7 @@ generated:
     `PATH` / `HOME` 等最小限を明示（`gateway.rs:110-113`,
     `sandbox.rs:225-229`）。サービス間でも bws プロジェクト分离が必要。
 - [ ] **P0-6** otelcol の `0.0.0.0` バインドを `127.0.0.1` へ（R1-SEC-002）
+  - 2026-11-22 並列 Verify（V-123）: repo 側は解消済み（otelcol-config.yaml の6リスナーすべて 127.0.0.1）。実機は 4317/4318/8888 のみ確認済み（todo.md:849）で health/pprof/zpages は未確認、実機設定は /etc/jarvis の別パスを読む（otelcol.service:21）。再デプロイ＋ss -lnt 確認はユーザー操作待ち。
   - **2026-11-18 現状**: repo 側 `infra/config/otelcol-config.yaml` の
     6リスナー（health 13133 / pprof 1777 / zpages 55679 / OTLP 4317,4318 /
     internal 8888）を `127.0.0.1` へ変更済み（`:8,10,12,18,20,165`）。
@@ -103,6 +106,7 @@ generated:
   - 毎起動 `batch_execute("001_initial.sql")` で `IF NOT EXISTS` のみ、
     `_sqlx_migrations` 不在。sqlx migrate またはデプロイ時 CLI に分離。
 - [ ] **P1-4** バックアップの保全先を外部化（R3-DR-001）
+  - 2026-11-22 並列 Verify（V-124）: 未解決（設計決定済み・実装未着手）。現行保存先は ADR-0004/BK-1 のローカル /var/lib/postgresql/jarvis-backups のみで外部転送処理なし（backup-local.sh:9,164-171）。USB 短期＋HDD 中長期・外部コピーのみ age 暗号化の方針は todo.md:906-908 に記録、RPO/RTO・媒体接続・鍵保管先はユーザー確認待ち。
   - `/var/lib/postgresql/jarvis-backups` は本番データと同一親ディスクで
     SPoF。最低 1 世代を別媒体へ。RPO/RTO も併せて決定。
 - [ ] **P1-5** timer を実機で有効化し復元演習へ（R3-DR-004, R3-DR-005）
@@ -232,6 +236,7 @@ generated:
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
     `adr/index.md` と `log.md` の未配置。
 - [ ] **P3-5** レガシー資産の最終判断（R2-DEBT-006, R2-DEBT-011,
+  - 2026-11-22 並列 Verify（V-125）: レガシー資産の凍結・削除実行判断は解消済み（ADR-0004:25,30-34 の別途判断記録、backup.sh/restore.sh/deploy.sh の exit 2 fail-closed、remaining-tasks.md:392-399/421）。 items の物理削除とライセンス方針は意図的に保留で open 維持。
     R3-DR-015, R5-RULES-002）
   - **2026-11-18 現状**: 4下位項目のうち3件は判断・担保済み。
     - `op://` テンプレート4件（`context.env` / `event.env` / `policy.env` /
