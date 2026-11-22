@@ -1353,15 +1353,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   TC-K2 への追記、UI の「承認済み・実行は非常停止中」表示、回帰名改名。
 - [x] `decide()` の publish が既存決定を無条件上書き（medium）—
   timeout / prune と同じ勝者温存ルールを適用（Noop バックエンドで競合）。〔Round 46 で対応済み〕
-- [ ] 発掘: rustfmt ゲートが CI 未配線、Cedar スキーマ旧コメント、
-  - 2026-11-22 並列 Verify（V-32）: 部分的解消。Cedar 旧コメントは解消済み（cedar_schema.cedarschema:4-8 が Strict/fail-closed を明記）。rustfmt は共有ワークフロー rust-gates.yml@v1 へ委譲済み（AGENTS.md:110-111）だが共有側の実体はローカルに無く CI 上で fmt が走るかは未確認。
-  opencode.jsonc が build-selfhost 配布対象外、infra/README の 1Password 表記、
-  dsh.md / tool-matrix.md の tools/list 非表示記述。
-
-- 親が対応: fmt 差分、構造ガードの誤った切断位置（`#[cfg(test)]` → テストモジュール）。
-
-### Round 46（R4 で修正済み）
-
+- [x] 発掘4項目の重複整理 — 2026-11-23 確認: すべて個別対応済み。(1) rustfmt は共有ワークフロー rust-gates.yml@v1 へ委譲、ローカルは Makefile:71/75/187 の fmt ゲート＋lint ターゲットで検証（V-32）。(2) Cedar スキーマ旧コメントは cedar_schema.cedarschema:4-8 が Strict/fail-closed を明記（V-32）。(3) opencode.jsonc は build-selfhost.sh:673-709 で配布配線済み（V-83 / ラウンド92）。(4) 1Password は ADR-0001 Phase 0 に bws 移行済み注記、tools/list は mcp_allowlist.toml:81,98,115 と dsh.md/tool-matrix.md が現行契約（表示＋呼び出し時承認）へ更新済み（V-29/V-34）。コード変更なし。
 - [x] **systemd `Environment=` の `${VAR:-default}` が展開されない**（confirmed high、
   Runtime Proof 付き）→ `jarvis-mcp-gw.service` の BASE_DIR / EGRESS_ALLOWLIST を
   リテラル既定値へ変更、EnvironmentFile を唯一の上書き経路と明記。
