@@ -2224,7 +2224,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] event ingress トークンテストの順序依存 — 2026-11-22 Verify: 既に解消済み。`config.rs:107-110` の `reset_admin_token_for_test()` が「Clear the process-wide snapshot so tests do not depend on execution order」と明記し、`:564` の静的 `TOKEN_SNAPSHOT_TEST_LOCK: Mutex<()>` が reset を使うテスト群（`ingress_token_snapshot_is_first_wins` 他）を直列化。 poisoned mutex も `into_inner()` で回復。根拠
   `rust/jarvis-event/src/config.rs:75-115,564-640` / verified。コード変更なし。
 
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 ### Round 78（R4 で修正済み）
@@ -2242,7 +2241,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] flock の dispatch 前 close トレードオフ — 2026-11-22 Verify: 既に明記済み。`restore-local.sh:844` と `:906-910` のコメントが「fd is closed before module dispatch」「Timer exclusion is unaffected: stop_services() + verify_stopped_services() handle it, not this fd」とトレードオフを説明。設計上の意図であり未実装ではない。根拠 `infra/scripts/restore-local.sh:842-848,904-913` / verified。
 - [x] stat 照合の TOCTOU 制約 — 2026-11-22 判定: **既知の設計制約として記録済み（対応不要）**。TODO 自身が「一次防御は /run 権限、設計書に明記済み」と認めるとおり、I81-A の inode 照合（restore-local.sh:825）は /run 権限による一次防御の上の二段防衛であり、完全排除を狙う設計ではない。根拠 `infra/scripts/restore-local.sh:823-831` / verified。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 - 親が対応: shellcheck SC2174／SC2261、event 証跡の件数同期、全ゲート検証。
@@ -2274,7 +2272,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `ci/scripts/secret_scan.py:17-31,112-117` / verified。コード変更なし。
 - [x] todo.md:591 の egress 記述 — 2026-11-22 Verify: 既に訂正済み。`:591` の完了記録内に「訂正（2026-11-20 追記・I84-B）: 未設定時は無制限は 2026-11-19 時点の履歴、現行は unset/blank が DenyAll（全宛先拒否・fail-closed）。現行契約は tool-matrix.md:171-175 が正」と明記。`tool-matrix.md:171-175` / `config.rs:92`（no unrestricted fallback）とも整合。根拠
   `todo.md:591-598`, `docs/integration/tool-matrix.md:171-175` / verified。コード変更なし。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 - 親が対応: fmt 差分、全ゲート再検証。
@@ -2299,7 +2296,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] rust-script メタブロック exact pin（重複整理） — 2026-11-22 並列 Verify（V-23）: 2301-2302 / 2321-2322 / 2352-2353 行目の完了記録の重複。4スクリプト（backup/deploy/restore/bootstrap）のメタ依存9件は =x.y.z で pin、clap/hostname は Makefile:23-26 に保留理由、方針は Makefile:15-35 に記録済み。rust-script 自体のバージョン固定は Makefile:27-34 の方針＋「CI で固定されず手動特権経路に留まる」注記どまり（自動固定は未対応だが方針記録済みで本指摘は充足）。
 - [ ] prod_db scope の同一モジュール内後続 psql は未検出（low・任意）。
   - 2026-11-22 並列 Verify（V-24）: 未解決。assert_production_boundary()（test-restore-local.sh:1499-1500,1520）が scope='prod_db' のとき db_patterns をスキップし、prod_stage():1613/1631 が後続 psql を検査しない。距離→SQL トークン改善は別件（:2052）のみ。低優先・任意のため現状維持。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 - 親が対応: restore コピードライバへの module 複製、shellcheck SC2016、
@@ -2332,7 +2328,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] flock/psql/Qdrant のテスト回帰3件 — 2026-11-22 Verify: すべて解消済み。(1) `test-restore-local.sh:661,713` が /run/jarvis/restore.lock の成功枝と /run 不可フォールバック枝をテスト用パス差し替えで検証。(2) `:278-292` の sudo モックが `command psql` 経路を通し、`:44,753` が I86-C で分岐漏れ解消を明記。(3) `:47,92-99,305,947-963` が `${JARVIS_QDRANT_COLLECTION:-jarvis_memories}` 契約と設定可能回帰（jarvis_memories_custom）を実装（I86-D）。根拠
   `infra/scripts/test-restore-local.sh:44,47,92-99,278-292,305,661,713,753,947-963` / verified。コード変更なし。
 - [x] CI の記録 SHA がコメント止まりで自動照合が無い／上流 v1 が未署名（low）。 — **2026-11-22 重複整理**: 同一内容は 2390 行目で完了記録済み。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 ### Round 82（R4 で修正済み）
@@ -2355,7 +2350,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] CI の記録 SHA がコメント止まりで自動照合が無い（low）— Round 83 で
   `ci/scripts/check-workflow-pins.sh` を追加し GitHub API で現行 SHA を照合。
   ci-local と CI extra_gates に配線、オフライン時は UNVERIFIED 警告で通過。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 ### Round 83（R4 で修正済み）
@@ -2372,7 +2366,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] PiiConfig に deny_unknown_fields（low）→ 未知トップレベルキーで parse
       失敗→warn＋既定パターンの回帰を追加。※ `[patterns]` 内のキーは HashMap
       のため今回の対象外（将来の列挙型化タスク）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 ### Round 84 の残り指摘（未対応）
@@ -2409,7 +2402,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] pin ゲートのブランチ ref（low）→ タグ優先・404 で heads フォールバック、
   curl スタブと回帰を拡張（pin 17→21件）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 ### Round 87 の残り指摘（未対応・次ラウンド優先）
@@ -2509,7 +2501,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       4箇所＋testing.rs の固定 /tmp → Round 92 で解消。
 - [x] event の OpenCode URL を config 側で解決し公開 getter 経由で probe
       → Round 92 で解消。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
 
 ### Round 92（R4 で修正済み）
