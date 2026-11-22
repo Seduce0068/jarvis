@@ -36,13 +36,7 @@ use reqwest::blocking::Client;
 use std::fs;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::time::Duration;
 use tracing::info;
-
-/// Default HTTP timeout (seconds) for Qdrant snapshot requests.
-const QDRANT_HTTP_TIMEOUT_SECS: u64 = 30;
-/// Optional environment variable to override the Qdrant HTTP timeout (seconds).
-const QDRANT_TIMEOUT_ENV: &str = "JARVIS_QDRANT_TIMEOUT_SECS";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -205,8 +199,8 @@ fn validate_backup_set(remote_files: &[String], date: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        configs_backup_file, postgres_backup_file, qdrant_backup_file, qdrant_http_timeout_from,
-        valid_backup_date, validate_backup_set,
+        configs_backup_file, postgres_backup_file, qdrant_backup_file, valid_backup_date,
+        validate_backup_set,
     };
 
     #[test]
@@ -253,29 +247,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("incomplete"));
         assert!(message.contains("Qdrant snapshot"));
-    }
-
-    #[test]
-    fn qdrant_http_timeout_falls_back_to_default() {
-        // Env unset -> default 30s.
-        assert_eq!(
-            qdrant_http_timeout_from(None),
-            std::time::Duration::from_secs(30)
-        );
-        // Invalid values (zero / non-numeric) -> default 30s.
-        assert_eq!(
-            qdrant_http_timeout_from(Some("0")),
-            std::time::Duration::from_secs(30)
-        );
-        assert_eq!(
-            qdrant_http_timeout_from(Some("not-a-number")),
-            std::time::Duration::from_secs(30)
-        );
-        // Valid positive value is honored.
-        assert_eq!(
-            qdrant_http_timeout_from(Some("45")),
-            std::time::Duration::from_secs(45)
-        );
     }
 
     #[test]
@@ -471,30 +442,6 @@ fn restore_postgres(args: &Args, hostname: &str, date: &str, config_flag: &str) 
     Ok(())
 }
 
-/// Resolves the Qdrant HTTP timeout from an optional raw env value.
-///
-/// Kept pure (value passed in, not read from the process environment) so the
-/// fallback behavior can be unit-tested without `std::env::set_var`, which is
-/// unsafe under edition 2024.
-fn qdrant_http_timeout_from(raw: Option<&str>) -> Duration {
-    let secs = raw
-        .and_then(|value| value.parse::<u64>().ok())
-        .filter(|secs| *secs > 0)
-        .unwrap_or(QDRANT_HTTP_TIMEOUT_SECS);
-    Duration::from_secs(secs)
-}
-
-fn qdrant_http_timeout() -> Duration {
-    qdrant_http_timeout_from(std::env::var(QDRANT_TIMEOUT_ENV).ok().as_deref())
-}
-
-fn build_qdrant_client() -> Result<Client> {
-    Client::builder()
-        .timeout(qdrant_http_timeout())
-        .build()
-        .context("Failed to build Qdrant HTTP client")
-}
-
 fn restore_qdrant(args: &Args, hostname: &str, date: &str, config_flag: &str) -> Result<()> {
     let backup_file = qdrant_backup_file(date);
     let remote_path = format!("{}:{}/{}/", args.remote, args.bucket, hostname);
@@ -512,7 +459,7 @@ fn restore_qdrant(args: &Args, hostname: &str, date: &str, config_flag: &str) ->
     // snapshot into the running collection; stopping Qdrant first would
     // make this HTTP call fail because nothing is listening. The endpoint
     // performs the restore itself, so no separate stop/start is needed.
-    let client = build_qdrant_client()?;
+    let client = Client::new();
     let form = reqwest::blocking::multipart::Form::new().file("snapshot", &local_file)?;
 
     client
