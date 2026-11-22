@@ -48,8 +48,14 @@ health_is_degraded() {
 # exit 2 (DANGER) は「安全な状態へ戻せていない」として失敗扱い (exit 3) にする。
 rollback() {
   echo "== ロールバック: 旧バイナリへ戻します ==" >&2
+  # deploy-mcp-gw-safe.sh:87-91 と同じ枠組み: 退避ファイルがあれば復元し、
+  # 無ければ今回配置した新バイナリを明示削除して「旧バイナリが無い状態」へ
+  # fail-closed に戻す。何も戻さないと新バイナリが残ったまま再起動／drift
+  # 検査へ進み、安全状態を確認できない。
   if [ -f "$dst.prev-$ts" ]; then
     install -o root -g root -m 0755 "$dst.prev-$ts" "$dst"
+  else
+    rm -f "$dst" || true
   fi
   systemctl restart jarvis-mcp-gw || true
   echo "  ロールバック後: $(systemctl is-active jarvis-mcp-gw) / health=$health_code" >&2

@@ -2641,7 +2641,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       ため差し戻し）— JARVIS_PG_EXTRA_DATABASES を segment 単位で設計し直し、
       manifest role と verify/restore の解決を整合させたうえで再実装。
       DB_NAME 上書きが pg.sh:29 で無視される low も同時に解消する。
-- [ ] smoke-mcp-gw.sh:90-94 の /health が 200 degraded 本文を合格させる
+- [x] smoke-mcp-gw.sh の /health 判定 — 2026-11-22 並列 Verify（V-54）: 既に解消済み。`smoke-mcp-gw.sh:93-100` が 200 に加え本文の `"status":"degraded"` を検出して Fail にし、deploy-mcp-gw-safe.sh:30-65,434-441 / deploy.rs:70-110 の degraded/503 拒否契約と整合。
       （medium、子が途中終了）— deploy と同じ契約へ。
 - [x] reconcile_pending の同時実行制御なし（low）— advisory lock または — **2026-11-22 重複整理**: 同一内容は 2668 行目で完了記録済み。
       条件付き UPDATE。
@@ -2969,7 +2969,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   axum 0.7.9 の依存に rustls は無く、実態は tokio-tungstenite 0.21 系統。
 - [ ] **依存監査ゲートが git 不在時に UNVERIFIED とならず古い DB で pass** —
   `ci/scripts/check-dependency-audit.sh:20-33,94-110` / R4-DP01 / confirmed。
-- [ ] **rust-script のマニフェスト依存が Cargo.lock 監査の対象外** —
+- [ ] **rust-script のマニフェスト依存が Cargo.lock 監査の対象外**
+  - 2026-11-22 並列 Verify（V-51）: 未解決（confirmed）。check-dependency-audit.sh:40,122-126 は rust/Cargo.lock と ui/Cargo.lock のみ。rust-script メタブロックの clap="4.5" / hostname="0.3" は両 lock に不在で、実行時に解決されるバージョンは固定も監査もされない。
+ —
   `ci/scripts/check-dependency-audit.sh:39-40,122-126`,
   `rust/scripts/{deploy,backup,restore}.rs` / R4-DP01 / confirmed。
 - [ ] **audit.toml の再評価日が依存監査ゲートで検証されない** —
@@ -3018,12 +3020,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   R1-ST05 / confirmed。backup 側の `JARVIS_QDRANT_TIMEOUT_SECS` が未反映。
 - [ ] **restore_postgres の DROP→CREATE→psql が非アトミック** —
   `rust/scripts/restore.rs:360-435,533-555` / R1-ST05 / confirmed。
-- [ ] **restore_configs がダウンロード tar を検証なしで `/` に展開** —
+- [ ] **restore_configs がダウンロード tar を検証なしで `/` に展開**
+  - 2026-11-22 並列 Verify（V-55）: 未解決（confirmed）。rust/scripts/restore.rs:475-494 が configs tar を検証なしで `tar -xzf -C /`（:488-491）。I77-C の検証は infra/scripts/restore-local.d/git.sh の git アーカイブ用で config tar には未適用。現行 restore-local.d/configs.sh は別経路（allowlist 個別コピー）で tar 展開を使わない。
+ —
   `rust/scripts/restore.rs:467-486,342-358` / R1-ST05 / likely。
-- [ ] **release profile の strip=true + panic=abort で本番クラッシュ痕跡が失われる** —
+- [ ] **release profile の strip=true + panic=abort で本番クラッシュ痕跡が失われる**
+  - 2026-11-22 並列 Verify（V-52）: 未解決（confirmed）。rust/Cargo.toml:157-161 の strip/panic 不変、build-selfhost.sh:201 も上書きオプションなし。RUST_BACKTRACE / LimitCORE / coredump 設定は repo 全体で未確認。バイナリサイズ vs デバッグ性の設計判断。
+ —
   `rust/Cargo.toml:157-161` / R1-ST05 / confirmed。
-- [ ] **install-mcp-gateway.sh のロールバックが旧バイナリ不在時に何も戻さない** —
-  `infra/scripts/install-mcp-gateway.sh:3,51-53` / R1-ST06 / confirmed。
+- [x] **install-mcp-gateway.sh のロールバック fail-closed 化** — 2026-11-22 対応済み。`rollback()`（install-mcp-gateway.sh:49-60）に else 分支を追加し、退避ファイル不在時は `rm -f "$dst"` で今回配置した新バイナリを明示削除。deploy-mcp-gw-safe.sh:87-91 と同じ枠組みで、「何も戻さず新バイナリが残ったまま再起動／drift 検査へ進む」経路を遮断。根拠
+  `infra/scripts/install-mcp-gateway.sh:49-60`, `infra/scripts/deploy-mcp-gw-safe.sh:84-94` / V-53 / confirmed。
+  - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **Qdrant 本番反映の「evacuating old collection」ログに実処理が伴わない** —
   `infra/scripts/restore-local.d/qdrant.sh:106-116` / R1-ST06 / confirmed。
 - [x] **hooks.json の Rust post-edit フックが repo root で cargo を実行** — 2026-11-21 対応済み: matcher `**/*.rs` を `rust/**/*.rs` と `ui/**/*.rs` に分割し、それぞれ `cd rust && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings` / `cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings` を実行（Makefile:63,66 と同一引数）。JSON parse OK、post-edit matchers = ['**/*.ts', 'rust/**/*.rs', 'ui/**/*.rs', '**/*.md'] / 根拠
