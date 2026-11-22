@@ -3,18 +3,18 @@
     "pre-task": [
       {
         "matcher": "review|レビュー|コードレビュー|PRレビュー",
-        "command": "subagent review-security",
-        "description": "レビュー依頼時にセキュリティレビュー起動"
+        "command": "skill cross-review",
+        "description": "レビュー依頼時にセキュリティレビュー起動（未定義 subagent を cross-review スキルへ置換）"
       },
       {
         "matcher": "アーキテクチャ|設計|責務|依存方向|拡張性",
-        "command": "subagent arch-reviewer",
-        "description": "アーキテクチャ観点のレビュー起動"
+        "command": "skill cross-review",
+        "description": "アーキテクチャ観点のレビュー起動（未定義 subagent を cross-review スキルへ置換）"
       },
       {
         "matcher": "運用|観測性|エラーハンドリング|ロールバック|マイグレーション",
-        "command": "subagent ops-reviewer",
-        "description": "運用観点のレビュー起動"
+        "command": "skill cross-review",
+        "description": "運用観点のレビュー起動（未定義 subagent を cross-review スキルへ置換）"
       },
       {
         "matcher": "クロスレビュー|多視点|統合レポート",

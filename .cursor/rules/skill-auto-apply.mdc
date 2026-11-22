@@ -32,7 +32,7 @@ alwaysApply: true
 | AI選定, モデル, 推論エンジン, ベクトルDB, RAG | `ai-selection` | AI技術選定 |
 | ドキュメント生成, ADR, RFC, Runbook | `doc-create` | 文書化 |
 | テスト仕様, TDD, BDD, Property-based | `test-spec` | テスト設計 |
-| コードレビュー, PR, セキュリティ, アーキテクチャ, 運用 | `review-security`, `arch-reviewer`, `ops-reviewer` | レビュー |
+| コードレビュー, PR, セキュリティ, アーキテクチャ, 運用 | `cross-review` | レビュー |
 | クロスレビュー, 多視点, 統合レポート | `cross-review` | 包括的レビュー |
 | レビュー管理, パイプライン, ゲート | `review-flow` | レュープロセス管理 |
 | ユーザースクリプト, Violentmonkey, メタデータ | `userscript-validator` | ユーザースクリプト検証 |
@@ -43,9 +43,9 @@ alwaysApply: true
 |-----------|----------------|------|
 | コード探索, パターン検索, 概要把握 | `explore` (quick/medium/very thorough) | コードベース理解 |
 | 複雑な調査, マルチステップ, 並列実行 | `general` | 汎用タスク実行 |
-| セキュリティレビュー | `security-reviewer` | 脆弱性・秘密管理チェック |
-| アーキテクチャレビュー | `arch-reviewer` | 責務分離・依存方向・拡張性評価 |
-| 運用レビュー | `ops-reviewer` | 観測性・エラー処理・ロールバック評価 |
+| セキュリティレビュー | `cross-review` スキル | 脆弱性・秘密管理チェック |
+| アーキテクチャレビュー | `cross-review` スキル | 責務分離・依存方向・拡張性評価 |
+| 運用レビュー | `cross-review` スキル | 観測性・エラー処理・ロールバック評価 |
 
 ## 適用優先順位
 

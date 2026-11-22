@@ -192,7 +192,8 @@ generated:
     R1-SUPPLY-001)
   - `set -uo pipefail` で配置失敗が fail-open。ヘルス確認も `curl -f` /
     `200` 判定が無い。Runtime Proof で `set -uo pipefail` 確認済み。
-- [ ] **P2-9** systemd hardening を全 unit へ底上げ（2026-11-18 一部対応: 全9 service に `UMask=0077`、欠落 unit に `ProtectControlGroups` / `RestrictSUIDSGID` を追加、自社スクリプトの backup に `SystemCallFilter=@system-service`。`systemd-analyze verify` 全 unit 成功。**SystemCallFilter を code-server / opencode / otelcol / qdrant のサードパーティバイナリへ追加するのは実機起動確認が必要なため保留**。`/etc/jarvis` の ReadWritePaths 個別ファイル化も書き込み先の把握が必要で保留）（R1-SEC-004,
+- [ ] **P2-9** systemd hardening を全 unit へ底上げ（
+  - 2026-11-22 並列 Verify（V-30）: 保留根拠は妥当。10 unit すべてに UMask/ProtectControlGroups/RestrictSUIDSGID、自社6 unit に SystemCallFilter を確認。残るは code-server/opencode/otelcol/qdrant の third-party 4 unit への SystemCallFilter（実機起動確認が必要）と /etc/jarvis の ReadWritePaths 個別化（実機の書き込み先把握が必要）で、いずれも自律対応不可。2026-11-18 一部対応: 全9 service に `UMask=0077`、欠落 unit に `ProtectControlGroups` / `RestrictSUIDSGID` を追加、自社スクリプトの backup に `SystemCallFilter=@system-service`。`systemd-analyze verify` 全 unit 成功。**SystemCallFilter を code-server / opencode / otelcol / qdrant のサードパーティバイナリへ追加するのは実機起動確認が必要なため保留**。`/etc/jarvis` の ReadWritePaths 個別ファイル化も書き込み先の把握が必要で保留）（R1-SEC-004,
     R1-SEC-009）
   - otelcol / opencode / code-server / qdrant / backup で
     `SystemCallFilter` 等が欠落。全 unit に `UMask=0077` も追加。
@@ -1433,6 +1434,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] Qdrant バリアントが公開 String（medium）— 型レベル排除ではなく
   `pub(crate)` コンストラクタ＋Newtype／QdrantErrorKind への変更が必要。〔Round 49 で対応済み〕
 - [ ] 新規コレクション作成直後の読み戻しが一時障害で起動拒否（low）。
+  - 2026-11-22 並列 Verify（V-26）: 未解決。ensure_collection（builder.rs:1629-1676）は collection_info を1回だけ呼び、一時失敗でも check_inspected_dimension の `refusing to start` へ流れる（Builder::new :994-999）。outbox 用 retry_backoff（:321-343）は読み戻しに未適用。リトライ追加は起動 fail-closed 設計の変更を伴うため設計判断案件として現状維持。
 
 - 親が対応: fmt 差分、テスト専用 API（approve / deny / into_decision）へ
   `#[cfg(test)]` 付与。
@@ -1497,7 +1499,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （medium）— HTTP 400 / gRPC InvalidArgument へ変更。〔Round 51 で対応済み〕
 - [x] TracerGuard の Drop が shutdown 失敗を握り潰す（low）。〔Round 51 で対応済み〕
 - [x] HTTP/gRPC 語彙パリティテストが gRPC 側を検証していない（low）。〔Round 51 で対応済み〕
-- [ ] 発掘: local-restore-design.md / remaining-tasks.md の古い記述、
+- [x] 発掘: local-restore-design.md / remaining-tasks.md の古い記述 — 2026-11-22 並列 Verify（V-29）: 両ファイルの古い記述は個別修正済み。firejail/egress/cp 行数は記述なし、PASSWORD_FILE（remaining-tasks.md:359-372）、verify-backup.sh（local-restore-design.md:341-342,99-100）、migration 一覧 001〜007、sqlx 履歴の履歴注記、restore-local スキップ旧セマンティクスも履歴明記済み。—
   jarvis-core の未参照共有型、backup.service の開発用絶対パス、
   docs/architecture の Structure ツリー。
 
@@ -2595,7 +2597,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 93 の残り指摘（未対応）
 
-- [ ] mcp-gw approval.rs:712 の approver task が timeout 未適用（低）—
+- [x] mcp-gw approver task の timeout 適用 — 2026-11-22 並列 Verify（V-27）: 既に解消済み（2609 行目 Round 94 完了記録）。`approval.rs:703-734` の approve_first_pending が deadline: Duration を受け `tokio::time::timeout(deadline, ...)`（:709）で poll ループを包む。回帰 `approver_poll_times_out_when_no_pending_ever_appears`（:738-762）と実 spawn（:775-779）が timeout 適用を検証。—
       成功経路ではハングしないが一貫性のため。
 - [ ] major 更新待ち29件（再評価 2026-12-20）。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
@@ -3030,7 +3032,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **hooks.json の Rust post-edit フックが repo root で cargo を実行** — 2026-11-21 対応済み: matcher `**/*.rs` を `rust/**/*.rs` と `ui/**/*.rs` に分割し、それぞれ `cd rust && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings` / `cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings` を実行（Makefile:63,66 と同一引数）。JSON parse OK、post-edit matchers = ['**/*.ts', 'rust/**/*.rs', 'ui/**/*.rs', '**/*.md'] / 根拠
   `hooks.json:57-64`, `rust/Cargo.toml:1`, `ui/Cargo.toml:1` /
   R1-ST08,R1-ST10,R1-CF02 / confirmed。
-- [ ] **pre-task フックが未定義サブエージェントを起動** —
+- [x] **pre-task フックが未定義サブエージェントを起動** — 2026-11-22 対応済み。hooks.json:6,11,16 の `subagent review-security / arch-reviewer / ops-reviewer` を `skill cross-review`（セキュリティ・設計・運用の3観点をカバー）へ置換。`.cursor/rules/skill-auto-apply.mdc:35,46-48` の未定義エージェント参照も cross-review スキル参照へ整理。infra 版 opencode.jsonc テンプレートは参照のみで実際の未定義起動は hooks.json/cursor ルール側だった。根拠
+  `hooks.json:6,11,16`, `.cursor/rules/skill-auto-apply.mdc:35,46-48`, `opencode.jsonc:133,190` / V-28 → resolved。
+  - 検証: `python3 json.load(hooks.json)` OK、未定義名（arch-reviewer / ops-reviewer / review-security / security-reviewer）の残存 0、markdownlint は既存 baseline（:43 表ヘッダ）のみ。
   `hooks.json:10-17`, `opencode.jsonc:132-133,190-191` / R1-ST10 / confirmed。
 - [x] **.gitignore が ui/target/ を無視していない** — 2026-11-21 対応済み: `/ui/target/` を repo ローカルの `.gitignore` へ追加。従前はグローバル gitignore (`~/.config/git/ignore` の `target/`) にのみ依存しており、CI runner 等では誤追跡リスクがあった。`git check-ignore -v ui/target/` が `.gitignore:47` を参照することを確認 / 根拠
   `.gitignore:47`, `AGENTS.md:55-57` / R1-ST10 / confirmed。
