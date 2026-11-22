@@ -30,6 +30,24 @@ fn sanitized_internal_status(detail: impl std::fmt::Display) -> Status {
     Status::internal(INTERNAL_ERROR_MESSAGE)
 }
 
+/// Map a malformed `args` JSON error onto the fixed gRPC contract.
+///
+/// The `serde_json::Error` is deliberately never read: its `Display`/`Debug`
+/// text carries caller-derived fragments, a byte offset and an expected-token
+/// description. It is absorbed here and only a fixed `error_kind` (shared with
+/// `jarvis_core`'s `BareJson` vocabulary) reaches tracing, so neither the
+/// status nor OTLP/Grafana can echo the offending input (V-43).
+fn invalid_args_json_status(_error: serde_json::Error) -> Status {
+    tracing::debug!(
+        error_kind = jarvis_core::INVALID_JSON_BODY_ERROR_KIND,
+        field = "args",
+        "invalid client input"
+    );
+    Status::invalid_argument(crate::http::safe_client_error_text(
+        "invalid tool arguments",
+    ))
+}
+
 /// Map a gateway error to a gRPC status by its concrete type.
 ///
 /// This mirrors `http::http_status_for`: the status code is derived from
@@ -137,14 +155,8 @@ impl McpGatewayService for GrpcMcpGatewayService {
     ) -> Result<Response<ExecuteToolResponse>, Status> {
         authorize_grpc(&request, self.admin_token.as_deref(), false)?;
         let req = request.into_inner();
-        let args: serde_json::Value = serde_json::from_str(&req.args).map_err(|e| {
-            // Caller input stays server-side: log the serde_json detail but
-            // return the same fixed client-error token the HTTP adapter uses.
-            tracing::warn!(error = %e, "gRPC execute_tool rejected malformed args JSON");
-            Status::invalid_argument(crate::http::safe_client_error_text(
-                "invalid tool arguments",
-            ))
-        })?;
+        let args: serde_json::Value =
+            serde_json::from_str(&req.args).map_err(invalid_args_json_status)?;
         let result = self
             .gateway
             .execute_tool(&req.tool, args, &req.principal)
@@ -408,6 +420,76 @@ requires_approval = false
         for leaked in ["expected value", "line 1", "column", "invalid args JSON"] {
             assert!(!status.message().contains(leaked), "leaked '{leaked}'");
         }
+    }
+
+    /// V-43 regression: the raw serde error (derived from caller input) must
+    /// be absorbed before tracing. Only the fixed `error_kind` and message are
+    /// logged, so no offending fragment, offset or serde detail reaches
+    /// OTLP/Grafana. A function-local static Mutex serializes the test because
+    /// `tracing::subscriber::with_default` is thread-local, while the test
+    /// harness runs tests in parallel on separate threads.
+    #[test]
+    fn invalid_args_json_never_logs_raw_error_detail() {
+        static LOG_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOG_CAPTURE_LOCK.lock().expect("log capture lock poisoned");
+
+        #[derive(Clone, Default)]
+        struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for LogBuffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let mut guard = self.0.lock().expect("log buffer mutex");
+                guard.extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        const PROBE: &str = "PROBE_MALFORMED_ARGS_INPUT";
+        let malformed = format!("{{ {PROBE}}}");
+        let raw_detail = serde_json::from_str::<serde_json::Value>(&malformed)
+            .expect_err("probe is malformed")
+            .to_string();
+
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(move || writer.clone())
+            .finish();
+
+        let status = tracing::subscriber::with_default(subscriber, || {
+            let error = serde_json::from_str::<serde_json::Value>(&malformed)
+                .expect_err("probe is malformed");
+            invalid_args_json_status(error)
+        });
+
+        assert_eq!(status.code(), Code::InvalidArgument);
+        assert_eq!(
+            status.message(),
+            crate::http::safe_client_error_text("invalid tool arguments")
+        );
+
+        let captured = buffer.0.lock().expect("log buffer mutex").clone();
+        let logs = String::from_utf8(captured).expect("logs are utf-8");
+        assert!(
+            logs.contains("invalid client input"),
+            "fixed log is missing: {logs}"
+        );
+        assert!(!logs.contains(PROBE), "raw input leaked to logs: {logs}");
+        assert!(
+            !logs.contains(raw_detail.as_str()),
+            "raw serde detail leaked: {logs}"
+        );
+        assert!(
+            !logs.contains("error ="),
+            "raw error field leaked to logs: {logs}"
+        );
     }
 
     /// Every `ErrorKind` must map to its agreed gRPC code, and the caller-

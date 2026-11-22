@@ -1681,6 +1681,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 215 passed / 0 failed、`cargo test -p jarvis-policy --bin jarvis-policy --locked` 8 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
   - 2026-11-22 並列 Verify（V-16）: **当初未解決（confirmed）**。4サービスとも `EnvFilter::new(RUST_LOG)` の後に `OTEL_SDK_LOG_GUARD=[opentelemetry_sdk=warn,...]` を add_directive するだけで、`RUST_LOG=opentelemetry_sdk::trace=debug` のようなより長い target 付き指定は「等価」でないため共存しサブツリーで debug が勝つ（tracing-subscriber 0.3.23 の DirectiveSet::add は Equal 時のみ置換、Ord は target 長優先）。回帰は RUST_LOG=debug の1件のみ。 victIM には事業者側の明示設定が必要で low。
 - [ ] サイズ境界が content/source/metadata のみ（low）— payload / query /
+  - 2026-11-22 並列 Verify（V-45）: 未解決だが構造的下地は加法で前進可能。共有バリデータの実体は jarvis-context/src/config.rs:86 の pub(crate) validation（core ではない）。fixed-vocabulary パターン（InvalidInput{field} + reject_invalid_input）を再利用し新規定数・検証を追加可能。上限値の選定と gRPC free-form pass-through 契約変更は設計判断で未決定。
   - 2026-11-22 並列 Verify（V-17, :1708 と同一）: **未解決（confirmed）**。共有バリデータは MAX_CONTENT_BYTES / MAX_SOURCE_BYTES / MAX_METADATA_BYTES / MAX_METADATA_DEPTH / MAX_SEARCH_LIMIT のみで payload / query / event_type / correlation_id 用の定数・検証が無い。context HTTP は event_type/payload/correlation_id を無検証で UnifiedEvent へ渡し、search_memory も query を無検証。event も HTTP/gRPC とも無検証透過。BareJson の 413 は axum の 2MiB ボディ全体制限で個別フィールド境界の代用にならない。I57-C 回帰は content/source/metadata と深い metadata の4ケースのみ。
   event_type / correlation_id にも上限を追加。
 - [ ] 発掘: policy/mcp-gw/event の JsonRejection 未対応、event の生 anyhow
@@ -1986,12 +1987,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 67 の残り指摘（未対応）
 
-- [ ] **restore-local が jarvis-backup.timer を停止せず本番 DB 上書きと
-  日次バックアップが競合**（confirmed high）— SERVICE_INVENTORY へ timer
-  追加＋apply 前 stop／on_exit 復元、runbook へ必須ステップ追加。
-- [ ] **setup-selfhost.sh の `chown -R` が root:root 配置のバックアップ
-  スクリプトを jarvis 所有へ劣化**（confirmed high）— chown 対象をデータ系
-  ディレクトリへ限定、bin/scripts は root 所有を冪等維持。
+- [x] **restore-local と jarvis-backup.timer の競合対策** — 2026-11-22 並列 Verify（V-41）: 既に解消済み（Round 68 / 2011-2013 行目と同一内容）。`restore-local.sh:64-78` の SERVICE_INVENTORY に timer を含め、inventory_services():568-597 が is-active のみで停止対象化（disabled-but-active も除外しない）、stop_services():602-613 → verify_stopped_services():620-637 が dispatch 前の fail-closed ゲート。on_exit():665-704 が成功時のみ逆順再起動、失敗時は停止維持＋手動警告。runbook:68-75/227-232 と test-restore-local.sh:1050-1109 も対応済み。
+- [x] **setup-selfhost.sh の chown -R 対象限定** — 2026-11-22 並列 Verify（V-44）: 既に解消済み（I71-B）。`setup-selfhost.sh:116-126` が方針コメント＋再帰 chown を /opt/jarvis/data・logs・/var/lib/jarvis のデータ系3ディレクトリへ限定、`:127` が bin/scripts に root:root を冪等再アサート。バックアップ先 /var/lib/postgresql/jarvis-backups は chown 対象外で install-backup-timer.sh:178-180 が postgres:postgres 0700 を設定。
 - [x] **smoke-mcp-gw.sh の inputSchema 検証が旧契約を固定** — 2026-11-22 確認: 既に解消済みの陈腐エントリ。`infra/scripts/smoke-mcp-gw.sh:148-162` の `read_schema_ok()` は filesystem.read に対して `'.' in desc and 'default' in desc.lower() and not required` を検証し、`mcp_server.rs:85-88` の description（`(optional; defaults to ".")`）+ required 無しという現行契約と整合している。deploy-mcp-gw-safe.sh のスモークが失敗する懸念は解消済み。根拠
   `infra/scripts/smoke-mcp-gw.sh:148-162,198-204`, `rust/jarvis-mcp-gw/src/mcp_server.rs:81-93` / verified。
   - 検証: 両ファイルを実読し契約が一致することを確認。コード変更なし。
@@ -2046,8 +2043,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **復元実行ユーザー前提が postgres(0700 backup_dir) と systemctl(root)
   で両立しない**（confirmed high）— 実行ユーザーを固定し precondition
   チェック、runbook の3コマンドを権限付き形へ統一。
-- [ ] Persistent=true の timer を失敗経路で無条件 restart すると、壊れた DB の
-  COMPLETE バックアップが作られる（medium）— 失敗時は timer を停止維持。
+- [x] **Persistent=true timer の失敗時 restart** — 2026-11-22 並列 Verify（V-42）: 既に解消済み。`restore-local.sh:665-704` の on_exit() が EXIT ステータスを捕捉し、成功時のみ逆順 start（:676-683,693-698）、失敗時は jarvis-backup.timer の start をスキップ（:688-692）し停止状態＋固定警告（:701-704）。stop は enablement bit を触らず（:572-597）、verify も読み取りのみ（:615-637）。
 - [x] jarvis-backup.service の ExecStartPost が repo 作業コピー（711 koppe） — **2026-11-22 重複整理**: 既に解消済み。`jarvis-backup.service:25` の ExecStartPost は `/opt/jarvis/scripts/verify-backup.sh`（root:root コピー）を参照し、repo 作業コピー（711 koppe）ではない。825 行目の Wants= 対応記録も参照。
   を参照し postgres から読めない（medium）— /opt の root:root コピーへ変更。
 - [x] restore-local.d の入力名記述子導出 — 2026-11-22 Verify: 既に解消済み（I75-B）。`pg.sh:45-49`、`qdrant.sh:24-28`、`git.sh:31-35`、`configs.sh:51` がすべて `resolve_restore_input "$SET_DIR" <role> <legacy_name>` で manifest の role/format 記述子から入力を解決し、第3引数は legacy 3列フォールバックのみ。固定名はデフォルト引数として残るが記述子が優先。根拠
@@ -2949,9 +2945,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **gRPC CheckResponse.reason が PolicyClient で捨てられる** —
   `rust/jarvis-policy/proto/policy.proto:19-25`, `src/grpc.rs:121-124`,
   `src/client.rs:91-97` / R1-ST01 / confirmed。HTTP と transport 間で非対称。
-- [ ] **gRPC ExecuteTool が caller 由来 serde エラーを生ログへ流す** —
-  `rust/jarvis-mcp-gw/src/grpc.rs:140-147`, `jarvis-policy/src/grpc.rs:84-91` /
-  R3-AU01 / confirmed。
+- [x] **gRPC ExecuteTool の serde エラー固定語彙化** — 2026-11-22 対応済み。`invalid_args_json_status(_error)`（grpc.rs:33-49）を追加し serde_json::Error を読まず `tracing::debug!(error_kind = jarvis_core::INVALID_JSON_BODY_ERROR_KIND, field = "args", "invalid client input")` を出力。ExecuteTool は `map_err(invalid_args_json_status)`（:158-159）へ変更し、生エラー出力を削除。Status は `invalid_argument(safe_client_error_text("invalid tool arguments"))` でクライアント契約不変。policy の I97-D パターンと整合。根拠
+  `rust/jarvis-mcp-gw/src/grpc.rs:33-49,158-159,425-491` / V-43 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 160 passed（+1）、mcp 証跡 159→160 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **allowlist の同名ツール定義が最後勝ちで requires_approval を上書き** —
   `rust/jarvis-mcp-gw/src/allowlist.rs:14-22,44-66` / R3-AU01 / likely。
   既存 472 行は upstream 登録側の衝突検出で、設定側は未対応。
