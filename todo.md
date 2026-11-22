@@ -1375,16 +1375,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   と誤分類して fail-closed を迂回（medium）— Ok(None) を2意味へ分離。〔Round 47 で対応済み〕
 - [x] 新規コレクション作成時に実次元を読み戻さず `Ok(())`（low）—
   create_collection 後も collection_info で検証。〔Round 47 で対応済み〕
-- [ ] persistence の構造ガードが `tracing::` 文字列計数（low）— AST ベース
-  - 2026-11-22 並列 Verify（V-25）: 未解決。persistence.rs:1651-1668 の include_str! + `production.matches("tracing::").count()==2` 文字列計数のまま、syn/quote 等の dev-dependency なし（Cargo.toml:56-59）。型境界 I47-A（DbOperation enum）は既存だがガード自体の AST 化ではない。依存追加を伴うため設計判断案件として現状維持。
-  または型境界での強制へ変更。
-
-- 親が対応: ureq 3 の `Error::StatusCode`（ボディ破棄）に対応するため
-  プローブ専用 agent（`http_status_as_error(false)`）を追加。仕様変更に伴い
-  evidence を実測再生成（policy 193件）。
-
-### Round 47（R4 で修正済み）
-
+- [x] persistence 構造ガードの構造検査化 — 2026-11-23 方針委譲で対応済み。persistence.rs:1692-1744 の persistence_logging_is_centralized_in_fixed_vocabulary_helpers を「tracing:: 出現回数==2」magic number から、db_error / db_attempt_warn 各ヘルパ本体に tracing:: が1回、2ヘルパ外の production に tracing:: が0回、という構造検査へ置換（抽出失敗は fail-closed）。新規依存なし・本番コード不変・テスト件数不変。根拠 V-25。
 - [x] OTLP 契約が policy のみ（medium）→ event / context / mcp-gw も固定語彙
   warn＋起動継続へ統一（定数名・値も policy と一致）、PROBE 回帰各1件。
 - [x] Qdrant の生エラー `e.to_string()` が5経路に残存（medium）→

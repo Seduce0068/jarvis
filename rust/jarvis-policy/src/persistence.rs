@@ -1683,8 +1683,18 @@ mod tests {
     /// Structural guard: all production logging is routed through the two
     /// fixed-vocabulary helpers. Neither accepts an error value, a URL or a SQL
     /// string, so no call site can reintroduce raw interpolation (I47-A).
+    ///
+    /// This is a structural check, not a raw count of `tracing::` occurrences:
+    /// each helper body must own exactly one logging call, and once both bodies
+    /// are removed the rest of production must not reach `tracing` at all. A
+    /// new direct log call outside the helpers therefore fails the test, while
+    /// adding a new *helper* no longer shifts a brittle magic number.
     #[test]
     fn persistence_logging_is_centralized_in_fixed_vocabulary_helpers() {
+        // The probe literal lives here in the test module, i.e. past `cut`, so
+        // it can never self-match against the production slice being scanned.
+        const LOG_PREFIX: &str = "tracing::";
+
         let source = include_str!("persistence.rs");
         // Split at the test module itself, not at the earlier `#[cfg(test)]`
         // on the test-only `DbOperation::ALL` constant.
@@ -1692,10 +1702,45 @@ mod tests {
             .find("\n#[cfg(test)]\nmod tests")
             .expect("test module marker");
         let production = &source[..cut];
+
+        // Extract one helper from its signature through its column-0 closing
+        // brace. Fail closed if the definition is missing or reshaped.
+        fn helper_body(production: &str, signature: &str) -> String {
+            let start = production
+                .find(signature)
+                .unwrap_or_else(|| panic!("missing helper definition: {signature}"));
+            let body_start = start + signature.len();
+            let tail = &production[body_start..];
+            let end = tail
+                .find("\n}")
+                .unwrap_or_else(|| panic!("unterminated helper body: {signature}"));
+            production[start..body_start + end + "\n}".len()].to_owned()
+        }
+
+        let error_body = helper_body(production, "\nfn db_error(");
+        let warn_body = helper_body(production, "\nfn db_attempt_warn(");
+
+        // Each fixed-vocabulary helper owns exactly one logging call.
         assert_eq!(
-            production.matches("tracing::").count(),
-            2,
-            "only db_error and db_attempt_warn may reach tracing"
+            error_body.matches(LOG_PREFIX).count(),
+            1,
+            "db_error must contain exactly one logging call: {error_body}"
+        );
+        assert_eq!(
+            warn_body.matches(LOG_PREFIX).count(),
+            1,
+            "db_attempt_warn must contain exactly one logging call: {warn_body}"
+        );
+
+        // With both helper bodies removed, no other production code may reach
+        // tracing directly. A new log call outside the helpers fails here.
+        let remainder = production
+            .replace(error_body.as_str(), "")
+            .replace(warn_body.as_str(), "");
+        assert_eq!(
+            remainder.matches(LOG_PREFIX).count(),
+            0,
+            "only db_error and db_attempt_warn may reach tracing: {remainder}"
         );
     }
 }
