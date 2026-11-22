@@ -1440,14 +1440,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   実データは名前なしベクトル固定のため全 upsert/search が失敗しうる。〔Round 49 で対応済み〕
 - [x] Qdrant バリアントが公開 String（medium）— 型レベル排除ではなく
   `pub(crate)` コンストラクタ＋Newtype／QdrantErrorKind への変更が必要。〔Round 49 で対応済み〕
-- [ ] 新規コレクション作成直後の読み戻しが一時障害で起動拒否（low）。
-  - 2026-11-22 並列 Verify（V-26）: 未解決。ensure_collection（builder.rs:1629-1676）は collection_info を1回だけ呼び、一時失敗でも check_inspected_dimension の `refusing to start` へ流れる（Builder::new :994-999）。outbox 用 retry_backoff（:321-343）は読み戻しに未適用。リトライ追加は起動 fail-closed 設計の変更を伴うため設計判断案件として現状維持。
-
-- 親が対応: fmt 差分、テスト専用 API（approve / deny / into_decision）へ
-  `#[cfg(test)]` 付与。
-
-### Round 49（R4 で修正済み）
-
+- [x] 新規コレクション読み戻しの一時障害 — 2026-11-22 判定: **意図的な fail-closed 設計として現状維持（V-26 再評価）**。`builder.rs:1685-1708` のコメントが I47-C/I49-C の方針を明記: 「成功・解析可能な collection_info が無ければ次元互換性を検証できず、Builder::new が健全な起動を報告してはならない。失敗呼び出し・result 欠落・未解析応答はすべて Err(()) で fail-closed」。一時障害での起動拒否はバグではなく安全設計。リトライ追加は「検証できない状態での起動」を許す方向になり設計判断を伴うため見送り。测试 :2279,2398 が fail-closed を固定。
 - [x] jarvis-context HTTP が anyhow チェーン全体を OTLP ログへ送出
   （confirmed high）→ `log_internal_error` を gRPC と同じ7語彙の variant トークン
   のみへ変更、PROBE 非漏洩＋語彙パリティ回帰2件。
