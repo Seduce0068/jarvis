@@ -41,10 +41,14 @@ code-server / OpenCode を集約する構成を前提としていた。しかし
 - **デプロイ**: リモート SSH 前提の `rust/scripts/deploy.rs` /
   `infra/scripts/deploy.sh` はローカル運用では使わない。ローカル配置は
   `infra/systemd/` と `infra/scripts/deploy-mcp-gw-safe.sh` 等で行う。
-- **バックアップ**: `rust/scripts/backup.rs` は OCI Object Storage（rclone）前提。
-  2026-11-15 の実機確認では `jarvis-backup.timer` は未導入、rclone 設定
-  （`~/.config/rclone/rclone.conf`）も無く、バックアップジョブは稼働していない。
-  保存先の再決定が必要（未解決）。
+- **バックアップ**: `rust/scripts/backup.rs` は OCI Object Storage（rclone）前提
+  のレガシー実装で、現行のローカル運用では使わない。2026-11-15 時点では
+  `jarvis-backup.timer` 未導入・rclone 設定も無かった（履歴）。
+  **現行（BK-1、2026-11-17 決定・実装済み）**: 保存先は
+  `/var/lib/postgresql/jarvis-backups`（ローカル、postgres:postgres 0700）へ
+  決定済み。`backup-local.sh` / `restore-local.sh` と `jarvis-backup.timer`
+  が現行経路（[remaining-tasks.md](../docs/integration/remaining-tasks.md)、
+  [backup-redesign-notes.md](../docs/integration/backup-redesign-notes.md) 参照）。
 - **監視**: OCI Monitoring / Alarms 前提の記述は無効。Grafana Cloud と
   `otelcol` による OTLP は継続する。
 - **ADR-0001 との関係**: インフラ選定（OCI）部分は本 ADR で置き換える。

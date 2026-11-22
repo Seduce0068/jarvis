@@ -2512,9 +2512,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] policy 仕様の 410 Gone 契約 — 2026-11-22 並列 Verify（V-86）: 既に解消済み。specs/test-policy-approval.md:47 の REQ-10、TC-D3（:292/:295）、Traceability（:347）に 410 Gone + 固定本文 APPROVAL_EXPIRED_BODY を明記。実装 http.rs:754 が Expired→GONE 写像、:709 が固定本文参照、:2687 が回帰検証。証跡 notes（:196）・specs/index.md:10 にも反映済み。
 - [x] 3仕様の /health degraded 契約 — 2026-11-22 並列 Verify（V-87）: 既に解消済み（todo.md:2529-2530 の完了記録と整合）。3仕様に I103-D Round 93 契約マーカー・REQ・Scenario TC-HC1〜3・Traceability を追加済み、各 http.rs の固定 degraded 本文と整合、4証跡 notes も HEALTH_*_BODY キーワードを充足。
-- [ ] mcp-gw /health が allowlist 経由で upstream 登録を判定し、登録済みだが
-      allowlist 未掲載だと永続 503 誤判定（中）— Gateway の実際の登録数を
-      直接公開して照合。
+- [x] mcp-gw /health の upstream 登録判定 — 2026-11-22 並列 Verify（V-104）: 既に解消済み（todo.md:2527-2529 の完了記録と整合）。http.rs:261-284 の upstreams_registered() が allowlist 推論を廃止し config.upstreams と登録済みサーバ名を照合。死亡 upstream 除外・未登録 503＋固定 degraded 本文・回帰（:1118-1229）・deploy 側 rollback まで一貫。
 - [ ] deploy-mcp-gw-safe.sh が 503 degraded を消费せず劣化サービスを
       DONE と報告（中）— スクリプト側にも degraded 検出と rollback。
 - [ ] deploy.rs のヘルスゲートが固定5秒＋1回プローブで低速起動を誤判定
@@ -2803,6 +2801,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **定数時間比較が HTTP と gRPC で重複し共有コメントと矛盾** —
   `rust/jarvis-context/src/config.rs:40-46,68-76`, `src/http.rs:207,221-236` /
   R1-ST03 / confirmed。
+  - 2026-11-22 並列 Verify（V-105）: 未解決（confirmed）。context 内で config.rs:46 と http.rs:221 の constant_time_eq が二重定義（config.rs:43 の「Shared by HTTP middleware and gRPC ingress」コメントと矛盾）。gateway も fixed_size_digest_eq をローカル定義し jarvis-core 集約先なし。定数時間性自体は各実装で確保。共有化は設計判断。
 - [ ] **HA トークン失効が Fatal 扱いで listener を永久停止** —
   `rust/jarvis-event/src/sources.rs:81,124-126`, `src/lib.rs:86-90` /
   R1-ST04 / confirmed。/health は 200 のまま再起動まで回復しない。
@@ -2900,13 +2899,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **backup.rs / deploy.rs の unit test がどのゲートからも実行されない** —
   `Makefile:62,164,170,172`, `rust/scripts/backup.rs:423`, `rust/scripts/deploy.rs:647` /
   R2-FG02 / confirmed。
+  - 2026-11-22 並列 Verify（V-101）: 未解決（confirmed）。rust-script --test は Makefile:197 の restore.rs のみで、ci-local/safety-test/backup-preflight と両 workflow からは未呼び出し。backup.rs:459 / deploy.rs:665 の #[test] は未実行（手動 pass 実績あり）。test-rust-scripts ターゲット追加＋ゲート配線で改善可能だが CI ランナーの rust-script 導入・pin が前提。
 - [x] **deploy のヘルスゲートが otelcol の 13133 を検査しない** — 2026-11-21 対応済み: `HEALTH_PORTS` を `[u16; 5] = [8081, 8082, 8083, 8084, 13133]` へ拡張し、コメントも実態（4 required services + otelcol health_check）へ更新。otelcol 停止時も `evaluate_health_checks` が fail-closed で "Deployment completed" を阻止 / 根拠
   `rust/scripts/deploy.rs:43-45`, `infra/config/otelcol-config.yaml:7` /
   R1-ST05,R2-FG02 / confirmed。
   - 検証: `cargo fmt --all --check` exit 0、`rust-script --test deploy.rs` 11 passed / 0 failed、`make secret-scan` exit 0。otelcol の 2xx JSON は degraded マーカー無く Healthy と判定され互換性確認済み。
-- [ ] **非推奨レガシースクリプトが本番デプロイで配布され続ける** —
-  `rust/scripts/backup.rs:16-23`, `rust/scripts/restore.rs:15-22`,
-  `rust/scripts/deploy.rs:508-528` / R1-ST05 / confirmed。
+- [x] レガシースクリプトの本番配布 — 2026-11-22 並列 Verify（V-102）: 既に解消済み。現行 build-selfhost.sh:247-255 の配布対象は4サービスバイナリのみでレガシー rust-script は不含。旧 deploy.rs:513-533 の scp コードは残るが deploy 経路が fail-closed（Makefile:61-64 / deploy.sh:9-19 / ADR-0004:41-43）で無効化、backup.sh/restore.sh も exit 2。手動直接実行の残リスクはあるが現行運用では配布なし。
 - [x] レガシー restore.rs の Qdrant timeout — 2026-11-22 判定: **レガシー凍結につき対応不要（V-82 再評価・差し戻し済み）**。`rust/scripts/restore.rs:13-28` が「参照用に残す既存コードであり、挙動・テストは変更しないでください」と明記し、`infra/scripts/restore.sh:1-20` が fail-closed（exit 2）で実行経路が塞がれている。backup.rs の timeout は現行経路のもので、レガシーへ流用する根拠なし。ラウンド68で追加した timeout 変更は 9fd2cb5 で revert 済み（履歴書換えではなく新規 revert コミット）。現行経路は restore-local.d/qdrant.sh が担当。
 - [ ] **restore_postgres の DROP→CREATE→psql が非アトミック** —
   `rust/scripts/restore.rs:360-435,533-555` / R1-ST05 / confirmed。
@@ -2931,9 +2929,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `hooks.json:10-17`, `opencode.jsonc:132-133,190-191` / R1-ST10 / confirmed。
 - [x] **.gitignore が ui/target/ を無視していない** — 2026-11-21 対応済み: `/ui/target/` を repo ローカルの `.gitignore` へ追加。従前はグローバル gitignore (`~/.config/git/ignore` の `target/`) にのみ依存しており、CI runner 等では誤追跡リスクがあった。`git check-ignore -v ui/target/` が `.gitignore:47` を参照することを確認 / 根拠
   `.gitignore:47`, `AGENTS.md:55-57` / R1-ST10 / confirmed。
-- [ ] **ADR-0004 がバックアップ保存先を「未解決」と記載したまま** —
-  `adr/0004-local-only-no-oci.md:44-47`, `docs/integration/remaining-tasks.md:308` /
-  R1-DR01 / confirmed。BK-1 で決着済み。
+- [x] ADR-0004 のバックアップ保存先 — 2026-11-22 対応済み。影響節の「保存先の再決定が必要（未解決）」を BK-1（2026-11-17 決定・実装済みの `/var/lib/postgresql/jarvis-backups`、postgres:postgres 0700、backup-local.sh / restore-local.sh / jarvis-backup.timer が現行経路）へ更新。adr/log.md にも記録。根拠
+  `adr/0004-local-only-no-oci.md:44-52`, `adr/log.md`, `docs/integration/remaining-tasks.md:308` / V-103 / confirmed。
+  - 検証: markdownlint 追加行付近違反 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **local-restore-design.md の「未決定事項」に決定済み項目が混在** — 2026-11-22 対応済み: 見出しを「未決定事項と決定記録」へ変更し、複数DB項目に「決定済み（2026-11-21）: 単一DB契約を維持」を明記、config owner/mode も `configs.sh` の `EXPECTED_CONFIG_MODE` 単一表（root:root 0644）で決定済みと記録。真に未決定の項目（本番PG/Qdrant上書き方式・git作業ツリー・レガシーセット）はそのまま残存。根拠
   `docs/integration/local-restore-design.md:302-338`, `infra/scripts/restore-local.d/configs.sh:133` / R1-DR01 / confirmed。
   - 検証: secret-scan exit 0、`make ci-local` all gates passed、markdownlint 既存 baseline のみ（変更行は 80 字以内へ調整）。

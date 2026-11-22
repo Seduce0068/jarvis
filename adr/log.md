@@ -4,6 +4,9 @@ ADR ディレクトリに変更を加えたコミットの記録。日付見出�
 
 ## 2026-11-22
 
+- [`0004-local-only-no-oci.md`](0004-local-only-no-oci.md): バックアップ保存先の
+  「未解決」を BK-1（2026-11-17 決定、`/var/lib/postgresql/jarvis-backups`）の
+  現行契約へ更新。
 - [`0003-native-web-fetch.md`](0003-native-web-fetch.md): egress allowlist の
   「導入も検討」を実装済み（未設定・空・不正値は `DenyAll` fail-closed）へ更新。
 - [`0001-unified-architecture.md`](0001-unified-architecture.md): Phase 0 の
