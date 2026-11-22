@@ -2851,11 +2851,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **ADR-0001 の OpenCode V2 固定の置換注記** — 2026-11-22 対応済み。Decision 1 直前に「ADR-0002 でランタイム非依存化が決定され、OpenCode/code-server は交换可能な実装へ降格した。現行契約は ADR-0002 を正とする」置換記録を追加（ADR-0004 の infra 置換と同粒度）。adr/log.md にも記録追記。根拠
   `adr/0001-unified-architecture.md:38-47`, `adr/log.md`, `adr/0002-runtime-agnostic.md:4,15,40` / R1-DR01 / confirmed。
   - 検証: markdownlint 既存 baseline のみ、差分は ADR 2ファイル8行追加。
-- [ ] **web.fetch の DNS 解決経路エラー分岐が未テスト** — 根拠
-  `rust/jarvis-mcp-gw/src/sandbox.rs:727,744,749,753` / R3-TQ01 / confirmed。
-  既存 498 行は TOCTOU 対策の実装で、解決失敗・空配列・非公開 IP 混入の
-  fail-closed 回帰は未検証。
-  - 2026-11-22 並列 Verify（V-38）: 未解決（confirmed）。sandbox.rs:727 の ensure_public_host が :745 で lookup_host を直接呼び、注入 seam なし。4ケース（解決失敗/空配列/混在/全公開）のテストなし、:1110 は #[ignore] の実 DNS 依存。
+- [x] **web.fetch の DNS 解決経路エラー分岐の回帰** — 2026-11-22 対応済み。sandbox.rs に `DnsResolver` 型エイリアスと `ensure_public_host_with(url, resolver)` を追加し、本番 `ensure_public_host` は `lookup_host` ラッパを渡す薄いラッパに分離（シグネチャ不変）。4ケース（解決失敗 / 空配列 / 公開＋非公開混在 / 全公開＋IP リテラル resolver 非呼び出し）を注入 resolver で検証。IP リテラル分岐・addrs pinning・エラー語彙は不変。根拠
+  `rust/jarvis-mcp-gw/src/sandbox.rs:717-798,1008-1047` / R3-TQ01 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 159 passed（+4）、mcp 証跡 155→159 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **承認 ID の再登録の fail-closed 化** — 2026-11-22 対応済み。`record_request`（persistence.rs:694-733）が `INSERT ... ON CONFLICT DO NOTHING` の影響行数（u64）を受け、0 行（競合）なら `Err(ApprovalError::Persistence)` を返す純粋ヘルパを追加。呼び出し側 approval.rs:706-731 の既存 fail-closed ロールバック（entry 削除＋503 相当）がそのまま働き、孤儿 hold も古い DB 行への誤紐づきも残らない。回帰2件追加（零行→Err / ConflictPersistence 経由のロールバック検証）。根拠
   `rust/jarvis-policy/src/persistence.rs:694-733,1013`, `rust/jarvis-policy/src/approval.rs:2736,2799` / R2-ER01 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 217 passed（+2）、policy 証跡 215→217 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。

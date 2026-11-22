@@ -9,7 +9,10 @@
 use crate::error::McpGatewayError;
 use anyhow::{Context, Result};
 use serde_json::{Value, json};
+use std::future::Future;
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::{Child, ChildStderr, ChildStdout, Command};
@@ -711,7 +714,7 @@ fn is_public_ip(ip: &std::net::IpAddr) -> bool {
 /// passed the public-IP check, closing the DNS-rebinding / TOCTOU window
 /// between validation and reqwest's own name resolution.
 #[derive(Clone, Debug)]
-enum ValidatedDest {
+pub(crate) enum ValidatedDest {
     /// The URL host is an IP literal: reqwest connects to it directly and
     /// never re-resolves it, so the checked literal is already the destination.
     Literal,
@@ -724,7 +727,34 @@ enum ValidatedDest {
     },
 }
 
-async fn ensure_public_host(url: &reqwest::Url) -> Result<ValidatedDest> {
+/// DNS resolution seam for [`ensure_public_host_with`]. A plain function
+/// pointer (rather than a generic parameter) keeps call sites monomorphic and
+/// lets tests inject a deterministic resolver without any network access. The
+/// higher-ranked lifetime ties the returned future to the borrowed host.
+pub(crate) type DnsResolver =
+    for<'a> fn(
+        &'a str,
+        u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>>;
+
+/// Production resolver: thin adapter over `tokio::net::lookup_host` that
+/// collects the iterator into the `Vec<SocketAddr>` the seam returns.
+fn lookup_host_resolver<'a>(
+    host: &'a str,
+    port: u16,
+) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+    Box::pin(async move {
+        let resolved = tokio::net::lookup_host((host, port)).await?;
+        Ok(resolved.collect())
+    })
+}
+
+/// Validation core with an injectable DNS resolver. All fail-closed checks and
+/// error strings are identical to the former inline implementation.
+pub(crate) async fn ensure_public_host_with(
+    url: &reqwest::Url,
+    resolver: DnsResolver,
+) -> Result<ValidatedDest> {
     let host = url
         .host_str()
         .ok_or_else(|| client_error("url has no host"))?;
@@ -741,11 +771,10 @@ async fn ensure_public_host(url: &reqwest::Url) -> Result<ValidatedDest> {
     }
     // The host came from caller input, so resolution failures are client
     // errors (400), not gateway-internal failures (500).
-    let resolved = client_context(
-        tokio::net::lookup_host((bare, port)).await,
+    let addrs = client_context(
+        resolver(bare, port).await,
         format!("dns lookup failed: {host}"),
     )?;
-    let addrs: Vec<std::net::SocketAddr> = resolved.collect();
     if addrs.is_empty() {
         let message = format!("dns lookup returned no addresses for {host}");
         return Err(client_error(message));
@@ -763,6 +792,12 @@ async fn ensure_public_host(url: &reqwest::Url) -> Result<ValidatedDest> {
         host: host.to_string(),
         addrs,
     })
+}
+
+/// Unchanged production entry point: delegates to the testable core using the
+/// real `tokio::net::lookup_host` resolver.
+async fn ensure_public_host(url: &reqwest::Url) -> Result<ValidatedDest> {
+    ensure_public_host_with(url, lookup_host_resolver).await
 }
 
 /// Build the per-hop HTTP client. DNS-named hosts are pinned to the exact
@@ -908,6 +943,133 @@ mod tests {
             let err = ensure_public_host(&url).await.unwrap_err();
             assert!(err.to_string().contains("non-public"), "{err}");
         }
+    }
+
+    // Deterministic resolvers injected through the `ensure_public_host_with`
+    // seam. They are plain `fn` items so they coerce to the higher-ranked
+    // `DnsResolver` pointer type; no network is ever consulted.
+    fn failing_resolver<'a>(
+        _host: &'a str,
+        _port: u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        Box::pin(async {
+            Err::<Vec<SocketAddr>, _>(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "synthetic dns failure",
+            ))
+        })
+    }
+
+    fn empty_resolver<'a>(
+        _host: &'a str,
+        _port: u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
+    fn mixed_resolver<'a>(
+        _host: &'a str,
+        _port: u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        Box::pin(async {
+            Ok(vec![
+                "93.184.216.34:443".parse().unwrap(),
+                "127.0.0.1:443".parse().unwrap(),
+                "10.0.0.1:443".parse().unwrap(),
+            ])
+        })
+    }
+
+    fn public_resolver<'a>(
+        _host: &'a str,
+        _port: u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        Box::pin(async {
+            Ok(vec![
+                "93.184.216.34:443".parse().unwrap(),
+                "[2606:2800:220:1:248:1893:25c8:1946]:443".parse().unwrap(),
+            ])
+        })
+    }
+
+    fn never_call_resolver<'a>(
+        _host: &'a str,
+        _port: u16,
+    ) -> Pin<Box<dyn Future<Output = std::io::Result<Vec<SocketAddr>>> + Send + 'a>> {
+        Box::pin(async {
+            Err::<Vec<SocketAddr>, _>(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "IP literal host must not reach the DNS resolver",
+            ))
+        })
+    }
+
+    /// (a) A resolver error is mapped to the same typed client error (HTTP
+    /// 400) as a real `lookup_host` failure, keeping the error vocabulary.
+    #[tokio::test]
+    async fn ensure_public_host_dns_error_is_client_error() {
+        let url = validate_http_url("https://dns-failure.example/").unwrap();
+        let err = ensure_public_host_with(&url, failing_resolver)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("dns lookup failed"), "{err}");
+        assert_client_error(&err);
+    }
+
+    /// (b) An empty resolution must fail closed rather than produce an empty
+    /// pinning set that would let reqwest resolve the host on its own.
+    #[tokio::test]
+    async fn ensure_public_host_empty_dns_result_is_client_error() {
+        let url = validate_http_url("https://no-addresses.example/").unwrap();
+        let err = ensure_public_host_with(&url, empty_resolver)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("dns lookup returned no addresses"),
+            "{err}"
+        );
+        assert_client_error(&err);
+    }
+
+    /// (c) One private address among public ones must still reject the whole
+    /// set: every pinned address is checked before any connection is allowed.
+    #[tokio::test]
+    async fn ensure_public_host_rejects_mixed_public_and_private_addresses() {
+        let url = validate_http_url("https://mixed.example/").unwrap();
+        let err = ensure_public_host_with(&url, mixed_resolver)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("non-public"), "{err}");
+        assert_client_error(&err);
+    }
+
+    /// (d) All-public resolutions are preserved verbatim for pinning, and an
+    /// IP literal never reaches the resolver (no redundant DNS / no TOCTOU).
+    #[tokio::test]
+    async fn ensure_public_host_pins_all_public_addresses() {
+        let url = validate_http_url("https://public.example/").unwrap();
+        let dest = ensure_public_host_with(&url, public_resolver)
+            .await
+            .unwrap();
+        let expected = vec![
+            "93.184.216.34:443".parse().unwrap(),
+            "[2606:2800:220:1:248:1893:25c8:1946]:443".parse().unwrap(),
+        ];
+        match dest {
+            ValidatedDest::Resolved { host, addrs } => {
+                assert_eq!(host, "public.example");
+                assert_eq!(addrs, expected);
+            }
+            other => panic!("expected a pinned resolved destination, got {other:?}"),
+        }
+
+        let literal = validate_http_url("https://8.8.8.8/").unwrap();
+        assert!(matches!(
+            ensure_public_host_with(&literal, never_call_resolver)
+                .await
+                .unwrap(),
+            ValidatedDest::Literal
+        ));
     }
 
     #[test]
