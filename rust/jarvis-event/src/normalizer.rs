@@ -711,6 +711,13 @@ mod tests {
 
     #[test]
     fn overflow_warning_records_event_metadata_without_payload() {
+        // tracing's thread-local dispatcher can be displaced by parallel tests;
+        // serialize log capture the same way the context-side helper does.
+        static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         const OVERFLOW_SECRET: &str = "overflow-body-secret-4f1a";
 
         let buffer = LogBuffer::default();

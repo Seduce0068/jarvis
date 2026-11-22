@@ -1843,8 +1843,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] シナリオ充足判定が下限のみ（medium）— 契約 step 追記時に新規 Scenario
   を要求、またはシナリオ別 pass 数を記録。〔Round 63 で対応済み〕
 - [x] migration pre-flight unit コメントが「through 004」のまま（low）。〔Round 63 で対応済み〕
-- [ ] `overflow_warning_records_event_metadata_without_payload` が並列実行時
-  - 2026-11-22 並列 Verify（V-19）: **未解決（confirmed）**。当該テスト（event/normalizer.rs:713-747）はローカル LogBuffer＋thread-local subscriber を使い、context 側の `static CAPTURE_LOCK: Mutex<()>`（builder.rs:3593 / pii.rs:352）による直列化が無い（別クレート）。positive control（:736-739）はあるが直列化ではない。兄弟テストの span capture 諦止＋SUBSCRIBER_PROBE も当該テストには未適用。
+- [x] `overflow_warning_records_event_metadata_without_payload` の flaky 修正 — 2026-11-22 対応済み。当該テスト（event/normalizer.rs:713-720）に関数内静的 `CAPTURE_LOCK: Mutex<()>` を追加し、context 側 builder.rs:3591-3596 と同じ poisoned 対応（into_inner）で log capture を直列化。positive control と non-leak アサーションは不変。根拠
+  `rust/jarvis-event/src/normalizer.rs:713-720`, `rust/jarvis-context/src/builder.rs:3591-3596` / V-19 → resolved。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 92 passed / 0 failed（件数不変）、対象テスト3回連続 pass、`make ci-local` all gates passed、`make secret-scan` exit 0。
   にフレーキ（tracing ログキャプチャ競合）— 再実行で pass、構造修正は未実施。
 
 - 親が対応: fmt 差分、I64-A pristine 一時ツリーへの evidence/index.md
