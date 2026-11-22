@@ -116,10 +116,12 @@ generated:
   - （旧状態）repo 側は完了、実機は未導入 / inactive。隔離先での実復元検証も未実施。
     `make timer-status` → `sudo ... install-backup-timer.sh --apply` →
     確認 → 復元演習の順（ユーザー実行が必要）。
+  - 2026-11-22 並列 Verify（V-141）: 未解決（ユーザー操作）。repo 側 timer unit と install-backup-timer.sh は整備済み、2026-11-19 に実機 active/enabled 記録あり。残るは修正済み unit（--repo-dir / ProtectHome=read-only）の実機再適用と S9 実機演習。
 - [ ] **P1-6** バックアップを暗号化・署名し保持期間を設定（R3-DR-002,
     R3-DR-003）
   - manifest は平文 SHA-256 のみ、署名なし。`--retain-days` は opt-in で
     unit が渡していない。ディスク枯渇と改ざん検知不能のリスク。
+  - 2026-11-22 並列 Verify（V-142）: 未解決（設計決定済み・実装未着手）。backup-local.sh:165-171 が encryption/signature を意図的に未実装と明記、manifest 既定 none/none。保持期間 --retain-days は unit ExecStart に未渡しで実運用無効。設計決定（USB短期＋HDD中長期、age 暗号化、OpenSSH 署名）は todo.md:919-921 に記録、RPO/RTO・鍵保管先はユーザー確認待ち。
 - [x] **P1-7** 共有ドメインモデルを一本化（2026-11-19 全スライス完了: core 正規形＋policy re-export、mcp-gw の `outcome_from_wire()` 集約、UI の `decision_from_json()` / `request_to_core()` 境界変換、旧 root 型と TryFrom の削除。UI の独立 workspace に jarvis-core path dep 追加、ui-test 22件 pass。競合で壊れた UI の legacy 2-variant テストは「明示拒否」へ更新）（R2-ARCH-001, R2-ARCH-005,
     R2-ARCH-009）
   - `jarvis-core` が policy / mcp-gw / UI から未参照で、承認型が
@@ -725,6 +727,7 @@ generated:
   使い捨て DB / Qdrant コレクション / ディレクトリで全コンポーネントを
   復元し Runtime Proof を記録する。本番適用はユーザー承認後に実施。
 
+  - 2026-11-22 並列 Verify（V-143）: 未解決（ユーザー承認待ち）。test-restore-local.sh:2,13-15 が「自動化可能な範囲のみ・本番データ復元演習はユーザー承認が必要」と宣言。自動テスト pass 済み、実機隔離先演習は runbook:268-285 で承認待ちタスクとして残る。
 ## follow-up（2026-11-19 Round 2 / R4 レビュー）
 
 - [x] **仕様書 REQ-7 をキュー枯渇の 503 挙動へ同期**（2026-11-19 対応済み: 仕様 REQ-7 と TC-Q1 を更新、証跡を実測 53 passed / 0 failed で再生成（`evidence/test-run-20261119-cc55d64f971a.json`）、両 index 更新、`make check-evidence` ok=6 errors=0） — 根拠
@@ -1731,6 +1734,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   reference-style リンクのみ（low）。〔Round 58 で対応済み〕
 - [x] mcp-gw http_error() の anyhow チェーン — 2026-11-22 並列 Verify（V-18）: 子は `http.rs:371-377` の `format!("{error:#}")` が main.rs:284-288 の OTLP exporter 併設 subscriber へ流れることを confirmed と判定（3166-3167 行目の speculative メモを格上げ）。ただし「Internal はクライアントへ固定メッセージ、詳細は tracing ログへ隔離」は型ベースエラー分類（R1 対応）の意図的な設計判断であり、OTLP はそのログ経路の一部。機微情報は PII フィルタ／fixed vocabulary の方針で別途制御するため、コード変更は行わず設計判断として記録のみ更新。
 - [ ] サイズ境界が payload/query/event_type/correlation_id に未適用（low）。
+  - 2026-11-22 並列 Verify（V-45 / :1701 と同一内容）: 未解決。詳細は :1701 の V-45 記録を参照。共有 validation（context/config.rs:86）への加法は可能だが、上限値と gRPC free-form 契約変更は設計判断。
 
 - 親が対応: fmt 差分、Cargo.lock 更新（offline）、tracing field 形式依存
   アサーション削除、shellcheck SC2181（heredoc の $? 判定）。
@@ -2104,6 +2108,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   に発動。verify_set 前に解決ゲートを組み込んで stop 前に拒否したい場合は
   `resolve_restore_input()` を verify_set() から呼ぶ必要がある（low）。
 - [ ] 共有 lib の実機配布（再インストール）と、ユーザー判断項目:
+  - 2026-11-22 並列 Verify（V-137）: repo 側配布先は完了（Makefile:160-163 / install-backup-timer.sh）、実機への再インストールはユーザー操作待ち。以下はユーザー判断リスト（重複メモ）。
   P1-6 暗号化鍵注入先、P0 ガード有効化、Grafana、Webhook、S9、
   バックアップ外部化、push。
 
@@ -2612,6 +2617,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       `docs/integration/local-restore-design.md` に記録。将来別 DB 化する場合の
       案（独立セット）も同所に明記。
 - [ ] ユーザー判断が必要な項目: P1-6 暗号化鍵の注入先、8段階の P0 ガード有効化、
+  - 2026-11-22 確認: 以下は各部门の未解決項目の要約（重複メモ）。個別の Root は respective 項目（P1-6 / P0 ガード / P0-7 / P1-12 / S9 / P1-4 / 共有 lib）に記録済み。
       Grafana Cloud 認証の供給、Webhook の公開範囲、S9 実機復元演習、
       バックアップ外部化、共有 lib の実機配布（再インストール）。
 - [x] push — 2026-11-21 実施済み: `git fetch origin master` で 0 behind / 514 ahead を確認し、`git push origin master` が `922460c..ebfb6bd  master -> master` で成功。
@@ -2633,6 +2639,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 ### Round 102 の残り（未対応）
 
 - [ ] ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化。
+  - 2026-11-22 確認: 要約メモ（重複）。個別 Root は各項目に記録済み。push は実施済みで制約誤記は訂正済み。
       （push は 2026-11-21 に実施済み。旧「push しない制約」の記述は訂正済み）
 
 ### Round 103（/swarm-limited・制限プロファイル）
@@ -2712,6 +2719,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   根拠 `infra/scripts/restore-local.d/pg.sh:137-141,155-167`,
   `infra/scripts/restore-local.sh:665-710` / R1-ST06 / confirmed。
   退避 DB 名をログするだけで EXIT trap に復元処理が無い（S9 の実運用リスク）。
+  - 2026-11-22 並列 Verify（V-144）: 未解決（confirmed）。pg.sh:137-142 が旧 DB を TEMPLATE 退避するが、以降の失敗分岐は fail のみで退避 DB から本番 DB を再作成する自動ロールバックなし。backup_db は関数ローカルで EXIT trap on_exit（restore-local.sh:665-709）も退避 DB に触れない。手動復旧前提・設計判断。
 - [ ] **PG 復元検証がテーブル件数>0 のみでスキーマ版を確認しない** —
   根拠 `infra/scripts/restore-local.d/pg.sh:34,103-114,169-180` /
   R2-DI01 / confirmed。古いダンプや 004/005/006 欠落が合格し得る。
@@ -2922,8 +2930,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `cargo fmt --all --check` exit 0、`rust-script --test deploy.rs` 11 passed / 0 failed、`make secret-scan` exit 0。otelcol の 2xx JSON は degraded マーカー無く Healthy と判定され互換性確認済み。
 - [x] レガシースクリプトの本番配布 — 2026-11-22 並列 Verify（V-102）: 既に解消済み。現行 build-selfhost.sh:247-255 の配布対象は4サービスバイナリのみでレガシー rust-script は不含。旧 deploy.rs:513-533 の scp コードは残るが deploy 経路が fail-closed（Makefile:61-64 / deploy.sh:9-19 / ADR-0004:41-43）で無効化、backup.sh/restore.sh も exit 2。手動直接実行の残リスクはあるが現行運用では配布なし。
 - [x] レガシー restore.rs の Qdrant timeout — 2026-11-22 判定: **レガシー凍結につき対応不要（V-82 再評価・差し戻し済み）**。`rust/scripts/restore.rs:13-28` が「参照用に残す既存コードであり、挙動・テストは変更しないでください」と明記し、`infra/scripts/restore.sh:1-20` が fail-closed（exit 2）で実行経路が塞がれている。backup.rs の timeout は現行経路のもので、レガシーへ流用する根拠なし。ラウンド68で追加した timeout 変更は 9fd2cb5 で revert 済み（履歴書換えではなく新規 revert コミット）。現行経路は restore-local.d/qdrant.sh が担当。
-- [ ] **restore_postgres の DROP→CREATE→psql が非アトミック** —
-  `rust/scripts/restore.rs:360-435,533-555` / R1-ST05 / confirmed。
+- [x] restore_postgres の非アトミック — 2026-11-22 並列 Verify（V-145）: レガシー restore.rs:395-440 の無退避 DROP→CREATE→psql は実行経路が塞がれ（restore.rs:15-22 凍結・restore.sh:10-22 exit 2）、現行 pg.sh:77-180 は隔離検証→旧 DB 退避（CREATE DATABASE ... TEMPLATE）→再検証の順序を実施。設計 local-restore-design.md:244-245 の「上書き前退避先必須」を満たす。完全自動ロールバック／原子性は V-144 で別途未解決。
 - [x] レガシー restore_configs の tar 展開 — 2026-11-22 判定: **実行経路が塞がれた凍結レガシーにつき対応不要（V-55 再評価）**。`rust/scripts/restore.rs:13-28` が「DEPRECATED / OCI+rclone+op 前提の旧方式」「実行経路は既に塞がれています」「参照用に残す既存コードであり挙動・テストは変更しないでください」と明記。`infra/scripts/restore.sh:1-20` が fail-closed（exit 2）で起動不能を確認。現行経路は `restore-local.d/configs.sh` の allowlist 個別ファイルコピーで tar 展開なし。設計判断（ADR-0004 レガシー凍結）として現状維持。
 - [ ] **release profile の strip=true + panic=abort で本番クラッシュ痕跡が失われる**
   - 2026-11-22 並列 Verify（V-52）: 未解決（confirmed）。rust/Cargo.toml:157-161 の strip/panic 不変、build-selfhost.sh:201 も上書きオプションなし。RUST_BACKTRACE / LimitCORE / coredump 設定は repo 全体で未確認。バイナリサイズ vs デバッグ性の設計判断。
