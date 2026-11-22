@@ -2292,8 +2292,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] CI の外部アクション／再利用ワークフロー pin — 2026-11-22 Verify: 既に解消済み。`.github/workflows/ci.yml:27` が `refs/tags/v1 -> b7675efd8a9a84ebc5b560da628d1a82f3fbf98f` の解決 SHA を記録し、`:35-36` が共通指示 §5 に従い `rust-gates.yml@v1` タグ pin を維持（checkout は `11d5960...` フル SHA 固定）。`check-workflow-pins.sh` が GitHub API で現行 SHA を照合し、タグ付け替え時に SHA_MISMATCH で fail-closed。根拠
   `.github/workflows/ci.yml:27,35-36`, `ci/scripts/check-workflow-pins.sh` / verified。コード変更なし。
-- [ ] qdrant-client の ^1.10 が reqwest 0.12/0.13 の major 重複を招く
-  （low）— exact pin か共存理由の記録。
+- [x] qdrant-client / reqwest の major 重複 — 2026-11-22 Verify: 既に判断済み（2344 行目の完了記録）。reqwest 0.13 への統一は見送り、理由は「rmcp / testcontainers が 0.12 を固定しており、統一にはそれらの major 更新が必要」で記録済み。`Cargo.lock` に reqwest が 0.12 / 0.13 の2系統存在するのはこの共存判断の結果であり、子の推奨「共存理由の記録」は充足。根拠
+  `rust/Cargo.lock` (reqwest 2系統), `todo.md:2344` / verified。コード変更なし。
 - [ ] rust-script の依存が semver 下限のみでロック無し（medium）—
   exact pin または Makefile + rust-script 例外の明記。
 - [x] verify サマリ ok=43 の単位誤記 — 2026-11-22 Verify: 2318 行目で訂正済みの重複エントリ。`evidence/test-run-20261120-c486b0dbe466.json` は「実測 43 passed」（テスト関数数）、verify-backup.sh の `ok=<n>` は判定呼び出し数で別単位。`docs/integration/evidence-regeneration.md:334-343`（I81-D (c)）が「ok+fail をイベント件数として読まない」と明記し区別を担保。根拠
