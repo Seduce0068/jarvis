@@ -1905,34 +1905,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 64 の残り指摘（未対応）
 
-- [ ] todo.md:1858 付近の旧 Round 63 残指摘（grandfather 記述、413/415
-      メトリクス、UnknownBodyError、trim 契約）はすべて本ラウンドで解消済み。
-      次回レビューで重複排除すること。
-- 親が対応: spec_hash drift の再生成、tamper が古い証跡ファイル名を参照
-  していた問題、notes/index の件数表記同期。
-
-## アーカイブ判定（2026-11-20 / I67-A）
-
-- 判定方針: 各 `- [ ]` について後続ラウンドの「R4 で修正済み」節および
-  本文の「対応済み」記述を照合し、明示的に解消が記録された項目のみを
-  `- [x]` へ変更した。行自体は履歴として保持し、行末に解消ラウンドを
-  追記（削除なし・見出し／OKF は未変更）。
-- アーカイブ判定: 91件（Round 42〜62 の「残り指摘」のうち Round 43〜64
-  で解消が明記された重複エントリ）。残り `- [ ]` は 44件。
-- 保持区分: ユーザー判断（P0-1/3/6/7、P0-10/11、P1-4/6/12、P2-2、
-  P3-4/5、Grafana／Webhook／bws.env／pprof・zpages／バックアップ外部化）、
-  実機操作（P1-5、S9、timer unit 再適用・実復元演習）、最新指摘
-  （Round 63/64 の残り）。
-- 一部解消のため `[ ]` を維持（誤判定防止）: commit_gate 新契約の
-  回帰名未反映、rustfmt ゲート CI 未配線を含む発掘5件、persistence 構造
-  ガード、新規コレクション読み戻し一時障害、local-restore 等ドキュメント
-  ドリフト、UI/mcp-gw 証跡の一部、REQ 集合ゲートの per-spec 検証、
-  OTel SDK ガードの上書き可能性、サイズ境界の未対象項目、mcp-gw の
-  anyhow エコー、フレーキテストの構造修正 — いずれも後続ラウンドで
-  「全項目解消」が明記されていない。
-
-### Round 65（R4 で修正済み）
-
+- [x] 旧 Round 63 残指摘の重複排除 — 2026-11-22 Verify: 項目自身が「すべて本ラウンドで解消済み」と明記。Root 確認: grandfather は check-evidence.sh:45,369 で baseline/grandfather 例外なしを明記、413/415 は core lib.rs:145-146,644 の固定バケット、UnknownBodyError は :173,190,207 で 400 分類、trim 契約も個別対応済み（1878 行目 V-47 で 4仕様・証跡の更新を確認）。
 - [x] todo.md の解消済み旧指摘91件を `[x]` 化（履歴は保持、open 135→44）。
 - [x] pre-commit に `make secret-scan` を追加（CI を最終ゲートとする二段構成）。
 - [x] UI clippy に `-D clippy::undocumented_unsafe_blocks` を付与、
