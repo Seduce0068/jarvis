@@ -2118,7 +2118,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 72 の残り指摘（未対応）
 
-- [ ] restore-local の module 内 fail-closed は dispatch 後（stop_services 後）
+- [x] restore-local module 内 fail-closed の位置 — 2026-11-22 並列 Verify（V-06）: 既に解消済み（I76-A/I77-A/I78-A）。`restore-local.sh:871` の verify_set() が `:896` stop_services() / `:916` dispatch_restore() より前に実行され、`:482-505` が共有 resolver で全コンポーネントを事前解決、rc=1/2 を DESCRIPTOR_FAILURES で拒否（`:338-354`）。モジュール側 fail-closed は pre-stop ゲートすり抜け時の defense-in-depth（`:473-474`）で、回帰（`test-restore-local.sh:1295-1334,1755-1799,1920-1957`）が本番非接触を固定。
   に発動。verify_set 前に解決ゲートを組み込んで stop 前に拒否したい場合は
   `resolve_restore_input()` を verify_set() から呼ぶ必要がある（low）。
 - [ ] 共有 lib の実機配布（再インストール）と、ユーザー判断項目:
@@ -2192,7 +2192,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `infra/scripts/lib/payload-descriptors.sh:18-26,169-178`, `infra/scripts/verify-backup.sh:184-191`, `infra/scripts/restore-local.sh:434-439` / verified。コード変更なし。
 - [x] restore-local.sh の flock 同時実行防止 — 2026-11-22 Verify: 既に解消済み（I81-A）。`restore-local.sh:765-800` の main() entry gate が `flock` でインスタンス間を直列化（既定 `/run/jarvis/restore.lock`、明示 LOCK_FILE 上書き可、`/run` 不可時 `/tmp` フォールバック＋WARN、flock 不在時 fail-closed）。設計書要件は実装で充足。根拠
   `infra/scripts/restore-local.sh:45-57,765-800` / verified。コード変更なし。
-- [ ] 設計書の「スキップ指定は事前検証から除外しない」が実装と正反対
+- [x] 設計書のスキップ指定セマンティクス — 2026-11-22 並列 Verify（V-10）: 既に解消済み（Round 76 / 2216 行目）。`local-restore-design.md:203-213` が現行セマンティクス（スキップ成分はマニフェスト存在ゲートと solve ゲートから除外）を記述し、旧記述は「履歴」として明示否定（:211-213）。CLI help（restore-local.sh:179）と整合。実装も :516-531 の存在ゲート条件付きスキップに対し config allowlist（:448-464）と role 解決（:379-444）は --skip-configs でも無条件実行。
   （low）— 設計書を CLI help のセマンティクスへ更新。
 - [x] 本番未接触アサーションの集約と前提ログ必須化（重複2件を統合） — 2026-11-22 Verify: 既に解消済み（I80-A / I84-C）。`assert_no_production_contact()`（`:1458`）が代表ケースへ集約され、`:1752` で `I80-A: representative full guard` として1回だけ呼ばれる。`assert_production_boundary()`（`:1495-`）は「前提ログは systemctl-query.log、空なら vacuous pass を禁止して fail」と明記し失敗クラスごとの境界を検証。根拠
   `infra/scripts/test-restore-local.sh:1458,1482-1500,1752` / verified。コード変更なし。
@@ -2300,7 +2300,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `docs/integration/evidence-regeneration.md:334-343`, `evidence/index.md` run-backup / verified。コード変更なし。
 - [ ] テスト集約で失敗時の本番非接触検証が代表1ケースのみに（medium）—
   失敗クラスごとに1件ずつ復活。
-- [ ] test-restore-local が既定ロックパスを使用し /run 経路が CI で未検証
+- [x] test-restore-local のロックパス — 2026-11-22 並列 Verify（V-07）: 既に解消済み（I84-D/I86-B）。`test-restore-local.sh:444` が全 run_driver 呼び出しで LOCK_FILE を一時的領域へ注入し既定パス不使用。`:652-703` が /run 相当を `elif true` へ sed 差し替えて dry-run 検証（lock 選択 :681、/tmp 不使用 :697-700、psql/systemctl 非呼び出し :702-703）、`:593-650` / `:705-750` が /run 不在・mkdir 失敗の両枝を固定。Makefile:87,100 と ci.yml:123 が CI 実行を担保。
   （low）— LOCK_FILE を一時パスへ。
 - [x] secret_scan index クロスチェックの主張限定 — 2026-11-22 Verify: 既に解消済み。`ci/scripts/secret_scan.py:21-26` が「index-count check is only a regression guard on tracked_files(); it compares against a second git -C <root> ls-files --cached call, which returns the same cached index today, so it is NOT an independent detector of CWD-induced shrinking」と自己和集の性質を正直に明記し、一次防御は `:17-20` の `repo_root()` + `git -C` と分離。子の推奨「主張を限定」は充足。根拠
   `ci/scripts/secret_scan.py:17-31,112-117` / verified。コード変更なし。
@@ -2350,14 +2350,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 81 の残り指摘（未対応）
 
-- [ ] **PII パターン設定が PiiConfig スキーマと不一致**（confirmed high）—
+- [x] **PII パターン設定が PiiConfig スキーマと不一致** — 2026-11-22 並列 Verify（V-08）: 既に解消済み（Round 82 / 2373-2375 行目）。`pii_patterns.toml:10,14,16-55` が PiiConfig（pii.rs:20-26 の deny_unknown_fields + patterns/redact_replacement/enabled）と一致。`shipped_pii_config_matches_pii_config_schema`（pii.rs:376-405）が 14 パターン全件・キー一致をアサート、`shipped_config_loads_without_warning`（:410-453）が warn 不出・redact を確認、`unknown_config_key_fails_closed`（:459-515）が fail-closed を担保。—
   `pii_patterns.toml` がトップレベルキーで14パターンを定義するが
   `patterns: HashMap` を要求するパースに失敗し既定6パターンのみが有効。
   `[patterns]` 配下へ移動＋実設定のパース回帰を追加。
 - [x] 証跡 generator／UI README／Makefile:test に --locked が無い（medium）。 — **2026-11-22 重複整理**: 同一内容は 2378 行目で完了記録済み。
 - [x] policy/event の起動検証テストが env 存在で早期 return し vacuous pass — **2026-11-22 重複整理**: 既に解消済み。2377 行目で policy/event 起動検証テストの env 非依存化（vacuous pass 解消）と egress 境界回帰4件を追加済み。
   （medium）— Serialized で明示値をマージして常にアサート。
-- [ ] egress ホスト長 253/254・ラベル長 63/64 の境界回帰が無い（low）。
+- [x] egress ホスト長/ラベル長の境界回帰 — 2026-11-22 並列 Verify（V-09）: 既に解消済み（2378-2379 行目の完了記録）。`config.rs:245-259` の is_valid_host_pattern が host.len()>253 と label.len()>63 を拒否し、`egress_allowlist_length_boundaries_flip_at_one_character`（:806-827）が 253 受理/254 拒否・63 受理/64 拒否を 1 文字差で直接アサート。
 - [x] ContextConfig Debug の pg_url redaction — 2026-11-22 Verify: 既に解消済み（I86-B (b)）。`config.rs:755-777` のカスタム Debug が `pg_url` / `qdrant_api_key` / `admin_token` を `<redacted>` に置換し、`:996-997` の回帰が「Debug 出力は redacted、pg_url() の実接続 URL は不変」をアサート。子の指摘は既に解消済み。根拠
   `rust/jarvis-context/src/config.rs:755-777,996-997` / verified。コード変更なし。
 - [x] UI 二重 POST 防止テスト — 2026-11-22 Verify: 既に解消済み（2380 行目の完了記録）。`ui/src/approvals.rs:294-300` の in_flight 管理に対し `:1321-1363` が挿入／成功時削除／失敗時削除／未登録 id の回帰を実装し、実 decide() 駆動（seam 隔離）で検証。`make ui-test` 85 passed / 0 failed。根拠
