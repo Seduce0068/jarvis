@@ -2924,12 +2924,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **Qdrant ヒットのスコア欠落を None 保持へ修正** — 2026-11-22 対応済み。`search_vectors`（builder.rs:1717-1752）の戻り scores を `HashMap<Uuid, Option<f32>>` へ変更し、:1752 を `scores.get(&entry.id).copied().flatten()` にして欠落を 0.0 に化けさせない。attach_scores も Option 型へ整合させ、実スコア Some(0.0) はそのまま保持。回帰 `attach_scores_keeps_explicit_none_from_qdrant` を追加し、既存2テストも Option リテラルへ更新。根拠
   `rust/jarvis-context/src/builder.rs:96-107,1154-1190,1717-1752,3525-3565` / V-73 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 183 passed（+1）、context 証跡 182→183 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **トークンヘッダ整合性チェックが自己比較で vacuous**
-  - 2026-11-22 並列 Verify（V-74）: 未解決（confirmed）。grpc.rs:9 の alias import と :71-74/:395-401 の debug_assert/テストは別名 vs 元定数の自己比較。独立リテラル pin（core:415 / config.rs:942-943）は定数値の固定のみで env キー名／HTTP ヘッダ名の横断照合ではない（そもそもヘッダ名用 env キーは未定義）。
- —
-  `rust/jarvis-context/src/grpc.rs:9,68-74,393-401`, `src/http.rs:14,160,698-701` /
-  R1-ST03 / confirmed。既存 959 行の共有定数化の後にエイリアス同士の
-  比較だけが残った。
+- [x] **トークンヘッダ自己比較の整理** — 2026-11-22 対応済み。`GrpcContextService::new()`（grpc.rs:63-70）の `debug_assert_eq!(CONTEXT_TOKEN_HEADER, jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER)` は alias import と元定数の自己比較で vacuous だったため削除し、過大主張コメントを「wire name is pinned by jarvis_core's canonical pin test」の事実ベースの記述へ置換。定数値の pin は core lib.rs:415 / config.rs:942-943 で既に担保。alias import と他箇所の使用は不変、テスト件数不変。根拠
+  `rust/jarvis-context/src/grpc.rs:9,63-70,102,388-396`, `rust/jarvis-core/src/lib.rs:415` / V-74 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 184 passed（件数不変）、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **定数時間比較が HTTP と gRPC で重複し共有コメントと矛盾** —
   `rust/jarvis-context/src/config.rs:40-46,68-76`, `src/http.rs:207,221-236` /
   R1-ST03 / confirmed。

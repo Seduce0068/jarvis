@@ -65,13 +65,8 @@ impl GrpcContextService {
         // the HTTP router uses). Reading the config value keeps both transports
         // on one secret instead of duplicating the credential.
         //
-        // The legacy config-side header name is retained in `config.rs` (outside
-        // this change's scope). Keep it in lockstep with the canonical constant
-        // so the ingress key cannot drift from the HTTP gate and the client.
-        debug_assert_eq!(
-            CONTEXT_TOKEN_HEADER,
-            jarvis_core::JARVIS_CONTEXT_TOKEN_HEADER
-        );
+        // The wire name is pinned by jarvis_core's canonical pin test; this
+        // module uses the shared constant directly.
         let admin_token = builder.config.admin_token().map(str::to_owned);
         let embedding_dim = builder.config.embedding_dim;
         Self {
