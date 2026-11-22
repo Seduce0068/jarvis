@@ -226,6 +226,7 @@ generated:
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
     `adr/index.md` と `log.md` の未配置。
 - [ ] **P3-5** レガシー資産の最終判断（R2-DEBT-006, R2-DEBT-011,
+  - 2026-11-23 方針判断: 凍結・実行経路遮断は完了（V-125）。残る物理削除は破壊的操作でユーザー確認が必要なため実行しない。ライセンス方針（todo.md:245-249）はレガシー資産とは別案件。
   - 2026-11-22 並列 Verify（V-125）: レガシー資産の凍結・削除実行判断は解消済み（ADR-0004:25,30-34 の別途判断記録、backup.sh/restore.sh/deploy.sh の exit 2 fail-closed、remaining-tasks.md:392-399/421）。 items の物理削除とライセンス方針は意図的に保留で open 維持。
     R3-DR-015, R5-RULES-002）
   - **2026-11-18 現状**: 4下位項目のうち3件は判断・担保済み。
@@ -498,6 +499,7 @@ generated:
 - [x] 配線済み review-gate が PR ではなく既定ブランチを検証 — 2026-11-19 対応済み: 未配線の参照実装 `ci/review-gate.yml` の3ステージ checkout に `refs/pull/<number>/head` を追加（workflow_dispatch は `pr_number` 入力）。auto-merge・権限・認証情報の方針は据え置き、YAML 有効 / R1-AR4 / confirmed（未配線の参照実装は既存 P2-2 の判断を維持）
 - [x] レビューゲートのシグナル解析が `grep ... || true` で fail-open — 2026-11-19 対応済み: `fail_closed()` / `count_findings()` を導入し解析エラー・信号ファイル不在で `verdict=UNKNOWN` かつジョブ失敗。merge-gate / auto-merge は APPROVE/CONDITIONAL のみ通過。未配線方針は維持 / `ci/review-gate.yml:145-148` / R2-ER4 / likely（未配線）
 - [ ] cloud-init が NOPASSWD root + docker グループ / 固定 DB パスワード —
+  - 2026-11-23 方針判断: **是正も削除もしない（ADR-0004 レガシー凍結を尊重）**。cloud-init は未使用レガシーで現行ローカル運用から実行されず（backup.sh/restore.sh/deploy.sh は exit 2 fail-closed）、是正は未使用ファイルへの変更、削除は破壊的操作でユーザー確認が必要。P3-5 の残る物理削除判断と一体化して扱う。
   - 2026-11-22 並列 Verify（V-21）: 設定は未是正（cloud-init.yaml:41,43,133）だが ADR-0004:30-34 で OpenTofu/OCI は未使用レガシー凍結。P3-5 の未完了はライセンス方針のみで cloud-init を吸収した記録は無く、削除／是正判断は P3-5 の設計判断待ちとして現状維持。 `infra/opentofu/cloud-init.yaml:41-43,133` / R3-AU3 / confirmed（ADR-0004 で未使用のレガシー、削除判断は既存 P3-5 に委譲）
 - [x] デプロイスクリプトが全 unit を単一ユーザーへ書き換え — 2026-11-19 対応済み: policy/mcp-gw/event/context の4サービスは User/Group をテンプレート宣言どおり保持し、その他5ユニットのみ従来の置換を適用（認可境界の権限分離を維持） / `infra/scripts/build-selfhost.sh:40-42` / R3-AU3 / confirmed
 - [x] `check-deploy-drift.sh` が配備済み Policy/PII ファイル欠落を検知しない — 2026-11-19 対応済み: allowlist と同じ枠組みで `MISSING (deployed)` / `MISSING (repo)` と danger=1 を設定。既存回帰22 tests pass / `infra/scripts/check-deploy-drift.sh:44` / R3-TQ3 / confirmed（既存 P0-9/P2-12 と枠組み共有）
