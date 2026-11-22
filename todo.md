@@ -356,6 +356,7 @@ generated:
   - **残る判断**: 導入要否は実機の公開範囲決定後。Tailscale 外への公開や
     リバースプロキシ経由の外部受取が発生した場合は、認証・署名検証と
     レート制限を再評価する（実機の公開範囲は未確認）。
+  - 2026-11-22 並列 Verify（V-126）: 未解決（意図的保留）。署名検証・共有トークンは未実装（normalizer.rs:187-200 の Router に認証ミドルウェアなし）。127.0.0.1 bind＋Tailscale のネットワーク境界で代替する設計判断は remaining-tasks.md:566-593 に記録済みだが、実機公開範囲は未確認で「判断待ち」のまま。
 - [x] **P2-12** drift 検査対象が Cedar 系3ファイルに及ばない（2026-11-18 対応済み: policies.cedar / cedar_schema.cedarschema / pii_patterns.toml を cmp 対象へ追加。配備版パスは env で上書き可能、回帰テストで stale schema 検出を確認）（A-M8）
   - `check-deploy-drift.sh:19-47` は binary/allowlist/`casbin_policy.csv`/unit のみ。`policies.cedar`・`cedar_schema.cedarschema`・`pii_patterns.toml` を `cmp` 対象へ追加（P0-9 と同じ枠組み）。
 - [x] **P3-8** 承認ボタンのキーボード操作・アクセシビリティ属性（A-M15）
@@ -709,6 +710,7 @@ generated:
     `--repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis` を追加し、
     root で unit を再適用する必要がある（ユーザー実行が必要）。
 
+  - 2026-11-22 並列 Verify（V-127）: 未解決（repo 側解消・実機再適用待ち）。repo の jarvis-backup.service:13 に --repo-dir、:34 に ProtectHome=read-only を確認。実機 /etc/systemd/system/jarvis-backup.service:12 は --repo-dir なし・ProtectHome=yes のままで、/opt/jarvis/scripts/backup-local.sh も --repo-dir 未実装。root で install-backup-timer.sh --apply の再実行が必要（ユーザー操作待ち）。
 ## 残タスク（restore-local S8 / S9）
 
 - [x] **S8: ドキュメントとレガシー整理**（2026-11-19 対応済み: `index.md` 追記、runbook に相互リンクと3段の安全レベル例示、`restore.rs` に非推奨ヘッダ（**rust-script の cargo マニフェストブロックより後に配置** — 先頭に置くと依存が認識されず `--help` が失敗する）、`infra/README.md` に現行状態を追記。`rust-script --help` / rustfmt / ci-local exit 0、新規 markdownlint 違反なし（既存 baseline の MD013/MD028 は据え置き）） — 根拠
@@ -2012,9 +2014,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **timer が active だが disabled だと停止されない**（confirmed high）— — **2026-11-22 重複整理**: 同一内容は 2059 行目で完了記録済み。
   `inventory_services()` の is-enabled && is-active 前提。timer は is-active
   のみで停止対象にし、停止後 inactive を確認。
-- [ ] **復元実行ユーザー前提が postgres(0700 backup_dir) と systemctl(root)
-  で両立しない**（confirmed high）— 実行ユーザーを固定し precondition
-  チェック、runbook の3コマンドを権限付き形へ統一。
+- [x] 復元実行ユーザー前提 — 2026-11-22 並列 Verify（V-128）: 既に解消済み（todo.md:2037-2039 Round 70 記録と整合）。restore-local.sh:92-96 が root 単一実行を明記、check_preconditions():120-159 が BACKUP_DIR_UNREADABLE / PSQL_UNAVAILABLE / SYSTEMCTL_STOP_DENIED を fail-closed 検査。復元=root・バックアップ生成=postgres は意図的分離で矛盾なし。
 - [x] **Persistent=true timer の失敗時 restart** — 2026-11-22 並列 Verify（V-42）: 既に解消済み。`restore-local.sh:665-704` の on_exit() が EXIT ステータスを捕捉し、成功時のみ逆順 start（:676-683,693-698）、失敗時は jarvis-backup.timer の start をスキップ（:688-692）し停止状態＋固定警告（:701-704）。stop は enablement bit を触らず（:572-597）、verify も読み取りのみ（:615-637）。
 - [x] jarvis-backup.service の ExecStartPost が repo 作業コピー（711 koppe） — **2026-11-22 重複整理**: 既に解消済み。`jarvis-backup.service:25` の ExecStartPost は `/opt/jarvis/scripts/verify-backup.sh`（root:root コピー）を参照し、repo 作業コピー（711 koppe）ではない。825 行目の Wants= 対応記録も参照。
   を参照し postgres から読めない（medium）— /opt の root:root コピーへ変更。
@@ -2878,6 +2878,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **tokio-tungstenite 0.21.0 が古い TLS スタックを保持** —
   `rust/jarvis-event/Cargo.toml:54`, `rust/Cargo.lock:4910-4923,3796-3806` /
   R4-DP01 / confirmed。0.26 系への更新で rustls 0.22 系統を排除できる。
+  - 2026-11-22 並列 Verify（V-130）: 未解決（再評価 2026-12-20 待ち）。tokio-tungstenite 0.21.0（jarvis-event/Cargo.toml:54, Cargo.lock:4910-4923）が rustls 0.22.4 系統を保持。audit.toml:51-55 のコメントは原因を axum ではなく tokio-tungstenite と訂正済みで、0.22+ 更新は再評価日まで抑制。
 - [x] **仕様内の証跡ファイル名・ハッシュが実在値と不一致（2 仕様）** — 2026-11-22 対応済み。根本原因は、仕様本文に自身の `spec_hash` を記載するとその記述自体が hash を変える自己言及的構造だったため、仕様から `spec_hash` 数値と証跡ファイル名を削除し、`evidence/index.md` の `[run-*]` 定義を権威へ集約（UI/policy 両仕様）。spec_hash 再計算に伴い両証跡を `test-run-20261120-035fb8483fb1.json` / `test-run-20261120-24de84a91940.json` へ rename し、`test_basis_ref.spec_hash` / `notes` / index を同期。さらに `Makefile:check-evidence-counts` のファイル名ハードコードを廃し、index の `[run-<name>]:` 定義から動的解決するよう変更（双重管理の解消）。根拠
   `specs/test-ui.md:419-425`, `specs/test-policy-approval.md:419-428`, `evidence/index.md:29-34`, `Makefile:104-114` / R1-ST09 / confirmed。
   - 検証: 5件の `--check` すべて MATCH、`make check-evidence` ok=6 errors=0、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、`make secret-scan` exit 0。git は旧→新ファイルを rename として検出。
@@ -2900,6 +2901,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   R3-TQ01 / confirmed。redirect 4 回・Location 欠落等が CI で未検証。
 - [ ] **kill switch の時刻逆行 fail-closed 分岐が実経路で未テスト** —
   `rust/jarvis-policy/src/kill_switch.rs:344,349,352,902` / R3-TQ01 / confirmed。
+  - 2026-11-22 並列 Verify（V-129）: 未解決（confirmed）。kill_switch.rs:349-354 の SystemTime::now() Err 分岐のみで、「現在時刻 < activated_at」判定自体はコードに存在しない。SystemTime 注入 Seam が無く実経路回帰もなし（CLOCK_FAILURE_REASON は vocabulary 分類テスト :929-948 のみ）。テスト追加には Seam 設計が必要。
 - [ ] **gRPC admin token の定時間比較テストが戻り値のみの vacuous** —
   `rust/jarvis-mcp-gw/src/grpc.rs:98,102,288`, `specs/test-mcp-gateway.md:284` /
   R3-TQ01 / likely。
