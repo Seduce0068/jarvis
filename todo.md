@@ -2885,10 +2885,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `make check-evidence` ok=6 errors=0、`make ci-local` all gates passed、`make secret-scan` exit 0。差分は description 2行のみ。
 - [ ] **backup 仕様の新規シナリオ（TC-B6/V5/R1/R2）に回帰テストが無い** —
   `specs/test-backup.md:353,358`, `evidence/index.md:18` / R3-TQ01 / confirmed。
-- [ ] **トークン予算の境界値（等号 / 等号+1）が未テスト** —
-  `rust/jarvis-context/src/builder.rs:1289,1291`, `specs/test-context.md:92,222` /
-  R3-TQ01 / confirmed。
-  - 2026-11-22 並列 Verify（V-98）: 未解決（confirmed）。builder.rs:1324-1325 の budget_bytes = max_tokens*4 に対し境界回帰は「大幅小／大幅大」のみで、ちょうど budget / budget+1 byte の直接検証なし。specs/test-context.md:222-229 の TC-C2 も境界値分析と乖離。境界テスト追加は安全に可能。
+- [x] トークン予算の境界値回帰 — 2026-11-22 対応済み。`token_budget_boundary_is_inclusive`（builder.rs:1860-1896）を追加し、`budget_bytes = max_tokens(10) * ESTIMATED_UTF8_BYTES_PER_TOKEN(4) = 40` に対して serde_json シリアライズ長がちょうど 40 bytes なら context 非変更・report=None、41 bytes なら memories/recent が空になり report=Some(before_bytes=41) を検証。パディング長はループで決定論的に算出（ハードコードなし、オーバーシュート防止アサート付き）。根拠
+  `rust/jarvis-context/src/builder.rs:1319-1330,1860-1896` / V-98 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 187 passed（+1）+ integration 6 passed、context 証跡 186→187 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **web.fetch の HTTP レスポンス処理分岐が実ネットワーク依存** —
   `rust/jarvis-mcp-gw/src/sandbox.rs:260,267,281,285,294,1110` /
   R3-TQ01 / confirmed。redirect 4 回・Location 欠落等が CI で未検証。

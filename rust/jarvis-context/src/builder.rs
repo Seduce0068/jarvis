@@ -1857,6 +1857,51 @@ mod tests {
         assert!(!report_debug.contains("state_changed"));
     }
 
+    #[test]
+    fn token_budget_boundary_is_inclusive() {
+        // `apply_token_budget` uses `before_bytes <= budget_bytes`, so the exact
+        // boundary must be a no-op while a single extra byte must truncate.
+        // Find the boundary deterministically instead of hardcoding a serialized
+        // length: grow one ASCII field until the JSON is exactly `budget_bytes`.
+        let max_tokens = 10usize;
+        let budget_bytes = max_tokens * ESTIMATED_UTF8_BYTES_PER_TOKEN;
+
+        let mut pad = 0usize;
+        let exact = loop {
+            let candidate = json!({"x": "x".repeat(pad)});
+            let len = serde_json::to_string(&candidate).expect("serialize").len();
+            if len == budget_bytes {
+                break candidate;
+            }
+            assert!(len < budget_bytes, "padding overshot the budget");
+            pad += 1;
+        };
+        assert_eq!(
+            serde_json::to_string(&exact).expect("serialize").len(),
+            budget_bytes
+        );
+
+        // Exactly at the budget: context unchanged, no report.
+        let (output, report) = apply_token_budget(exact.clone(), max_tokens).expect("budget");
+        assert_eq!(
+            output, exact,
+            "at the boundary the context must be unchanged"
+        );
+        assert_eq!(report, None, "at the boundary no truncation is reported");
+
+        // One byte over the budget: truncation fires and is reported.
+        let over = json!({"x": "x".repeat(pad + 1)});
+        assert_eq!(
+            serde_json::to_string(&over).expect("serialize").len(),
+            budget_bytes + 1
+        );
+        let (output, report) = apply_token_budget(over, max_tokens).expect("budget");
+        assert_eq!(output["memories"], json!([]));
+        assert_eq!(output["recent"], json!([]));
+        let report = report.expect("one byte over the budget must be reported");
+        assert_eq!(report.before_bytes, budget_bytes + 1);
+    }
+
     fn email_filter() -> crate::pii::PiiFilter {
         let mut patterns = std::collections::HashMap::new();
         patterns.insert(
