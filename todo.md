@@ -2732,12 +2732,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-context/src/builder.rs:669-688,2893-2956` / V-78 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 186 passed（+1）+ integration 6 passed、context 証跡 185→186 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] outbox の synced 終端ゲート — 2026-11-23 方針委譲で対応済み。PendingStore::mark_synced（builder.rs:443-451）を追加し、store_memory_with_sinks / reconcile_pending の両 remove 失敗経路で vector_state=synced へ遷移（新規 migration なし）。LIST_PENDING_SQL（:260-273）に `vector_state = 'pending'` ゲートを追加し、synced 行が再 reconcile で旧ベクトルを Qdrant へ再書込みする経路を遮断。モック4種と静的 SQL アサーション同期、回帰 +1（remove 失敗後に再 list されない）。根拠 V-148。
-- [ ] **PG コミット後に outbox 記録が失敗すると再試行マーカーが消える**
-  - 2026-11-22 並列 Verify（V-80）: 未解決（confirmed）。store_memory（builder.rs:1076-1112）が memories INSERT を先に実行、store_memory_with_sinks の outbox.record 失敗（:674-677）で補償（ロールバック／再キュー）なし。PG 行のみ永続化され pending_embeddings も無い孤立行となり reconcile が拾えない。トランザクション化またはコミット前 outbox 挿入が必要で設計判断案件。
- —
-  `rust/jarvis-context/src/builder.rs:646-656,1063-1089` /
-  R2-DI01 / likely。memories INSERT と outbox record が非原子的。
-  - 2026-11-23 調査（V-148）: 根本策は memories INSERT と outbox INSERT の同一 tx＋commit 後 Qdrant＋成功後 remove。record 失敗時補償 DELETE は数行で可能だが crash 窓と明示 id 直接呼び出しで既存行を削除する危険があり恒久策に不適。V-79 の synced ゲートを先に実装する方針。
+- [x] outbox 記録失敗の補償 — 2026-11-23 方針委譲で対応済み。StoreSinksOutcome::{Ok,Queued,NeedsCompensation} を追加し、Qdrant 失敗 AND outbox 記録失敗のときだけ store_memory が自ら INSERT した行（公開 ingress が発行した新規 UUID）を `DELETE FROM memories WHERE id=$1` で補償してから元の Qdrant エラーを返す（downcast 可能性維持、ContextError::Qdrant）。DELETE 失敗は固定語彙 warn のみで元エラーを隠蔽しない。互換ラッパ store_memory_with_sinks / into_result は #[cfg(test)] 化（production は outcome-aware 経路）。回帰 +1。根拠 `rust/jarvis-context/src/builder.rs:680-760,840-850,1151-1186,3210-3310` / V-148。crash 窓は残るが公開新規 UUID 契約下で既存行誤削除リスクはない。
 - [x] **pending_embeddings の embedding JSON 破損の可視化** — 2026-11-22 対応済み。pure helper `parse_embedding_json`（builder.rs:321-333）を追加しデコード失敗を None として検出。`PgPendingStore::list`（:535-547）が None 分岐で `error_kind = "embedding_json_parse_failed"` の固定語彙 warn を発行（JSON 値／serde エラー／row id は非出力）。挙動（空ベクトルで re-embed 経路へ流す）と dead-letter 分類は不変。回帰 `corrupt_embedding_json_is_detected_for_warning` を追加。根拠
   `rust/jarvis-context/src/builder.rs:321-333,535-547,3286-3310` / V-71 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 184 passed（+1）、context 証跡 183→184 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
