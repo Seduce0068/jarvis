@@ -2294,8 +2294,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `.github/workflows/ci.yml:27,35-36`, `ci/scripts/check-workflow-pins.sh` / verified。コード変更なし。
 - [x] qdrant-client / reqwest の major 重複 — 2026-11-22 Verify: 既に判断済み（2344 行目の完了記録）。reqwest 0.13 への統一は見送り、理由は「rmcp / testcontainers が 0.12 を固定しており、統一にはそれらの major 更新が必要」で記録済み。`Cargo.lock` に reqwest が 0.12 / 0.13 の2系統存在するのはこの共存判断の結果であり、子の推奨「共存理由の記録」は充足。根拠
   `rust/Cargo.lock` (reqwest 2系統), `todo.md:2344` / verified。コード変更なし。
-- [ ] rust-script の依存が semver 下限のみでロック無し（medium）—
-  exact pin または Makefile + rust-script 例外の明記。
+- [x] rust-script 依存の exact pin／例外明記 — 2026-11-22 Verify: 既に解消済み（2347-2348 / 2317 行目の完了記録）。4スクリプトのメタ依存9件を `rust/Cargo.lock` 根拠で exact pin（backup.rs の anyhow =1.0.104 / chrono =0.4.45 / reqwest =0.12.28 等）、残る `clap = "4.5"` / `hostname = "0.3"` は「リポジトリ内に根拠が無いため保留」理由を記録。exact pin 方針は Makefile へ明記済み。子の推奨「exact pin または例外の明記」は両方充足。根拠
+  `rust/scripts/{backup,restore,deploy}.rs` の cargo メタブロック, `todo.md:2317,2347-2348` / verified。コード変更なし。
 - [x] verify サマリ ok=43 の単位誤記 — 2026-11-22 Verify: 2318 行目で訂正済みの重複エントリ。`evidence/test-run-20261120-c486b0dbe466.json` は「実測 43 passed」（テスト関数数）、verify-backup.sh の `ok=<n>` は判定呼び出し数で別単位。`docs/integration/evidence-regeneration.md:334-343`（I81-D (c)）が「ok+fail をイベント件数として読まない」と明記し区別を担保。根拠
   `docs/integration/evidence-regeneration.md:334-343`, `evidence/index.md` run-backup / verified。コード変更なし。
 - [ ] テスト集約で失敗時の本番非接触検証が代表1ケースのみに（medium）—
