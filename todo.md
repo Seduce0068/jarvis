@@ -72,6 +72,7 @@ generated:
   - **実機対応は残る**: 実機は `/etc/jarvis/otelcol-config.yaml` を読み込む
     ため、repo テンプレートの同期と `ss -lnt` による確認は未実施。
 - [ ] **P0-7** Grafana 認証情報の供給経路を確定（R1-SEC-003）
+  - 2026-11-22 並列 Verify（V-131）: 未解決（needs_user）。案A（bws run 経由注入）を推奨する設計調査はあるが、7項目のユーザー確認が必要で判断未確定（todo.md:80-91,864-866,2991）。AGENTS.md:188-190 も「credential supply path not yet identified」と明記、infra/config/otel.env:6-7 はレガシー op:// テンプレートで現行 unit 未使用。
   - **2026-11-19 設計調査**: 3案を比較し **案A（bws run 経由で注入）を推奨**。
     otelcol.service に `EnvironmentFile=-/etc/jarvis/bws.env` を追加し、
     `bws run --project-id <ID> -- otelcol-contrib` で起動。値は bws vault に
@@ -799,6 +800,7 @@ generated:
 ## follow-up（2026-11-19 Round 17 / R4 レビュー）
 
 - [ ] **OpenCode の設定だけでは塞がらない秘密読取経路** — 根拠
+  - 2026-11-22 並列 Verify（V-132）: 未解決（設計判断待ち）。opencode.jsonc は deny パターン＋per-agent permission を記録済み（todo.md:630-631 で [x]）だが bash/task 等は "*": "allow" を残し、メタ文字・cwd 外絶対パスは wildcard fallback で迂回可能。OS サンドボックス／実行前フックでの補完を「検討」として残存（todo.md:801-809）。配布未配線（V-83）も未解消。
   `opencode-agent/src/executor.rs:578-651`（ローカル依存ソース）/
   R4 レビュー / 優先度 中。
   - bash コマンドに `& ; | > < $ \` ( ) { } \` や改行が含まれると
@@ -825,8 +827,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **P1-2 PG/Qdrant 二段書き込みの補償**（重複: 行89の P1-2 で 2026-11-19 対応済み） — `context/src/builder.rs:198` / B5 / 高。
 - [x] **P1-3 マイグレーションのバージョン管理移行**（重複: 行92の P1-3 で 2026-11-19 対応済み） — `context/src/builder.rs:396` / B5 / 高。
 - [ ] **Grafana Cloud アラート／失敗通知が未整備** — `docs/integration/remaining-tasks.md:667` / B7 / 高 / needs_user。kill switch 発動・承認タイムアウト・バックアップ失敗の通知先を確定。
+  - 2026-11-22 並列 Verify（V-133）: 未解決（needs_user）。infra/grafana/ にはダッシュボード JSON と README のみで alert rule / contact point 定義なし。3事象（kill switch/承認タイムアウト/バックアップ失敗）の通知先は DOC-1（remaining-tasks.md:735）で「方針/設定確認継続・要再評価」のまま、ユーザー確定待ち。
 - [ ] **bws.env の復元・再配置経路が未定義** — `docs/integration/backup-restore-runbook.md:70-72,186` / B7 / 高 / needs_user。ディスク故障後にサービスが起動できない。
+  - 2026-11-22 並列 Verify（V-134）: 未解決（needs_user）。runbook:100-102 が「バックアップ対象外で管理者が再配置」と方針を示すのみで、BWS_ACCESS_TOKEN 再投入手順・取得元・承認フロー未記載。configs.sh:10-11,39-40 と restore-local.sh:281-298 は bws.env を明示拒否（回帰 test-restore-local.sh:985-1020）。トークン再投入はユーザー操作待ち。
 - [ ] **pprof/zpages が常時有効でネットワーク制限も未判断** — `otelcol-config.yaml:144`, `otelcol.service:27-32` / B7 / 高 / needs_user。
+  - 2026-11-22 並列 Verify（V-135）: 未解決（needs_user）。repo 側 otelcol-config.yaml:9-12 は pprof/zpages を 127.0.0.1 bind に変更済みだが、実機は /etc/jarvis 別パスを読み health/pprof/zpages の実機確認未完了（4317/4318/8888 のみ確認済み）。unit 側ネットワーク制限（IPAddressDeny 等）と常時有効化要否も remaining-tasks.md:481-482 で要判断。
 
 ### 優先度 中
 
