@@ -1476,6 +1476,10 @@ const ESTIMATED_UTF8_BYTES_PER_TOKEN: usize = 4;
 struct TruncationReport {
     before_bytes: usize,
     after_bytes: usize,
+    /// Whether the trimmed context still exceeds the estimated budget. Because
+    /// `event.payload` is preserved, an oversized payload alone can keep the
+    /// result above budget even after `memories`/`recent` were emptied.
+    still_exceeds_budget: bool,
 }
 
 /// Drop the memory arrays when the serialized context appears to exceed the
@@ -1487,6 +1491,12 @@ struct TruncationReport {
 /// therefore neither a character nor a byte: this is a coarse heuristic, not
 /// a tokenizer, and non-ASCII text (e.g. Japanese, where a character commonly
 /// occupies 3 UTF-8 bytes) will be over-counted.
+///
+/// `event.payload` is deliberately preserved — dropping it would lose the event
+/// data callers rely on. As a result, when the payload alone is larger than the
+/// budget, emptying `memories`/`recent` cannot bring the context back under it;
+/// [`TruncationReport::still_exceeds_budget`] records that state. Consequently
+/// `max_context_tokens` is a best-effort target, not an absolute guarantee.
 fn truncate_context_to_tokens(context: Value, max_tokens: usize) -> Result<Value> {
     let (context, report) = apply_token_budget(context, max_tokens)?;
     if let Some(report) = report {
@@ -1502,8 +1512,10 @@ fn truncate_context_to_tokens(context: Value, max_tokens: usize) -> Result<Value
 
 /// Pure core of the token-budget step. Returns the (possibly trimmed) context
 /// together with a [`TruncationReport`] when the memory arrays were emptied, or
-/// `None` when the context was left untouched. Kept free of logging so the
-/// truncation decision is directly testable.
+/// `None` when the context was left untouched. The decision itself depends only
+/// on the inputs (no I/O and no clock), so it stays directly testable; the only
+/// side effect is a single fixed-vocabulary warning when the budget is still
+/// exceeded, which carries neither sizes nor payload content.
 fn apply_token_budget(
     mut context: Value,
     max_tokens: usize,
@@ -1517,11 +1529,21 @@ fn apply_token_budget(
     context["memories"] = Value::Array(vec![]);
     context["recent"] = Value::Array(vec![]);
     let after_bytes = serde_json::to_string(&context)?.len();
+    let still_exceeds_budget = after_bytes > budget_bytes;
+    if still_exceeds_budget {
+        // Fixed vocabulary only: never log byte counts, config values, or any
+        // part of the preserved `event.payload`.
+        warn!(
+            reason = "still_exceeds_budget",
+            "context still exceeds estimated token budget after dropping memory sections"
+        );
+    }
     Ok((
         context,
         Some(TruncationReport {
             before_bytes,
             after_bytes,
+            still_exceeds_budget,
         }),
     ))
 }
@@ -2043,6 +2065,55 @@ mod tests {
         let report_debug = format!("{report:?}");
         assert!(!report_debug.contains(secret));
         assert!(!report_debug.contains("state_changed"));
+    }
+
+    #[test]
+    fn truncation_report_flags_payload_only_budget_overflow() {
+        let max_tokens = 100usize;
+        let budget_bytes = max_tokens * ESTIMATED_UTF8_BYTES_PER_TOKEN;
+
+        // Case 1: the event payload alone is larger than the budget. Even with
+        // memories/recent emptied, the context cannot fit, so the flag is set.
+        let oversized_payload = "z".repeat(budget_bytes + 1);
+        let context = json!({
+            "memories": [{"content": "x".repeat(64)}],
+            "recent": [{"content": "y".repeat(64)}],
+            "event": {"payload": oversized_payload.clone()},
+        });
+        let (output, report) = apply_token_budget(context, max_tokens).expect("budget");
+        let report = report.expect("an oversized context must be reported");
+
+        assert_eq!(output["memories"], json!([]));
+        assert_eq!(output["recent"], json!([]));
+        assert_eq!(
+            output["event"]["payload"], oversized_payload,
+            "event payload must be preserved verbatim"
+        );
+        assert!(report.after_bytes > budget_bytes);
+        assert!(
+            report.still_exceeds_budget,
+            "a payload above budget on its own must be flagged as still exceeding"
+        );
+
+        // Case 2: an ordinary overflow that fits once the memory arrays are
+        // dropped. The preserved event stays below budget, so the flag is clear.
+        let context = json!({
+            "memories": [{"content": "x".repeat(budget_bytes + 1)}],
+            "recent": [{"content": "y".repeat(64)}],
+            "event": "state_changed",
+        });
+        let (output, report) = apply_token_budget(context, max_tokens).expect("budget");
+        let report = report.expect("an oversized context must be reported");
+
+        assert_eq!(
+            output["event"], "state_changed",
+            "event data must be preserved"
+        );
+        assert!(report.after_bytes <= budget_bytes);
+        assert!(
+            !report.still_exceeds_budget,
+            "dropping memories must clear the flag when the remainder fits"
+        );
     }
 
     #[test]

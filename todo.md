@@ -2712,11 +2712,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **pending_embeddings の embedding JSON 破損の可視化** — 2026-11-22 対応済み。pure helper `parse_embedding_json`（builder.rs:321-333）を追加しデコード失敗を None として検出。`PgPendingStore::list`（:535-547）が None 分岐で `error_kind = "embedding_json_parse_failed"` の固定語彙 warn を発行（JSON 値／serde エラー／row id は非出力）。挙動（空ベクトルで re-embed 経路へ流す）と dead-letter 分類は不変。回帰 `corrupt_embedding_json_is_detected_for_warning` を追加。根拠
   `rust/jarvis-context/src/builder.rs:321-333,535-547,3286-3310` / V-71 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 184 passed（+1）、context 証跡 183→184 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **max_context_tokens が event.payload でバイパスされる**
-  - 2026-11-22 並列 Verify（V-72）: 未解決（confirmed）。apply_token_budget は全体バイトで超過判定するが削減対象は memories/recent のみで event.payload は温存（builder.rs:1018-1052）。payload 単体が budget 超過なら truncate 後も超過。HTTP/gRPC も payload サイズ検証なし。テスト oversized_context_drops_memory_arrays_but_keeps_event_data が event 温存を明示的に期待しており設計判断が絡む。
- —
-  `rust/jarvis-context/src/builder.rs:1018-1052,1285-1305`, `src/http.rs:91-97` /
-  R1-ST03 / confirmed。payload にサイズ上限が無く設定名と保証が一致しない。
+- [x] max_context_tokens の契約明記 — 2026-11-23 方針委譲で前進。event.payload 温存契約（oversized_context_drops_memory_arrays_but_keeps_event_data）は壊さず、TruncationReport に `still_exceeds_budget` を追加し、memories/recent を落としても budget 超えが残る状態を固定語彙 warn で可視化。builder.rs:1494-1499 の doc に「max_context_tokens は best-effort 目標で絶対保証ではない、payload 単体超過时は収まらない場合がある」と明記。回帰 +1（payload 単独超過で true・通常超過で false・event 温存）。注: ingress の MAX_PAYLOAD_BYTES=1MiB はラウンド90で対応済み。根本解消（payload 自体のトークン予算への組込）は event 温存契約変更を伴うため今回は契約明記に留める。根拠 V-72。
 - [x] **Qdrant ヒットのスコア欠落を None 保持へ修正** — 2026-11-22 対応済み。`search_vectors`（builder.rs:1717-1752）の戻り scores を `HashMap<Uuid, Option<f32>>` へ変更し、:1752 を `scores.get(&entry.id).copied().flatten()` にして欠落を 0.0 に化けさせない。attach_scores も Option 型へ整合させ、実スコア Some(0.0) はそのまま保持。回帰 `attach_scores_keeps_explicit_none_from_qdrant` を追加し、既存2テストも Option リテラルへ更新。根拠
   `rust/jarvis-context/src/builder.rs:96-107,1154-1190,1717-1752,3525-3565` / V-73 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --lib --locked` 183 passed（+1）、context 証跡 182→183 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
