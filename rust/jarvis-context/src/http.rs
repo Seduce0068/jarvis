@@ -573,6 +573,15 @@ async fn build_context(
     // UUID — the caller would receive 200 while the event carried an id they
     // never asked for. Reject with a bare 400 instead.
     let id = uuid::Uuid::parse_str(&body.event_id).map_err(|_| reject_invalid_input("event_id"))?;
+    // C90-R2-01: bound the previously unbounded event fields through the shared
+    // validator. Each failure maps to the same bare 400 / fixed field label as
+    // every other `InvalidInput`; the offending bytes never reach the response.
+    validation::validate_payload_value(&body.payload)
+        .map_err(|invalid| reject_invalid_input(invalid.field))?;
+    validation::validate_event_type(&body.event_type)
+        .map_err(|invalid| reject_invalid_input(invalid.field))?;
+    validation::validate_correlation_id(&body.correlation_id)
+        .map_err(|invalid| reject_invalid_input(invalid.field))?;
     let event = UnifiedEvent {
         id,
         source: jarvis_core::EventSource::Manual,
@@ -636,6 +645,10 @@ async fn search_memory(
     req: BareJson<SearchMemoryRequest>,
 ) -> Result<Json<Vec<MemoryEntryResponse>>, axum::http::StatusCode> {
     let BareJson(Json(body)) = req;
+    // C90-R2-01: bound the query string before it reaches the store/embedding
+    // path; over-limit input maps to the same bare 400 as every `InvalidInput`.
+    validation::validate_query(&body.query)
+        .map_err(|invalid| reject_invalid_input(invalid.field))?;
     // I55-A: the signed wire value is widened/try_from-checked by the shared
     // validator, so a negative or oversized limit yields the same bare 400 as
     // gRPC's InvalidArgument and never reaches the over-fetch/Qdrant path.

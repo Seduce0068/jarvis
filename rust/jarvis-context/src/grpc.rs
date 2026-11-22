@@ -192,7 +192,12 @@ fn parse_event_id(value: &str) -> Result<uuid::Uuid, Status> {
 }
 
 /// Parse a client-supplied payload string into JSON (I53-C).
+///
+/// C90-R2-01: the raw string is bounded before parsing so an oversized body is
+/// rejected with the same fixed `InvalidArgument` as malformed JSON, without
+/// allocating a large `Value` first.
 fn parse_payload(value: &str) -> Result<serde_json::Value, Status> {
+    validation::validate_payload(value).map_err(|invalid| reject_invalid_input(invalid.field))?;
     serde_json::from_str(value).map_err(|_| reject_invalid_input("payload"))
 }
 
@@ -285,6 +290,13 @@ impl ContextService for GrpcContextService {
         // minting a UUID / using an empty object.
         let id = parse_event_id(&req.event_id)?;
         let payload = parse_payload(&req.payload)?;
+        // C90-R2-01: event_type/correlation_id keep their free-form pass-through
+        // contract within the shared byte budgets; only over-limit input is
+        // rejected, with the fixed InvalidArgument status and static field label.
+        validation::validate_event_type(&req.event_type)
+            .map_err(|invalid| reject_invalid_input(invalid.field))?;
+        validation::validate_correlation_id(&req.correlation_id)
+            .map_err(|invalid| reject_invalid_input(invalid.field))?;
         // Convert proto event to UnifiedEvent; the additive fields carry the
         // original source/timestamp, falling back to legacy values when unset.
         let (source, timestamp) = event_metadata_from_request(&req);
@@ -319,6 +331,10 @@ impl ContextService for GrpcContextService {
     ) -> Result<Response<SearchMemoryResponse>, Status> {
         authorize(&request, self.admin_token.as_deref())?;
         let req = request.into_inner();
+        // C90-R2-01: bound the query string before it reaches the store/embedding
+        // path; over-limit input maps to the same fixed InvalidArgument status.
+        validation::validate_query(&req.query)
+            .map_err(|invalid| reject_invalid_input(invalid.field))?;
         // I55-A: `as usize` used to turn limit=-1 into usize::MAX and reach
         // Qdrant through the over-fetch path. The shared validator performs the
         // `try_from` sign check and the common upper bound before any store call.

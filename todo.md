@@ -1698,10 +1698,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-policy/src/main.rs:166-230,676-730` / V-16 → resolved。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 215 passed / 0 failed、`cargo test -p jarvis-policy --bin jarvis-policy --locked` 8 passed / 0 failed、`make ci-local` all gates passed、`make secret-scan` exit 0。
   - 2026-11-22 並列 Verify（V-16）: **当初未解決（confirmed）**。4サービスとも `EnvFilter::new(RUST_LOG)` の後に `OTEL_SDK_LOG_GUARD=[opentelemetry_sdk=warn,...]` を add_directive するだけで、`RUST_LOG=opentelemetry_sdk::trace=debug` のようなより長い target 付き指定は「等価」でないため共存しサブツリーで debug が勝つ（tracing-subscriber 0.3.23 の DirectiveSet::add は Equal 時のみ置換、Ord は target 長優先）。回帰は RUST_LOG=debug の1件のみ。 victIM には事業者側の明示設定が必要で low。
-- [ ] サイズ境界が content/source/metadata のみ（low）— payload / query /
-  - 2026-11-22 並列 Verify（V-45）: 未解決だが構造的下地は加法で前進可能。共有バリデータの実体は jarvis-context/src/config.rs:86 の pub(crate) validation（core ではない）。fixed-vocabulary パターン（InvalidInput{field} + reject_invalid_input）を再利用し新規定数・検証を追加可能。上限値の選定と gRPC free-form pass-through 契約変更は設計判断で未決定。
-  - 2026-11-22 並列 Verify（V-17, :1708 と同一）: **未解決（confirmed）**。共有バリデータは MAX_CONTENT_BYTES / MAX_SOURCE_BYTES / MAX_METADATA_BYTES / MAX_METADATA_DEPTH / MAX_SEARCH_LIMIT のみで payload / query / event_type / correlation_id 用の定数・検証が無い。context HTTP は event_type/payload/correlation_id を無検証で UnifiedEvent へ渡し、search_memory も query を無検証。event も HTTP/gRPC とも無検証透過。BareJson の 413 は axum の 2MiB ボディ全体制限で個別フィールド境界の代用にならない。I57-C 回帰は content/source/metadata と深い metadata の4ケースのみ。
-  event_type / correlation_id にも上限を追加。
+- [x] サイズ境界（content/source/metadata／payload/query/event_type/correlation_id） — 2026-11-22 対応済み。validation（config.rs:86）に MAX_PAYLOAD_BYTES=1MiB / MAX_QUERY_BYTES=64KiB / MAX_EVENT_TYPE_BYTES=256 / MAX_CORRELATION_ID_BYTES=256 と pure 検証ヘルパを加法（`I57-C` 既存定数・回帰は不変）。HTTP（http.rs:576-584,648-651）と gRPC（grpc.rs:194-202,293-299,334-337）の両経路へ適用、拒否は既存 fixed vocabulary invalid_input → 400/InvalidArgument。境界テスト4件追加（上限内受理・上限+1拒否）。根拠 `rust/jarvis-context/src/{config.rs:124-149,216-253,414-479,http.rs,grpc.rs}` / V-45,V-72 / confirmed。
+  - 検証: fmt exit 0、context 191 passed（+4）+ integration 6 passed、証跡 187→191 同期し `--check` 5件 MATCH、clippy -D warnings exit 0、ci-local / check-evidence すべて pass。
 - [x] 発掘: JsonRejection／event anyhow／UI expires_at（V-61〜63） — 2026-11-22 並列 Verify: 3サブ項目とも解消済み。JsonRejection は3サービスとも `jarvis_core::BareJson` へ置換（policy 6ルート / mcp-gw /v1/execute / event /v1/events）、rejection 本文・入力バイトをログへ出さず固定語彙（1707-1708 行目 Round 57 記録と整合）。event anyhow は normalizer.rs:47-76 の error_kind() + log_processing_failure() で固定語彙化、回帰 :761-826。UI expires_at は `expires_at < now`（approvals.rs:728）で policy 側（deadline > now / now <= deadline）と境界一致、回帰 :903-914。
 - [ ] 発掘: backup-preflight の BK-4 表記（判断待ち） — 2026-11-22 並列 Verify（V-64）: 未解決。BK-4 は OCI+rclone の旧要件から「op:// レガシー参照テンプレートの整理判断」へ意味が変化。backup-preflight.sh:62-66 が "BK-4 decision pending" と警告し、infra/config/*.env 4ファイルに op:// 参照が残存。バックアップ保存先自体は ADR-0004 準拠のローカル保存へ更新済み。
 - [x] 発掘: docs/architecture/AGENTS.md の verify.rs 記載 — 2026-11-22 対応済み。`docs/architecture/AGENTS.md` の Source Files 表・Verification Protocol（3番目）・Commands に `rust-script verify.rs` を追記し、`docs/architecture/index.md` の文書一覧にも verify.rs を追加（任意ローカル検証・ツール未インストール時 skip・CI 非呼び出しを明記）。根拠
@@ -1733,14 +1731,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] skipped 正当化が "ignored" 部分文字列一致（low）、index 件数検証が
   reference-style リンクのみ（low）。〔Round 58 で対応済み〕
 - [x] mcp-gw http_error() の anyhow チェーン — 2026-11-22 並列 Verify（V-18）: 子は `http.rs:371-377` の `format!("{error:#}")` が main.rs:284-288 の OTLP exporter 併設 subscriber へ流れることを confirmed と判定（3166-3167 行目の speculative メモを格上げ）。ただし「Internal はクライアントへ固定メッセージ、詳細は tracing ログへ隔離」は型ベースエラー分類（R1 対応）の意図的な設計判断であり、OTLP はそのログ経路の一部。機微情報は PII フィルタ／fixed vocabulary の方針で別途制御するため、コード変更は行わず設計判断として記録のみ更新。
-- [ ] サイズ境界が payload/query/event_type/correlation_id に未適用（low）。
-  - 2026-11-22 並列 Verify（V-45 / :1701 と同一内容）: 未解決。詳細は :1701 の V-45 記録を参照。共有 validation（context/config.rs:86）への加法は可能だが、上限値と gRPC free-form 契約変更は設計判断。
-
-- 親が対応: fmt 差分、Cargo.lock 更新（offline）、tracing field 形式依存
-  アサーション削除、shellcheck SC2181（heredoc の $? 判定）。
-
-### Round 58（R4 で修正済み）
-
+- [x] サイズ境界（content/source/metadata／payload/query/event_type/correlation_id） — 2026-11-22 対応済み。validation（config.rs:86）に MAX_PAYLOAD_BYTES=1MiB / MAX_QUERY_BYTES=64KiB / MAX_EVENT_TYPE_BYTES=256 / MAX_CORRELATION_ID_BYTES=256 と pure 検証ヘルパを加法（`I57-C` 既存定数・回帰は不変）。HTTP（http.rs:576-584,648-651）と gRPC（grpc.rs:194-202,293-299,334-337）の両経路へ適用、拒否は既存 fixed vocabulary invalid_input → 400/InvalidArgument。境界テスト4件追加（上限内受理・上限+1拒否）。根拠 `rust/jarvis-context/src/{config.rs:124-149,216-253,414-479,http.rs,grpc.rs}` / V-45,V-72 / confirmed。
+  - 検証: fmt exit 0、context 191 passed（+4）+ integration 6 passed、証跡 187→191 同期し `--check` 5件 MATCH、clippy -D warnings exit 0、ci-local / check-evidence すべて pass。
 - [x] kill switch probe の fail-open（confirmed medium 2件）→ probe agent に
   `max_redirects(0)`、200/503 以外を Err 化（502/504/3xx は停止側）、想定外
   200 本文も Err。UI 73 tests。

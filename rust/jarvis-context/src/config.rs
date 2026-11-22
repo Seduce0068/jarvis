@@ -121,6 +121,33 @@ pub(crate) mod validation {
     /// size without bound even when the total byte count is modest.
     pub(crate) const MAX_METADATA_DEPTH: usize = 16;
 
+    /// Maximum UTF-8 byte length of a caller-supplied event `payload` (C90-R2-01).
+    ///
+    /// `payload` is the event body carried into context assembly and may be
+    /// rendered into JSON logs or LLM prompts. Bounding it to the same 1 MiB
+    /// budget as `content` keeps a single event from exhausting either pipeline.
+    pub(crate) const MAX_PAYLOAD_BYTES: usize = 1_048_576;
+
+    /// Maximum UTF-8 byte length of a caller-supplied search `query` (C90-R2-01).
+    ///
+    /// A query is a short retrieval string, not a document; 64 KiB is far above
+    /// any realistic embedding input while bounding allocation and downstream
+    /// work on both ingresses.
+    pub(crate) const MAX_QUERY_BYTES: usize = 65_536;
+
+    /// Maximum UTF-8 byte length of a caller-supplied `event_type` (C90-R2-01).
+    ///
+    /// `event_type` is a short classification label (potentially namespaced);
+    /// 256 bytes accommodates any such label without permitting an unbounded
+    /// string in logs or prompts.
+    pub(crate) const MAX_EVENT_TYPE_BYTES: usize = 256;
+
+    /// Maximum UTF-8 byte length of a caller-supplied `correlation_id` (C90-R2-01).
+    ///
+    /// `correlation_id` is an opaque ID string (UUID/ULID/W3C trace id); 256 bytes
+    /// is generous for those formats while keeping the pass-through bounded.
+    pub(crate) const MAX_CORRELATION_ID_BYTES: usize = 256;
+
     /// The only information a boundary validation failure carries outward.
     ///
     /// `field` is always a static label chosen here (never derived from input),
@@ -184,6 +211,45 @@ pub(crate) mod validation {
             return Err(InvalidInput { field });
         }
         Ok(())
+    }
+
+    /// Bound a caller-supplied event `payload` string before it is parsed (C90-R2-01).
+    ///
+    /// Used by the gRPC ingress, which receives the payload as a raw JSON string.
+    /// The `field` label is static, so an oversized payload never reaches logs.
+    pub(crate) fn validate_payload(value: &str) -> Result<(), InvalidInput> {
+        validate_text_bytes(value, MAX_PAYLOAD_BYTES, "payload")
+    }
+
+    /// Bound an already-parsed `payload` value (C90-R2-01).
+    ///
+    /// The HTTP ingress deserializes the payload into a `Value` before the handler
+    /// runs, so the budget is measured on the canonical serialization — the same
+    /// technique used for `metadata`. Within the limit the value is untouched;
+    /// only the size check can reject it.
+    pub(crate) fn validate_payload_value(value: &serde_json::Value) -> Result<(), InvalidInput> {
+        validate_text_bytes(&value.to_string(), MAX_PAYLOAD_BYTES, "payload")
+    }
+
+    /// Bound a caller-supplied search `query` (C90-R2-01).
+    pub(crate) fn validate_query(value: &str) -> Result<(), InvalidInput> {
+        validate_text_bytes(value, MAX_QUERY_BYTES, "query")
+    }
+
+    /// Bound a caller-supplied `event_type` label (C90-R2-01).
+    ///
+    /// The value is otherwise passed through verbatim into `UnifiedEvent`;
+    /// only an over-limit value is rejected.
+    pub(crate) fn validate_event_type(value: &str) -> Result<(), InvalidInput> {
+        validate_text_bytes(value, MAX_EVENT_TYPE_BYTES, "event_type")
+    }
+
+    /// Bound a caller-supplied `correlation_id` (C90-R2-01).
+    ///
+    /// Like `event_type`, the free-form value stays transparent within the
+    /// limit; only an over-limit value is rejected.
+    pub(crate) fn validate_correlation_id(value: &str) -> Result<(), InvalidInput> {
+        validate_text_bytes(value, MAX_CORRELATION_ID_BYTES, "correlation_id")
     }
 
     /// Depth check that stops descending as soon as the limit is exceeded, so a
@@ -344,6 +410,77 @@ pub(crate) mod validation {
     mod tests {
         use super::*;
         use serde_json::json;
+
+        /// C90-R2-01: the event `payload` budget is shared by the raw-string
+        /// (gRPC) and parsed-value (HTTP) ingress paths. Both accept the exact
+        /// boundary and reject one byte more with the fixed `payload` label.
+        #[test]
+        fn payload_byte_boundary_is_enforced() {
+            let at_limit = "x".repeat(MAX_PAYLOAD_BYTES);
+            assert!(validate_payload(&at_limit).is_ok());
+            let over_limit = "x".repeat(MAX_PAYLOAD_BYTES + 1);
+            assert_eq!(
+                validate_payload(&over_limit),
+                Err(InvalidInput { field: "payload" })
+            );
+
+            // A JSON string value serializes to its bytes plus two quotes.
+            let value: serde_json::Value =
+                serde_json::from_str(&format!("\"{}\"", "x".repeat(MAX_PAYLOAD_BYTES - 2)))
+                    .expect("payload JSON parses");
+            assert_eq!(value.to_string().len(), MAX_PAYLOAD_BYTES, "test premise");
+            assert!(validate_payload_value(&value).is_ok());
+            let over_value: serde_json::Value =
+                serde_json::from_str(&format!("\"{}\"", "x".repeat(MAX_PAYLOAD_BYTES - 1)))
+                    .expect("payload JSON parses");
+            assert_eq!(
+                validate_payload_value(&over_value),
+                Err(InvalidInput { field: "payload" })
+            );
+        }
+
+        /// C90-R2-01: a search `query` accepts exactly 64 KiB and rejects one
+        /// more byte with the fixed `query` field label.
+        #[test]
+        fn query_byte_boundary_is_enforced() {
+            let at_limit = "q".repeat(MAX_QUERY_BYTES);
+            assert!(validate_query(&at_limit).is_ok());
+            let over_limit = "q".repeat(MAX_QUERY_BYTES + 1);
+            assert_eq!(
+                validate_query(&over_limit),
+                Err(InvalidInput { field: "query" })
+            );
+        }
+
+        /// C90-R2-01: `event_type` is a free-form pass-through within 256 bytes
+        /// and is rejected only beyond the limit.
+        #[test]
+        fn event_type_byte_boundary_is_enforced() {
+            let at_limit = "e".repeat(MAX_EVENT_TYPE_BYTES);
+            assert!(validate_event_type(&at_limit).is_ok());
+            let over_limit = "e".repeat(MAX_EVENT_TYPE_BYTES + 1);
+            assert_eq!(
+                validate_event_type(&over_limit),
+                Err(InvalidInput {
+                    field: "event_type"
+                })
+            );
+        }
+
+        /// C90-R2-01: `correlation_id` is a free-form pass-through within 256
+        /// bytes and is rejected only beyond the limit.
+        #[test]
+        fn correlation_id_byte_boundary_is_enforced() {
+            let at_limit = "c".repeat(MAX_CORRELATION_ID_BYTES);
+            assert!(validate_correlation_id(&at_limit).is_ok());
+            let over_limit = "c".repeat(MAX_CORRELATION_ID_BYTES + 1);
+            assert_eq!(
+                validate_correlation_id(&over_limit),
+                Err(InvalidInput {
+                    field: "correlation_id"
+                })
+            );
+        }
 
         #[test]
         fn limit_rejects_negative_and_oversized_values() {
