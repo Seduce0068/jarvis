@@ -2070,7 +2070,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] Round 69 の新規仕様シナリオ4件（TC-B6 / TC-V5 / TC-R1 / TC-R2）に
   自動テストが無く証跡がカバレッジを虚偽主張（medium）— 7列 manifest／
   未知記述子／role 導出の回帰追加＋シナリオ別 pass のゲート化。
-- [ ] 必須ペイロード検査が manifest 自己申告 role へ後退（medium）—
+- [x] 必須ペイロード検査の manifest role 依存 — 2026-11-22 並列 Verify（V-01）: 既に解消済み。必須存在判定は実 basename（is_pg_payload/is_qdrant_payload/is_config_payload）から導出し、`verify-backup.sh:173-181` / `restore-local.sh:420-431` が has_pg/has_qdrant/has_config を立てる（`payload-descriptors.sh:83-104`）。`resolved_role_for()` が未知 role=rc2・role/basename 矛盾=rc1 で fail-closed（`:122-141`）。回帰 `test-verify-backup.sh:396-400` が readme.txt への role=postgres 付与を ROLE MISMATCH exit 1 で検証。2090-2091 行目の完了記録と整合。—
   Runtime Proof: postgres 欠落／truncated が format=raw role=postgres で
   exit 0。role と basename の整合強制＋footer 検査を role に紐付け。
 - [x] owner/mode 表の deploy 経路カバー — 2026-11-22 Verify: 既に解消済み（2092 行目の完了記録）。`deploy-mcp-gw-safe.sh:76,78` が共有表のアクセサ `expected_config_mode mcp_allowlist.toml` / `expected_config_mode systemd/jarvis-mcp-gw.service` を参照し、build / restore / deploy の3経路すべてが同一表を参照。根拠
@@ -2457,13 +2457,13 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `otelcol-config.yaml:99-104` の include（`jarvis.*` 等）が実スパン名
   （`check` / `process_event` / `approve_approval`）と不一致。include 拡張または
   スパン名変更＋E2E 検証。
-- [ ] Grafana Dependencies パネルが未スクレイプの4 job を参照（medium）、
+- [x] Grafana Dependencies パネルの job セレクタ — 2026-11-22 並列 Verify（V-02）: 既に解消済み。`jarvis-overview.json:220` のセレクタ `up{job=~"jarvis-policy|jarvis-mcp-gw|jarvis-event|jarvis-context|qdrant"}` が `otelcol-config.yaml:25-45` の scrape_configs 5 job と完全一致。2481-2483 行目の完了記録どおり dead-letter/outbox 4メトリクスパネルも追加済み（:264,308,352,396）。—
   dead-letter/outbox 4メトリクスにパネルが無い（low）。
-- [ ] status_label が4サービスで個別定義で 503 バケットが不一致（low）—
+- [x] status_label の4サービス個別定義 — 2026-11-22 並列 Verify（V-03）: 既に解消済み（I93-D）。`jarvis-core/src/lib.rs:134` に単一定義、`:148` が 503 専用バケット。4サービスはローカル写像を持たず `policy:343` / `mcp-gw:170` / `event:205` / `context:328` が `jarvis_core::status_label` を呼ぶだけ。core の pinn テスト（:621）が 503 と 502/other を区別。2481 行目の完了記録と整合。—
   jarvis-core へ共有化。
-- [ ] ui/Cargo.toml に rust-version が無く README の MSRV 主張が裏付けなし
+- [x] ui/Cargo.toml の rust-version — 2026-11-22 並列 Verify（V-04）: 既に解消済み。`ui/Cargo.toml:5` に `rust-version = "1.100"`、`ui/README.md:27` の「Rust 1.100+（edition 2024）」と一致。ui は独立 workspace（:16）だが `rust/Cargo.toml:15` も 1.100 で整合。2485 行目の完了記録と整合。
   （medium）。
-- [ ] aarch64 クロスゲートで cmake 未宣言（medium）、libssl-dev の根拠消滅
+- [x] aarch64 クロスゲートの cmake / libssl-dev — 2026-11-22 並列 Verify（V-05）: 既に解消済み（Round 88 / 2484-2485 行目）。cmake は `ci.yml:39-40` の apt_packages に宣言（根拠は `Cargo.lock:131-141` の aws-lc-sys cmake ビルド依存）。libssl-dev は apt になく aarch64 手順も `ci.yml:75` で `libc6-dev-arm64-cross` のみ。openssl-sys / native-tls は両 lock に不在（TLS は rustls + aws-lc/ring）。補足: 共有ワークフロー rust-gates.yml@v1 の内部 apt 挙動はローカルに無く未確認だが、呼び出し側 input の宣言は直接確認済み。
   （low）。
 
 - 親が対応: 全ゲート再検証（pin 21件、ci-local ok=435）。
