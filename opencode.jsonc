@@ -155,10 +155,13 @@
           "*bws.env*": "deny",
           "*.key*": "deny",
           "*.pem*": "deny",
+          "*id_rsa*": "deny",
+          "*.kdbx*": "deny",
           "*secrets/*": "deny",
           "*.ssh/*": "deny",
           "*.aws/*": "deny",
-          "*.config/gcloud/*": "deny"
+          "*.config/gcloud/*": "deny",
+          "*.npmrc*": "deny"
         },
         "read": {
           "*.env*": "deny",
@@ -166,10 +169,13 @@
           "*bws.env*": "deny",
           "*.key*": "deny",
           "*.pem*": "deny",
+          "*id_rsa*": "deny",
+          "*.kdbx*": "deny",
           "*secrets/*": "deny",
           "*.ssh/*": "deny",
           "*.aws/*": "deny",
-          "*.config/gcloud/*": "deny"
+          "*.config/gcloud/*": "deny",
+          "*.npmrc*": "deny"
         },
         "edit": {
           "*.env*": "deny",
@@ -177,10 +183,13 @@
           "*bws.env*": "deny",
           "*.key*": "deny",
           "*.pem*": "deny",
+          "*id_rsa*": "deny",
+          "*.kdbx*": "deny",
           "*secrets/*": "deny",
           "*.ssh/*": "deny",
           "*.aws/*": "deny",
-          "*.config/gcloud/*": "deny"
+          "*.config/gcloud/*": "deny",
+          "*.npmrc*": "deny"
         },
         "task": "deny",
         "webfetch": "deny",
@@ -211,10 +220,13 @@
           "*bws.env*": "deny",
           "*.key*": "deny",
           "*.pem*": "deny",
+          "*id_rsa*": "deny",
+          "*.kdbx*": "deny",
           "*secrets/*": "deny",
           "*.ssh/*": "deny",
           "*.aws/*": "deny",
-          "*.config/gcloud/*": "deny"
+          "*.config/gcloud/*": "deny",
+          "*.npmrc*": "deny"
         },
         "webfetch": "deny",
         "websearch": "deny"

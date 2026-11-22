@@ -37,6 +37,12 @@ generated:
 
 ### 1. OpenCode V2 を JARVIS の **公式 Agent Runtime** として採用
 
+> **置換記録（[ADR-0002](0002-runtime-agnostic.md)）**: 本节の「公式 Agent
+> Runtime 固定」は初期実装としての OpenCode V2 を指す履歴である。ADR-0002
+> でランタイム非依存化が決定され、OpenCode / code-server は交换可能な
+> 実装へ降格した。現行の契約は ADR-0002 を正とする（infra 部分の置換は
+> ADR-0004、本節はランタイム固定部分の置換）。
+
 | 要素 | 採用 | 備考 |
 | ---- | ---- | ---- |
 | Agent 実行基盤 | **OpenCode V2** (`opencode serve` + TUI/CLI) | 自前実装は中止 |

@@ -2844,23 +2844,25 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `jarvis-core/src/lib.rs:378-393` / R1-AP01 / confirmed。
   HTTP は case-sensitive＋未知値を Manual 化、gRPC は case-insensitive＋
   未知値を InvalidArgument。同じ入力が別 source になり下流判定が食い違う。
-- [ ] **opencode サブエージェント permission がホスト側 secret deny より弱い** —
-  根拠 `infra/config/opencode/opencode.jsonc:38-45,81-83` / R1-ST07 / confirmed。
-  トップレベルの `*id_rsa*` / `*.kdbx*` / `*.npmrc*` が per-agent ブロックに欠落。
+- [x] **opencode サブエージェント permission の secret deny** — 2026-11-22 対応済み。repo 版・配布用版 opencode.jsonc の全 per-agent permission ブロック（jarvis-dev bash/read/edit、jarvis-policy-audit read）に `*id_rsa*` / `*.kdbx*` / `*.npmrc*` を追加。トップレベルは不変（重複なし）、jarvis-policy-audit の bash/edit は既に全拒否のため対象外。根拠
+  `opencode.jsonc:158-164,172-178,186-192,223-229`, `infra/config/opencode/opencode.jsonc:173-179,187-193,201-207,237-243` / R1-ST07 / confirmed。
+  - 検証: deny 3パターンの一致数が両ファイルとも21（トップレベル3×3＋per-agent4×3）、JSONC コメント除去後の JSON parse OK、gcloud 行のカンマ付与は追加に伴う正当な変更。
 - [ ] **opencode.jsonc が配布経路に未配線で deny が実機に届かない** —
   根拠 `docs/integration/remaining-tasks.md:74-82` / R5-VU01 / confirmed。
   `build-selfhost.sh` の配布対象外で旧 cloud-init.yaml にのみ記載されている。
-- [ ] **ADR-0001 の「OpenCode V2 固定」が ADR-0002 で置換された旨未反映** —
-  根拠 `adr/0001-unified-architecture.md:3,38-47`, `adr/0002-runtime-agnostic.md:4` /
-  R1-DR01 / confirmed。既存 P3-1 は OCI/1Password 置換のみを注記済み。
+- [x] **ADR-0001 の OpenCode V2 固定の置換注記** — 2026-11-22 対応済み。Decision 1 直前に「ADR-0002 でランタイム非依存化が決定され、OpenCode/code-server は交换可能な実装へ降格した。現行契約は ADR-0002 を正とする」置換記録を追加（ADR-0004 の infra 置換と同粒度）。adr/log.md にも記録追記。根拠
+  `adr/0001-unified-architecture.md:38-47`, `adr/log.md`, `adr/0002-runtime-agnostic.md:4,15,40` / R1-DR01 / confirmed。
+  - 検証: markdownlint 既存 baseline のみ、差分は ADR 2ファイル8行追加。
 - [ ] **web.fetch の DNS 解決経路エラー分岐が未テスト** — 根拠
   `rust/jarvis-mcp-gw/src/sandbox.rs:727,744,749,753` / R3-TQ01 / confirmed。
   既存 498 行は TOCTOU 対策の実装で、解決失敗・空配列・非公開 IP 混入の
   fail-closed 回帰は未検証。
+  - 2026-11-22 並列 Verify（V-38）: 未解決（confirmed）。sandbox.rs:727 の ensure_public_host が :745 で lookup_host を直接呼び、注入 seam なし。4ケース（解決失敗/空配列/混在/全公開）のテストなし、:1110 は #[ignore] の実 DNS 依存。
 - [ ] **承認 ID の再登録が DB 既存行を黙って再利用する** — 根拠
   `rust/jarvis-policy/src/approval.rs:657,697`, `src/persistence.rs:698` /
   R2-ER01 / likely。重複チェックがメモリ entries のみで、再起動後の
   同一 id が古い期限・context の DB 行に紐づき即 Expired になり得る。
+  - 2026-11-22 並列 Verify（V-40）: 未解決（confirmed）。record_request（persistence.rs:698-715）が ON CONFLICT DO NOTHING の影響行を破棄、deadline 更新なし。メモリ重複チェックのみで、決着済み行の id 再登録が暗黙成功→decide が AlreadyDecided で誰も決着できない。
 
 ### 優先度 中
 
