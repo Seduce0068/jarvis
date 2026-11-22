@@ -2941,6 +2941,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **gRPC EmitEvent レスポンスに event_id が無く HTTP と非対称** —
   `rust/jarvis-event/proto/event.proto:18-20`, `src/http.rs:38-42`, `src/grpc.rs:163` /
   R1-ST04,R1-AP01 / confirmed。
+- [x] **HA WebSocket エラーの anyhow チェーン固定語彙化** — 2026-11-22 対応済み。`lib.rs:87-89` と `sources.rs:82-91` の HA WebSocket エラーから `{error:#}` を削除し `error_kind = "home_assistant"` の固定語彙ログへ変更（normalizer.rs:50 の既存トークンと整合）。`ListenFailure::Transient` から error フィールドを除去し anyhow チェーンを保持しない構造へ変更。リトライ／backoff／spawn lifecycle 不変。根拠
+  `rust/jarvis-event/src/{lib.rs:87-89,sources.rs:78-95,168-178}` / V-62 補足 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 93 passed（件数不変）、`cargo clippy -p jarvis-event --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **error_kind の EventError 分岐が本番経路で到達不能** —
   `rust/jarvis-event/src/error.rs:5-27`, `src/normalizer.rs:47-66,801-804` /
   R1-ST04 / confirmed。7 分岐中 6 分岐が vacuous。

@@ -79,12 +79,15 @@ impl HomeAssistantClient {
                     backoff = INITIAL_RECONNECT_BACKOFF;
                 }
                 Err(ListenFailure::Fatal(error)) => return Err(error),
-                Err(ListenFailure::Transient { error, subscribed }) => {
+                Err(ListenFailure::Transient { subscribed }) => {
                     if subscribed {
                         // The connection had been healthy; retry promptly.
                         backoff = INITIAL_RECONNECT_BACKOFF;
                     }
-                    tracing::warn!("Home Assistant WebSocket disconnected: {error:#}");
+                    tracing::warn!(
+                        error_kind = "home_assistant",
+                        "home assistant websocket disconnected"
+                    );
                 }
             }
             tokio::time::sleep(backoff).await;
@@ -148,13 +151,9 @@ impl HomeAssistantClient {
 
         // 3. Forward events until the connection drops.
         loop {
-            let message =
-                read_json(&mut socket)
-                    .await
-                    .map_err(|error| ListenFailure::Transient {
-                        error,
-                        subscribed: true,
-                    })?;
+            let message = read_json(&mut socket)
+                .await
+                .map_err(|_| ListenFailure::Transient { subscribed: true })?;
             if let Some(event) = parse_event_message(&message) {
                 crate::normalizer::try_emit_event(event_tx, event);
             }
@@ -166,19 +165,14 @@ enum ListenFailure {
     /// Unrecoverable failure (e.g. invalid access token); stop listening.
     Fatal(anyhow::Error),
     /// Transient failure; `subscribed` reports whether the connection had
-    /// completed the subscription before failing.
-    Transient {
-        error: anyhow::Error,
-        subscribed: bool,
-    },
+    /// completed the subscription before failing. The underlying error is
+    /// deliberately not carried: only fixed-vocabulary tokens are logged.
+    Transient { subscribed: bool },
 }
 
 impl ListenFailure {
-    fn transient(error: impl Into<anyhow::Error>, subscribed: bool) -> Self {
-        Self::Transient {
-            error: error.into(),
-            subscribed,
-        }
+    fn transient(_error: impl Into<anyhow::Error>, subscribed: bool) -> Self {
+        Self::Transient { subscribed }
     }
 }
 

@@ -84,8 +84,11 @@ impl EventNormalizer {
             let ha_client = ha_client.clone();
             let event_tx = normalizer.event_sender();
             tokio::spawn(async move {
-                if let Err(error) = ha_client.listen_events(event_tx).await {
-                    tracing::error!("Home Assistant WebSocket listener stopped: {error:#}");
+                if ha_client.listen_events(event_tx).await.is_err() {
+                    tracing::error!(
+                        error_kind = "home_assistant",
+                        "home assistant listener stopped"
+                    );
                 }
             });
         }
