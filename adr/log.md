@@ -44,6 +44,8 @@ ADR ディレクトリに変更を加えたコミットの記録。日付見出�
 - `0001-unified-architecture.md`: ADR-0004 による infra 部分の置換を注記。
 - `0001-unified-architecture.md`: Decision 1 の OpenCode V2 固定が ADR-0002
   で置換された旨（ランタイム非依存化）を注記（2026-11-22）。
+- `0001-unified-architecture.md`: Consequences / Neutral の OCI 前提記述へ
+  ADR-0004 / ADR-0002 の置換注記を追加（2026-11-22）。
 
 ## 2026-11-09
 

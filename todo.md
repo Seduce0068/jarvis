@@ -484,7 +484,9 @@ generated:
 - [x] deploy がヘルスチェック失敗を警告のみで完了報告 — 2026-11-19 対応済み: `evaluate_health_checks()` を追加し異常なら `bail!` で非ゼロ終了（全失敗ポートを列挙）。dry-run の skip と 200 は維持。回帰テスト4件追加、deploy rust-script pass / `rust/scripts/deploy.rs:385-389` / R4-DR2 / confirmed（既存 P2-8 と関連）
 - [x] `verify-backup.sh` がマニフェスト記載ファイルのみ検査し必須ペイロード欠落を合格させる — 2026-11-19 対応は **COMPLETE-gated な部分修正に過ぎなかった**: `:69` の `if [ -f "$set/COMPLETE" ]` 配下でのみ postgres/qdrant/config-* の実在を必須化し、完全セットの欠落は `REQUIRED MISSING` で失敗。COMPLETE が無い legacy セットは検査自体がスキップされ、`created_at` ヘッダもペイロードも無い manifest だけのディレクトリが exit 0 で通過する fail-open が残存。子の指摘で既存フィクスチャ2件が新チェックで失敗したため親が必須ペイロードを追加し `test-verify-backup` 23 tests pass を記録したが、この23件に fail-open 期待が含まれていたため完了主張は過大。完全修正は Round 65 残り指摘の I69-B を参照 / `infra/scripts/verify-backup.sh:62-79` / R4-DR3 / confirmed
 - [x] jq 欠落時にバックアップ整合性検証をスキップして verified と報告 — 2026-11-19 対応済み: apply 時に jq が無ければ `fail()` で非ゼロ終了（verified に到達しない）。dry-run は jq 不要を維持、bash -n OK / `infra/scripts/install-backup-timer.sh:96` / R2-ER3 / confirmed
-- [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed。
+- [ ] ダウンロードしたリリースバイナリにチェックサム/署名検証が無い
+  - 2026-11-22 並列 Verify（V-46）: 未解決（confirmed）。setup-selfhost.sh:39-58 は R4-DP3 の理由コメントのみで実際の検証コードなし。Qdrant / code-server install.sh / otelcol deb / bws zip を curl 取得後に直接展開・実行。SHA256SUMS ファイルも repo 内に存在せず、期待ダイジェストの入手先と鍵管理は設計判断待ち。
+ — `infra/scripts/setup-selfhost.sh:34-37` / R4-DP3 / confirmed。
   - **2026-11-19 調査**: repo 内に SHA256SUMS / 署名鍵 / 公開ダイジェストは存在せず（glob/grep 0件）、Qdrant / otelcol-contrib / bws / code-server の取得元を照合できない。勝手なハードコードや外部取得は追加せず、未検証の旨と推奨対応（リリース側でバージョン固定の SHA256SUMS + 署名を公開し取得・照合）を setup-selfhost.sh のコメントに明記。情報源が用意されるまで未解決。
 - [x] `/health` が固定 `"OK"` を返し劣化を検知できない — 2026-11-19 対応済み: kill switch 発動時とポリシー来源欠落時に 503 `{"status":"degraded","reason":...}` を返す。固定語彙のみで理由文字列・パスは非開示、正常時は 200 維持。新規テスト3件追加、policy 86 tests pass / `policy/src/http.rs:187-189` / R4-DR1 / confirmed
 - [x] シグナル処理・ドレインが無くデプロイ時停止で保留作業が失われる — 2026-11-19 対応済み: Ctrl-C / SIGTERM を `tokio::select!` で join! と競わせ停止時に tracer flush 付きで終了。biased で実エラーを優先。完全なコネクションドレインは serve 側の変更が必要で別タスク / `policy/src/main.rs:59` / R4-DR1 / confirmed
@@ -1875,7 +1877,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   未同期（medium）— 現在 `BASELINE_CONTRACT_STEPS` で grandfather 中。
   notes へ実測キーワードを追記し baseline を削除して strict 化する。
 - [x] status_label の 413/415 丸め — 2026-11-22 並列 Verify（V-11）: 既に解消済み（1881-1882 行目の完了記録）。`jarvis-core/src/lib.rs:134` の単一定義が 413 => "413"（:145）/ 415 => "415"（:146）を返し、"other" はフォールバックに限定。pinn テスト（:621,632-633）が固定バケットを検証し、4サービスは core 関数を呼ぶだけ。
-- [ ] UnknownBodyError→400 が4仕様・証跡に未反映（low）— 3種→4種へ修正。
+- [x] UnknownBodyError→400 の仕様反映 — 2026-11-22 並列 Verify（V-47）: 既に解消済み（1891-1895 行目 Round 64）。4仕様（test-policy-approval.md:194-197 / test-mcp-gateway.md:200-203 / test-event.md:195-198 / test-context.md:215-218）が「UnknownBodyError を含む4種→空本文 400／rejection 文と本文バイトを出さない」へ更新済み。jarvis-core/src/lib.rs:171-216 が LengthLimitError のみ 413、他を 400 に分岐（I64-C）。
 - [ ] /health の `.trim()` が「完全バイト一致」契約と矛盾（low）— trim を
   外すか doc／仕様を trim 許容へ揃える。
 
@@ -2862,7 +2864,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **safe_client_error_text の語彙に git / パス系 ClientError が抜ける** —
   `rust/jarvis-mcp-gw/src/http.rs:323,349`, `sandbox.rs:125,330,413,473,498` /
   R1-ST02 / confirmed。機密ファイル拒否が「引数不正」に丸められる。
-- [ ] **kill_switch の暗号プリミティブが gateway から流用され比較も二重実装** —
+- [ ] **kill_switch の暗号プリミティブが gateway から流用され比較も二重実装**
+  - 2026-11-22 並列 Verify（V-48）: 未解決（confirmed）。kill_switch.rs:98-107 に constant_time_eq 集約済みだが、mcp-gw の grpc.rs:116-124 / http.rs:103-111 が fixed_size_digest_eq をローカル二重定義し XOR fold も自前実装。jarvis-core には集約先が無く、共有化・集約は未実施（定数時間性自体は確保）。
+ —
   `rust/jarvis-mcp-gw/src/grpc.rs:72-73,98-106`, `http.rs:97-103` /
   R1-AR01 / confirmed。jarvis-core への集約が必要。
 - [ ] **承認期限が 2 クレートに分散し起動時の一致検証が無い** —
@@ -2874,7 +2878,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-mcp-gw/src/lib.rs:111-143`, `rust/jarvis-policy/src/policy.rs:967-969` /
   R1-AR01 / confirmed。「allowlist が single source of truth」という
   コメントと最初のゲートが policy 側である点が矛盾。
-- [ ] **Cedar コンテキストが gateway にハードコードされ schema 検証が無い** —
+- [ ] **Cedar コンテキストが gateway にハードコードされ schema 検証が無い**
+  - 2026-11-22 並列 Verify（V-49）: 未解決（confirmed）。gateway の policy_context（lib.rs:26-47）は server 管理4属性に限定されるが、policy.rs:170 の `Context::from_json_value(context, None)` が schema を渡さず、schema 未指定時は検証をスキップ（:141-147）。cedar_schema.cedarschema:51-55 も context 属性を宣言せずコメントのみ。
+ —
   `rust/jarvis-mcp-gw/src/lib.rs:26-47`, `rust/jarvis-policy/src/policy.rs:157-170` /
   R1-AR01 / confirmed。`Context::from_json_value(context, None)` で属性 typo が
   起動時 validation をすり抜ける。
@@ -3035,9 +3041,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **local-restore-design.md の「未決定事項」に決定済み項目が混在** — 2026-11-22 対応済み: 見出しを「未決定事項と決定記録」へ変更し、複数DB項目に「決定済み（2026-11-21）: 単一DB契約を維持」を明記、config owner/mode も `configs.sh` の `EXPECTED_CONFIG_MODE` 単一表（root:root 0644）で決定済みと記録。真に未決定の項目（本番PG/Qdrant上書き方式・git作業ツリー・レガシーセット）はそのまま残存。根拠
   `docs/integration/local-restore-design.md:302-338`, `infra/scripts/restore-local.d/configs.sh:133` / R1-DR01 / confirmed。
   - 検証: secret-scan exit 0、`make ci-local` all gates passed、markdownlint 既存 baseline のみ（変更行は 80 字以内へ調整）。
-- [ ] **ADR-0001 の Consequences / Neutral が OCI 前提のまま** —
-  `adr/0001-unified-architecture.md:100,104-105,169`, `adr/0004:50-52` /
-  R1-DR01 / confirmed。
+- [x] **ADR-0001 の Consequences / Neutral 置換注記** — 2026-11-22 対応済み。Consequences 冒頭に ADR-0004 / ADR-0002 の置換注記を追加し、OCI 前提の4項目（単一 IaC/秘密管理、OCI A1 集約、Always Free 枠、Arm64 互換）へ「当時:/現行:」の明記を追記。adr/log.md にも記録。根拠
+  `adr/0001-unified-architecture.md:93-118`, `adr/log.md` / R4-DR01 / confirmed。
+  - 検証: markdownlint 追加行付近違反 0（既存 baseline 7 件のみ）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **report.md の月間使用時間式と calc.rs の単位ラベルが結論と乖離** — 2026-11-22 対応済み: `report.md` の「月間使用時間 / H_monthly」を「月間リソース時間（OCPU-hours / GB-hours）/ H_resource」へ、`calc.rs` の LaTeX 出力 `\text{ hours}` を `\text{ OCPU-hours}` へ修正。計算値（1584 OCPU-hours）は不変でラベルのみ。根拠
   `docs/architecture/report.md:79-83`, `docs/architecture/calc.rs:125-130,237` / R1-DR01 / confirmed。
   - 検証: `rust-script calc.rs` exit 0（1584 OCPU-hours 不変）、`npx markdownlint report.md` 0 件、`make ci-local` all gates passed、`make secret-scan` exit 0。docs/architecture/AGENTS.md の検証プロトコルに従い report.md / calc.rs のみ変更、dist/ は未変更。

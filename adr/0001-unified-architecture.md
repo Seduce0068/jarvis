@@ -92,23 +92,38 @@ OpenCode ではカバーできない **セキュリティ境界・ポリシー�
 
 ## Consequences
 
+> **置換注記（[ADR-0004](0004-local-only-no-oci.md) /
+> [ADR-0002](0002-runtime-agnostic.md)）**: 以下の Positive / Negative /
+> Neutral は初期決定時点の OCI・OpenCode 固定前提を反映した履歴である。
+> 現行はローカル Kubuntu + systemd 運用（OCI / OpenTofu / 1Password CLI は
+> 非適用、秘密情報は `bws run`）であり、Agent Runtime も交换可能（ADR-0002）。
+> 各項目の具体的な置換は下記のとおり。
+
 ### Positive
 
 - 自前 Agent ランタイム実装コスト **削減** (OpenCode: セッション、MCP、モデル切替、UI、非対話実行を標準装備)
 - セキュリティクリティカルな境界のみ **Rust で堅牢に実装** (Policy、MCP GW、キルスイッチ)
 - 開発環境 (code-server) と Agent Runtime (OpenCode) が **同一ワークスペースを共有** → 開発ループ高速化
 - 単一 IaC・単一プロセス管理・単一秘密管理で **運用簡素化**
+  （当時: OpenTofu + systemd + 1Password CLI。現行は IaC 非適用・
+  systemd + `bws run` / ADR-0004）
 
 ### Negative / Risks
 
 - OpenCode V2 の仕様変更・破壊的変更への追従リスク → バージョン固定 + 変更監視
 - OpenCode の MCP 実装が JARVIS 要件を満たすか要検証 → `jarvis-mcp-gw` でラップ吸収
-- 単一 VM (OCI A1) への集約 → Idle Compute 回収時の全停止リスク → **自動再プロビジョニング必須**
+- 単一 VM (OCI A1) への集約 → Idle Compute 回収時の全停止リスク →
+  **自動再プロビジョニング必須**（当時の OCI A1 前提。現行はローカル
+  Kubuntu で OCI 不使用 / ADR-0004、再プロビジョニング要件は非適用）
 
 ### Neutral
 
 - OCI Always Free 枠内で完結 (2 OCPU / 12GB / 200GB Block + 10TB Object)
-- Arm64 互換性確認必須 (OpenCode, code-server, Rust toolchain, PostgreSQL, Qdrant すべて対応済み)
+  — **履歴**。現行はローカル Kubuntu (Ryzen 5 3600 / x86_64) で OCI
+  リソース不使用 / ADR-0004
+- Arm64 互換性確認必須 (OpenCode, code-server, Rust toolchain, PostgreSQL,
+  Qdrant すべて対応済み) — **履歴**。現行は x86_64 運用のため再評価対象
+  （ADR-0004）
 
 ---
 
