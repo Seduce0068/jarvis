@@ -62,6 +62,17 @@ ignore = [
 
   # libsqlite3-sys 0.30.1: patch 版が無く major 更新待ち。
   "RUSTSEC-2026-0459",
+
+  # smartstring 1.0.1: Hickory (DNS) 系の推移依存で unmaintained 相当の
+  # advisory。修正版が無く hickory 0.26 系 major 更新（上記 DNSSEC 17 件と
+  # 同一の更新経路）を待つ。patch 版なし・一時抑制、再評価日は共通の
+  # 2026-12-20T00:00:00+09:00。
+  "RUSTSEC-2026-0249",
+
+  # rustls-pemfile 2.2.0: unmaintained 相当の advisory。修正版が無く、
+  # TLS スタック（rustls）側の主要更新を待つ一時抑制。再評価日は共通の
+  # 2026-12-20T00:00:00+09:00。
+  "RUSTSEC-2025-0134",
 ]
 
 # unmaintained / unsound / notice は情報警告として扱い、既定では終了コードを
