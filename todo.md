@@ -2995,9 +2995,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **非推奨レガシースクリプトが本番デプロイで配布され続ける** —
   `rust/scripts/backup.rs:16-23`, `rust/scripts/restore.rs:15-22`,
   `rust/scripts/deploy.rs:508-528` / R1-ST05 / confirmed。
-- [ ] **restore.rs の Qdrant HTTP クライアントに timeout 設定が無い** —
-  `rust/scripts/backup.rs:35-38,192-206`, `rust/scripts/restore.rs:454-462` /
-  R1-ST05 / confirmed。backup 側の `JARVIS_QDRANT_TIMEOUT_SECS` が未反映。
+- [x] レガシー restore.rs の Qdrant timeout — 2026-11-22 判定: **レガシー凍結につき対応不要（V-82 再評価・差し戻し済み）**。`rust/scripts/restore.rs:13-28` が「参照用に残す既存コードであり、挙動・テストは変更しないでください」と明記し、`infra/scripts/restore.sh:1-20` が fail-closed（exit 2）で実行経路が塞がれている。backup.rs の timeout は現行経路のもので、レガシーへ流用する根拠なし。ラウンド68で追加した timeout 変更は 9fd2cb5 で revert 済み（履歴書換えではなく新規 revert コミット）。現行経路は restore-local.d/qdrant.sh が担当。
 - [ ] **restore_postgres の DROP→CREATE→psql が非アトミック** —
   `rust/scripts/restore.rs:360-435,533-555` / R1-ST05 / confirmed。
 - [x] レガシー restore_configs の tar 展開 — 2026-11-22 判定: **実行経路が塞がれた凍結レガシーにつき対応不要（V-55 再評価）**。`rust/scripts/restore.rs:13-28` が「DEPRECATED / OCI+rclone+op 前提の旧方式」「実行経路は既に塞がれています」「参照用に残す既存コードであり挙動・テストは変更しないでください」と明記。`infra/scripts/restore.sh:1-20` が fail-closed（exit 2）で起動不能を確認。現行経路は `restore-local.d/configs.sh` の allowlist 個別ファイルコピーで tar 展開なし。設計判断（ADR-0004 レガシー凍結）として現状維持。
