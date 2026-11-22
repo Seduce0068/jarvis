@@ -2856,11 +2856,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   既存 498 行は TOCTOU 対策の実装で、解決失敗・空配列・非公開 IP 混入の
   fail-closed 回帰は未検証。
   - 2026-11-22 並列 Verify（V-38）: 未解決（confirmed）。sandbox.rs:727 の ensure_public_host が :745 で lookup_host を直接呼び、注入 seam なし。4ケース（解決失敗/空配列/混在/全公開）のテストなし、:1110 は #[ignore] の実 DNS 依存。
-- [ ] **承認 ID の再登録が DB 既存行を黙って再利用する** — 根拠
-  `rust/jarvis-policy/src/approval.rs:657,697`, `src/persistence.rs:698` /
-  R2-ER01 / likely。重複チェックがメモリ entries のみで、再起動後の
-  同一 id が古い期限・context の DB 行に紐づき即 Expired になり得る。
-  - 2026-11-22 並列 Verify（V-40）: 未解決（confirmed）。record_request（persistence.rs:698-715）が ON CONFLICT DO NOTHING の影響行を破棄、deadline 更新なし。メモリ重複チェックのみで、決着済み行の id 再登録が暗黙成功→decide が AlreadyDecided で誰も決着できない。
+- [x] **承認 ID の再登録の fail-closed 化** — 2026-11-22 対応済み。`record_request`（persistence.rs:694-733）が `INSERT ... ON CONFLICT DO NOTHING` の影響行数（u64）を受け、0 行（競合）なら `Err(ApprovalError::Persistence)` を返す純粋ヘルパを追加。呼び出し側 approval.rs:706-731 の既存 fail-closed ロールバック（entry 削除＋503 相当）がそのまま働き、孤儿 hold も古い DB 行への誤紐づきも残らない。回帰2件追加（零行→Err / ConflictPersistence 経由のロールバック検証）。根拠
+  `rust/jarvis-policy/src/persistence.rs:694-733,1013`, `rust/jarvis-policy/src/approval.rs:2736,2799` / R2-ER01 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 217 passed（+2）、policy 証跡 215→217 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
 
 ### 優先度 中
 

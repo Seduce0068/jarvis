@@ -674,13 +674,32 @@ impl PgApprovalPersistence {
     }
 }
 
+/// Interpret the auto-committed `record_request` INSERT result (R2 / V-40).
+///
+/// `ON CONFLICT (id) DO NOTHING` reports `rows_affected() == 0` when a row with
+/// this id already exists — notably a decided hold left behind by an earlier
+/// registration. Treating that as success would bind the new in-memory entry
+/// to the stale durable row, whose later `decide` CAS finds no undecided row
+/// and is misreported as `AlreadyDecided` (HTTP 409) with no audit trail. Fail
+/// closed instead: the store rolls the registration back and answers with a
+/// retryable persistence failure.
+fn record_request_insert_result(rows_affected: u64) -> Result<(), ApprovalError> {
+    if rows_affected == 0 {
+        Err(ApprovalError::Persistence)
+    } else {
+        Ok(())
+    }
+}
+
 #[async_trait::async_trait]
 impl ApprovalPersistence for PgApprovalPersistence {
     /// Persist the pending request with a single auto-committed INSERT.
     ///
     /// This runs before the store starts waiting (and therefore before any
     /// `decide` CAS), so on the success path the row exists when the decision
-    /// arrives. On a failed INSERT, [`db_failure`] logs a fixed-vocabulary
+    /// arrives. A zero-row INSERT (`ON CONFLICT (id) DO NOTHING`) is handled the
+    /// same way: an existing row with this id must not silently own the new hold.
+    /// On a failed INSERT, [`db_failure`] logs a fixed-vocabulary
     /// failure and returns [`ApprovalError::Persistence`]; the store then rolls
     /// back the in-memory registration and answers HTTP 503 (retry). This
     /// fail-closed choice (R4-PERSIST) prevents an orphan hold whose later `decide` would hit a
@@ -712,7 +731,7 @@ impl ApprovalPersistence for PgApprovalPersistence {
                 .await;
 
             match result {
-                Ok(_) => return Ok(()),
+                Ok(rows_affected) => return record_request_insert_result(rows_affected),
                 Err(_error) => {
                     // Fixed vocabulary only (I47-A): the raw error is discarded
                     // before the attempt is logged.
@@ -985,6 +1004,19 @@ fn db_failure(operation: DbOperation) -> ApprovalError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// R2 / V-40: a zero-row INSERT (`ON CONFLICT (id) DO NOTHING`) must never
+    /// be treated as a successful `record_request`. Binding a new entry to a
+    /// stale decided row makes the later `decide` CAS report `AlreadyDecided`
+    /// with no audit trail, so the zero-row case is a persistence failure.
+    #[test]
+    fn record_request_zero_rows_are_a_persistence_failure() {
+        assert!(matches!(
+            record_request_insert_result(0),
+            Err(ApprovalError::Persistence)
+        ));
+        assert!(record_request_insert_result(1).is_ok());
+    }
 
     #[test]
     fn decision_columns_match_audit_vocabulary() {

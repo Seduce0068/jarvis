@@ -2733,6 +2733,113 @@ mod tests {
         assert!(store.list_pending().await.is_empty());
     }
 
+    /// Mock that models the Pg backend's `ON CONFLICT (id) DO NOTHING`: the
+    /// first INSERT for an id claims it, a later INSERT for the same id writes
+    /// zero rows and is reported as [`ApprovalError::Persistence`] (the new
+    /// fail-closed mapping in `PgApprovalPersistence::record_request`). No
+    /// database is contacted.
+    #[derive(Debug, Default)]
+    struct ConflictPersistence {
+        claimed: tokio::sync::Mutex<std::collections::HashSet<Uuid>>,
+        calls: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ApprovalPersistence for ConflictPersistence {
+        async fn record_request(
+            &self,
+            request: &ApprovalRequest,
+            _deadline: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let mut claimed = self.claimed.lock().await;
+            if claimed.insert(request.id) {
+                Ok(())
+            } else {
+                Err(ApprovalError::Persistence)
+            }
+        }
+
+        async fn record_decision(
+            &self,
+            _id: Uuid,
+            _decision: &ApprovalDecision,
+            _decided_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+
+        async fn load_pending(&self) -> Result<Vec<ApprovalRequest>, ApprovalError> {
+            Ok(Vec::new())
+        }
+
+        async fn load_decision(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ApprovalDecision>, ApprovalError> {
+            Ok(None)
+        }
+
+        async fn mark_expired(
+            &self,
+            _id: Uuid,
+            _expired_at: DateTime<Utc>,
+        ) -> Result<(), ApprovalError> {
+            Ok(())
+        }
+    }
+
+    /// R2 / V-40: a decided durable row left under the same id makes a second
+    /// registration's INSERT write zero rows. That second `record_request`
+    /// must report `ApprovalError::Persistence`, and the store's fail-closed
+    /// rollback must leave no in-memory entry bound to the stale row — otherwise
+    /// a later operator `decide` hits a zero-row CAS and reports
+    /// `AlreadyDecided` (409) with no audit trail.
+    #[tokio::test]
+    async fn duplicate_id_insert_conflict_fails_closed_without_orphan() {
+        let persistence = Arc::new(ConflictPersistence::default());
+        let request = make_request();
+        let id = request.id;
+        let deadline = Utc::now() + chrono::Duration::seconds(30);
+
+        // First INSERT claims the id (the earlier registration / stale row).
+        persistence
+            .record_request(&request, deadline)
+            .await
+            .expect("first INSERT claims the id");
+
+        // Second INSERT with the same id writes zero rows (ON CONFLICT) and
+        // must be a persistence failure, never a silent success.
+        assert!(
+            matches!(
+                persistence.record_request(&request, deadline).await,
+                Err(ApprovalError::Persistence)
+            ),
+            "zero-row conflict must be reported as Persistence"
+        );
+
+        // Through the store, that failure must roll back the in-memory hold.
+        let store = ApprovalStore::with_persistence(
+            Duration::from_secs(5),
+            DEFAULT_MAX_PENDING,
+            persistence.clone(),
+        );
+        let result = store.try_request(request).await;
+        assert!(
+            matches!(result, Err(ApprovalError::Persistence)),
+            "duplicate-id conflict must fail closed: {result:?}"
+        );
+        assert_eq!(persistence.calls.load(Ordering::SeqCst), 3);
+        assert!(
+            matches!(store.status(id).await, Err(ApprovalError::NotFound(_))),
+            "no orphan in-memory entry may survive the conflict"
+        );
+        assert!(
+            store.list_pending().await.is_empty(),
+            "the rolled-back hold must not be visible to operators"
+        );
+    }
+
     /// An injected `mark_expired` failure must be non-fatal for the timing-out
     /// waiter, must still reach the persistence seam (where the warning is
     /// emitted), and must leave the durable row undecided so startup
