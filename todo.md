@@ -2956,10 +2956,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
  —
   `infra/config/opencode/opencode.jsonc:10-14`, `rust/jarvis-mcp-gw/src/http.rs:75-81` /
   R3-AU01 / likely。
-- [ ] **verify と restore で legacy バックアップ set の受入条件が非対称** —
-  `specs/test-backup.md:186-193`, `infra/scripts/verify-backup.sh:103-112`,
-  `infra/scripts/restore-local.sh:178,368-370` / R2-FG01 / confirmed。
-  verify を通った set を restore-local が `--allow-legacy` なしで拒否する。
+- [ ] **verify と restore で legacy バックアップ set の受入条件が非対称** — 2026-11-22 並列 Verify（V-84）: 未解決（confirmed）。verify-backup.sh:103-112 は created_at が無い set を legacy として自動受け入れ（COMPLETE なしでも fail 加算せず）、restore-local.sh:365-372 は `--allow-legacy`（:199）が無いと失敗扱い。記述子・ロール判定自体は共有 lib で解消済み（I78-A）だが、COMPLETE マーカー受入条件だけ非対称。restore 側は破壊操作前のゲートとして厳格にする設計判断があり、DEFAULT を緩めるのは判断待ち。
 - [ ] **audit.toml の旧 rustls 残存原因が axum 0.7 と誤記**
   - 2026-11-22 並列 Verify（V-67）: 未解決（confirmed）。audit.toml:51-53 が原因を axum 0.7 とするが、axum 0.7.9 は rustls 系を依存しない。実際は tokio-tungstenite 0.21.0（rust/Cargo.lock:4910-4923, jarvis-event/Cargo.toml:54 の直接依存）が rustls 0.22.4 / rustls-webpki 0.102.8 を固定。コメント訂正は安全に可能。
  —
