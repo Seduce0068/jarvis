@@ -136,8 +136,13 @@ impl McpGateway {
         }
 
         // Allowlist: the tool must be listed, the principal must be
-        // admitted, and the tool entry must grant the principal. The
-        // allowlist remains the single source of truth for what may run.
+        // admitted, and the tool entry must grant the principal. Effective
+        // access is the intersection (AND) of the Cedar/policy decision above
+        // and this allowlist grant -- the allowlist is a second independent
+        // deny layer, not the single source of truth. The shipped
+        // `mcp_allowlist.toml` and `casbin_policy.csv` intentionally carry
+        // overlapping-but-not-identical grants (V-146); a grant present in
+        // only one of them never authorizes execution.
         self.allowlist.check(tool)?;
         let tool_config =
             tool_config.ok_or_else(|| error::McpGatewayError::NotAllowed(tool.into()))?;

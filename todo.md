@@ -2713,12 +2713,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-mcp-gw/src/grpc.rs:72-73,98-106`, `http.rs:97-103` /
   R1-AR01 / confirmed。jarvis-core への集約が必要。
 - [x] 承認期限の共通化 — 2026-11-23 方針委譲で対応済み。jarvis-core の `DEFAULT_APPROVAL_TIMEOUT_SECS` を単一情報源とし、policy config.rs は alias、mcp-gw approval.rs は `as i64` 由来に変更。既定値 300 と compile-time assert は不変。根拠 `rust/jarvis-core/src/lib.rs:73-83`, `rust/jarvis-policy/src/config.rs:35-44`, `rust/jarvis-mcp-gw/src/approval.rs:35-48` / V-92。
-- [ ] **allowlist と Casbin で principal / tool 許可が二重定義** —
-  `rust/jarvis-mcp-gw/src/lib.rs:111-143`, `rust/jarvis-policy/src/policy.rs:967-969` /
-  R1-AR01 / confirmed。「allowlist が single source of truth」という
-  コメントと最初のゲートが policy 側である点が矛盾。
-  - 2026-11-22 並列 Verify（V-93）: 未解決（confirmed）。mcp_allowlist.toml:17,22-132 と casbin_policy.csv:13-53 が許可を二重定義（コメント :5-6,:40-41 が自認）。lib.rs は policy 判定→allowlist 判定の二層で、単一情報源化・整合検証なし。mcp_server.rs:587-588 のテストが二層独立を明記。設計判断。
-  - 2026-11-23 調査（V-146）: 正規化 grant は実効13件の差分（allowlist のみ6／Casbin のみ7）があり、厳密一致 fail-closed は同梱設定で起動不能。実判定は lib.rs:125-155 の Casbin→allowlist の AND（積集合）で fail-open ではなく、lib.rs:138-140 の「allowlist が single source of truth」コメントが事実と矛盾するのみ。単一情報源化は実効権限変更を伴い採用しない方針。構造制約（全 principal に role、全 tool に tool: p 行）の起動検証は小規模で可能だが、まずコメント是真積集合契約へ修正する案件。
+- [x] allowlist/Casbin 二層契約の明文化 — 2026-11-23 方針委譲で対応済み（単一情報源化は採用しない）。V-146 調査で実効は policy(Cedar/Casbin) と allowlist の AND（積集合）で fail-open ではないと判明。lib.rs:136-145 の「allowlist が single source of truth」という矛盾コメントを「第2の独立 deny 層、実効は両者の積集合、片方のみの grant は実行を許可しない」へ修正。同梱設定の13件差分は意図的重複として明記。単一情報源化は実効権限変更を伴うため不採用（方針記録）。コード挙動不変でテスト件数不変。根拠 V-146。
 - [x] Cedar 実行時 context の schema 検証 — 2026-11-23 方針委譲で対応済み。cedar_schema.cedarschema:60-113 の5 action に4属性（tool/principal/resource: String, requires_approval: Bool）を required 宣言。CedarEngine が schema を保持し is_authorized（policy.rs:227-235）が Context::from_json_value へ schema を渡す（Request::new は None 維持）。Cedar 4.13 の文字列→Bool 暗黙昇格を塞ぐ JSON 型事前検証（:60-77）も追加。management API/reload で保持 schema 同期。schema 無しでは従来挙動維持。互換性変更（4属性以外の直接 context は fail-closed deny）をコメント明記。回帰 +2。根拠 V-147。
 - [x] 起動時検証の集約 — 2026-11-23 方針委譲で対応済み。PolicyEngine::new（lib.rs:31-38）のインライン placeholder 判定を削除し config.validate_kill_switch_admin_token()? を単一真正源として呼ぶ。config.rs:222-264 のコメントも両経路共有へ更新、既定 warn-only は維持。回帰 +1（expect_err の Debug 境界は Result 分解で回避）。根拠 `rust/jarvis-policy/src/{lib.rs:31-38,config.rs:222-264,939-982}` / V-94。
 - [x] 承認 wire DTO の共有型集約 — 2026-11-22 並列 Verify（V-95）: 既に解消済み。jarvis-core/src/approval.rs:19-47 に ApprovalRequest/ApprovalDecision の単一定義、policy.rs:68-74 は pub use へ置換、gateway/ui は境界 DTO として薄く保持し core 型へ変換（outcome_from_wire / decision_from_json 等）。整合回帰（core ゴールデン / gateway wire→core / UI 変換）も充実。
