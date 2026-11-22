@@ -2905,9 +2905,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-mcp-gw/src/sandbox.rs:260,267,281,285,294,1110` /
   R3-TQ01 / confirmed。redirect 4 回・Location 欠落等が CI で未検証。
   - 2026-11-22 並列 Verify（V-140）: 未解決（confirmed）。native_web_fetch の status/Location/content-type/content_length/chunk 分岐（sandbox.rs:263-307）は reqwest::Response 直接読みでレスポンス注入 seam なし。V-50 の DNS seam は別経路。CI はヘルパー直接テストと #[ignore] 実ネットテストのみ、redirect 超過・content-type 非対応・body 切り詰め分岐は未検証。
-- [ ] **kill switch の時刻逆行 fail-closed 分岐が実経路で未テスト** —
-  `rust/jarvis-policy/src/kill_switch.rs:344,349,352,902` / R3-TQ01 / confirmed。
-  - 2026-11-22 並列 Verify（V-129）: 未解決（confirmed）。kill_switch.rs:349-354 の SystemTime::now() Err 分岐のみで、「現在時刻 < activated_at」判定自体はコードに存在しない。SystemTime 注入 Seam が無く実経路回帰もなし（CLOCK_FAILURE_REASON は vocabulary 分類テスト :929-948 のみ）。テスト追加には Seam 設計が必要。
+- [x] kill switch 時刻逆行 fail-closed の回帰 — 2026-11-22 対応済み。時刻解決ロジックを pure `resolve_activation_time`（kill_switch.rs:68-86）へ切り出し、`arm_with_actor`（:363-375）は薄いラッパ化（挙動不変）。回帰 `resolve_activation_time_keeps_ok_and_fails_closed_on_err`（:977-997）が Ok(Duration::from_secs(123)) → (123, 元 reason)、real SystemTimeError（UNIX_EPOCH.duration_since(UNIX_EPOCH+1s) でマシン時刻非依存に生成）→ (0, CLOCK_FAILURE_REASON 付き reason) を検証。根拠 `rust/jarvis-policy/src/kill_switch.rs:68-86,344-375,977-997` / V-129 / confirmed。
+  - 検証: fmt exit 0、policy 219 passed（+1）、証跡 218→219 同期し `--check` 5件 MATCH、clippy -D warnings exit 0、ci-local / check-evidence すべて pass。
 - [ ] **gRPC admin token の定時間比較テストが戻り値のみの vacuous** —
   `rust/jarvis-mcp-gw/src/grpc.rs:98,102,288`, `specs/test-mcp-gateway.md:284` /
   R3-TQ01 / likely。

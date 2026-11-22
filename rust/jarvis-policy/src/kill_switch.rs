@@ -65,6 +65,26 @@ fn reason_kind(reason: &str) -> &'static str {
     }
 }
 
+/// Resolve the activation timestamp and reason from a fallible clock read.
+///
+/// The clock is read at the call site so this helper stays pure: tests can pass
+/// an `Ok`/`Err` result directly and exercise the fail-closed branch without a
+/// global clock-injection hook. `Ok` keeps the elapsed seconds and the original
+/// reason; `Err` keeps the sentinel timestamp and prefixes the reason with the
+/// fixed [`CLOCK_FAILURE_REASON`] vocabulary. Warning wording is unchanged.
+fn resolve_activation_time(
+    now: Result<std::time::Duration, std::time::SystemTimeError>,
+    reason: String,
+) -> (u64, String) {
+    match now {
+        Ok(duration) => (duration.as_secs(), reason),
+        Err(error) => {
+            warn!("kill switch clock is before UNIX_EPOCH: {error}; failing closed");
+            (0, format!("{CLOCK_FAILURE_REASON}: {reason}"))
+        }
+    }
+}
+
 /// Compute the fixed-size SHA-256 digest used as the comparison target by
 /// every token gate. Reducing both operands to `[u8; 32]` absorbs their
 /// lengths into the digest, so the comparison itself always covers exactly 32
@@ -343,16 +363,11 @@ impl KillSwitch {
     fn arm_with_actor(&self, reason: String, actor: String) {
         // `duration_since` returns Err when the clock is before UNIX_EPOCH
         // (e.g. on time regression). Never unwrap here: this is the emergency
-        // stop path and a panic is fatal under `panic = "abort"`. Fail closed
-        // instead: keep the switch armed, use a sentinel timestamp and record
-        // the degradation in the reason slot alongside the original reason.
-        let (now, reason) = match SystemTime::now().duration_since(UNIX_EPOCH) {
-            Ok(duration) => (duration.as_secs(), reason),
-            Err(error) => {
-                warn!("kill switch clock is before UNIX_EPOCH: {error}; failing closed");
-                (0, format!("{CLOCK_FAILURE_REASON}: {reason}"))
-            }
-        };
+        // stop path and a panic is fatal under `panic = "abort"`. The pure
+        // helper fails closed with a sentinel timestamp and records the
+        // degradation in the reason slot alongside the original reason.
+        let clock = SystemTime::now().duration_since(UNIX_EPOCH);
+        let (now, reason) = resolve_activation_time(clock, reason);
         self.activated.store(true, Ordering::SeqCst);
         self.activated_at.store(now, Ordering::SeqCst);
         Self::write_slot(&self.reason, Some(reason));
@@ -957,6 +972,28 @@ mod tests {
             view.activated_by.as_deref(),
             Some(status_vocabulary::ACTOR_SYSTEM)
         );
+    }
+
+    /// The clock-resolution seam must be pure so the fail-closed Err branch is
+    /// reachable without a clock-injection hook. Only return values are
+    /// asserted; the warning side effect is deliberately not captured.
+    #[test]
+    fn resolve_activation_time_keeps_ok_and_fails_closed_on_err() {
+        let (secs, reason) = resolve_activation_time(
+            Ok(std::time::Duration::from_secs(123)),
+            "operator reason".into(),
+        );
+        assert_eq!(secs, 123);
+        assert_eq!(reason, "operator reason");
+
+        // UNIX_EPOCH predates UNIX_EPOCH + 1s deterministically, so this yields
+        // a real SystemTimeError without depending on the machine clock.
+        let clock_error = UNIX_EPOCH
+            .duration_since(UNIX_EPOCH + std::time::Duration::from_secs(1))
+            .expect_err("an earlier instant must yield a SystemTimeError");
+        let (secs, reason) = resolve_activation_time(Err(clock_error), "operator reason".into());
+        assert_eq!(secs, 0, "clock failure must use the sentinel timestamp");
+        assert_eq!(reason, format!("{CLOCK_FAILURE_REASON}: operator reason"));
     }
 
     /// An unset/blank admin token must never authorize a kill-switch gate.
