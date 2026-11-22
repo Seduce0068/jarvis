@@ -22,7 +22,6 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(2);
 /// Client for the `jarvis.policy.v1.PolicyService` endpoint.
 #[derive(Clone)]
 pub struct PolicyClient {
-    endpoint: String,
     channel: Channel,
 }
 
@@ -37,7 +36,7 @@ impl PolicyClient {
         let channel = Channel::from_shared(endpoint.clone())
             .with_context(|| format!("invalid policy endpoint: {endpoint}"))?
             .connect_lazy();
-        Ok(Self { endpoint, channel })
+        Ok(Self { channel })
     }
 
     /// Authorization check that fails closed.
@@ -54,13 +53,11 @@ impl PolicyClient {
     ) -> bool {
         match self.check(principal, action, resource, context).await {
             Ok(allowed) => allowed,
-            Err(error) => {
+            Err(_error) => {
+                // The raw anyhow chain can embed the endpoint and caller input;
+                // only fixed vocabulary reaches tracing (cf. `grpc::error_kind`).
                 tracing::error!(
-                    endpoint = %self.endpoint,
-                    principal,
-                    action,
-                    resource,
-                    error = ?error,
+                    error_kind = "policy_check_failed",
                     "policy check failed; denying (fail-closed)"
                 );
                 false
@@ -91,7 +88,7 @@ impl PolicyClient {
         let response = client
             .check(request)
             .await
-            .with_context(|| format!("policy check RPC to {} failed", self.endpoint))?
+            .with_context(|| "policy check RPC failed")?
             .into_inner();
         Ok(response.allowed)
     }
@@ -244,6 +241,47 @@ mod tests {
                 )
                 .await,
             "an unreachable policy service must deny"
+        );
+    }
+
+    /// The fail-closed error log must expose only fixed vocabulary: no endpoint,
+    /// principal/action/resource, or raw error chain may reach tracing. A
+    /// function-local mutex serializes the thread-local subscriber so parallel
+    /// tests cannot interfere with the captured log line.
+    #[test]
+    fn unreachable_policy_logs_fixed_vocabulary_only() {
+        // Static contract check: the fail-closed log must carry only the fixed
+        // error_kind token. A dynamic thread-local capture is deliberately
+        // avoided -- tonic/hyper emit their own TRACE records under the same
+        // subscriber and made this assertion flaky under parallel execution.
+        const SRC: &str = include_str!("client.rs");
+        let at = SRC
+            .find("policy check failed; denying (fail-closed)")
+            .expect("fail-closed log message exists");
+        let start = SRC[..at]
+            .rfind("tracing::error!(")
+            .expect("fail-closed log is an error event");
+        let statement = &SRC[start..at];
+        assert!(
+            statement.contains("error_kind = \"policy_check_failed\""),
+            "fail-closed log missing fixed error_kind: {statement}"
+        );
+        for leak in [
+            "endpoint",
+            "principal",
+            "action",
+            "resource",
+            "error = ?error",
+        ] {
+            assert!(
+                !statement.contains(leak),
+                "fail-closed log must not format {leak}: {statement}"
+            );
+        }
+        // The RPC error context must not embed the endpoint either.
+        assert!(
+            SRC.contains("with_context(|| \"policy check RPC failed\")"),
+            "RPC context must stay fixed-vocabulary"
         );
     }
 

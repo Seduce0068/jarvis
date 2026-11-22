@@ -2938,7 +2938,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **Android / HA の外部クライアントが生成されるだけで未配線** —
   `rust/jarvis-event/src/lib.rs:25-31,67-68`, `src/sources.rs:37-63,313-334` /
   R1-ST04 / confirmed。既存 P3-10 は `Normalizer` 側の削除で、`EventNormalizer` は別。
-- [ ] **gRPC EmitEvent レスポンスに event_id が無く HTTP と非対称** —
+- [ ] **gRPC EmitEvent レスポンスに event_id が無く HTTP と非対称**
+  - 2026-11-22 並列 Verify（V-66）: 未解決（confirmed）。proto EmitEventResponse は `bool success` のみ（event.proto:18-20）、gRPC ハンドラも success=true のみ（grpc.rs:157）。HTTP 側は event_id: String を返す（http.rs:40-44,71-77）。proto 変更を伴うため設計判断案件。
+ —
   `rust/jarvis-event/proto/event.proto:18-20`, `src/http.rs:38-42`, `src/grpc.rs:163` /
   R1-ST04,R1-AP01 / confirmed。
 - [x] **HA WebSocket エラーの anyhow チェーン固定語彙化** — 2026-11-22 対応済み。`lib.rs:87-89` と `sources.rs:82-91` の HA WebSocket エラーから `{error:#}` を削除し `error_kind = "home_assistant"` の固定語彙ログへ変更（normalizer.rs:50 の既存トークンと整合）。`ListenFailure::Transient` から error フィールドを除去し anyhow チェーンを保持しない構造へ変更。リトライ／backoff／spawn lifecycle 不変。根拠
@@ -2952,12 +2954,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **kill switch の activated_by が公開経路で依然 "system"** —
   `rust/jarvis-policy/src/kill_switch.rs:241-248,280-286`, `src/lib.rs:249-251` /
   R1-ST01 / confirmed。既存 622 行の対応は `activate_with_actor` 追加のみ。
-- [ ] **再起動復元された承認保留にタイマーがなく prune 依存** —
+- [ ] **再起動復元された承認保留にタイマーがなく prune 依存**
+  - 2026-11-22 並列 Verify（V-70）: 未解決（confirmed）。reconcile_pending() が undecided 行を deadline 付きで再登録するが watch receiver を破棄し待機タイマーが無い（approval.rs:1266-1274,1309-1349）。モジュール doc :12-13 と classify_prune :1414-1416 が「lazy prune が timeout path」と明記。prune は try_request() 先頭のみで周期性なし。設計判断案件。
+ —
   `rust/jarvis-policy/src/approval.rs:8-20,1325-1327,1407-1410` /
   R1-ST01 / confirmed。新規リクエストが来るまで期限切れ処理が走らない。
-- [ ] **policy check 失敗ログに principal / resource / 生エラーが流出** —
-  `rust/jarvis-policy/src/client.rs:55-65,91-95` / R1-ST01 / confirmed。
-  endpoint 文字列が OTLP へ流れる固定語彙方針の迂回経路。
+- [x] **policy check 失敗ログの固定語彙化** — 2026-11-22 対応済み。`PolicyClient::is_allowed`（client.rs:57-64）の tracing から endpoint / principal / action / resource / `error = ?error` を削除し `error_kind = "policy_check_failed"` のみへ変更。`check()`:92 の with_context も固定文字列化し、endpoint を anyhow チェーンへ埋め込まないようにした（構造体の endpoint フィールドも削除）。回帰 `unreachable_policy_logs_fixed_vocabulary_only` は tonic/hyper の TRACE 混入で flaky になったため静的契約検査方式へ変更（動的 capture を避ける）。fail-closed 戻り値は不変。根拠
+  `rust/jarvis-policy/src/client.rs:24-41,55-64,92,275-310` / V-69 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-policy --lib --locked` 218 passed（+1）、event 証跡は政策 217→218 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-policy --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **gRPC CheckResponse.reason が PolicyClient で捨てられる** —
   `rust/jarvis-policy/proto/policy.proto:19-25`, `src/grpc.rs:121-124`,
   `src/client.rs:91-97` / R1-ST01 / confirmed。HTTP と transport 間で非対称。
@@ -2976,7 +2980,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `specs/test-backup.md:186-193`, `infra/scripts/verify-backup.sh:103-112`,
   `infra/scripts/restore-local.sh:178,368-370` / R2-FG01 / confirmed。
   verify を通った set を restore-local が `--allow-legacy` なしで拒否する。
-- [ ] **audit.toml の旧 rustls 残存原因が axum 0.7 と誤記** —
+- [ ] **audit.toml の旧 rustls 残存原因が axum 0.7 と誤記**
+  - 2026-11-22 並列 Verify（V-67）: 未解決（confirmed）。audit.toml:51-53 が原因を axum 0.7 とするが、axum 0.7.9 は rustls 系を依存しない。実際は tokio-tungstenite 0.21.0（rust/Cargo.lock:4910-4923, jarvis-event/Cargo.toml:54 の直接依存）が rustls 0.22.4 / rustls-webpki 0.102.8 を固定。コメント訂正は安全に可能。
+ —
   `audit.toml:51-53`, `rust/Cargo.lock:144-175,4910-4923` / R4-DP01 / confirmed。
   axum 0.7.9 の依存に rustls は無く、実態は tokio-tungstenite 0.21 系統。
 - [ ] **依存監査ゲートが git 不在時に UNVERIFIED とならず古い DB で pass** —
@@ -3043,7 +3049,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **install-mcp-gateway.sh のロールバック fail-closed 化** — 2026-11-22 対応済み。`rollback()`（install-mcp-gateway.sh:49-60）に else 分支を追加し、退避ファイル不在時は `rm -f "$dst"` で今回配置した新バイナリを明示削除。deploy-mcp-gw-safe.sh:87-91 と同じ枠組みで、「何も戻さず新バイナリが残ったまま再起動／drift 検査へ進む」経路を遮断。根拠
   `infra/scripts/install-mcp-gateway.sh:49-60`, `infra/scripts/deploy-mcp-gw-safe.sh:84-94` / V-53 / confirmed。
   - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **Qdrant 本番反映の「evacuating old collection」ログに実処理が伴わない** —
+- [ ] **Qdrant 本番反映の「evacuating old collection」ログに実処理が伴わない**
+  - 2026-11-22 並列 Verify（V-68）: 未解決（confirmed）。qdrant.sh:136 が退避をログするが実処理は同一コレクションへの snapshot upload＋points_count 再検証のみ（:138-167）。旧 collection のコピー／新規作成／alias 切替／DELETE は無く、コードコメントと design doc:334-336,345 も未決定を明記。pg.sh:136-151 の実退避と差がある。
+ —
   `infra/scripts/restore-local.d/qdrant.sh:106-116` / R1-ST06 / confirmed。
 - [x] **hooks.json の Rust post-edit フックが repo root で cargo を実行** — 2026-11-21 対応済み: matcher `**/*.rs` を `rust/**/*.rs` と `ui/**/*.rs` に分割し、それぞれ `cd rust && cargo fmt --all -- --check && cargo clippy --all-targets --locked -- -D warnings` / `cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings` を実行（Makefile:63,66 と同一引数）。JSON parse OK、post-edit matchers = ['**/*.ts', 'rust/**/*.rs', 'ui/**/*.rs', '**/*.md'] / 根拠
   `hooks.json:57-64`, `rust/Cargo.toml:1`, `ui/Cargo.toml:1` /
