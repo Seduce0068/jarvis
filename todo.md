@@ -2358,8 +2358,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] policy/event の起動検証テストが env 存在で早期 return し vacuous pass — **2026-11-22 重複整理**: 既に解消済み。2377 行目で policy/event 起動検証テストの env 非依存化（vacuous pass 解消）と egress 境界回帰4件を追加済み。
   （medium）— Serialized で明示値をマージして常にアサート。
 - [ ] egress ホスト長 253/254・ラベル長 63/64 の境界回帰が無い（low）。
-- [ ] ContextConfig の Debug が pg_url を redact せず userinfo がダンプされる
-  （medium）。
+- [x] ContextConfig Debug の pg_url redaction — 2026-11-22 Verify: 既に解消済み（I86-B (b)）。`config.rs:755-777` のカスタム Debug が `pg_url` / `qdrant_api_key` / `admin_token` を `<redacted>` に置換し、`:996-997` の回帰が「Debug 出力は redacted、pg_url() の実接続 URL は不変」をアサート。子の指摘は既に解消済み。根拠
+  `rust/jarvis-context/src/config.rs:755-777,996-997` / verified。コード変更なし。
 - [ ] UI の二重 POST 防止テストが実 decide() を通らず空振り（medium）—
   in-flight 解放の全経路を回帰で担保。
 - [x] flock/psql/Qdrant のテスト回帰3件 — 2026-11-22 Verify: すべて解消済み。(1) `test-restore-local.sh:661,713` が /run/jarvis/restore.lock の成功枝と /run 不可フォールバック枝をテスト用パス差し替えで検証。(2) `:278-292` の sudo モックが `command psql` 経路を通し、`:44,753` が I86-C で分岐漏れ解消を明記。(3) `:47,92-99,305,947-963` が `${JARVIS_QDRANT_COLLECTION:-jarvis_memories}` 契約と設定可能回帰（jarvis_memories_custom）を実装（I86-D）。根拠
