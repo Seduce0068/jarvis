@@ -2555,9 +2555,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 95 の残り指摘（未対応・次ラウンド優先）
 
-- [ ] **source が VARCHAR(100) で Rust 検証上限 4096 と不一致**（high、
-      子エージェントが途中終了したため未実装）— migration 006 で TEXT 化、
-      ON CONFLICT へ source/expires_at 追加、境界回帰。
+- [x] source 列の長上限整合 — 2026-11-22 並列 Verify（V-91）: 既に解消済み（todo.md:2570-2571,2642-2643 の記録と整合）。001_initial.sql:9 の VARCHAR(100) は migration 006 で TEXT へ拡張済み、Rust 側 MAX_SOURCE_BYTES=4096 と境界回帰（config.rs:506-576 / http.rs:872 / grpc.rs:544）を保持。
 - [ ] **両 DB バックアップギャップ**（high、子の実装が既存10回帰と矛盾した
       ため差し戻し）— JARVIS_PG_EXTRA_DATABASES を segment 単位で設計し直し、
       manifest role と verify/restore の解決を整合させたうえで再実装。
@@ -2751,10 +2749,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-mcp-gw/src/approval.rs:15-18,31-44`, `src/config.rs:19-23` /
   R1-AR01,R1-CF01,R1-ST01 / confirmed。既存 469 行の対応は既定値の
   compile-time assert のみで、Env 片側変更の drift は検出できない。
+  - 2026-11-22 並列 Verify（V-92）: 未解決（confirmed）。policy の DEFAULT_APPROVAL_TIMEOUT_SECS=300 と gateway の DEFAULT_APPROVAL_WINDOW_SECS=300 は別定義（compile-time assert は既定値のみ）。実効値は TOML/env の別経路で、cross-crate 一致テストなし。共通定数集約は設計判断。
 - [ ] **allowlist と Casbin で principal / tool 許可が二重定義** —
   `rust/jarvis-mcp-gw/src/lib.rs:111-143`, `rust/jarvis-policy/src/policy.rs:967-969` /
   R1-AR01 / confirmed。「allowlist が single source of truth」という
   コメントと最初のゲートが policy 側である点が矛盾。
+  - 2026-11-22 並列 Verify（V-93）: 未解決（confirmed）。mcp_allowlist.toml:17,22-132 と casbin_policy.csv:13-53 が許可を二重定義（コメント :5-6,:40-41 が自認）。lib.rs は policy 判定→allowlist 判定の二層で、単一情報源化・整合検証なし。mcp_server.rs:587-588 のテストが二層独立を明記。設計判断。
 - [ ] **Cedar コンテキストが gateway にハードコードされ schema 検証が無い**
   - 2026-11-22 並列 Verify（V-49）: 未解決（confirmed）。gateway の policy_context（lib.rs:26-47）は server 管理4属性に限定されるが、policy.rs:170 の `Context::from_json_value(context, None)` が schema を渡さず、schema 未指定時は検証をスキップ（:141-147）。cedar_schema.cedarschema:51-55 も context 属性を宣言せずコメントのみ。
  —
@@ -2765,9 +2765,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `rust/jarvis-policy/src/config.rs:146-155`, `src/lib.rs:69`,
   `rust/jarvis-mcp-gw/src/lib.rs:337-356` / R1-AR01 / confirmed。
   `PolicyConfig` 直接構築経路では fail-closed ガードがスキップされる。
-- [ ] **承認 wire DTO が共有型の外で再実装されている** —
-  `rust/jarvis-mcp-gw/src/approval.rs:97-153`, `jarvis-policy/src/policy.rs:68-74` /
-  R1-AR01 / confirmed。`ApprovalDecision` は共有済みだが request/outcome が重複。
+  - 2026-11-22 並列 Verify（V-94）: 未解決（confirmed）。config.rs:153-159 の load 時4検証に対し lib.rs:36-50 に placeholder トークン検証のインライン再実装、lib.rs:69 に validate_approval_persistence 再呼び出し（コメント :66-68,226-228 が分散を自認）。PolicyConfig 直接構築経路では一部ガードがスキップされる。集約は設計判断。
+- [x] 承認 wire DTO の共有型集約 — 2026-11-22 並列 Verify（V-95）: 既に解消済み。jarvis-core/src/approval.rs:19-47 に ApprovalRequest/ApprovalDecision の単一定義、policy.rs:68-74 は pub use へ置換、gateway/ui は境界 DTO として薄く保持し core 型へ変換（outcome_from_wire / decision_from_json 等）。整合回帰（core ゴールデン / gateway wire→core / UI 変換）も充実。
 - [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能**（部分対応） — 2026-11-22 対応済み（安全な範囲）: builder.rs:1329 の `pub mod memory` と内部 bare pub 5項目（create_pg_pool / create_qdrant_client / ensure_collection / upsert_vector / search_vectors）を `pub(crate)` へ縮小。lib.rs:27-28 の同一クレート参照は維持、外部クレート実利用は無し。残るは他クレートから実利用のある grpc::proto / kill_switch::sha256_digest 等の再エクスポート設計（判断待ち）のため項目は open 維持。根拠
   `rust/jarvis-context/src/builder.rs:1329,1338,1381,1651,1700,1740`, `rust/jarvis-context/src/lib.rs:27-28` / V-76 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 184 passed（unit）+ 6 passed（integration）、件数不変で証跡同期不要、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
