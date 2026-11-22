@@ -1978,8 +1978,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   `ci/scripts/generate-evidence.sh:116-138` / verified。コード変更なし。
 - [x] restore_configs の owner/mode 方針（重複エントリ2件を統合） — 2026-11-22 確認: 既に解消済み。`infra/scripts/restore-local.d/configs.sh:133-159` の `EXPECTED_CONFIG_MODE` が allowlist 6対象＋全 unit の期待 owner/mode（root:root 0644）を単一表で定義し、`expected_config_mode()` アクセサ経由で restore_configs / build / deploy の3経路が参照（:2093 の既存完了記録も参照）。旧「0600 方針」は現在の 0644 契約へ既に更新済み。根拠
   `infra/scripts/restore-local.d/configs.sh:133-159,191-` / verified。コード変更なし。
-- [ ] P1-6 暗号化導入時に verify/restore のペイロード名・形式ハードコード
-  がゲートを停止（medium）— manifest に format/encryption/signature 記述子。
+- [x] P1-6 manifest 記述子（format/encryption/signature/role） — 2026-11-22 Verify: 既に解消済みの重複2件。`payload-descriptors.sh:7` が manifest 行契約 `name size sha256 [format encryption signature role]` を実装し `:55-61` の resolve_descriptors() が4記述子を解決、`backup-local.sh:161-178` が記述子を manifest へ書き出し（P1-6 暗号化自体は鍵注入判断待ちで意図的に未実装と明記、`:10` が更新ポイント一元化を記載）。verify/restore は共有 lib 経由で記述子を扱いハードコードを排除済み（I77-A/I78-A）。残るは暗号化鍵の注入先のユーザー判断のみ。
 - [x] dsh.md / remaining-tasks.md の旧記述4件 — 2026-11-22 Verify: すべて更新済み。(1) `dsh.md:54` は firejail 実行 fallback 撤去済み・設定値のみ互換残存と明記、(2) `dsh.md:109-110` は「firejail フォールバック失敗」を 2026-11-15 時点の履歴と注記、(3) `remaining-tasks.md:610` は Cedar schema が informational でなく Strict 検証強制と明記、(4) `build-selfhost.sh:47` は 007 まで更新済み（先ラウンド対応）。根拠
   `docs/integration/dsh.md:54,106-112`, `docs/integration/remaining-tasks.md:606-614`, `infra/scripts/build-selfhost.sh:43-47` / verified。コード変更なし。
 
@@ -2000,9 +1999,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 68 の残り指摘（未対応）
 
-- [ ] P1-6 暗号化導入時に verify/restore のペイロード名・形式ハードコードが
-  ゲートを停止（medium）— manifest に format/encryption/signature 記述子。
-  過去のラウンドから継続、ユーザー判断（暗号化鍵の注入先）を含む。
+- [x] P1-6 manifest 記述子（format/encryption/signature/role） — 2026-11-22 Verify: 既に解消済みの重複2件。`payload-descriptors.sh:7` が manifest 行契約 `name size sha256 [format encryption signature role]` を実装し `:55-61` の resolve_descriptors() が4記述子を解決、`backup-local.sh:161-178` が記述子を manifest へ書き出し（P1-6 暗号化自体は鍵注入判断待ちで意図的に未実装と明記、`:10` が更新ポイント一元化を記載）。verify/restore は共有 lib 経由で記述子を扱いハードコードを排除済み（I77-A/I78-A）。残るは暗号化鍵の注入先のユーザー判断のみ。
 - [x] restore_configs の owner/mode 方針（重複エントリ2件を統合） — 2026-11-22 確認: 既に解消済み。`infra/scripts/restore-local.d/configs.sh:133-159` の `EXPECTED_CONFIG_MODE` が allowlist 6対象＋全 unit の期待 owner/mode（root:root 0644）を単一表で定義し、`expected_config_mode()` アクセサ経由で restore_configs / build / deploy の3経路が参照（:2093 の既存完了記録も参照）。旧「0600 方針」は現在の 0644 契約へ既に更新済み。根拠
   `infra/scripts/restore-local.d/configs.sh:133-159,191-` / verified。コード変更なし。
 - 親が対応: build-selfhost.sh:402 の sudo install root 所有化（chown 修正の
