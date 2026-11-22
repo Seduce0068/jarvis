@@ -1227,8 +1227,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   event の CONTEXT_MODE/CONTEXT_GRPC_ADDR/CONTEXT_GRPC_TOKEN、context の
   EMBEDDING_DIM、policy の REQUIRE_* ガード、mcp-gw の UPSTREAMS など。
   R4-E で一部追記済みだが、設定キーの網羅性を再確認する。
-- [ ] check-evidence の tamper 期待値が増えたため、次回以降も
-      `make safety-test` で全ケースの維持を確認する。
+- [x] check-evidence の tamper 期待値 — 2026-11-22 並列 Verify（V-31）: 既に配線済みで継続運用の注意喚起。`test-legacy-guards.sh:164,353,469,2448` に tamper 全ケースと fail-closed 構造があり、Makefile:95 (safety-test) / :83 (ci-local) / ci.yml:123 / review-gate.yml:64 から呼ばれる。未対応バグではない。
 
 ### Round 42 のレビュー結果（R4 で修正済み）
 
@@ -1343,6 +1342,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] `decide()` の publish が既存決定を無条件上書き（medium）—
   timeout / prune と同じ勝者温存ルールを適用（Noop バックエンドで競合）。〔Round 46 で対応済み〕
 - [ ] 発掘: rustfmt ゲートが CI 未配線、Cedar スキーマ旧コメント、
+  - 2026-11-22 並列 Verify（V-32）: 部分的解消。Cedar 旧コメントは解消済み（cedar_schema.cedarschema:4-8 が Strict/fail-closed を明記）。rustfmt は共有ワークフロー rust-gates.yml@v1 へ委譲済み（AGENTS.md:110-111）だが共有側の実体はローカルに無く CI 上で fmt が走るかは未確認。
   opencode.jsonc が build-selfhost 配布対象外、infra/README の 1Password 表記、
   dsh.md / tool-matrix.md の tools/list 非表示記述。
 
@@ -1594,8 +1594,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   のみで放置（high）— テンプレートを書き戻すか unit を fail-closed 化。〔Round 54 で対応済み〕
 - [x] I54-D 即時停止が event/context に未適用（"exiting cleanly" 残存、
   TimeoutStopSec=30）— policy と同じ固定語彙・10秒へ揃える。〔Round 54 で対応済み〕
-- [ ] 発掘: UI/mcp-gw の仕様・証跡が古い（36/45 件のまま）、check-evidence
-  の requirements 集合未検証、Runbook ゲート表の古さ、mcp_allowlist 旧コメント。
+- [x] 発掘: UI/mcp-gw 仕様・証跡（V-35） — 2026-11-22 対応済み。(1) 「36/45」は todo.md 自身にのみ残り、evidence/index.md は UI 85 / mcp-gw 155 の現行値へ同期済み。(2) requirements 全 evidence 走査は V-13 で確認済み。(3) Runbook のゲート一覧に `check-evidence-counts` が欠落していたため追記（:122-136）。(4) mcp_allowlist 旧コメントは 833 行目で修正済み。
 
 - 親が対応: fmt 差分、`tracing_subscriber::fmt()` 修正（3箇所）、
   grpc.rs テストの UnifiedEvent / MemoryEntry import。

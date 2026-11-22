@@ -126,7 +126,15 @@ make check-evidence
 ```
 
 `ok=<n> errors=0` なら成功。失敗時はエラーコードのみが出力され、
-問題の値は表示されない。現行実装が発行する主なコードは次のとおり。
+問題の値は表示されない。
+
+実 suite との件数照合は別ゲート `make check-evidence-counts`（`ci/scripts/
+generate-evidence.sh --check`）が担う。これは各証跡の `results` と実 cargo
+suite の機械導出値を照合し、`CHECK: MATCH` / `CHECK: MISMATCH` のみを出力する
+（値は出さない）。`ci-local` と CI `extra_gates` の両方に配線済みで、
+`check-evidence.sh`（内部整合）と補完関係にある。
+
+現行実装が発行する主なコードは次のとおり。
 
 | 区分 | エラーコード |
 | --- | --- |
