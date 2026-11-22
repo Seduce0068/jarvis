@@ -2904,11 +2904,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **outbox バックオフ CAS の単調性ガード** — 2026-11-22 対応済み。`mark_failed`（builder.rs:571-590）の UPDATE を `SET attempts = GREATEST(attempts, $2), next_retry_at = GREATEST(next_retry_at, $3)` へ変更。同値 attempts の古いスナップショットが再来しても next_retry_at が後退せず exponential backoff が保持される。WHERE `attempts <= $2` は維持（attempts 巻き戻し防止）。静的 SQL 回帰 `mark_failed_sql_keeps_retry_columns_monotonic` を追加。根拠
   `rust/jarvis-context/src/builder.rs:571-590,3149-3178` / V-77 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 185 passed（+1）+ integration 6 passed、context 証跡 184→185 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **Qdrant と outbox の二重失敗で元の障害 identity が失われる**
-  - 2026-11-22 並列 Verify（V-78）: 未解決（confirmed）。store_memory_with_sinks（builder.rs:668-679）で Qdrant エラーは warn に残るが outbox.record 失敗時に .context(...)? が early return し元エラーが返り値から破棄。上層 error_kind は outbox 由来を other 扱い。二重失敗注入回帰なし。
- —
-  `rust/jarvis-context/src/builder.rs:646,652,1064` / R2-ER01 / confirmed。
-  PG 行のみ永続化されベクターも outbox も無い孤立行が残る。
+- [x] **二重失敗時の障害 identity 保持** — 2026-11-22 対応済み。`store_memory_with_sinks` の Err 分岐（builder.rs:669-688）で outbox.record 失敗時に early return せず、固定語彙 warn を出したうえで元の Qdrant エラーを `error.context("queuing a failed Qdrant upsert also failed")` として返す。上層 http/grpc の `ContextError::Qdrant` downcast が復元され障害 identity が保持される。outbox エラーの本文/ID はログ・エラー文字列へ非出力。回帰 `outbox_record_failure_still_returns_downcastable_qdrant_error` を追加（FailingRecordOutbox + QdrantIdentitySink、動的ログ capture なしで決定論的）。根拠
+  `rust/jarvis-context/src/builder.rs:669-688,2893-2956` / V-78 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 186 passed（+1）+ integration 6 passed、context 証跡 185→186 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **古い pending_embeddings 行が新鲜なベクトルを Qdrant で上書き**
   - 2026-11-22 並列 Verify（V-79）: 未解決（confirmed）。PendingEmbedding に created_at/version が無く（:375-393）、record は ON CONFLICT DO UPDATE で created_at=NOW() のみ（:474-486）、remove は id のみの無条件 DELETE（:563-568）。remove 失敗は warn のみで、古い行が残ると次回 reconcile で旧ベクトルが Qdrant を上書きしうる。競合防止は未実装。
  —

@@ -674,10 +674,19 @@ async fn store_memory_with_sinks(
                 error_kind = error_kind(&error, ErrorKind::Qdrant),
                 "Qdrant upsert failed; queuing memory in pending_embeddings for retry"
             );
-            outbox
-                .record(memory, &memory.embedding)
-                .await
-                .context("queuing a failed Qdrant upsert in pending_embeddings")?;
+            // R2 (C66-R2-01): the enqueue is best-effort. If it also fails, keep
+            // the original Qdrant error at the root of the returned anyhow chain
+            // so the upper layers (http/grpc) can still downcast it to
+            // `ContextError::Qdrant`. The outbox error's text/ID/body never
+            // reaches a log record or the error string: only the fixed-category
+            // classifier and a fixed message are used here.
+            if let Err(outbox_error) = outbox.record(memory, &memory.embedding).await {
+                warn!(
+                    error_kind = error_kind(&outbox_error, ErrorKind::Persistence),
+                    "pending_embeddings enqueue also failed after Qdrant upsert failure"
+                );
+                return Err(error.context("queuing a failed Qdrant upsert also failed"));
+            }
             Err(error)
         }
     }
@@ -2879,6 +2888,69 @@ mod tests {
         assert_eq!(queued[0].id, memory.id);
         assert_eq!(queued[0].content, memory.content);
         assert_eq!(queued[0].metadata, memory.metadata);
+    }
+
+    #[tokio::test]
+    async fn outbox_record_failure_still_returns_downcastable_qdrant_error() {
+        // R2 (C66-R2-01): a Qdrant failure whose outbox enqueue also fails must
+        // keep `ContextError::Qdrant` in the returned anyhow chain, because the
+        // http/grpc layers classify by downcasting. Losing it would relabel the
+        // incident as `other`. Only the returned error is inspected here — no
+        // dynamic log capture, so the check is deterministic.
+        struct QdrantIdentitySink;
+
+        #[async_trait::async_trait]
+        impl VectorSink for QdrantIdentitySink {
+            async fn upsert(&self, _memory: &MemoryEntry) -> Result<()> {
+                // Same error the production `QdrantVectorSink` yields via
+                // `discard_qdrant_error`.
+                let err: anyhow::Error =
+                    crate::error::ContextError::qdrant(crate::error::QdrantErrorKind::FAILED)
+                        .into();
+                Err(err)
+            }
+        }
+
+        /// Outbox whose `record` always fails; remaining seams are no-ops.
+        struct FailingRecordOutbox;
+
+        #[async_trait::async_trait]
+        impl PendingStore for FailingRecordOutbox {
+            async fn record(&self, _memory: &MemoryEntry, _embedding: &[f32]) -> Result<()> {
+                anyhow::bail!("injected pending_embeddings enqueue failure")
+            }
+            async fn list(&self, _limit: usize) -> Result<Vec<PendingEmbedding>> {
+                Ok(Vec::new())
+            }
+            async fn remove(&self, _id: Uuid) -> Result<()> {
+                Ok(())
+            }
+            async fn mark_failed(
+                &self,
+                _id: Uuid,
+                _attempts: i32,
+                _next_retry_at: DateTime<Utc>,
+            ) -> Result<()> {
+                Ok(())
+            }
+        }
+
+        let err = store_memory_with_sinks(
+            &entry_with_expiry(None),
+            &QdrantIdentitySink,
+            &FailingRecordOutbox,
+        )
+        .await
+        .expect_err("a Qdrant failure must surface even when the enqueue also fails");
+
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::error::ContextError>(),
+                Some(crate::error::ContextError::Qdrant(_))
+            ),
+            "the original Qdrant error must survive in the anyhow chain"
+        );
+        assert_eq!(error_kind(&err, ErrorKind::Persistence), "qdrant");
     }
 
     #[tokio::test]
