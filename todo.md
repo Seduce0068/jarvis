@@ -2826,6 +2826,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **opencode.jsonc が配布経路に未配線で deny が実機に届かない** —
   根拠 `docs/integration/remaining-tasks.md:74-82` / R5-VU01 / confirmed。
   `build-selfhost.sh` の配布対象外で旧 cloud-init.yaml にのみ記載されている。
+  - 2026-11-22 並列 Verify（V-83）: 未解決（confirmed）。build-selfhost.sh の配布対象に opencode.jsonc が無く、参照は legacy cloud-init/deploy.rs のみ。repo の deny は実機に届かない。追加自体は otelcol-config.yaml の退避＋install 方式で可能だが、owner 方針（legacy jarvis:jarvis 0644 vs 共有 install の root:root）、drift 検査追加、実機再デプロイ（build-selfhost 再実行＋service 再起動）の判断待ち。
 - [x] **ADR-0001 の OpenCode V2 固定の置換注記** — 2026-11-22 対応済み。Decision 1 直前に「ADR-0002 でランタイム非依存化が決定され、OpenCode/code-server は交换可能な実装へ降格した。現行契約は ADR-0002 を正とする」置換記録を追加（ADR-0004 の infra 置換と同粒度）。adr/log.md にも記録追記。根拠
   `adr/0001-unified-architecture.md:38-47`, `adr/log.md`, `adr/0002-runtime-agnostic.md:4,15,40` / R1-DR01 / confirmed。
   - 検証: markdownlint 既存 baseline のみ、差分は ADR 2ファイル8行追加。
@@ -2841,6 +2842,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **allowlist の timeout_ms に起動時検証がなくハンドラごとに扱いが異なる** —
   `rust/jarvis-mcp-gw/src/allowlist.rs:20`, `sandbox.rs:223,375`, `gateway.rs:601` /
   R1-ST02 / confirmed。web.fetch のみ clamp し git/upstream は生値を使用。
+  - 2026-11-22 並列 Verify（V-81）: 未解決（confirmed）。AllowList::new（allowlist.rs:32-73）は TOML parse・空 name・空 principal のみ検証し timeout_ms の範囲ガードなし。「ハンドラごとの扱い差」は mcp_allowlist.toml:8-14 のコメントで現行契約として明記（web.fetch のみ clamp、他は生値）。起動時範囲検証の追加は可能だが設計判断。
 - [ ] **safe_client_error_text の語彙に git / パス系 ClientError が抜ける** —
   `rust/jarvis-mcp-gw/src/http.rs:323,349`, `sandbox.rs:125,330,413,473,498` /
   R1-ST02 / confirmed。機密ファイル拒否が「引数不正」に丸められる。
