@@ -1221,7 +1221,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 41 の残り指摘（未対応）
 
-- [ ] config 4テンプレートに実装済み変数が未反映（confirmed medium）—
+- [x] config 4テンプレートの変数反映 — 2026-11-22 並列 Verify（V-15）: 既に解消済み（2767 行目の確認記録と整合）。event.env:24,26,29（CONTEXT_MODE/GRPC_ADDR/GRPC_TOKEN）、context.env:16（EMBEDDING_DIM）、policy.env:25,29,32,47（4つの REQUIRE_* ガード）、mcp_gateway.env:25（UPSTREAMS）が各 impl の Env prefix フィールドと 1:1 で一致。シークレットは <set-at-deployment> プレースホルダ方式（値は読まず）。—
   event の CONTEXT_MODE/CONTEXT_GRPC_ADDR/CONTEXT_GRPC_TOKEN、context の
   EMBEDDING_DIM、policy の REQUIRE_* ガード、mcp-gw の UPSTREAMS など。
   R4-E で一部追記済みだが、設定キーの網羅性を再確認する。
@@ -1336,7 +1336,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   するか、shell ラッパで展開。併せて `${` 残存を fail-closed で検査。〔Round 46 で対応済み〕
 - [x] kill switch 本体の `warn!` が自由入力 reason と `{error}` を OTLP へ送出
   （medium）— `kill_switch.rs:246-252,357-361`。`redacted()` と同じ固定語彙化。〔Round 46 で対応済み〕
-- [ ] commit_gate 1回化の新契約が spec / UI / 回帰名に未反映（medium）—
+- [x] commit_gate 1回化の新契約 — 2026-11-22 並列 Verify（V-14）: 契約本体（approval.rs:445-461,1129-1152）、spec（test-policy-approval.md:143-154,370-376）、UI（approvals.rs:654-663,1002-1029）はすべて反映済み。子は「回帰名 kill_switch_during_commit_is_not_published が旧名のまま」を未解決としたが、`lib.rs:705-712` が「this test keeps its historical name as a regression ID, but its expectation was updated」と意図的に維持しており、以前の判定（却下）と整合。期待値は Approved に更新済み（:740-753）で実害なし。—
   TC-K2 への追記、UI の「承認済み・実行は非常停止中」表示、回帰名改名。
 - [x] `decide()` の publish が既存決定を無条件上書き（medium）—
   timeout / prune と同じ勝者温存ルールを適用（Noop バックエンドで競合）。〔Round 46 で対応済み〕
@@ -1672,7 +1672,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   near-total skip を通さない。〔Round 57 で対応済み〕
 - [x] 有限性チェックが store ingress のみ（medium）— query embedding /
   reconcile / f64→f32 キャスト経路へ `validate_embedding` を適用。〔Round 57 で対応済み〕
-- [ ] REQ 集合ゲートが spec ごとに最後の evidence しか検証しない（low）。
+- [x] REQ 集合ゲートの全 evidence 検証 — 2026-11-22 並列 Verify（V-13）: 既に解消済み。`check-evidence.sh:80-83` の evi_reqs_entries はリストで、全 evidence 走査（:233）で各 requirements を記録し、比較ループ（:494-504）が entries 全件を for で回して set 一致を検証（REQ_SET_MISMATCH:<spec>:<evi_file>）。tamper 回帰（test-legacy-guards.sh:726-789）も存在。
 - [ ] OTel SDK ガードがより詳細な RUST_LOG ターゲット指定で上書き可能（low）。
 - [ ] サイズ境界が content/source/metadata のみ（low）— payload / query /
   event_type / correlation_id にも上限を追加。
@@ -1864,9 +1864,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] Round 61 の4証跡の notes に BareJson／415／413／no-leak キーワードが
   未同期（medium）— 現在 `BASELINE_CONTRACT_STEPS` で grandfather 中。
   notes へ実測キーワードを追記し baseline を削除して strict 化する。
-- [ ] 4サービスの `status_label` が 413/415 を "other" に丸め（medium）—
-  Round 62 の 400/413 分離がメトリクスで観測不能。ラベル追加＋cross-crate
-  回帰。
+- [x] status_label の 413/415 丸め — 2026-11-22 並列 Verify（V-11）: 既に解消済み（1881-1882 行目の完了記録）。`jarvis-core/src/lib.rs:134` の単一定義が 413 => "413"（:145）/ 415 => "415"（:146）を返し、"other" はフォールバックに限定。pinn テスト（:621,632-633）が固定バケットを検証し、4サービスは core 関数を呼ぶだけ。
 - [ ] UnknownBodyError→400 が4仕様・証跡に未反映（low）— 3種→4種へ修正。
 - [ ] /health の `.trim()` が「完全バイト一致」契約と矛盾（low）— trim を
   外すか doc／仕様を trim 許容へ揃える。
@@ -2451,8 +2449,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   実測。patch 版あり: tokio 1.53.3 / rustls 0.23.46 / rustls-webpki 0.103.16 /
   webpki-roots 1.0.10 / rustix 1.1.6 / pulldown-cmark 0.13.6 / ctutils 0.4.4 /
   ui heapless 0.9.4。major 更新要: hickory 0.26 / rsa 0.10 / rmcp 3.9。
-- [ ] CI / Makefile に cargo audit ゲートが無い（medium）— 両 lock を対象に
-  extra_gates / ci-local へ追加、advisory DB 更新方針と ignore 運用を決定。
+- [x] cargo audit ゲート — 2026-11-22 並列 Verify（V-12）: 既に解消済み（2478-2480 / 2493-2494 行目の完了記録）。`check-dependency-audit.sh:40` が LOCK_FILES=(rust/Cargo.lock ui/Cargo.lock) で両 lock を走査し、Makefile:69/80/94/96 と ci.yml:112-123 が ci-local / safety-test / extra_gates へ配線。advisory DB 方針（CI のみ fetch、scan は常に --no-fetch）と ignore 運用（audit.toml + 再評価日 2026-12-20）も明記済み。
 - [x] **OTel traces filter が全 Rust スパンをドロップ**（confirmed high）— — **2026-11-22 重複整理**: 同一内容は 2483 行目で完了記録済み。
   `otelcol-config.yaml:99-104` の include（`jarvis.*` 等）が実スパン名
   （`check` / `process_event` / `approve_approval`）と不一致。include 拡張または
