@@ -47,6 +47,36 @@ fn validate_policies_against_schema(schema: Schema, policies: &PolicySet) -> Res
     )
 }
 
+/// Pre-validate the JSON types of the four server-controlled runtime context
+/// attributes against the types declared by the deployed Cedar schema.
+///
+/// Cedar 4.13's `Context::from_json_value` applies lenient scalar coercion when
+/// a schema is supplied (e.g. the JSON string `"false"` is promoted to a
+/// `Bool`), so the schema check alone can silently accept a wrongly typed
+/// attribute. Inspecting the plain `serde_json::Value` here closes that gap:
+/// any attribute that is missing or has a type other than the declared one
+/// fails closed. This is a pure function; the caller decides whether to apply
+/// it based on whether a schema is deployed. The error text uses fixed wording
+/// and never includes the offending value (or any caller-supplied data).
+fn validate_runtime_context_json_types(context: &Value) -> Result<()> {
+    // Same shape as the `context` record declared for every action in
+    // `cedar_schema.cedarschema`: three strings and one boolean.
+    type ExpectedType = (&'static str, fn(&Value) -> bool);
+    const EXPECTED_TYPES: [ExpectedType; 4] = [
+        ("tool", Value::is_string),
+        ("principal", Value::is_string),
+        ("resource", Value::is_string),
+        ("requires_approval", Value::is_boolean),
+    ];
+
+    for (field, matches_expected_type) in EXPECTED_TYPES {
+        if !context.get(field).is_some_and(matches_expected_type) {
+            anyhow::bail!("Cedar runtime context does not match the deployed schema types");
+        }
+    }
+    Ok(())
+}
+
 /// Locate the schema deployed alongside the configured Cedar policy source.
 ///
 /// `None` means no schema is available, in which case startup keeps the
@@ -83,6 +113,12 @@ pub struct CedarEngine {
     /// Configured Cedar policy source. Management operations persist here so a
     /// restart observes the same rules; only directory sources are mutable.
     policy_path: PathBuf,
+    /// Schema deployed next to the policy source, retained after the startup
+    /// type-check so `is_authorized` can type-check the runtime context too.
+    /// Interior mutability lets the management/reload path refresh it from the
+    /// same on-disk source. `None` preserves the legacy behavior of an
+    /// unvalidated context for installations with no deployed schema.
+    schema: StdRwLock<Option<Schema>>,
 }
 
 impl CedarEngine {
@@ -125,10 +161,12 @@ impl CedarEngine {
         tracing::info!("Loaded {} Cedar policies", policies.policies().count());
 
         // Type-check the policies that were actually loaded before the engine
-        // can authorize anything. The schema is deployed next to the policy
-        // source, so a missing schema means this installation has no schema
-        // contract yet: keep the legacy deny-by-default startup rather than
-        // failing (see the separate configuration-path finding).
+        // can authorize anything, then retain the same parsed schema for the
+        // runtime context check in `is_authorized`. The schema is deployed next
+        // to the policy source, so a missing schema means this installation has
+        // no schema contract yet: keep the legacy deny-by-default startup
+        // rather than failing (see the separate configuration-path finding).
+        let mut schema = None;
         if let Some(schema_path) = schema_path_for(path) {
             tracing::info!(
                 "Validating Cedar policies against schema {}",
@@ -136,8 +174,12 @@ impl CedarEngine {
             );
             let schema_text = std::fs::read_to_string(&schema_path)
                 .with_context(|| format!("reading Cedar schema {}", schema_path.display()))?;
-            let schema = parse_schema(&schema_text, &schema_path)?;
-            validate_policies_against_schema(schema, &policies)?;
+            let parsed = parse_schema(&schema_text, &schema_path)?;
+            // `Validator::new` consumes the schema; `Schema` is `Clone`, so keep
+            // a copy for the per-request context check instead of re-reading
+            // the file on every authorization.
+            validate_policies_against_schema(parsed.clone(), &policies)?;
+            schema = Some(parsed);
         } else {
             tracing::info!(
                 "Cedar schema {} not found next to {}; skipping schema validation",
@@ -151,6 +193,7 @@ impl CedarEngine {
             policies: StdRwLock::new(policies),
             entities,
             policy_path: path.to_path_buf(),
+            schema: StdRwLock::new(schema),
         })
     }
 
@@ -167,7 +210,35 @@ impl CedarEngine {
         let action_uid = format!("jarvis::Action::\"{}\"", action).parse()?;
         let resource_uid = format!("jarvis::Resource::\"{}\"", resource).parse()?;
 
-        let context_entity = Context::from_json_value(context.clone(), None)?;
+        // The gateway builds a fixed four-field context from server-controlled
+        // attributes. When a schema is deployed, require the context to conform
+        // to the declared shape of this action: a missing or misspelled field,
+        // an extra caller-supplied field, a wrong type, or an undeclared action
+        // is rejected (fail-closed deny). This is an intentional compatibility
+        // change for callers that previously sent `{}` or arbitrary keys.
+        // `CedarRequest::new` stays schema-less (5th argument `None`), so only
+        // the context is checked here; installations without a schema keep the
+        // legacy unvalidated-context behavior.
+        let context_entity = {
+            let schema = self
+                .schema
+                .read()
+                .map_err(|_| anyhow::anyhow!("Cedar schema lock is poisoned"))?;
+            let schema_ref: Option<&Schema> = (*schema).as_ref();
+            // Only installations with a deployed schema opt into this strict
+            // context contract; without one the legacy unvalidated-context
+            // behavior is preserved. Run the explicit JSON type check before
+            // Cedar's lenient conversion so a wrong-typed attribute (e.g. the
+            // string `"false"` for `requires_approval`) fails closed instead
+            // of being coerced into a valid-looking value.
+            if schema_ref.is_some() {
+                validate_runtime_context_json_types(context)?;
+            }
+            Context::from_json_value(
+                context.clone(),
+                schema_ref.map(|schema| (schema, &action_uid)),
+            )?
+        };
 
         let request = CedarRequest::new(
             principal_uid,
@@ -212,16 +283,26 @@ impl CedarEngine {
     }
 
     /// Apply the same strict schema gate used at startup to policies entering
-    /// through the management API. A missing schema keeps the legacy behavior
-    /// (no schema contract, deny by default).
+    /// through the management API, and refresh the retained schema from the
+    /// same on-disk source so runtime context checks cannot drift from the
+    /// policies that were just validated. A missing schema keeps the legacy
+    /// behavior (no schema contract, deny by default).
     fn validate_against_deployed_schema(&self, policies: &PolicySet) -> Result<()> {
         let Some(schema_path) = schema_path_for(&self.policy_path) else {
+            // Fail closed: do not discard an already active schema just because
+            // the file disappeared, which would silently disable context checks.
             return Ok(());
         };
         let schema_text = std::fs::read_to_string(&schema_path)
             .with_context(|| format!("reading Cedar schema {}", schema_path.display()))?;
         let schema = parse_schema(&schema_text, &schema_path)?;
-        validate_policies_against_schema(schema, policies)
+        validate_policies_against_schema(schema.clone(), policies)?;
+        let mut guard = self
+            .schema
+            .write()
+            .map_err(|_| anyhow::anyhow!("Cedar schema lock is poisoned"))?;
+        *guard = Some(schema);
+        Ok(())
     }
 
     /// Reload the in-memory snapshot through the very same [`load_from_directory`]
@@ -583,6 +664,22 @@ mod tests {
         }
     }
 
+    /// Mirror of `jarvis-mcp-gw::policy_context`: exactly the four
+    /// server-controlled, allowlist-derived attributes the gateway sends.
+    fn gateway_context(
+        tool: &str,
+        principal: &str,
+        resource: &str,
+        requires_approval: bool,
+    ) -> Value {
+        json!({
+            "tool": tool,
+            "principal": principal,
+            "resource": resource,
+            "requires_approval": requires_approval,
+        })
+    }
+
     const ADMIN_POLICY: &str =
         r#"permit (principal == jarvis::Principal::"jarvis_admin", action, resource);"#;
 
@@ -688,7 +785,105 @@ mod tests {
         )?;
 
         let engine = CedarEngine::new(&config_for(&dir)).await?;
+        // A schema-conforming request must carry the gateway's four required
+        // context attributes; a bare `{}` is no longer accepted (fail-closed).
+        assert!(engine.is_authorized(
+            "jarvis_admin",
+            "execute",
+            "tool:git.commit",
+            &gateway_context("git.commit", "jarvis_admin", "tool:git.commit", false),
+        )?);
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// Runtime context is type-checked against the deployed schema: a missing
+    /// or misspelled required attribute, an extra caller-supplied field, or a
+    /// wrong type must all fail closed instead of being silently accepted.
+    #[tokio::test]
+    async fn schema_rejects_nonconforming_runtime_context() -> Result<()> {
+        let dir = temp_dir("schema-context");
+        fs::write(dir.join("policies.cedar"), ADMIN_POLICY)?;
+        fs::write(
+            dir.join(CEDAR_SCHEMA_FILE),
+            include_str!("../../../infra/config/policy/cedar_schema.cedarschema"),
+        )?;
+        let engine = CedarEngine::new(&config_for(&dir)).await?;
+
+        let valid = gateway_context("git.commit", "jarvis_admin", "tool:git.commit", false);
+        assert!(engine.is_authorized("jarvis_admin", "execute", "tool:git.commit", &valid)?);
+
+        let missing = json!({
+            "tool": "git.commit",
+            "principal": "jarvis_admin",
+            "resource": "tool:git.commit",
+        });
+        let typo = json!({
+            "tool": "git.commit",
+            "principal": "jarvis_admin",
+            "resource": "tool:git.commit",
+            "requiresApproval": false,
+        });
+        let extra = json!({
+            "tool": "git.commit",
+            "principal": "jarvis_admin",
+            "resource": "tool:git.commit",
+            "requires_approval": false,
+            "caller_role": "admin",
+        });
+        let wrong_type = json!({
+            "tool": "git.commit",
+            "principal": "jarvis_admin",
+            "resource": "tool:git.commit",
+            "requires_approval": "false",
+        });
+        for (label, context) in [
+            ("missing requires_approval", &missing),
+            ("misspelled requires_approval", &typo),
+            ("extra caller-supplied field", &extra),
+            ("wrong requires_approval type", &wrong_type),
+        ] {
+            let outcome =
+                engine.is_authorized("jarvis_admin", "execute", "tool:git.commit", context);
+            let denied = !matches!(&outcome, Ok(true));
+            assert!(denied, "{label} must fail closed; got {outcome:?}");
+        }
+
+        fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
+
+    /// Without a deployed schema, the legacy unvalidated-context contract is
+    /// preserved. Installing one later is picked up by the management/reload
+    /// path without restarting, so the retained schema cannot drift from the
+    /// policies that were validated on disk.
+    #[tokio::test]
+    async fn no_schema_keeps_legacy_context_until_reload() -> Result<()> {
+        let dir = temp_dir("no-schema-context");
+        fs::write(dir.join("policies.cedar"), ADMIN_POLICY)?;
+        let engine = CedarEngine::new(&config_for(&dir)).await?;
+
         assert!(engine.is_authorized("jarvis_admin", "execute", "tool:git.commit", &json!({}))?);
+        assert!(engine.is_authorized(
+            "jarvis_admin",
+            "execute",
+            "tool:git.commit",
+            &json!({ "arbitrary_caller_key": "value" }),
+        )?);
+
+        fs::write(
+            dir.join(CEDAR_SCHEMA_FILE),
+            include_str!("../../../infra/config/policy/cedar_schema.cedarschema"),
+        )?;
+        engine.reload_policies()?;
+        let outcome =
+            engine.is_authorized("jarvis_admin", "execute", "tool:git.commit", &json!({}));
+        let denied = !matches!(&outcome, Ok(true));
+        assert!(
+            denied,
+            "a schema added on disk must be synced by reload: {outcome:?}"
+        );
 
         fs::remove_dir_all(&dir)?;
         Ok(())

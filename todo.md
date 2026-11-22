@@ -2719,13 +2719,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   コメントと最初のゲートが policy 側である点が矛盾。
   - 2026-11-22 並列 Verify（V-93）: 未解決（confirmed）。mcp_allowlist.toml:17,22-132 と casbin_policy.csv:13-53 が許可を二重定義（コメント :5-6,:40-41 が自認）。lib.rs は policy 判定→allowlist 判定の二層で、単一情報源化・整合検証なし。mcp_server.rs:587-588 のテストが二層独立を明記。設計判断。
   - 2026-11-23 調査（V-146）: 正規化 grant は実効13件の差分（allowlist のみ6／Casbin のみ7）があり、厳密一致 fail-closed は同梱設定で起動不能。実判定は lib.rs:125-155 の Casbin→allowlist の AND（積集合）で fail-open ではなく、lib.rs:138-140 の「allowlist が single source of truth」コメントが事実と矛盾するのみ。単一情報源化は実効権限変更を伴い採用しない方針。構造制約（全 principal に role、全 tool に tool: p 行）の起動検証は小規模で可能だが、まずコメント是真積集合契約へ修正する案件。
-- [ ] **Cedar コンテキストが gateway にハードコードされ schema 検証が無い**
-  - 2026-11-22 並列 Verify（V-49）: 未解決（confirmed）。gateway の policy_context（lib.rs:26-47）は server 管理4属性に限定されるが、policy.rs:170 の `Context::from_json_value(context, None)` が schema を渡さず、schema 未指定時は検証をスキップ（:141-147）。cedar_schema.cedarschema:51-55 も context 属性を宣言せずコメントのみ。
- —
-  `rust/jarvis-mcp-gw/src/lib.rs:26-47`, `rust/jarvis-policy/src/policy.rs:157-170` /
-  R1-AR01 / confirmed。`Context::from_json_value(context, None)` で属性 typo が
-  起動時 validation をすり抜ける。
-  - 2026-11-23 調査（V-147）: repo 内完結で実装可能（cedar-policy 4.13 既存 API、新規依存なし）。方針: schema の5 action に4属性 required 宣言＋CedarEngine が schema を保持し Context::from_json_value に渡す（Request::new は None 維持）。3ファイル +40〜80行。互換性変更（4属性以外の context は fail-closed deny）を明記要。テスト policy.rs:691 の json!({}) 更新が必要。
+- [x] Cedar 実行時 context の schema 検証 — 2026-11-23 方針委譲で対応済み。cedar_schema.cedarschema:60-113 の5 action に4属性（tool/principal/resource: String, requires_approval: Bool）を required 宣言。CedarEngine が schema を保持し is_authorized（policy.rs:227-235）が Context::from_json_value へ schema を渡す（Request::new は None 維持）。Cedar 4.13 の文字列→Bool 暗黙昇格を塞ぐ JSON 型事前検証（:60-77）も追加。management API/reload で保持 schema 同期。schema 無しでは従来挙動維持。互換性変更（4属性以外の直接 context は fail-closed deny）をコメント明記。回帰 +2。根拠 V-147。
 - [x] 起動時検証の集約 — 2026-11-23 方針委譲で対応済み。PolicyEngine::new（lib.rs:31-38）のインライン placeholder 判定を削除し config.validate_kill_switch_admin_token()? を単一真正源として呼ぶ。config.rs:222-264 のコメントも両経路共有へ更新、既定 warn-only は維持。回帰 +1（expect_err の Debug 境界は Result 分解で回避）。根拠 `rust/jarvis-policy/src/{lib.rs:31-38,config.rs:222-264,939-982}` / V-94。
 - [x] 承認 wire DTO の共有型集約 — 2026-11-22 並列 Verify（V-95）: 既に解消済み。jarvis-core/src/approval.rs:19-47 に ApprovalRequest/ApprovalDecision の単一定義、policy.rs:68-74 は pub use へ置換、gateway/ui は境界 DTO として薄く保持し core 型へ変換（outcome_from_wire / decision_from_json 等）。整合回帰（core ゴールデン / gateway wire→core / UI 変換）も充実。
 - [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能**（部分対応） — 2026-11-22 対応済み（安全な範囲）: builder.rs:1329 の `pub mod memory` と内部 bare pub 5項目（create_pg_pool / create_qdrant_client / ensure_collection / upsert_vector / search_vectors）を `pub(crate)` へ縮小。lib.rs:27-28 の同一クレート参照は維持、外部クレート実利用は無し。残るは他クレートから実利用のある grpc::proto / kill_switch::sha256_digest 等の再エクスポート設計（判断待ち）のため項目は open 維持。根拠
@@ -2737,12 +2731,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **二重失敗時の障害 identity 保持** — 2026-11-22 対応済み。`store_memory_with_sinks` の Err 分岐（builder.rs:669-688）で outbox.record 失敗時に early return せず、固定語彙 warn を出したうえで元の Qdrant エラーを `error.context("queuing a failed Qdrant upsert also failed")` として返す。上層 http/grpc の `ContextError::Qdrant` downcast が復元され障害 identity が保持される。outbox エラーの本文/ID はログ・エラー文字列へ非出力。回帰 `outbox_record_failure_still_returns_downcastable_qdrant_error` を追加（FailingRecordOutbox + QdrantIdentitySink、動的ログ capture なしで決定論的）。根拠
   `rust/jarvis-context/src/builder.rs:669-688,2893-2956` / V-78 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 186 passed（+1）+ integration 6 passed、context 証跡 185→186 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **古い pending_embeddings 行が新鲜なベクトルを Qdrant で上書き**
-  - 2026-11-22 並列 Verify（V-79）: 未解決（confirmed）。PendingEmbedding に created_at/version が無く（:375-393）、record は ON CONFLICT DO UPDATE で created_at=NOW() のみ（:474-486）、remove は id のみの無条件 DELETE（:563-568）。remove 失敗は warn のみで、古い行が残ると次回 reconcile で旧ベクトルが Qdrant を上書きしうる。競合防止は未実装。
- —
-  `rust/jarvis-context/src/builder.rs:630-643,454-480,712-715,946-955` /
-  R2-DI01 / likely。outbox.remove 失敗時に世代照合が無い。
-  - 2026-11-23 調査（V-148）: V-80（トランザクション化）より先に本件を対応すべき。vector_state に synced 終端を書き LIST_PENDING_SQL(:267-272) へ vector_state=pending ゲートを追加する案は新規 migration 不要・公開 API 不変で小規模（remove 失敗2コールサイト＋モック4種＋静的 SQL テスト同期）。完全保証は migration 008 の generation 列。
+- [x] outbox の synced 終端ゲート — 2026-11-23 方針委譲で対応済み。PendingStore::mark_synced（builder.rs:443-451）を追加し、store_memory_with_sinks / reconcile_pending の両 remove 失敗経路で vector_state=synced へ遷移（新規 migration なし）。LIST_PENDING_SQL（:260-273）に `vector_state = 'pending'` ゲートを追加し、synced 行が再 reconcile で旧ベクトルを Qdrant へ再書込みする経路を遮断。モック4種と静的 SQL アサーション同期、回帰 +1（remove 失敗後に再 list されない）。根拠 V-148。
 - [ ] **PG コミット後に outbox 記録が失敗すると再試行マーカーが消える**
   - 2026-11-22 並列 Verify（V-80）: 未解決（confirmed）。store_memory（builder.rs:1076-1112）が memories INSERT を先に実行、store_memory_with_sinks の outbox.record 失敗（:674-677）で補償（ロールバック／再キュー）なし。PG 行のみ永続化され pending_embeddings も無い孤立行となり reconcile が拾えない。トランザクション化またはコミット前 outbox 挿入が必要で設計判断案件。
  —

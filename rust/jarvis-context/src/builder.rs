@@ -257,16 +257,20 @@ const MAX_RETRY_BACKOFF_MINUTES: i64 = 60 * 24; // 24 h
 /// no longer occupy a slot of [`RECONCILE_BATCH_LIMIT`] on every startup.
 const MAX_RECONCILE_ATTEMPTS: i32 = 10;
 
-/// Selection query for one reconcile batch (I30-C / I61-B / I63-A).
+/// Selection query for one reconcile batch (I30-C / I61-B / I63-A / C95-R2-01).
 ///
-/// Named so the three eligibility gates are stated once and can be asserted in
+/// Named so the four eligibility gates are stated once and can be asserted in
 /// a pure test without a live PostgreSQL connection. A dead-lettered row is
 /// retained in the table for auditing but can never be selected again; an
 /// exhausted row is excluded from retries and exported by its own gauge
-/// (I65-B) rather than being counted as recoverable pending work.
+/// (I65-B) rather than being counted as recoverable pending work. A row whose
+/// upsert already succeeded but whose deletion failed is retired as
+/// `vector_state = 'synced'`; without that gate a later startup would replay
+/// its stored (possibly stale) vector into Qdrant.
 const LIST_PENDING_SQL: &str = "SELECT id, content, metadata, embedding, attempts, next_retry_at
                  FROM pending_embeddings
                  WHERE dead_lettered_at IS NULL
+                   AND vector_state = 'pending'
                    AND attempts < $2
                    AND (next_retry_at IS NULL OR next_retry_at <= NOW())
                  ORDER BY created_at ASC LIMIT $1";
@@ -385,8 +389,9 @@ struct PendingEmbedding {
     #[allow(dead_code)]
     next_retry_at: Option<DateTime<Utc>>,
     /// Mirrors `pending_embeddings.vector_state` for the in-memory store
-    /// (I65-B). Only the fixed tokens `'pending'` and `'exhausted'` are written
-    /// here; dead-lettered rows are removed by the seam's default method.
+    /// (I65-B / C95-R2-01). Only the fixed tokens `'pending'`, `'exhausted'`
+    /// and `'synced'` are written here; dead-lettered rows are removed by the
+    /// seam's default method.
     // Read by the in-memory assertions; production state lives in SQL.
     #[allow(dead_code)]
     vector_state: &'static str,
@@ -432,6 +437,18 @@ trait PendingStore: Send + Sync {
     /// distinction between a retired row and a recoverable backlog is testable
     /// without a live database.
     async fn mark_exhausted(&self, _id: Uuid) -> Result<()> {
+        Ok(())
+    }
+    /// Persist the terminal `synced` state after an upsert succeeded but the
+    /// row deletion failed (C95-R2-01). `PgPendingStore` reuses the existing
+    /// `vector_state` column — already home to `'exhausted'` and
+    /// `'dead_lettered'` — so no migration is needed. The
+    /// `vector_state = 'pending'` gate in [`LIST_PENDING_SQL`] then keeps this
+    /// row out of every later batch, preventing a stale stored vector from
+    /// being replayed. The default no-op preserves in-memory stores that still
+    /// model an always-successful delete; the four persistence-mirroring mocks
+    /// override it explicitly.
+    async fn mark_synced(&self, _id: Uuid) -> Result<()> {
         Ok(())
     }
     /// Re-aggregate `OUTBOX_STATE_COUNTS_SQL` and publish both gauges once
@@ -515,17 +532,19 @@ impl PendingStore for PgPendingStore {
         // Only live, due rows still inside the attempt budget are selected. A
         // deferred row drops out of the head of the batch (I30-C); once its
         // attempts reach `MAX_RECONCILE_ATTEMPTS` it drops out entirely
-        // (I61-B); a dead-lettered row is never selected again (I63-A). Poison
-        // rows therefore cannot starve healthy PG-only memories.
+        // (I61-B); a dead-lettered row is never selected again (I63-A), and a
+        // row already retired as `'synced'` (C95-R2-01) cannot replay its stale
+        // vector. Poison rows therefore cannot starve healthy PG-only memories.
         let rows = client
             .query(
                 LIST_PENDING_SQL,
                 &[&(limit as i64), &MAX_RECONCILE_ATTEMPTS],
             )
             .await?;
-        // Best-effort gauges (I63-A / I65-B): the list gate only selects rows
-        // with `vector_state = 'pending'` (via the attempt cap), so report the
-        // retired rows separately instead of presenting them as recoverable.
+        // Best-effort gauges (I63-A / I65-B): the list gate selects only rows
+        // with `vector_state = 'pending'`, so report the retired rows
+        // separately instead of presenting them as recoverable. `'synced'` rows
+        // are neither recoverable nor exhausted and count in neither gauge.
         if let Ok(row) = client.query_one(OUTBOX_STATE_COUNTS_SQL, &[]).await {
             let pending: i64 = row.get(0);
             let exhausted: i64 = row.get(1);
@@ -625,6 +644,24 @@ impl PendingStore for PgPendingStore {
         Ok(())
     }
 
+    /// C95-R2-01: a successful upsert whose `DELETE` failed must still retire
+    /// the row. No new column or migration: `vector_state` already carries the
+    /// other terminal tokens, and `LIST_PENDING_SQL` selects only `'pending'`.
+    /// The `dead_lettered_at IS NULL` guard preserves an already-audited
+    /// decision. Only the id is bound; no row value is read into a log record.
+    async fn mark_synced(&self, id: Uuid) -> Result<()> {
+        let client = self.pool.get().await?;
+        client
+            .execute(
+                "UPDATE pending_embeddings
+                 SET vector_state = 'synced'
+                 WHERE id = $1 AND dead_lettered_at IS NULL",
+                &[&id],
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn observe_state_counts(&self) {
         // Best-effort by construction (I63-A / I65-B / I69-D): an aggregate
         // failure must never turn an already-durable terminal write into a
@@ -660,6 +697,10 @@ async fn store_memory_with_sinks(
                     error_kind = error_kind(&error, ErrorKind::Persistence),
                     "vector upsert succeeded but a stale pending_embeddings row could not be removed"
                 );
+                // C95-R2-01: the row is still in the table, so retire it via
+                // the existing `vector_state` column. Without this, the next
+                // startup replays its stored (possibly stale) vector.
+                finalize_synced(outbox, memory.id).await;
             }
             // I69-D: a confirmed delete changes the outbox state counts, so
             // refresh once here as well. This path is outside
@@ -766,6 +807,24 @@ async fn vector_for_pending_with(
     }
     validate_embedding(&vector, embedding_dim)?;
     Ok(vector)
+}
+
+/// Retire a row whose vector was already upserted but whose outbox deletion
+/// failed (C95-R2-01). Both successful-upsert call sites share this helper:
+/// writing the terminal `vector_state = 'synced'` is what makes the
+/// `vector_state = 'pending'` selection gate effective, so a later startup
+/// cannot replay a stale stored vector into Qdrant. The write is best-effort —
+/// a failed marker must not turn an already-successful upsert into an error —
+/// and its warning uses only the fixed `id`/`error_kind` vocabulary, never the
+/// raw error text or any row payload.
+async fn finalize_synced(outbox: &dyn PendingStore, id: Uuid) {
+    if let Err(error) = outbox.mark_synced(id).await {
+        warn!(
+            id = %id,
+            error_kind = error_kind(&error, ErrorKind::Persistence),
+            "could not persist the synced state for an already-upserted row"
+        );
+    }
 }
 
 /// Persist a failed reconcile attempt so the row is deferred out of the head
@@ -985,6 +1044,10 @@ async fn reconcile_pending(
                         error_kind = error_kind(&error, ErrorKind::Persistence),
                         "reconciled upsert succeeded but the pending row could not be deleted"
                     );
+                    // C95-R2-01: same terminal transition as the store path —
+                    // a retained row must not be re-selected and replayed with
+                    // the old vector on the next reconcile pass.
+                    finalize_synced(outbox, memory.id).await;
                 }
             }
             Err(error) => {
@@ -999,12 +1062,12 @@ async fn reconcile_pending(
         }
     }
 
-    // I69-D: every terminal transition in this batch (dead-letter, exhausted
-    // or removed) changes the pending/exhausted counts. Re-aggregate ONCE after
-    // the loop rather than issuing a COUNT per row, so the gauges describe the
-    // final state of the outbox. The seam is overridden by mock stores, which
-    // makes the "mutations first, single refresh last" ordering verifiable
-    // without a live PostgreSQL connection.
+    // I69-D: every terminal transition in this batch (dead-letter, exhausted,
+    // synced or removed) changes the pending/exhausted counts. Re-aggregate
+    // ONCE after the loop rather than issuing a COUNT per row, so the gauges
+    // describe the final state of the outbox. The seam is overridden by mock
+    // stores, which makes the "mutations first, single refresh last" ordering
+    // verifiable without a live PostgreSQL connection.
     outbox.observe_state_counts().await;
 }
 
@@ -2758,13 +2821,15 @@ mod tests {
 
         async fn list(&self, limit: usize) -> Result<Vec<PendingEmbedding>> {
             let now = Utc::now();
-            // Mirror both production SQL gates: exhausted rows never enter a
-            // batch (I61-B), deferred rows only when due (I30-C).
+            // Mirror the production SQL gates: only `'pending'` rows enter a
+            // batch (C95-R2-01), exhausted rows never do (I61-B), and deferred
+            // rows only when due (I30-C).
             Ok(self
                 .rows
                 .lock()
                 .expect("outbox lock")
                 .iter()
+                .filter(|row| row.vector_state == "pending")
                 .filter(|row| row.attempts < MAX_RECONCILE_ATTEMPTS)
                 .filter(|row| !self.respect_backoff || is_retry_due(row.next_retry_at, now))
                 .take(limit)
@@ -2798,6 +2863,14 @@ mod tests {
             let mut rows = self.rows.lock().expect("outbox lock");
             if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
                 row.vector_state = "exhausted";
+            }
+            Ok(())
+        }
+
+        async fn mark_synced(&self, id: Uuid) -> Result<()> {
+            let mut rows = self.rows.lock().expect("outbox lock");
+            if let Some(row) = rows.iter_mut().find(|row| row.id == id) {
+                row.vector_state = "synced";
             }
             Ok(())
         }
@@ -2856,6 +2929,7 @@ mod tests {
                 .expect("outbox lock")
                 .iter()
                 .filter(|row| row.dead_lettered_at.is_none())
+                .filter(|row| row.vector_state == "pending")
                 .filter(|row| row.pending.attempts < MAX_RECONCILE_ATTEMPTS)
                 .filter(|row| is_retry_due(row.pending.next_retry_at, now))
                 .take(limit)
@@ -2881,6 +2955,14 @@ mod tests {
             if let Some(row) = rows.iter_mut().find(|row| row.pending.id == id) {
                 row.pending.attempts = attempts;
                 row.pending.next_retry_at = Some(next_retry_at);
+            }
+            Ok(())
+        }
+
+        async fn mark_synced(&self, id: Uuid) -> Result<()> {
+            let mut rows = self.rows.lock().expect("outbox lock");
+            if let Some(row) = rows.iter_mut().find(|row| row.pending.id == id) {
+                row.vector_state = "synced";
             }
             Ok(())
         }
@@ -3423,6 +3505,10 @@ mod tests {
         );
 
         assert!(
+            LIST_PENDING_SQL.contains("vector_state = 'pending'"),
+            "a synced row must never be replayed: {LIST_PENDING_SQL}"
+        );
+        assert!(
             LIST_PENDING_SQL.contains("attempts < $2"),
             "exhausted rows must stay out of the batch: {LIST_PENDING_SQL}"
         );
@@ -3900,6 +3986,7 @@ mod log_safety_tests {
                 .expect("rows lock")
                 .iter()
                 .filter(|row| !dead.contains(&row.id))
+                .filter(|row| row.vector_state == "pending")
                 .cloned()
                 .collect())
         }
@@ -3919,6 +4006,19 @@ mod log_safety_tests {
         ) -> Result<()> {
             if self.fail_mark_failed {
                 anyhow::bail!("deferred-retry write failed for {PROBE}");
+            }
+            Ok(())
+        }
+
+        async fn mark_synced(&self, id: Uuid) -> Result<()> {
+            if let Some(row) = self
+                .rows
+                .lock()
+                .expect("rows lock")
+                .iter_mut()
+                .find(|row| row.id == id)
+            {
+                row.vector_state = "synced";
             }
             Ok(())
         }
@@ -3997,6 +4097,59 @@ mod log_safety_tests {
         // Do not pin the textual rendering of structured fields: it depends on
         // the tracing-subscriber formatter version. The contract is the absence
         // of raw error text; the fixed `error_kind` fields are set at the sites.
+    }
+
+    /// C95-R2-01: both successful-upsert paths retire a row whose deletion
+    /// failed by writing the terminal `vector_state = 'synced'`. Because the
+    /// selection gate only accepts `'pending'` rows, a later reconcile pass
+    /// cannot replay the stale stored vector. Pure/mock-based: no dynamic log
+    /// capture and no live service, and the fixed-vocabulary warnings are left
+    /// untouched.
+    #[tokio::test]
+    async fn failed_remove_marks_row_synced_and_prevents_relist() {
+        // Reconcile path: upsert succeeds, `remove` fails, row is retained.
+        let row = pending();
+        let id = row.id;
+        let store = LeakStore::new(vec![row]).with_remove_failure();
+        reconcile_pending(&store, &OkSink, None, 384).await;
+        let state = store.rows.lock().expect("rows lock")[0].vector_state;
+        assert_eq!(
+            state, "synced",
+            "a retained row must carry the terminal state"
+        );
+        assert!(
+            !store
+                .list(10)
+                .await
+                .expect("list")
+                .iter()
+                .any(|row| row.id == id),
+            "a synced row must not be selected for another upsert"
+        );
+
+        // Store path: a stale row carrying the same id as the written memory.
+        let mem = memory();
+        let store_id = mem.id;
+        let mut stale = pending();
+        stale.id = store_id;
+        let store = LeakStore::new(vec![stale]).with_remove_failure();
+        store_memory_with_sinks(&mem, &OkSink, &store)
+            .await
+            .expect("upsert succeeds");
+        let state = store.rows.lock().expect("rows lock")[0].vector_state;
+        assert_eq!(
+            state, "synced",
+            "the store path must use the same transition"
+        );
+        assert!(
+            !store
+                .list(10)
+                .await
+                .expect("list")
+                .iter()
+                .any(|row| row.id == store_id),
+            "a synced row must not be replayed after the store path either"
+        );
     }
 
     /// I61-B / I63-A: a poison row emits exactly one decision warning, carrying
@@ -4204,7 +4357,14 @@ mod log_safety_tests {
         }
 
         async fn list(&self, _limit: usize) -> Result<Vec<PendingEmbedding>> {
-            Ok(self.rows.lock().expect("rows lock").clone())
+            Ok(self
+                .rows
+                .lock()
+                .expect("rows lock")
+                .iter()
+                .filter(|row| row.vector_state == "pending")
+                .cloned()
+                .collect())
         }
 
         async fn remove(&self, _id: Uuid) -> Result<()> {
@@ -4229,6 +4389,11 @@ mod log_safety_tests {
 
         async fn mark_exhausted(&self, _id: Uuid) -> Result<()> {
             self.events.push("mark_exhausted");
+            Ok(())
+        }
+
+        async fn mark_synced(&self, _id: Uuid) -> Result<()> {
+            self.events.push("mark_synced");
             Ok(())
         }
 

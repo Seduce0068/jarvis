@@ -15,7 +15,16 @@
 //   allowlist-derived attributes: `tool`, `principal`, `resource` and
 //   `requires_approval`. A caller cannot forge ABAC fields through tool
 //   arguments; the shipped policies condition only on principal/action/
-//   resource, so no context attributes are declared for the actions below.
+//   resource.
+//
+// 2026-11-23: those four attributes are now DECLARED AS REQUIRED on every
+// action below, and `CedarEngine::is_authorized` type-checks the runtime
+// context against this schema. A context with a missing or misspelled
+// attribute, an extra caller-supplied field, a wrong type, or an undeclared
+// action is rejected (fail-closed deny). This is an intentional compatibility
+// change: callers that previously sent `{}` or arbitrary context keys must
+// now send the four fields above. The startup/management policy type-check
+// described at the top of this file is unchanged by this declaration.
 
 namespace jarvis {
 
@@ -48,29 +57,58 @@ entity ApprovalRequest {
     expires_at: String  // RFC 3339
 };
 
-// Actions served by the policy engine. No context attributes are declared
-// because the shipped policies condition only on principal/action/resource.
-// The runtime context is still the fixed, server-controlled four-field record
-// built by `jarvis-mcp-gw::policy_context` (see the header comment), never the
-// caller's raw tool arguments.
+// Actions served by the policy engine. Their `context` is the fixed,
+// server-controlled four-field record built by `jarvis-mcp-gw::policy_context`
+// (see the header comment), never the caller's raw tool arguments. Every
+// attribute is required (no `?`), so a nonconforming context fails closed.
 action "read" appliesTo {
     principal: Principal,
-    resource: Resource
+    resource: Resource,
+    context: {
+        "tool": String,
+        "principal": String,
+        "resource": String,
+        "requires_approval": Bool
+    }
 };
 action "write" appliesTo {
     principal: Principal,
-    resource: Resource
+    resource: Resource,
+    context: {
+        "tool": String,
+        "principal": String,
+        "resource": String,
+        "requires_approval": Bool
+    }
 };
 action "execute" appliesTo {
     principal: Principal,
-    resource: Resource
+    resource: Resource,
+    context: {
+        "tool": String,
+        "principal": String,
+        "resource": String,
+        "requires_approval": Bool
+    }
 };
 action "delete" appliesTo {
     principal: Principal,
-    resource: Resource
+    resource: Resource,
+    context: {
+        "tool": String,
+        "principal": String,
+        "resource": String,
+        "requires_approval": Bool
+    }
 };
 action "approve" appliesTo {
     principal: Principal,
-    resource: Resource
+    resource: Resource,
+    context: {
+        "tool": String,
+        "principal": String,
+        "resource": String,
+        "requires_approval": Bool
+    }
 };
 }
