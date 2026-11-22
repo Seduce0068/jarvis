@@ -2302,8 +2302,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   失敗クラスごとに1件ずつ復活。
 - [ ] test-restore-local が既定ロックパスを使用し /run 経路が CI で未検証
   （low）— LOCK_FILE を一時パスへ。
-- [ ] secret_scan の index 件数クロスチェックが自己和集（low）—
-  主張を限定または独立検証へ置換。
+- [x] secret_scan index クロスチェックの主張限定 — 2026-11-22 Verify: 既に解消済み。`ci/scripts/secret_scan.py:21-26` が「index-count check is only a regression guard on tracked_files(); it compares against a second git -C <root> ls-files --cached call, which returns the same cached index today, so it is NOT an independent detector of CWD-induced shrinking」と自己和集の性質を正直に明記し、一次防御は `:17-20` の `repo_root()` + `git -C` と分離。子の推奨「主張を限定」は充足。根拠
+  `ci/scripts/secret_scan.py:17-31,112-117` / verified。コード変更なし。
 - [x] todo.md:591 の egress 記述 — 2026-11-22 Verify: 既に訂正済み。`:591` の完了記録内に「訂正（2026-11-20 追記・I84-B）: 未設定時は無制限は 2026-11-19 時点の履歴、現行は unset/blank が DenyAll（全宛先拒否・fail-closed）。現行契約は tool-matrix.md:171-175 が正」と明記。`tool-matrix.md:171-175` / `config.rs:92`（no unrestricted fallback）とも整合。根拠
   `todo.md:591-598`, `docs/integration/tool-matrix.md:171-175` / verified。コード変更なし。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
