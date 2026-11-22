@@ -1885,14 +1885,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   notes へ実測キーワードを追記し baseline を削除して strict 化する。
 - [x] status_label の 413/415 丸め — 2026-11-22 並列 Verify（V-11）: 既に解消済み（1881-1882 行目の完了記録）。`jarvis-core/src/lib.rs:134` の単一定義が 413 => "413"（:145）/ 415 => "415"（:146）を返し、"other" はフォールバックに限定。pinn テスト（:621,632-633）が固定バケットを検証し、4サービスは core 関数を呼ぶだけ。
 - [x] UnknownBodyError→400 の仕様反映 — 2026-11-22 並列 Verify（V-47）: 既に解消済み（1891-1895 行目 Round 64）。4仕様（test-policy-approval.md:194-197 / test-mcp-gateway.md:200-203 / test-event.md:195-198 / test-context.md:215-218）が「UnknownBodyError を含む4種→空本文 400／rejection 文と本文バイトを出さない」へ更新済み。jarvis-core/src/lib.rs:171-216 が LengthLimitError のみ 413、他を 400 に分岐（I64-C）。
-- [ ] /health の `.trim()` が「完全バイト一致」契約と矛盾（low）— trim を
-  外すか doc／仕様を trim 許容へ揃える。
-
-- 親が対応: fmt 差分、clippy `collapsible_if`（let-chain 化）、shellcheck
-  SC2016（SQL プレースホルダのリテラル一致）。
-
-### Round 64（R4 で修正済み）
-
+- [x] /health の `.trim()` 契約 — 2026-11-22 判定: **誤検知（却下）**。`deploy.rs:87,91` の trim／空白除去は `code`（curl 出力の改行終端除去）と `body` に対するもので、コードコメント（:88-92）が「Whitespace-tolerant match: a pretty-printed body must be classified exactly like the compact contract form. Otherwise a relay that re-serializes the JSON could turn degradation into fail-open」と意図的な fail-closed 対策を明記。「完全バイト一致契約」は repo 内に存在せず（grep 0 件）、逆に空白許容が degraded 見逃しを防ぐ設計。コード変更なし。
 - [x] 4証跡の notes に契約キーワードを同期し `BASELINE_CONTRACT_STEPS` を
   削除して strict 化。tamper を notes キーワード除去方式へ更新。
 - [x] 4サービスの status_label に 413/415 を追加し "other" 丸めを解消、
