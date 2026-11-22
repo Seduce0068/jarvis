@@ -18,7 +18,7 @@ JSON はテキスト形式のため、リンク先として記載しています
 - [backup の実行ログ][run-backup]
   — [test-backup.md](../specs/test-backup.md) の実測結果。43 passed / 0 failed。
 - [event の実行ログ][run-event]
-  — [test-event.md](../specs/test-event.md) の実測結果。92 passed / 0 failed。
+  — [test-event.md](../specs/test-event.md) の実測結果。93 passed / 0 failed。
 - [ui の実行ログ][run-ui]
   — [test-ui.md](../specs/test-ui.md) の実測結果。85 passed / 0 failed。
 

@@ -43,18 +43,11 @@ struct EmitEventResponse {
     event_id: String,
 }
 
-/// Map a `/v1/events` source string to a `UnifiedEvent` source. Unknown values
-/// fall back to `Manual`; this is the exact mapping used by the HTTP handler.
+/// Map a `/v1/events` source string to a `UnifiedEvent` source via the shared
+/// lossy parser. Unknown values fall back to `Manual`, exactly as on the gRPC
+/// ingress path.
 fn normalize_event_source(raw: &str) -> EventSource {
-    match raw {
-        "home_assistant" => EventSource::HomeAssistant,
-        "android" => EventSource::Android,
-        "gmail" => EventSource::Gmail,
-        "calendar" => EventSource::Calendar,
-        "web" => EventSource::Web,
-        "finance" => EventSource::Finance,
-        _ => EventSource::Manual,
-    }
+    EventSource::from_str_lossy(raw)
 }
 
 /// Pure request -> event conversion. Generated values are injected by the

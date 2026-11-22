@@ -375,6 +375,18 @@ impl std::fmt::Display for EventSource {
     }
 }
 
+impl EventSource {
+    /// Case-insensitive source parsing with a lossy fallback.
+    ///
+    /// Reuses the exact mapping of [`std::str::FromStr`] but returns
+    /// [`EventSource::Manual`] for unknown values instead of an error. Both
+    /// HTTP and gRPC ingress use this so the same wire value normalizes
+    /// identically across transports; strict parsing via `parse()` is unchanged.
+    pub fn from_str_lossy(raw: &str) -> Self {
+        raw.parse::<Self>().unwrap_or(EventSource::Manual)
+    }
+}
+
 impl std::str::FromStr for EventSource {
     type Err = anyhow::Error;
 
@@ -693,6 +705,19 @@ mod tests {
     #[test]
     fn unknown_event_source_is_rejected() {
         assert!("mqtt".parse::<EventSource>().is_err());
+    }
+
+    #[test]
+    fn from_str_lossy_maps_uppercase_known_and_unknown_sources() {
+        // Same case-insensitive mapping as FromStr.
+        assert_eq!(
+            EventSource::from_str_lossy("HOME_ASSISTANT"),
+            EventSource::HomeAssistant
+        );
+        // Unknown values normalize to Manual instead of returning an error.
+        assert_eq!(EventSource::from_str_lossy("mqtt"), EventSource::Manual);
+        // Known lowercase values still resolve normally.
+        assert_eq!(EventSource::from_str_lossy("android"), EventSource::Android);
     }
 
     #[test]

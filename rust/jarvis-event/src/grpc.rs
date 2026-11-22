@@ -92,7 +92,8 @@ impl GrpcEventService {
 /// from malformed instead of replacing every parse failure with a default:
 ///
 /// - `id` must parse as a UUID (`""` from an absent field is rejected);
-/// - `source` must be non-empty and name a known [`EventSource`];
+/// - `source` must be non-empty; unknown values fall back to
+///   [`EventSource::Manual`], matching the HTTP `/v1/events` path;
 /// - `payload` must contain a valid JSON document (`""` from an absent field
 ///   is not JSON and is rejected, matching the HTTP endpoint where the field
 ///   is mandatory);
@@ -111,14 +112,7 @@ fn event_from_request(req: &EmitEventRequest) -> Result<UnifiedEvent, Status> {
     if req.source.trim().is_empty() {
         return Err(Status::invalid_argument("source must not be empty"));
     }
-    let source = match req.source.parse::<EventSource>() {
-        Ok(source) => source,
-        Err(_) => {
-            return Err(Status::invalid_argument(
-                "source must be a known event source",
-            ));
-        }
-    };
+    let source = EventSource::from_str_lossy(&req.source);
 
     if req.payload.trim().is_empty() {
         return Err(Status::invalid_argument("payload must be a JSON document"));
@@ -281,12 +275,22 @@ mod tests {
     }
 
     #[test]
-    fn event_from_request_rejects_empty_or_unknown_source() {
-        for source in ["", "   ", "telepathy"] {
+    fn event_from_request_rejects_empty_source() {
+        for source in ["", "   "] {
             let mut req = valid_request();
             req.source = source.into();
-            let status = event_from_request(&req).expect_err("invalid source must be rejected");
+            let status = event_from_request(&req).expect_err("empty source must be rejected");
             assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn event_from_request_accepts_unknown_source_as_manual() {
+        for source in ["mqtt", "telepathy"] {
+            let mut req = valid_request();
+            req.source = source.into();
+            let event = event_from_request(&req).expect("unknown source accepted as Manual");
+            assert_eq!(event.source, EventSource::Manual, "source {source}");
         }
     }
 

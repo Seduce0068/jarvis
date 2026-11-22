@@ -2839,11 +2839,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **Qdrant 本番検証が隔離検証の points_count と突き合わされない** —
   根拠 `infra/scripts/restore-local.d/qdrant.sh:82-93,131-142` /
   R2-DI01 / confirmed。部分スナップショットのサイレント欠損を検出できない。
-- [ ] **event source の正規化が HTTP と gRPC で非対称** — 根拠
-  `rust/jarvis-event/src/http.rs:44-56`, `src/grpc.rs:114-121`,
-  `jarvis-core/src/lib.rs:378-393` / R1-AP01 / confirmed。
-  HTTP は case-sensitive＋未知値を Manual 化、gRPC は case-insensitive＋
-  未知値を InvalidArgument。同じ入力が別 source になり下流判定が食い違う。
+- [x] **event source の正規化を両トランスポートで統一** — 2026-11-22 対応済み。jarvis-core に `EventSource::from_str_lossy`（未知値→Manual、case-insensitive）を追加（lib.rs:378-405）、HTTP `normalize_event_source`（http.rs:46-51）と gRPC `EmitEvent`（grpc.rs:88-115）の両方をそれへ委譲。gRPC の未知値拒否回帰を「Manual 受け付け」期待へ更新し、core に大文字/未知/既知の3ケース回帰を追加。根拠
+  `rust/jarvis-core/src/lib.rs:378-405,710-721`, `rust/jarvis-event/src/{http.rs:46-51,grpc.rs:88-115,277-295}` / R1-AP01 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-core --lib --locked` 20 passed（+1）、`cargo test -p jarvis-event --lib --locked` 93 passed（+1）、event 証跡 92→93 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **opencode サブエージェント permission の secret deny** — 2026-11-22 対応済み。repo 版・配布用版 opencode.jsonc の全 per-agent permission ブロック（jarvis-dev bash/read/edit、jarvis-policy-audit read）に `*id_rsa*` / `*.kdbx*` / `*.npmrc*` を追加。トップレベルは不変（重複なし）、jarvis-policy-audit の bash/edit は既に全拒否のため対象外。根拠
   `opencode.jsonc:158-164,172-178,186-192,223-229`, `infra/config/opencode/opencode.jsonc:173-179,187-193,201-207,237-243` / R1-ST07 / confirmed。
   - 検証: deny 3パターンの一致数が両ファイルとも21（トップレベル3×3＋per-agent4×3）、JSONC コメント除去後の JSON parse OK、gcloud 行のカンマ付与は追加に伴う正当な変更。
