@@ -50,7 +50,9 @@ ignore = [
 
   # 旧 rustls 0.22.4 / rustls-webpki 0.102.8: 推移依存として残存。
   # 新しい 0.23.46 / 0.103.16 へは更新済みだが、古い系統を保持する
-  # 上流クレート（axum 0.7 系統）の解消を待つ。
+  # 直接依存は jarvis-event の tokio-tungstenite 0.21.0
+  # (rustls-tls-native-roots) であり、axum 0.7 ではない。0.21 系を
+  # 使う tungstenite の更新を待つ一時抑制（再評価 2026-12-20）。
   "RUSTSEC-2026-0346",
   "RUSTSEC-2026-0349",
   "RUSTSEC-2026-0049",
