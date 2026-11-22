@@ -326,6 +326,7 @@ generated:
     `config.rs:66`（既定値 `PLACEHOLDER_KILL_SWITCH_TOKEN` = `"changeme"`）、
     `rust/jarvis-policy/src/lib.rs:35-48`（true のときのみ拒否、既定は warn）。
     ガードの既定値は `false` なので既存デプロイの起動動作は変わらない。
+  - 2026-11-22 並列 Verify（V-111）: 未解決（confirmed）。placeholder 拒否は require_kill_switch_admin_token=true の opt-in 時のみ（config.rs:240-248 / lib.rs:36-50）、既定 false では warn のみ。ガード既定値反転は本番トークン注入確認後の運用判断として TODO 自身が明記。
 - [ ] **P0-11** `store_memory` に PII フィルタ未適用（A-H4）
   - **2026-11-18 判断記録済み（未実装）**: [ADR-0002](adr/0002-runtime-agnostic.md)
     の「記録（未決定）: PII の保存時扱い」に、PII フィルタは LLM 送信前の
@@ -336,6 +337,7 @@ generated:
 
 ### 中・低優先度（新規）
 
+  - 2026-11-22 並列 Verify（V-112）: 未解決（confirmed）。PII フィルタは build_context→prepare_context 経路のみ（builder.rs:1081-1085,1266-1272）で、store_memory（:1088-1124）は content/metadata を生のまま保存。ADR-0002:70-82 が設計判断として明記。
 - [x] **P1-11** jarvis-event の unbounded channel（A-M2）
   - **2026-11-18 完了**: bounded(1024) + try_send + warn&drop に統一。
     sources.rs の型変更で unbounded ブリッジも除去済み（grep 0件）。
@@ -2515,8 +2517,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] mcp-gw /health の upstream 登録判定 — 2026-11-22 並列 Verify（V-104）: 既に解消済み（todo.md:2527-2529 の完了記録と整合）。http.rs:261-284 の upstreams_registered() が allowlist 推論を廃止し config.upstreams と登録済みサーバ名を照合。死亡 upstream 除外・未登録 503＋固定 degraded 本文・回帰（:1118-1229）・deploy 側 rollback まで一貫。
 - [ ] deploy-mcp-gw-safe.sh が 503 degraded を消费せず劣化サービスを
       DONE と報告（中）— スクリプト側にも degraded 検出と rollback。
-- [ ] deploy.rs のヘルスゲートが固定5秒＋1回プローブで低速起動を誤判定
-      （中）— 上限付きリトライ（20回×0.5s 等）へ。
+- [x] deploy.rs のヘルスゲート — 2026-11-22 並列 Verify（V-113）: 既に解消済み（todo.md:2525-2527,2905-2908 の完了記録と整合）。deploy.rs:140-153 の HEALTH_PROBE_ATTEMPTS=20 / INTERVAL=500ms / WAIT_DEADLINE=20s / PROBE_TIMEOUT=2s と上限付きリトライを実装。レガシーガード test-legacy-guards.sh:2330-2383 が検証。
 - [x] drift が casbin_model.conf の内容・owner/mode を未検査（中）。 — **2026-11-22 重複整理**: 同一内容は 2591 行目で完了記録済み。
 - [x] ui/README.md:39 と remaining-tasks.md:288 の clippy 例へ
       undocumented_unsafe_blocks を追加。
@@ -2737,6 +2738,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **safe_client_error_text の語彙に git / パス系 ClientError が抜ける** —
   `rust/jarvis-mcp-gw/src/http.rs:323,349`, `sandbox.rs:125,330,413,473,498` /
   R1-ST02 / confirmed。機密ファイル拒否が「引数不正」に丸められる。
+  - 2026-11-22 並列 Verify（V-114）: 未解決（confirmed）。safe_client_error_text（http.rs:325-352）は prefix 列挙＋デフォルトで、git timed out / sensitive file 拒否 / path escapes 等が丸められる。I97-D の共有ヘルパ化は達成済みだが語彙網羅性は未達。拡張は設計判断。
 - [ ] **kill_switch の暗号プリミティブが gateway から流用され比較も二重実装**
   - 2026-11-22 並列 Verify（V-48）: 未解決（confirmed）。kill_switch.rs:98-107 に constant_time_eq 集約済みだが、mcp-gw の grpc.rs:116-124 / http.rs:103-111 が fixed_size_digest_eq をローカル二重定義し XOR fold も自前実装。jarvis-core には集約先が無く、共有化・集約は未実施（定数時間性自体は確保）。
  —
@@ -2859,8 +2861,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
  —
   `audit.toml:51-53`, `rust/Cargo.lock:144-175,4910-4923` / R4-DP01 / confirmed。
   axum 0.7.9 の依存に rustls は無く、実態は tokio-tungstenite 0.21 系統。
-- [ ] **依存監査ゲートが git 不在時に UNVERIFIED とならず古い DB で pass** —
-  `ci/scripts/check-dependency-audit.sh:20-33,94-110` / R4-DP01 / confirmed。
+- [x] 依存監査ゲートの git 不在時 UNVERIFIED — 2026-11-22 対応済み。`check-dependency-audit.sh` のローカルパスで git が無い／DB が git-backed でない場合に `else unverified AUDIT_DB_UNVERIFIED` を追加。コメント（:96-97）と実装が整合。git 有り・DB 鮮度正常時は従来どおり走査。根拠 `ci/scripts/check-dependency-audit.sh:94-117` / V-115 / confirmed。
+  - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make check-dependency-audit` ok=2、`make ci-local` all gates passed。
 - [ ] **rust-script のマニフェスト依存が Cargo.lock 監査の対象外**
   - 2026-11-22 並列 Verify（V-51）: 未解決（confirmed）。check-dependency-audit.sh:40,122-126 は rust/Cargo.lock と ui/Cargo.lock のみ。rust-script メタブロックの clap="4.5" / hostname="0.3" は両 lock に不在で、実行時に解決されるバージョンは固定も監査もされない。
  —

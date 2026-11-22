@@ -106,7 +106,14 @@ else
       if [ "$db_epoch" -eq 0 ] || [ "$((now_epoch - db_epoch))" -gt "$max_age" ]; then
         unverified AUDIT_DB_STALE
       fi
+    else
+      # DB is not git-backed: its freshness cannot be judged from history.
+      unverified AUDIT_DB_UNVERIFIED
     fi
+  else
+    # git is absent: no freshness signal at all. Do not guess -- mark the
+    # local scan as unverified (matches the comment above).
+    unverified AUDIT_DB_UNVERIFIED
   fi
 fi
 
