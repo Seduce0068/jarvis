@@ -20,7 +20,7 @@ JSON はテキスト形式のため、リンク先として記載しています
 - [event の実行ログ][run-event]
   — [test-event.md](../specs/test-event.md) の実測結果。97 passed / 0 failed。
 - [ui の実行ログ][run-ui]
-  — [test-ui.md](../specs/test-ui.md) の実測結果。85 passed / 0 failed。
+  — [test-ui.md](../specs/test-ui.md) の実測結果。86 passed / 0 failed。
 
 ## 関連
 

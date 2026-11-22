@@ -2869,14 +2869,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **バックアップ再設計メモのブロッカー節が解消済み決定を未解決と提示** — 2026-11-22 対応済み: ブロッカー節を「2026-11-17 解消、履歴として保持」へ改題し、保存先（BK-1 で `/var/lib/postgresql/jarvis-backups` に決定）、認証/暗号化（bws 集約＋P1-6 は外部化時に検討）、復旧検証（restore-local + 47 tests、残りは S9 実機演習）、timer（実機 active/enabled）の各現行状態を明記。現行 state は remaining-tasks.md / backup-restore-runbook.md を正とするようリンク追加。根拠
   `docs/integration/backup-redesign-notes.md:143-153`, `docs/integration/remaining-tasks.md:316` / R5-VU01 / confirmed。
   - 検証: secret-scan exit 0、markdownlint 既存 baseline（:110 等）のみで変更行に新規違反なし。文書のみ変更のため compile/lint/test は省略。
-- [ ] **期限内切れ表示の承認要求でも承認 / 却下ボタンが有効** —
-  `ui/README.md:69-72`, `docs/integration/evidence-regeneration.md:88-90` /
-  R5-VU01 / confirmed。policy 側は 410 を返す契約と矛盾。
-
-### 優先度 低
-
-  - 2026-11-22 並列 Verify（V-100）: 未解決（confirmed）。UI の is_expired は表示のみ（approvals.rs:436-439 のコメントが display-only と明記）でボタンの disabled ガードなし、decide にも expires_at 检查なし。policy 側 410 で事後 fail-closed だが UI 事前ガードは未実装。
-  - 2026-11-22 並列 Verify（V-110 再確認）: 未解決（confirmed）。is_expired（expires_at < now）は policy 側 decided_at > deadline と数学的に同一で、既存 predicate 回帰を disabled に結びつければ整合可能。ただし GPUI の disabled バインディング API が repo 内に使用例無く未確認、display-only コメント/README 更新も必要で設計判断。
+- [x] 期限切れ承認の送信ガード — 2026-11-23 方針委譲で対応済み。UI の decide()（approvals.rs:309-329）先頭で対象要求の is_expired（expires_at < now、policy 側 decided_at > deadline と同値）を检查し、期限切れなら begin_decision より前に return（POST 送信なし・固定文言 status）。GPUI の disabled API に依存しないため確実。render_row コメントと ui/README.md:69-72 も実態（表示＋送信ガード）へ更新。回帰 +1（期限切れは enqueue/POST 0、期限内は POST 1）。根拠 V-110。
 - [x] **.editorconfig に Rust の indent 指定が無く rustfmt 既定と衝突** — 2026-11-22 対応済み: `[*.rs] indent_size = 4` を追加し rustfmt 既定（4 スペース）と整合。あわせて `[*.{json,yaml,yml}]` を `[*.{json,jsonc,yaml,yml}]` へ拡張し `opencode.jsonc` も明示的に 2 スペースへ。根拠
   `.editorconfig:17,26`, `Makefile:63` / R1-ST10 / confirmed に格上げ。
 - [x] **audit.toml と Makefile の cargo-audit バージョンが二重管理** — 2026-11-22 対応済み: Makefile に `CARGO_AUDIT_VERSION ?= 0.23.0` と `print-cargo-audit-version` ターゲットを追加し、ci.yml の install step が `make -s print-cargo-audit-version` から値を取得して probe 用 regex と `cargo install --version` に使用するよう変更（ci.yml 側の 0.23.0 ハードコードを削除）。バージョン更新は Makefile 1箇所で済む。根拠

@@ -307,6 +307,26 @@ impl ApprovalsView {
     /// production path. Only the GPUI plumbing is behind [`DecisionSeam`], so a
     /// plain unit test can drive this method synchronously.
     fn decide(&mut self, id: String, approve: bool) {
+        // C97-R2-01: re-check the deadline at decision time, not only when the
+        // row was rendered. An elapsed deadline drops the decision before any
+        // loopback work (and therefore any POST) is enqueued; the policy
+        // service's post-hoc 410 is the second line of defence, not the only
+        // one. Keep the notice fixed — no id, token or payload is echoed. A
+        // missing row is left to the existing `decision_target` fail-closed
+        // path below.
+        let expired = self
+            .pending
+            .iter()
+            .find(|request| request.id == id)
+            .is_some_and(|request| is_expired(request, chrono::Utc::now()));
+        if expired {
+            self.status = "期限切れのため承認・却下を送信しませんでした".into();
+            self.error = None;
+            self.action_status = true;
+            self.halted_decision_status = false;
+            self.decision_seam.notify();
+            return;
+        }
         // I83-D: drop rapid duplicate clicks on the same row while its first
         // POST is still in flight; the last response must not win the race.
         if !self.begin_decision(&id) {
@@ -435,7 +455,10 @@ impl ApprovalsView {
             .unwrap_or_else(|| "-".to_string());
         // An elapsed deadline is easy to miss in a dense queue; highlight it
         // so the operator does not approve a stale command by accident. This
-        // is display-only: decide/on_click/keyboard handling stay unchanged.
+        // is not display-only any more: `decide` re-checks `is_expired` before
+        // dispatch and drops the decision without a POST when the deadline has
+        // elapsed, so a highlighted row can no longer be approved or denied by
+        // click or keyboard. The on_click handlers still call decide unchanged.
         let expired = is_expired(request, chrono::Utc::now());
 
         let approve_id = request.id.clone();
@@ -1383,5 +1406,104 @@ mod tests {
             3,
             "three accepted decides must produce three POSTs"
         );
+    }
+
+    /// C97-R2-01: the deadline is re-checked at decision time. An expired row
+    /// is dropped before any loopback work is queued, so it produces no POST;
+    /// an in-date row still dispatches through the unchanged `decide` path and
+    /// POSTs exactly once. No dynamic log capture — the existing accept
+    /// connector counts POSTs and the seam counts queued decisions.
+    #[test]
+    fn decide_blocks_expired_request_but_sends_in_date_request() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        const EXPIRED_ID: &str = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
+        const VALID_ID: &str = "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+        const APPROVE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}";
+        const PENDING_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"pending\":[]}";
+        const HEALTH_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
+
+        let accepted: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock policy server");
+        let addr = listener.local_addr().expect("mock address");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+
+        let accepted_for_server = accepted.clone();
+        let stop_for_server = stop.clone();
+        let server = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !stop_for_server.load(Ordering::Relaxed) && Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        let mut buf = [0u8; 4096];
+                        let n = stream.read(&mut buf).unwrap_or(0);
+                        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let (marker, response) = if request.starts_with("POST ") {
+                            ("post", APPROVE_RESPONSE)
+                        } else if request.starts_with("GET /health") {
+                            ("health", HEALTH_RESPONSE)
+                        } else {
+                            ("pending", PENDING_RESPONSE)
+                        };
+                        accepted_for_server
+                            .lock()
+                            .expect("lock accept connector")
+                            .push(marker.to_string());
+                        let _ = stream.write_all(response.as_bytes());
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        let expired_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        let valid_at = chrono::Utc::now() + chrono::Duration::seconds(60);
+        let seam = SyncDecisionSeam::default();
+        let mut view = view_with("", None, false);
+        view.client = PolicyClient::new(format!("http://{addr}"));
+        view.pending = vec![
+            request_with_expiry(EXPIRED_ID, Some(expired_at)),
+            request_with_expiry(VALID_ID, Some(valid_at)),
+        ];
+        view.decision_seam = Box::new(seam.clone());
+
+        // (1) Expired row: the guard fires before `begin_decision`, so nothing
+        // is reserved, no loopback work is enqueued and no POST reaches the
+        // mock. The operator sees a fixed notice with no id or payload.
+        view.decide(EXPIRED_ID.to_string(), true);
+        assert_eq!(
+            seam.pending_count(),
+            0,
+            "expired decide must not enqueue loopback work"
+        );
+        assert_eq!(post_count(&accepted), 0, "expired decide must not POST");
+        assert!(!view.in_flight.contains(EXPIRED_ID));
+        assert!(
+            view.status.to_string().contains("期限切れ"),
+            "expired decide must report the fixed deadline notice"
+        );
+
+        // (2) In-date row: the same `decide` dispatches normally; running the
+        // queued task through the real loopback yields exactly one POST.
+        view.decide(VALID_ID.to_string(), true);
+        assert_eq!(
+            seam.pending_count(),
+            1,
+            "in-date decide must enqueue loopback work"
+        );
+        seam.run_one(&mut view);
+        assert_eq!(post_count(&accepted), 1, "in-date decide must POST once");
+
+        stop.store(true, Ordering::Relaxed);
+        server.join().expect("mock server thread");
     }
 }
