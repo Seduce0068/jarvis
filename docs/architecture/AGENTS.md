@@ -14,6 +14,7 @@ LaTeX** workflow defined in
 |------|---------|
 | `report.md` | Authoritative document source (Markdown + LaTeX formulas + MPE imports) |
 | `calc.rs` | All calculations in Rust (runnable via `rust-script`) |
+| `verify.rs` | Optional local checks (skips cleanly when tool is absent) |
 | `dist/` | Generated artifacts ONLY (never edit directly) |
 
 ---
@@ -45,9 +46,10 @@ Before marking any task complete in this directory:
 
 1. `rust-script calc.rs` → exits 0, output matches `report.md` tables
 2. `git diff report.md calc.rs` → only intentional changes
-3. MPE preview renders formulas and tables correctly
-4. `dist/report.md` (Save as Markdown) renders on GitHub without MPE
-5. No secrets or API keys in any file
+3. `rust-script verify.rs` → optional local checks (skips cleanly when the tool is absent)
+4. MPE preview renders formulas and tables correctly
+5. `dist/report.md` (Save as Markdown) renders on GitHub without MPE
+6. No secrets or API keys in any file
 
 ### Prohibited Actions
 - ❌ Rewriting unrelated files in this directory
@@ -64,6 +66,9 @@ Before marking any task complete in this directory:
 # Verify calculations
 cd /home/koppe/ドキュメント/作業用/jarvis/jarvis/docs/architecture
 rust-script calc.rs
+
+# Optional local verification (skips cleanly if the tool is absent)
+rust-script verify.rs
 
 # Check Markdown lint
 markdownlint report.md

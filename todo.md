@@ -1691,9 +1691,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 2026-11-22 並列 Verify（V-45）: 未解決だが構造的下地は加法で前進可能。共有バリデータの実体は jarvis-context/src/config.rs:86 の pub(crate) validation（core ではない）。fixed-vocabulary パターン（InvalidInput{field} + reject_invalid_input）を再利用し新規定数・検証を追加可能。上限値の選定と gRPC free-form pass-through 契約変更は設計判断で未決定。
   - 2026-11-22 並列 Verify（V-17, :1708 と同一）: **未解決（confirmed）**。共有バリデータは MAX_CONTENT_BYTES / MAX_SOURCE_BYTES / MAX_METADATA_BYTES / MAX_METADATA_DEPTH / MAX_SEARCH_LIMIT のみで payload / query / event_type / correlation_id 用の定数・検証が無い。context HTTP は event_type/payload/correlation_id を無検証で UnifiedEvent へ渡し、search_memory も query を無検証。event も HTTP/gRPC とも無検証透過。BareJson の 413 は axum の 2MiB ボディ全体制限で個別フィールド境界の代用にならない。I57-C 回帰は content/source/metadata と深い metadata の4ケースのみ。
   event_type / correlation_id にも上限を追加。
-- [ ] 発掘: policy/mcp-gw/event の JsonRejection 未対応、event の生 anyhow
-  ログ、UI の expires_at 境界不一致、backup-preflight の BK-4 表記、
-  docs/architecture/AGENTS.md の verify.rs 欠落。
+- [x] 発掘: JsonRejection／event anyhow／UI expires_at（V-61〜63） — 2026-11-22 並列 Verify: 3サブ項目とも解消済み。JsonRejection は3サービスとも `jarvis_core::BareJson` へ置換（policy 6ルート / mcp-gw /v1/execute / event /v1/events）、rejection 本文・入力バイトをログへ出さず固定語彙（1707-1708 行目 Round 57 記録と整合）。event anyhow は normalizer.rs:47-76 の error_kind() + log_processing_failure() で固定語彙化、回帰 :761-826。UI expires_at は `expires_at < now`（approvals.rs:728）で policy 側（deadline > now / now <= deadline）と境界一致、回帰 :903-914。
+- [ ] 発掘: backup-preflight の BK-4 表記（判断待ち） — 2026-11-22 並列 Verify（V-64）: 未解決。BK-4 は OCI+rclone の旧要件から「op:// レガシー参照テンプレートの整理判断」へ意味が変化。backup-preflight.sh:62-66 が "BK-4 decision pending" と警告し、infra/config/*.env 4ファイルに op:// 参照が残存。バックアップ保存先自体は ADR-0004 準拠のローカル保存へ更新済み。
+- [x] 発掘: docs/architecture/AGENTS.md の verify.rs 記載 — 2026-11-22 対応済み。`docs/architecture/AGENTS.md` の Source Files 表・Verification Protocol（3番目）・Commands に `rust-script verify.rs` を追記し、`docs/architecture/index.md` の文書一覧にも verify.rs を追加（任意ローカル検証・ツール未インストール時 skip・CI 非呼び出しを明記）。根拠
+  `docs/architecture/AGENTS.md:11-19,45-52,63-78`, `docs/architecture/index.md:9-18`, `docs/architecture/verify.rs` / V-65 / confirmed。
+  - 検証: markdownlint 追加行由来の違反 0（既存 baseline のみ）、`make ci-local` all gates passed、`make secret-scan` exit 0。
 
 - 親が対応: fmt 差分、shellcheck の SC2329（eval 間接呼び出し）、
   spec 変更に伴う evidence 実測再生成（UI 67）。

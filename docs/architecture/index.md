@@ -8,6 +8,8 @@ JARVIS のアーキテクチャ資料・リソース試算の索引です。
 
 - [report.md](report.md)
   — リソース分析の正本。計算は `calc.rs`、生成物は `dist/`（編集不可）。OCI Always Free 前提の参照資料。
+- [verify.rs](verify.rs)
+  — 任意のローカル検証スクリプト。ツール未インストール時は skip し、CI からは呼ばれない。
 - [personal-ai-architecture.md](personal-ai-architecture.md)
   — JARVIS 型パーソナル AI の構成図・目的。
 - [mpe-rust-latex-architecture-report.md](mpe-rust-latex-architecture-report.md)
