@@ -577,10 +577,13 @@ impl PendingStore for PgPendingStore {
         let client = self.pool.get().await?;
         client
             .execute(
-                // Compare-and-set: a concurrent reconciler may have bumped
-                // `attempts` already. Never overwrite it with a stale snapshot,
-                // otherwise the exponential backoff loses its guarantee.
-                "UPDATE pending_embeddings SET attempts = $2, next_retry_at = $3
+                // Compare-and-set with a monotonicity guard: a concurrent
+                // reconciler may already have bumped `attempts` or pushed out
+                // `next_retry_at`. `GREATEST` keeps both columns from moving
+                // backwards when a stale snapshot is written again, so a
+                // same-attempt retry can never regress the exponential backoff.
+                // The WHERE-clause compare-and-set still blocks attempt rewind.
+                "UPDATE pending_embeddings SET attempts = GREATEST(attempts, $2), next_retry_at = GREATEST(next_retry_at, $3)
                  WHERE id = $1 AND attempts <= $2",
                 &[&id, &attempts, &next_retry_at],
             )
@@ -3144,6 +3147,33 @@ mod tests {
         let (attempts, next) = next_retry_state(attempts, now);
         assert_eq!(attempts, 2);
         assert_eq!(next, now + chrono::Duration::minutes(4));
+    }
+
+    /// C65-R2-01 regression: `mark_failed` must clamp both retry columns with
+    /// SQL `GREATEST` so a stale, same-attempt snapshot cannot pull the next
+    /// retry deadline backwards and break the exponential backoff. The
+    /// compare-and-set on attempts must stay as well. Static scan only — a
+    /// live parallel-race reproduction would be flaky.
+    #[test]
+    fn mark_failed_sql_keeps_retry_columns_monotonic() {
+        const SOURCE: &str = include_str!("builder.rs");
+        // Build the needles at runtime: a source literal would let this scan
+        // match its own text if the production SQL were ever reverted.
+        let attempts_guard = String::from("GREATEST(attempts, ") + "$2)";
+        let next_retry_guard = String::from("GREATEST(next_retry_at, ") + "$3)";
+        let cas_guard = String::from("attempts <") + "= $2";
+        assert!(
+            SOURCE.contains(&attempts_guard),
+            "attempts must be clamped with GREATEST to prevent rewind"
+        );
+        assert!(
+            SOURCE.contains(&next_retry_guard),
+            "next_retry_at must be clamped with GREATEST so backoff cannot regress"
+        );
+        assert!(
+            SOURCE.contains(&cas_guard),
+            "the WHERE-clause compare-and-set on attempts must be retained"
+        );
     }
 
     #[test]

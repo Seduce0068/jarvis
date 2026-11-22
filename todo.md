@@ -2901,11 +2901,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能**（部分対応） — 2026-11-22 対応済み（安全な範囲）: builder.rs:1329 の `pub mod memory` と内部 bare pub 5項目（create_pg_pool / create_qdrant_client / ensure_collection / upsert_vector / search_vectors）を `pub(crate)` へ縮小。lib.rs:27-28 の同一クレート参照は維持、外部クレート実利用は無し。残るは他クレートから実利用のある grpc::proto / kill_switch::sha256_digest 等の再エクスポート設計（判断待ち）のため項目は open 維持。根拠
   `rust/jarvis-context/src/builder.rs:1329,1338,1381,1651,1700,1740`, `rust/jarvis-context/src/lib.rs:27-28` / V-76 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 184 passed（unit）+ 6 passed（integration）、件数不変で証跡同期不要、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **outbox バックオフ CAS が古い attempts を上書きしうる**
-  - 2026-11-22 並列 Verify（V-77）: 未解決（confirmed）。mark_failed（builder.rs:583-584）の `WHERE id=$1 AND attempts <= $2` は不変、GREATEST／厳密比較／FOR UPDATE／next_retry_at 単調ガードなし。attempts の巻き戻し自体は WHERE で防がれるが、同値再書込みで next_retry_at が早い時刻へ後退する余地が残る。CAS 回帰テストなし。
- —
-  `rust/jarvis-context/src/builder.rs:340,558,561` / R2-ER01 / confirmed。
-  既存 2672 行の `attempts <= $2` 条件が並行更新に弱い。
+- [x] **outbox バックオフ CAS の単調性ガード** — 2026-11-22 対応済み。`mark_failed`（builder.rs:571-590）の UPDATE を `SET attempts = GREATEST(attempts, $2), next_retry_at = GREATEST(next_retry_at, $3)` へ変更。同値 attempts の古いスナップショットが再来しても next_retry_at が後退せず exponential backoff が保持される。WHERE `attempts <= $2` は維持（attempts 巻き戻し防止）。静的 SQL 回帰 `mark_failed_sql_keeps_retry_columns_monotonic` を追加。根拠
+  `rust/jarvis-context/src/builder.rs:571-590,3149-3178` / V-77 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 185 passed（+1）+ integration 6 passed、context 証跡 184→185 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **Qdrant と outbox の二重失敗で元の障害 identity が失われる**
   - 2026-11-22 並列 Verify（V-78）: 未解決（confirmed）。store_memory_with_sinks（builder.rs:668-679）で Qdrant エラーは warn に残るが outbox.record 失敗時に .context(...)? が early return し元エラーが返り値から破棄。上層 error_kind は outbox 由来を other 扱い。二重失敗注入回帰なし。
  —
