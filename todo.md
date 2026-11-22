@@ -2362,8 +2362,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   （medium）。
 - [ ] UI の二重 POST 防止テストが実 decide() を通らず空振り（medium）—
   in-flight 解放の全経路を回帰で担保。
-- [ ] root の /run ロック成功枝に回帰が無い（low）、psql モックが sudo 経路を
-  通らない（medium）、Qdrant コレクション名がハードコード（low）。
+- [x] flock/psql/Qdrant のテスト回帰3件 — 2026-11-22 Verify: すべて解消済み。(1) `test-restore-local.sh:661,713` が /run/jarvis/restore.lock の成功枝と /run 不可フォールバック枝をテスト用パス差し替えで検証。(2) `:278-292` の sudo モックが `command psql` 経路を通し、`:44,753` が I86-C で分岐漏れ解消を明記。(3) `:47,92-99,305,947-963` が `${JARVIS_QDRANT_COLLECTION:-jarvis_memories}` 契約と設定可能回帰（jarvis_memories_custom）を実装（I86-D）。根拠
+  `infra/scripts/test-restore-local.sh:44,47,92-99,278-292,305,661,713,753,947-963` / verified。コード変更なし。
 - [x] CI の記録 SHA がコメント止まりで自動照合が無い／上流 v1 が未署名（low）。 — **2026-11-22 重複整理**: 同一内容は 2390 行目で完了記録済み。
 - ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
   push、共有 lib の実機配布。
