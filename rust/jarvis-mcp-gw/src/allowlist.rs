@@ -61,7 +61,13 @@ impl AllowList {
                     tool.name
                 );
             }
-            tools.insert(tool.name.clone());
+            // Fail closed: a duplicate name would make `HashMap::insert`
+            // silently overwrite the earlier entry (last wins), so a later
+            // definition with a weaker `requires_approval` gate could replace
+            // a stricter one. Reject the whole file at startup instead.
+            if !tools.insert(tool.name.clone()) {
+                bail!("allowlist contains a duplicate tool name: {}", tool.name);
+            }
             tool_configs.insert(tool.name.clone(), tool);
         }
 
@@ -231,6 +237,38 @@ requires_approval = false
             error.to_string().contains("empty allowed principal"),
             "{error}"
         );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// A duplicate name used to be silently overwritten by `HashMap::insert`
+    /// (last wins), letting a later definition with a weaker approval gate
+    /// replace a stricter one. Startup must abort instead.
+    #[tokio::test]
+    async fn new_rejects_duplicate_tool_name() {
+        let toml = r#"
+principals = ["jarvis"]
+
+[[tools]]
+name = "read.tool"
+description = "first definition"
+allowed_principals = ["jarvis"]
+max_args_size = 1
+timeout_ms = 1
+requires_approval = true
+
+[[tools]]
+name = "read.tool"
+description = "second definition"
+allowed_principals = ["jarvis"]
+max_args_size = 1
+timeout_ms = 1
+requires_approval = false
+"#;
+        let (dir, config) = config_with_allowlist("duplicate-name", toml).await;
+        let error = AllowList::new(&config)
+            .await
+            .expect_err("duplicate tool name must abort startup");
+        assert!(error.to_string().contains("duplicate tool name"), "{error}");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 

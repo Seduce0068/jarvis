@@ -2828,6 +2828,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **kill switch の activated_by が公開経路で依然 "system"** —
   `rust/jarvis-policy/src/kill_switch.rs:241-248,280-286`, `src/lib.rs:249-251` /
   R1-ST01 / confirmed。既存 622 行の対応は `activate_with_actor` 追加のみ。
+  - 2026-11-22 並列 Verify（V-96）: 未解決（confirmed）。公開 HTTP/gRPC の ActivateKillSwitchRequest に actor フィールドが無く、activate() が "system" をハードコード（kill_switch.rs:237-239）。既存 I 系対応は persist 再-arm 時の actor 保持のみで公開側配線は未実施。wire DTO へ actor 追加＋activate_with_actor 接続が必要（設計判断）。
 - [ ] **再起動復元された承認保留にタイマーがなく prune 依存**
   - 2026-11-22 並列 Verify（V-70）: 未解決（confirmed）。reconcile_pending() が undecided 行を deadline 付きで再登録するが watch receiver を破棄し待機タイマーが無い（approval.rs:1266-1274,1309-1349）。モジュール doc :12-13 と classify_prune :1414-1416 が「lazy prune が timeout path」と明記。prune は try_request() 先頭のみで周期性なし。設計判断案件。
  —
@@ -2844,9 +2845,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **gRPC ExecuteTool の serde エラー固定語彙化** — 2026-11-22 対応済み。`invalid_args_json_status(_error)`（grpc.rs:33-49）を追加し serde_json::Error を読まず `tracing::debug!(error_kind = jarvis_core::INVALID_JSON_BODY_ERROR_KIND, field = "args", "invalid client input")` を出力。ExecuteTool は `map_err(invalid_args_json_status)`（:158-159）へ変更し、生エラー出力を削除。Status は `invalid_argument(safe_client_error_text("invalid tool arguments"))` でクライアント契約不変。policy の I97-D パターンと整合。根拠
   `rust/jarvis-mcp-gw/src/grpc.rs:33-49,158-159,425-491` / V-43 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-mcp-gw --lib --locked` 160 passed（+1）、mcp 証跡 159→160 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
-- [ ] **allowlist の同名ツール定義が最後勝ちで requires_approval を上書き** —
-  `rust/jarvis-mcp-gw/src/allowlist.rs:14-22,44-66` / R3-AU01 / likely。
-  既存 472 行は upstream 登録側の衝突検出で、設定側は未対応。
+- [x] allowlist 同名ツール定義の fail-closed 化 — 2026-11-22 対応済み。allowlist.rs:64-71 のロードループで `tools.insert()` の戻り値を検査し、重複名なら `bail!("allowlist contains a duplicate tool name: ...")` でファイル全体を拒否（後勝ちで requires_approval が上書きされる経路を遮断）。回帰 `new_rejects_duplicate_tool_name` を追加。根拠 `rust/jarvis-mcp-gw/src/allowlist.rs:64-71,243-276` / V-97 / confirmed。
+  - 検証: fmt exit 0、mcp-gw 161 passed（+1）、証跡 160→161 同期し `--check` 5件 MATCH、clippy -D warnings exit 0。
 - [ ] **OpenCode remote MCP 設定に認証手段がなくデータプレーンを無認証運用に追いやる**
   - 2026-11-22 並列 Verify（V-59）: 未解決（confirmed）。opencode.jsonc の remote MCP は type=remote / url=http://127.0.0.1:8082/mcp / oauth=false のまま。gateway 側は admin_token 未設定時に無認証を許す設計（non fail-closed）。Tailscale のネットワーク境界は記録されるが公式クローズ判断なし。
  —
@@ -2888,6 +2888,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **トークン予算の境界値（等号 / 等号+1）が未テスト** —
   `rust/jarvis-context/src/builder.rs:1289,1291`, `specs/test-context.md:92,222` /
   R3-TQ01 / confirmed。
+  - 2026-11-22 並列 Verify（V-98）: 未解決（confirmed）。builder.rs:1324-1325 の budget_bytes = max_tokens*4 に対し境界回帰は「大幅小／大幅大」のみで、ちょうど budget / budget+1 byte の直接検証なし。specs/test-context.md:222-229 の TC-C2 も境界値分析と乖離。境界テスト追加は安全に可能。
 - [ ] **web.fetch の HTTP レスポンス処理分岐が実ネットワーク依存** —
   `rust/jarvis-mcp-gw/src/sandbox.rs:260,267,281,285,294,1110` /
   R3-TQ01 / confirmed。redirect 4 回・Location 欠落等が CI で未検証。
@@ -2896,6 +2897,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **gRPC admin token の定時間比較テストが戻り値のみの vacuous** —
   `rust/jarvis-mcp-gw/src/grpc.rs:98,102,288`, `specs/test-mcp-gateway.md:284` /
   R3-TQ01 / likely。
+  - 2026-11-22 並列 Verify（V-99）: 未解決（confirmed）。constant_time_eq / fixed_size_digest_eq 自体は 32 バイト XOR fold の定時間実装だが、回帰は戻り値・status・トークン非開示のみで、タイミング計測／実装静的検査なし。実装は安全でテスト品質の課題。
 - [ ] **backup.rs / deploy.rs の unit test がどのゲートからも実行されない** —
   `Makefile:62,164,170,172`, `rust/scripts/backup.rs:423`, `rust/scripts/deploy.rs:647` /
   R2-FG02 / confirmed。
@@ -2954,6 +2956,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### 優先度 低
 
+  - 2026-11-22 並列 Verify（V-100）: 未解決（confirmed）。UI の is_expired は表示のみ（approvals.rs:436-439 のコメントが display-only と明記）でボタンの disabled ガードなし、decide にも expires_at 检查なし。policy 側 410 で事後 fail-closed だが UI 事前ガードは未実装。
 - [x] **.editorconfig に Rust の indent 指定が無く rustfmt 既定と衝突** — 2026-11-22 対応済み: `[*.rs] indent_size = 4` を追加し rustfmt 既定（4 スペース）と整合。あわせて `[*.{json,yaml,yml}]` を `[*.{json,jsonc,yaml,yml}]` へ拡張し `opencode.jsonc` も明示的に 2 スペースへ。根拠
   `.editorconfig:17,26`, `Makefile:63` / R1-ST10 / confirmed に格上げ。
 - [x] **audit.toml と Makefile の cargo-audit バージョンが二重管理** — 2026-11-22 対応済み: Makefile に `CARGO_AUDIT_VERSION ?= 0.23.0` と `print-cargo-audit-version` ターゲットを追加し、ci.yml の install step が `make -s print-cargo-audit-version` から値を取得して probe 用 regex と `cargo install --version` に使用するよう変更（ci.yml 側の 0.23.0 ハードコードを削除）。バージョン更新は Makefile 1箇所で済む。根拠
