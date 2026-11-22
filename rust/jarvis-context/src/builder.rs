@@ -1326,7 +1326,7 @@ fn apply_token_budget(
     ))
 }
 
-pub mod memory {
+pub(crate) mod memory {
     use super::*;
     use qdrant_client::qdrant::point_id::PointIdOptions;
     use qdrant_client::qdrant::{
@@ -1335,7 +1335,7 @@ pub mod memory {
     };
     use std::collections::HashMap;
 
-    pub async fn create_pg_pool(
+    pub(crate) async fn create_pg_pool(
         config: &crate::config::ContextConfig,
     ) -> Result<deadpool_postgres::Pool> {
         let mut cfg = deadpool_postgres::Config::new();
@@ -1378,7 +1378,9 @@ pub mod memory {
         Ok(pool)
     }
 
-    pub async fn create_qdrant_client(config: &crate::config::ContextConfig) -> Result<Qdrant> {
+    pub(crate) async fn create_qdrant_client(
+        config: &crate::config::ContextConfig,
+    ) -> Result<Qdrant> {
         // R4-DP2: never restore `skip_compatibility_check()`. The client's
         // default `check_compatibility = true` probes the server at build time
         // and reads its version; disabling that let a server-side API/version
@@ -1648,7 +1650,7 @@ pub mod memory {
         )
     }
 
-    pub async fn ensure_collection(
+    pub(crate) async fn ensure_collection(
         client: &Qdrant,
         name: &str,
         embedding_dim: usize,
@@ -1697,7 +1699,7 @@ pub mod memory {
         check_inspected_dimension(name, embedding_dim, inspected)
     }
 
-    pub async fn upsert_vector(
+    pub(crate) async fn upsert_vector(
         client: &Qdrant,
         collection: &str,
         memory: &MemoryEntry,
@@ -1737,7 +1739,7 @@ pub mod memory {
     /// relevance order. The score is captured here because the later PostgreSQL
     /// refetch only returns row columns and cannot reconstruct it (P1-1). An id
     /// without a usable score keeps `None` instead of a fabricated `0.0`.
-    pub async fn search_vectors(
+    pub(crate) async fn search_vectors(
         client: &Qdrant,
         collection: &str,
         embedding: &[f32],

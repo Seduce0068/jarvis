@@ -2898,11 +2898,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **承認 wire DTO が共有型の外で再実装されている** —
   `rust/jarvis-mcp-gw/src/approval.rs:97-153`, `jarvis-policy/src/policy.rs:68-74` /
   R1-AR01 / confirmed。`ApprovalDecision` は共有済みだが request/outcome が重複。
-- [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能**
-  - 2026-11-22 並列 Verify（V-76）: 未解決（confirmed）。pub mod は変更なし。一部は pub(crate) 化済み（context/config.rs:86 validation 等）だが builder.rs:1329 の pub mod memory / :1338,:1381 の create_pg_pool/create_qdrant_client は外部未参照で pub(crate) 化可能。ただし grpc::proto や kill_switch::sha256_digest 等は他クレートから実利用があり、安易な pub(crate) 化はビルド破壊。API 再編（pub use 追加）を伴う設計判断案件。
- —
-  `rust/jarvis-policy/src/lib.rs:4-14`, `rust/jarvis-mcp-gw/src/lib.rs:3-15` /
-  R1-AR01 / confirmed。
+- [ ] **公開モジュールが過剰で内部実装が crate 外から参照可能**（部分対応） — 2026-11-22 対応済み（安全な範囲）: builder.rs:1329 の `pub mod memory` と内部 bare pub 5項目（create_pg_pool / create_qdrant_client / ensure_collection / upsert_vector / search_vectors）を `pub(crate)` へ縮小。lib.rs:27-28 の同一クレート参照は維持、外部クレート実利用は無し。残るは他クレートから実利用のある grpc::proto / kill_switch::sha256_digest 等の再エクスポート設計（判断待ち）のため項目は open 維持。根拠
+  `rust/jarvis-context/src/builder.rs:1329,1338,1381,1651,1700,1740`, `rust/jarvis-context/src/lib.rs:27-28` / V-76 / confirmed。
+  - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 184 passed（unit）+ 6 passed（integration）、件数不変で証跡同期不要、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **outbox バックオフ CAS が古い attempts を上書きしうる**
   - 2026-11-22 並列 Verify（V-77）: 未解決（confirmed）。mark_failed（builder.rs:583-584）の `WHERE id=$1 AND attempts <= $2` は不変、GREATEST／厳密比較／FOR UPDATE／next_retry_at 単調ガードなし。attempts の巻き戻し自体は WHERE で防がれるが、同値再書込みで next_retry_at が早い時刻へ後退する余地が残る。CAS 回帰テストなし。
  —
