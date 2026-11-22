@@ -223,12 +223,18 @@ impl PolicyConfig {
     /// rejected only when `require_kill_switch_admin_token` is enabled. That
     /// preserves the documented staged-rollout compatibility (todo.md P0-10:
     /// enabling the guard in production is a separate operator decision).
-    /// The `lib.rs` startup guard keeps enforcing the same placeholder rule
-    /// for programmatically built configs; this method makes the file-based
-    /// startup path (`load()` -> `load_from_path`) consistent with it.
+    /// With the guard off the placeholder is still allowed and only logged as
+    /// a warning, so the default remains warn-only.
     ///
-    /// No token value is interpolated into either error: secrets must never
-    /// reach logs, and the message text already distinguishes the two cases.
+    /// This is now the single source of truth for the startup guard: both the
+    /// file-based path (`load()` -> `load_from_path_with`) and the
+    /// programmatic path (`PolicyEngine::new`) call it, so the same blank
+    /// rejection and placeholder rule apply to either route.
+    ///
+    /// No configured secret is interpolated into either error: secrets must
+    /// never reach logs. The guard's error names the public
+    /// [`PLACEHOLDER_KILL_SWITCH_TOKEN`] marker (a known, non-secret constant)
+    /// so operators and callers can identify which value was rejected.
     pub fn validate_kill_switch_admin_token(&self) -> Result<()> {
         if self.kill_switch_admin_token.trim().is_empty() {
             anyhow::bail!(
@@ -242,8 +248,16 @@ impl PolicyConfig {
         {
             anyhow::bail!(
                 "kill switch admin token is still the known placeholder value \
-                 but require_kill_switch_admin_token = true; set \
-                 JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN to a real secret"
+                 '{}' but require_kill_switch_admin_token = true; set \
+                 JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN to a real secret",
+                PLACEHOLDER_KILL_SWITCH_TOKEN
+            );
+        }
+        if self.kill_switch_admin_token == PLACEHOLDER_KILL_SWITCH_TOKEN {
+            tracing::warn!(
+                "Kill switch admin token is still the default '{}'; \
+                 set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN",
+                PLACEHOLDER_KILL_SWITCH_TOKEN
             );
         }
         Ok(())
@@ -920,6 +934,57 @@ default_deny = true
             .expect("blank token parses as an empty string");
         assert_eq!(config.kill_switch_admin_token(), "");
         assert!(config.validate_kill_switch_admin_token().is_err());
+    }
+
+    /// R2-01: the placeholder guard must fire on both startup routes. The
+    /// load path aborts inside `load_from_path_with`; the programmatic path
+    /// aborts inside `PolicyEngine::new` before any Cedar/Casbin I/O. Both
+    /// errors originate from the single shared validator, so their text is
+    /// identical. No log capture is needed to prove the guard is shared.
+    #[tokio::test]
+    async fn placeholder_guard_is_shared_by_load_and_programmatic_paths() {
+        let toml = format!("{}\nrequire_kill_switch_admin_token = true\n", base_toml());
+        let name = format!(
+            "jarvis-policy-placeholder-shared-{}.toml",
+            std::process::id()
+        );
+        let path = std::env::temp_dir().join(name);
+        std::fs::write(&path, &toml).expect("write temp config");
+
+        let load_error = PolicyConfig::load_from_path_with(
+            path.to_str().expect("utf8 temp path"),
+            Figment::new(),
+        )
+        .expect_err("load path rejects a guarded placeholder token");
+
+        let config = PolicyConfig {
+            kill_switch_admin_token: PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
+            require_kill_switch_admin_token: true,
+            ..Default::default()
+        };
+        // PolicyEngine is not Debug, so avoid expect_err's Display bound by
+        // destructuring the Result directly.
+        let engine_error = match crate::PolicyEngine::new(config).await {
+            Ok(_) => panic!("programmatic path must reject the guarded placeholder"),
+            Err(error) => error,
+        };
+
+        let message = engine_error.to_string();
+        assert_eq!(
+            load_error.to_string(),
+            message,
+            "both routes surface the same shared guard"
+        );
+        assert!(
+            message.contains("require_kill_switch_admin_token"),
+            "error names the opt-in flag: {message}"
+        );
+        assert!(
+            message.contains(PLACEHOLDER_KILL_SWITCH_TOKEN),
+            "error names the placeholder: {message}"
+        );
+
+        std::fs::remove_file(&path).expect("clean temp config");
     }
 
     // ---- I29-A approval persistence config seam --------------------------

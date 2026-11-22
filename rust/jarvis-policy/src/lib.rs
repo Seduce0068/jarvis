@@ -28,26 +28,13 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub async fn new(config: config::PolicyConfig) -> Result<Self> {
-        // P0-10 staged rollout: the kill-switch admin token must not be the
-        // placeholder in production. Default stays warn-only to avoid an
-        // unplanned outage; operators can opt into a hard startup failure by
-        // setting `require_kill_switch_admin_token = true` once the deployed
-        // unit injects a real token via Secret Manager.
-        if config.kill_switch_admin_token() == config::PLACEHOLDER_KILL_SWITCH_TOKEN {
-            if config.require_kill_switch_admin_token {
-                anyhow::bail!(
-                    "kill switch admin token is still '{}' but \
-                     require_kill_switch_admin_token = true; set \
-                     JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN",
-                    config::PLACEHOLDER_KILL_SWITCH_TOKEN
-                );
-            }
-            tracing::warn!(
-                "Kill switch admin token is still the default '{}'; \
-                 set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN",
-                config::PLACEHOLDER_KILL_SWITCH_TOKEN
-            );
-        }
+        // P0-10 staged rollout: the single startup guard for the kill-switch
+        // admin token (blank rejection + opt-in placeholder rejection +
+        // warn-only default) now lives in `PolicyConfig::validate_...`, shared
+        // with the file-based load path. Keeping this call first preserves the
+        // fail-closed contract for programmatically built configs too; the
+        // default stays warn-only because the P0 default reversal is on hold.
+        config.validate_kill_switch_admin_token()?;
         let cedar_engine = Arc::new(policy::CedarEngine::new(&config).await?);
         let casbin_enforcer = Arc::new(
             policy::CasbinEnforcer::new(
