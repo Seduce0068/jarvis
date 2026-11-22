@@ -61,6 +61,18 @@ impl AllowList {
                     tool.name
                 );
             }
+            // Fail closed: timeout_ms is otherwise only deserialized as a u64,
+            // so 0 would make every call expire immediately and an extreme
+            // value (e.g. 86400000) could hang a tool for a day. Reject the
+            // whole file at startup when it falls outside 1..=60000. Handler
+            // clamping (web.fetch only) is intentionally left unchanged.
+            if !(1..=60_000).contains(&tool.timeout_ms) {
+                bail!(
+                    "allowlist tool '{}' has timeout_ms {} outside 1..=60000",
+                    tool.name,
+                    tool.timeout_ms
+                );
+            }
             // Fail closed: a duplicate name would make `HashMap::insert`
             // silently overwrite the earlier entry (last wins), so a later
             // definition with a weaker `requires_approval` gate could replace
@@ -270,6 +282,53 @@ requires_approval = false
             .expect_err("duplicate tool name must abort startup");
         assert!(error.to_string().contains("duplicate tool name"), "{error}");
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// C92-R2-04: startup must reject timeout_ms outside 1..=60000
+    /// (fail-closed), while the boundary values remain accepted. The values
+    /// live only in this test; the shipped allowlist is untouched. The
+    /// handler-specific clamp (web.fetch only) is deliberately not changed.
+    #[tokio::test]
+    async fn new_validates_timeout_ms_range() {
+        let tool_toml_with_timeout = |timeout_ms: u64| {
+            format!(
+                r#"
+principals = ["jarvis"]
+
+[[tools]]
+name = "timed.tool"
+description = "test tool"
+allowed_principals = ["jarvis"]
+max_args_size = 1
+timeout_ms = {timeout_ms}
+requires_approval = false
+"#
+            )
+        };
+
+        // 0 would expire instantly; 60001 is one past the ceiling; 86400000
+        // is the extreme value that could hang a tool for a day.
+        for rejected in [0, 60_001, 86_400_000] {
+            let toml = tool_toml_with_timeout(rejected);
+            let (dir, config) =
+                config_with_allowlist(&format!("bad-timeout-{rejected}"), &toml).await;
+            let error = AllowList::new(&config)
+                .await
+                .expect_err("timeout_ms outside 1..=60000 must abort startup");
+            assert!(error.to_string().contains("timeout_ms"), "{error}");
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
+
+        // Both ends of the inclusive range are accepted.
+        for accepted in [1_000, 60_000] {
+            let toml = tool_toml_with_timeout(accepted);
+            let (dir, config) =
+                config_with_allowlist(&format!("ok-timeout-{accepted}"), &toml).await;
+            AllowList::new(&config)
+                .await
+                .expect("timeout_ms within 1..=60000 must be accepted");
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+        }
     }
 
     /// I75-C: the new startup guards must not reject the shipped allowlist.

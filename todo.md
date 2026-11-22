@@ -11,6 +11,14 @@ generated:
   at: "2026-11-17T19:56:05+09:00"
 ---
 
+## 方針（2026-11-23: ユーザーが「2 を任せる」= 方針判断をエージェントへ委譲）
+
+- 実機操作・秘密情報の実値投入（root 対話承認、トークン注入、S9 実機演習、timer/unit 再適用、otelcol 実機確認、bws.env 再投入、共有 lib 実機配布）はエージェント権限外のためユーザー操作として残す。
+- 再評価日 2026-12-20 の major 更新（hickory / rsa / rmcp / tokio-tungstenite）は現状 2026-11-23 で日付前につき保留。
+- `panic=abort` 解除（release profile）は本番バイナリのクラッシュ挙動が変わるため保留。
+- P0 ガード既定反転（require_approval_api_token / require_server_side_principal / require_kill_switch_admin_token 等）は、トークン未設定の実機で起動失敗するリスクがあるため、実機への値投入確認まで保留（opt-in 実装は維持）。
+- 上記以外の、**repo 内で完結し標準検証ループ（fmt/check/test/clippy/ci-local/secret-scan）で検証可能な設計判断・コード修正**はエージェント判断で実施する。
+
 ## 実施記録
 
 - 実施日: 2026-11-17。対象: `jarvis` リポジトリ全体（Rust 5 crate、
@@ -2703,33 +2711,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
     一過性の `ActualRunDetectedFailure` が1回だけ発生したが、単独再実行2回と
     `make check-evidence-counts` 2回連続で再現せず、flaky 反復は停止した。
     根拠 `ci/scripts/generate-evidence.sh:130-158` / R1-ST08 / confirmed。
-- [ ] **build-selfhost の policy / otelcol 退避が EXIT trap で復元されない** —
-  根拠 `infra/scripts/build-selfhost.sh:559-563,600-605` / R1-ST06 / confirmed。
-  配置途中で `set -e` が発動すると `.bak` だけが残り途中状態が実効になる。
-  - 2026-11-22 並列 Verify（V-118）: 未解決（confirmed）。build-selfhost.sh:561-563,602-604 の policy/otelcol .bak 退避はその後参照されず、EXIT trap cleanup_selfhost（:212-242）が復元するのは STAGE_DIR / mcp_gw_env / migrations.service unmask のみ。退避後の exit 1 分岐が複数残り、I54-B の復元は mcp-gw env に限る（:614,619,649 コメント）。復元ロジック追加は設計判断。
-- [ ] **本番 DB 退避から自動ロールバックが無く失敗時に空 DB が残る** —
-  根拠 `infra/scripts/restore-local.d/pg.sh:137-141,155-167`,
-  `infra/scripts/restore-local.sh:665-710` / R1-ST06 / confirmed。
-  退避 DB 名をログするだけで EXIT trap に復元処理が無い（S9 の実運用リスク）。
-  - 2026-11-22 並列 Verify（V-144）: 未解決（confirmed）。pg.sh:137-142 が旧 DB を TEMPLATE 退避するが、以降の失敗分岐は fail のみで退避 DB から本番 DB を再作成する自動ロールバックなし。backup_db は関数ローカルで EXIT trap on_exit（restore-local.sh:665-709）も退避 DB に触れない。手動復旧前提・設計判断。
-- [ ] **PG 復元検証がテーブル件数>0 のみでスキーマ版を確認しない** —
-  根拠 `infra/scripts/restore-local.d/pg.sh:34,103-114,169-180` /
-  R2-DI01 / confirmed。古いダンプや 004/005/006 欠落が合格し得る。
-  - 2026-11-22 並列 Verify（V-119）: 未解決（confirmed）。pg.sh:102-114,169-180 の検証は information_schema.tables の count>0 のみで、_sqlx_migrations の version/checksum 照合なし（infra 全体で _sqlx_migrations 言及は build-selfhost.sh:47 のコメント1件のみ）。古いダンプや migration 欠落が合格しうる。スキーマ版検証追加は設計判断。
-- [ ] **Qdrant 本番検証が隔離検証の points_count と突き合わされない** —
-  根拠 `infra/scripts/restore-local.d/qdrant.sh:82-93,131-142` /
-  R2-DI01 / confirmed。部分スナップショットのサイレント欠損を検出できない。
-  - 2026-11-22 並列 Verify（V-120）: 未解決（confirmed）。qdrant.sh:107 の隔離 points_count は :118 のログ以降未参照、本番 :156 の prod_points と照合するガードなし（両者とも「>0 かつ数値」のみ）。部分スナップショットのサイレント欠損を検出できない。照合ガード追加は設計判断。
+- [x] build-selfhost 退避の EXIT trap 復元 — 2026-11-23 方針委譲で対応済み。cleanup_selfhost（build-selfhost.sh:235-279）に mcp_gw_env と同じ entered/done/backup_made 枠組みで policy/otelcol/opencode の .bak 復元を追加（配置完了後は復元しないため成功時に古い設定が戻るバグを回避）。退避成功フラグ・完了フラグも追加。根拠 `infra/scripts/build-selfhost.sh:235-279,605-709` / V-118。
+- [x] 本番 DB 退避の自動ロールバック — 2026-11-23 方針委譲で対応済み。pg.sh:127-153 の rollback_from_backup() が退避 DB 実在確認後 DROP IF EXISTS＋CREATE ... TEMPLATE で本番 DB を再作成し、DROP 後 CREATE/psql/再検証の3失敗分岐から呼ぶ（DROP 失敗は本番無傷のため意図的に不使用）。退避 DB 残存も fail-closed 確認。根拠 `infra/scripts/restore-local.d/pg.sh:127-153,291-340` / V-144。
+- [x] PG 復元のスキーマ版検証 — 2026-11-23 方針委譲で対応済み。expected_sqlx_version() が rust/migrations/*.sql の最大プレフィクス（現状 007）を動的導出、verify_sqlx_migrations() が管理表存在＋max(version) 照合を fail-closed で実施。隔離は legacy 互換、本番再検証は strict。根拠 `infra/scripts/restore-local.d/pg.sh:45-125,245-330` / V-119。
+- [x] Qdrant points_count の照合 — 2026-11-23 方針委譲で対応済み。qdrant.sh:114 の隔離 points_count を本番検証まで保持し、本番 < 隔離（部分スナップショット）を固定語彙 fail で拒否（完全一致ではなく本番>=隔離を要求）。「evacuating old collection」ログは実態（退避未実装・同一コレクション上書き）へ訂正。根拠 `infra/scripts/restore-local.d/qdrant.sh:17-22,114,139-143,174-186` / V-120。
 - [x] **event source の正規化を両トランスポートで統一** — 2026-11-22 対応済み。jarvis-core に `EventSource::from_str_lossy`（未知値→Manual、case-insensitive）を追加（lib.rs:378-405）、HTTP `normalize_event_source`（http.rs:46-51）と gRPC `EmitEvent`（grpc.rs:88-115）の両方をそれへ委譲。gRPC の未知値拒否回帰を「Manual 受け付け」期待へ更新し、core に大文字/未知/既知の3ケース回帰を追加。根拠
   `rust/jarvis-core/src/lib.rs:378-405,710-721`, `rust/jarvis-event/src/{http.rs:46-51,grpc.rs:88-115,277-295}` / R1-AP01 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-core --lib --locked` 20 passed（+1）、`cargo test -p jarvis-event --lib --locked` 93 passed（+1）、event 証跡 92→93 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] **opencode サブエージェント permission の secret deny** — 2026-11-22 対応済み。repo 版・配布用版 opencode.jsonc の全 per-agent permission ブロック（jarvis-dev bash/read/edit、jarvis-policy-audit read）に `*id_rsa*` / `*.kdbx*` / `*.npmrc*` を追加。トップレベルは不変（重複なし）、jarvis-policy-audit の bash/edit は既に全拒否のため対象外。根拠
   `opencode.jsonc:158-164,172-178,186-192,223-229`, `infra/config/opencode/opencode.jsonc:173-179,187-193,201-207,237-243` / R1-ST07 / confirmed。
   - 検証: deny 3パターンの一致数が両ファイルとも21（トップレベル3×3＋per-agent4×3）、JSONC コメント除去後の JSON parse OK、gcloud 行のカンマ付与は追加に伴う正当な変更。
-- [ ] **opencode.jsonc が配布経路に未配線で deny が実機に届かない** —
-  根拠 `docs/integration/remaining-tasks.md:74-82` / R5-VU01 / confirmed。
-  `build-selfhost.sh` の配布対象外で旧 cloud-init.yaml にのみ記載されている。
-  - 2026-11-22 並列 Verify（V-83）: 未解決（confirmed）。build-selfhost.sh の配布対象に opencode.jsonc が無く、参照は legacy cloud-init/deploy.rs のみ。repo の deny は実機に届かない。追加自体は otelcol-config.yaml の退避＋install 方式で可能だが、owner 方針（legacy jarvis:jarvis 0644 vs 共有 install の root:root）、drift 検査追加、実機再デプロイ（build-selfhost 再実行＋service 再起動）の判断待ち。
+- [x] opencode.jsonc の配布配線 — 2026-11-23 方針委譲で対応済み。build-selfhost.sh:673-709 が /home/${JARVIS_USER}/.config/opencode/opencode.jsonc へ legacy の jarvis:jarvis 0644 で配布（共有 install_expected_config の root:root 強制は使わない）。既存は .bak-<ts> 退避＋tmp→mv 原子的配置＋失敗時復元。根拠 `infra/scripts/build-selfhost.sh:673-709` / V-83。
 - [x] **ADR-0001 の OpenCode V2 固定の置換注記** — 2026-11-22 対応済み。Decision 1 直前に「ADR-0002 でランタイム非依存化が決定され、OpenCode/code-server は交换可能な実装へ降格した。現行契約は ADR-0002 を正とする」置換記録を追加（ADR-0004 の infra 置換と同粒度）。adr/log.md にも記録追記。根拠
   `adr/0001-unified-architecture.md:38-47`, `adr/log.md`, `adr/0002-runtime-agnostic.md:4,15,40` / R1-DR01 / confirmed。
   - 検証: markdownlint 既存 baseline のみ、差分は ADR 2ファイル8行追加。
@@ -2742,14 +2734,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### 優先度 中
 
-- [ ] **allowlist の timeout_ms に起動時検証がなくハンドラごとに扱いが異なる** —
-  `rust/jarvis-mcp-gw/src/allowlist.rs:20`, `sandbox.rs:223,375`, `gateway.rs:601` /
-  R1-ST02 / confirmed。web.fetch のみ clamp し git/upstream は生値を使用。
-  - 2026-11-22 並列 Verify（V-81）: 未解決（confirmed）。AllowList::new（allowlist.rs:32-73）は TOML parse・空 name・空 principal のみ検証し timeout_ms の範囲ガードなし。「ハンドラごとの扱い差」は mcp_allowlist.toml:8-14 のコメントで現行契約として明記（web.fetch のみ clamp、他は生値）。起動時範囲検証の追加は可能だが設計判断。
-- [ ] **safe_client_error_text の語彙に git / パス系 ClientError が抜ける** —
-  `rust/jarvis-mcp-gw/src/http.rs:323,349`, `sandbox.rs:125,330,413,473,498` /
-  R1-ST02 / confirmed。機密ファイル拒否が「引数不正」に丸められる。
-  - 2026-11-22 並列 Verify（V-114）: 未解決（confirmed）。safe_client_error_text（http.rs:325-352）は prefix 列挙＋デフォルトで、git timed out / sensitive file 拒否 / path escapes 等が丸められる。I97-D の共有ヘルパ化は達成済みだが語彙網羅性は未達。拡張は設計判断。
+- [x] allowlist timeout_ms の起動時検証 — 2026-11-23 方針委譲で対応済み。AllowList::new（allowlist.rs:64-75）が 1..=60000 範囲を検査し範囲外を bail! で拒否。ハンドラごとの clamp（web.fetch のみ）は現行契約として維持。回帰 new_validates_timeout_ms_range を追加。根拠 `rust/jarvis-mcp-gw/src/allowlist.rs:64-75,287-332` / V-81。
+- [x] safe_client_error_text の語彙網羅 — 2026-11-23 方針委譲で対応済み。http.rs:351-366 に git timed out / git failed / sensitive file / path is a directory / path escapes workspace の固定語彙を加法（生パス・stderr・引数は破棄）。stat/read 系は既存回帰契約で据え置き。回帰 uncovered_git_and_path_errors_map_to_fixed_vocabulary_without_leaking_details を追加。根拠 `rust/jarvis-mcp-gw/src/http.rs:351-366,823-858` / V-114。
 - [ ] **kill_switch の暗号プリミティブが gateway から流用され比較も二重実装**
   - 2026-11-22 並列 Verify（V-48）: 未解決（confirmed）。kill_switch.rs:98-107 に constant_time_eq 集約済みだが、mcp-gw の grpc.rs:116-124 / http.rs:103-111 が fixed_size_digest_eq をローカル二重定義し XOR fold も自前実装。jarvis-core には集約先が無く、共有化・集約は未実施（定数時間性自体は確保）。
  —

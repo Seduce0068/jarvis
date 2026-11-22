@@ -348,6 +348,20 @@ pub(crate) fn safe_client_error_text(message: &str) -> &'static str {
         _ if message.contains("dns lookup") => "dns lookup failed",
         _ if message.starts_with("no native handler for tool '") => "no native handler for tool",
         _ if message.starts_with("MCP server '") => "upstream MCP server is unavailable",
+        // R2 (V-114): git/path client errors that previously collapsed into the
+        // generic "invalid tool arguments" default now get their own fixed,
+        // distinguishable phrases. Only static prefixes are matched; the
+        // interpolated path, git argument slice and git stderr are discarded
+        // instead of being echoed into any caller-facing body. Generic OS
+        // failures (`stat`/`read`/`read_dir`/`canonicalize <path>`) are left on
+        // the default on purpose, matching the existing regression contract.
+        _ if message.starts_with("git timed out") => "git timed out",
+        _ if message.starts_with("git [") && message.contains("] failed: ") => "git command failed",
+        _ if message.starts_with("refusing to read sensitive file:") => {
+            "refusing to read a sensitive file"
+        }
+        _ if message.starts_with("path is a directory:") => "path is a directory",
+        _ if message.starts_with("path escapes workspace:") => "path escapes workspace",
         _ => "invalid tool arguments",
     }
 }
@@ -801,6 +815,47 @@ requires_approval = true
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
                 "{message}"
             );
+        }
+    }
+
+    /// R2 (V-114): previously uncovered git/path `ClientError` messages must
+    /// map to distinct fixed phrases, and the interpolated path, git args and
+    /// git stderr must never reach the caller-facing body. This is a pure
+    /// function check (`safe_client_error_text` plus the pure `http_error`
+    /// mapper); no listener and no dynamic log capture are involved.
+    #[test]
+    fn uncovered_git_and_path_errors_map_to_fixed_vocabulary_without_leaking_details() {
+        for (message, expected) in [
+            ("git timed out", "git timed out"),
+            (
+                "git [\"status\", \"--porcelain\"] failed: fatal: not a git repository: /srv/app/repo/.git",
+                "git command failed",
+            ),
+            (
+                "refusing to read sensitive file: /home/koppe/.ssh/id_rsa",
+                "refusing to read a sensitive file",
+            ),
+            (
+                "path is a directory: /home/koppe/some-dir",
+                "path is a directory",
+            ),
+            (
+                "path escapes workspace: /home/koppe/../../etc/passwd",
+                "path escapes workspace",
+            ),
+        ] {
+            // Pure helper: static vocabulary only, dynamic parts stripped.
+            assert_eq!(safe_client_error_text(message), expected, "{message}");
+
+            // The same phrase reaches the HTTP body, keeps the typed 400, and
+            // carries none of the raw path / git stderr from `message`.
+            let (status, body) = http_error(client_error(message));
+            assert_eq!(status, axum::http::StatusCode::BAD_REQUEST, "{message}");
+            let text = body.0["error"].as_str().unwrap();
+            assert_eq!(text, expected, "{message}");
+            assert!(!text.contains('/'), "path leaked: {text}");
+            assert!(!text.contains("fatal:"), "git stderr leaked: {text}");
+            assert!(!text.contains("id_rsa"), "sensitive name leaked: {text}");
         }
     }
 

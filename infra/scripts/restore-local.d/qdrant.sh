@@ -13,6 +13,13 @@
 # descriptors by the shared resolve_restore_input() helper (defined in
 # restore-local.d/configs.sh); qdrant-snapshot.bin is only the legacy 3-column
 # fallback. The none/none descriptor contract is unchanged (P1-6 undecided).
+#
+# POLICY (unified): the existing production collection is not evacuated to a
+# separate backup collection or alias. The design choice between an in-place
+# same-collection restore and a new-collection + alias switch is still open;
+# until it is made, the snapshots/upload API with priority=snapshot overwrites
+# the production collection in place and the previous contents are replaced.
+# The production-apply log line states this explicitly in fixed vocabulary.
 
 restore_qdrant() {
   if [ "$#" -ne 0 ]; then
@@ -129,11 +136,11 @@ restore_qdrant() {
 
   # --- Step 3: production apply, only with --confirm -----------------------
   if [ "$CONFIRM" -eq 1 ]; then
-    # The evacuation of the old collection is recorded by name only here.
-    # UNDECIDED (design doc "未決定事項"): same-collection API restore vs.
-    # new collection + alias switch. For now we restore into the same
-    # collection; the actual evacuation target/retention is still undecided.
-    log "Qdrant: --confirm -> production apply; evacuating old collection '${qdrant_collection}' (name only)"
+    # POLICY (see header): no evacuation is performed. The old collection is
+    # not copied aside, and no alias is switched; priority=snapshot replaces
+    # its contents in place. Log the real behaviour instead of claiming an
+    # evacuation that never happens (V-68).
+    log "Qdrant: --confirm -> production apply; evacuation not implemented, overwriting same collection in place"
 
     local prod_code="" prod_rc=0
     prod_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
@@ -162,6 +169,15 @@ restore_qdrant() {
     esac
     if [ "$prod_points" -le 0 ]; then
       fail "Qdrant: production collection has no points after restore"
+      return 1
+    fi
+    # Fail closed on a partial apply: the production collection must not end
+    # up with fewer points than the isolated verification observed for the
+    # same snapshot. Requiring prod >= isolated (not exact equality) still
+    # detects every shortfall while tolerating pre-existing extra points;
+    # neither count is logged.
+    if [ "$prod_points" -lt "$points_count" ]; then
+      fail "Qdrant: production points_count below isolated verification (partial snapshot)"
       return 1
     fi
     log "Qdrant: production collection re-verified (points_count ok, value not logged)"

@@ -232,6 +232,51 @@ cleanup_selfhost() {
       sudo install -o root -g root -m 0600 "${REPO_DIR}/infra/config/mcp_gateway.env" "${MCP_GW_ENV_DST}" 2>/dev/null || true
     fi
   fi
+  # C92-R2-01: policy / otelcol / opencode の退避 .bak も I54-B と同じ
+  # entered/done 枠組みで復元する。配置完了後（done=1）は .bak を触らず、
+  # EXIT trap が新しい設定を古い設定で上書きして deny を Kill しない。
+  # *_backup_made は退避 mv が成功した場合のみ立つため、mv 失敗時に
+  # 存在しない .bak を元へ戻すことはない。
+  if [[ "${policy_entered:-0}" -eq 1 && "${policy_done:-0}" -eq 0 ]]; then
+    if [[ "${policy_backup_made:-0}" -eq 1 && -n "${policy_backup:-}" ]]; then
+      if [[ -e "${policy_backup}" || -L "${policy_backup}" ]]; then
+        # 退避後に配置が途中まで進んだ場合はその残骸を除けてから戻す。
+        if [[ -e "${POLICY_DST}" || -L "${POLICY_DST}" ]]; then
+          sudo rm -rf -- "${POLICY_DST}" 2>/dev/null || true
+        fi
+        if [[ ! -e "${POLICY_DST}" && ! -L "${POLICY_DST}" ]]; then
+          sudo mv -- "${policy_backup}" "${POLICY_DST}" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+  if [[ "${otel_entered:-0}" -eq 1 && "${otel_done:-0}" -eq 0 ]]; then
+    if [[ "${otel_backup_made:-0}" -eq 1 && -n "${otel_backup:-}" ]]; then
+      if [[ -f "${otel_backup}" || -L "${otel_backup}" ]]; then
+        if [[ -e "${OTEL_DST}" || -L "${OTEL_DST}" ]]; then
+          sudo rm -f -- "${OTEL_DST}" 2>/dev/null || true
+        fi
+        if [[ ! -e "${OTEL_DST}" && ! -L "${OTEL_DST}" ]]; then
+          sudo mv -- "${otel_backup}" "${OTEL_DST}" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
+  if [[ "${opencode_entered:-0}" -eq 1 && "${opencode_done:-0}" -eq 0 ]]; then
+    if [[ -n "${opencode_tmp:-}" && -e "${opencode_tmp}" ]]; then
+      sudo rm -f "${opencode_tmp}" 2>/dev/null || true
+    fi
+    if [[ "${opencode_backup_made:-0}" -eq 1 && -n "${opencode_backup:-}" ]]; then
+      if [[ -f "${opencode_backup}" || -L "${opencode_backup}" ]]; then
+        if [[ -e "${OPENCODE_DST}" || -L "${OPENCODE_DST}" ]]; then
+          sudo rm -f -- "${OPENCODE_DST}" 2>/dev/null || true
+        fi
+        if [[ ! -e "${OPENCODE_DST}" && ! -L "${OPENCODE_DST}" ]]; then
+          sudo mv -- "${opencode_backup}" "${OPENCODE_DST}" 2>/dev/null || true
+        fi
+      fi
+    fi
+  fi
   if [[ "${mig_unit_masked:-0}" -eq 1 ]]; then
     sudo systemctl unmask "${MIGRATIONS_UNIT:-jarvis-migrations.service}" >/dev/null 2>&1 || true
     # R4-D: remove our marker together with the unmask so a clean exit is not
@@ -557,9 +602,18 @@ sudo mkdir -p /etc/jarvis
 # /etc/jarvis/policy, leaving the stale config effective (todo.md 2026-11-19).
 POLICY_SRC="${REPO_DIR}/infra/config/policy"
 POLICY_DST="/etc/jarvis/policy"
+# C92-R2-01: I54-B と同じ entered/done/backup_made 枠組みで退避を追跡する。
+# 退避 mv が成功した場合のみ backup_made を立て、EXIT trap が失敗時に .bak を
+# 元パスへ戻せるようにする。配置完了後は done=1 で復元を無効化し、trap が
+# 新しい policy を古い .bak で上書きしないようにする。
+policy_entered=1
+policy_done=0
+policy_backup=""
+policy_backup_made=0
 if [[ -e "${POLICY_DST}" || -L "${POLICY_DST}" ]]; then
   policy_backup="${POLICY_DST}.bak-$(date +%Y%m%d%H%M%S)"
   sudo mv "${POLICY_DST}" "${policy_backup}"
+  policy_backup_made=1
   echo "backed up existing policy dir to ${policy_backup}"
 fi
 sudo install -d -o root -g root -m 0755 "${POLICY_DST}"
@@ -592,18 +646,67 @@ for top_config in pii_patterns.toml mcp_allowlist.toml; do
   install_expected_config "${top_mode}" \
     "${REPO_DIR}/infra/config/${top_config}" "/etc/jarvis/${top_config}"
 done
+# C92-R2-01: policy とトップレベル config の配置が完了したので、EXIT trap の
+# 退避復元を無効化する（.bak は成功時も従来どおり残す）。
+policy_done=1
 
 # P0-6: otelcol.service は /etc/jarvis/otelcol-config.yaml を読み込むため、
 # repo テンプレートを配布経路に含めないと repo/実機設定が drift する。
 # 既存ファイルは .bak-<ts> へ退避してから root:root 0644 で配置する。
 OTEL_SRC="${REPO_DIR}/infra/config/otelcol-config.yaml"
 OTEL_DST="/etc/jarvis/otelcol-config.yaml"
+# C92-R2-01: policy と同じ entered/done/backup_made 枠組みで退避を追跡する。
+# 配置完了後は done=1 で EXIT trap の復元を無効化し、.bak は残す。
+otel_entered=1
+otel_done=0
+otel_backup=""
+otel_backup_made=0
 if [[ -e "${OTEL_DST}" || -L "${OTEL_DST}" ]]; then
   otel_backup="${OTEL_DST}.bak-$(date +%Y%m%d%H%M%S)"
   sudo mv "${OTEL_DST}" "${otel_backup}"
+  otel_backup_made=1
   echo "backed up existing otelcol config to ${otel_backup}"
 fi
 sudo install -o root -g root -m 0644 "${OTEL_SRC}" "${OTEL_DST}"
+otel_done=1
+
+# C92-R2-01: opencode.jsonc は OpenCode の deny ルールを実機へ届ける設定。
+# opencode.service の OPENCODE_CONFIG_DIR は /home/jarvis/.config/opencode を
+# 指す（unit テンプレートの /home/jarvis は JARVIS_USER へ置換されるため、
+# 配置先も同じユーザーで解決する）。この配布経路が無いと repo の deny が
+# 実機に届かない。owner/mode は legacy の jarvis:jarvis 0644 を維持するため
+# 共有 install_expected_config（root:root 強制）は使わず、mcp_gw_env と同じ
+# tmp -> mv -f の原子的配置にする。既存ファイルは .bak-<ts> へ退避する。
+OPENCODE_SRC="${REPO_DIR}/infra/config/opencode/opencode.jsonc"
+OPENCODE_DST="/home/${JARVIS_USER}/.config/opencode/opencode.jsonc"
+opencode_entered=1
+opencode_done=0
+opencode_backup=""
+opencode_backup_made=0
+opencode_tmp=""
+if [[ -e "${OPENCODE_DST}" || -L "${OPENCODE_DST}" ]]; then
+  opencode_backup="${OPENCODE_DST}.bak-$(date +%Y%m%d%H%M%S)"
+  sudo mv "${OPENCODE_DST}" "${opencode_backup}"
+  opencode_backup_made=1
+  echo "backed up existing opencode config to ${opencode_backup}"
+fi
+sudo install -d -o "${JARVIS_USER}" -g "${JARVIS_USER}" -m 0755 \
+  "$(dirname -- "${OPENCODE_DST}")"
+opencode_tmp="$(sudo mktemp "${OPENCODE_DST}.tmp.XXXXXX")" || {
+  echo "failed to create temp file for opencode config" >&2
+  exit 1
+}
+if ! sudo install -o "${JARVIS_USER}" -g "${JARVIS_USER}" -m 0644 \
+  "${OPENCODE_SRC}" "${opencode_tmp}"; then
+  echo "failed to stage opencode config to temp file" >&2
+  exit 1
+fi
+if ! sudo mv -f "${opencode_tmp}" "${OPENCODE_DST}"; then
+  echo "failed to atomically install opencode config" >&2
+  exit 1
+fi
+opencode_tmp=""
+opencode_done=1
 
 # I52-B / I54-B: jarvis-mcp-gw.service は EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env
 # を optional で読む。この配布経路が無いと unit のリテラル既定値

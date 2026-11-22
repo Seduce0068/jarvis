@@ -10,8 +10,9 @@
 #   KEEP_ISOLATED_DB : 1=隔離DBを保持（既定=検証後にDROP）。--keep-isolated-db 由来。
 #   ISOLATED_DB_NAME / ISOLATED_DB_CREATED : 後始末状態を EXIT trap と共有するグローバル。
 #
-# 定義する関数は restore_pg() のみ（引数なし、戻り値 0/1）。
-# 実 DB 操作は APPLY=1 のときだけ行う。入力は共有ヘルパ
+# 定義する関数は restore_pg()（引数なし、戻り値 0/1）と、その補助関数
+# pg_fixed_error() / expected_sqlx_version() / verify_sqlx_migrations() /
+# rollback_from_backup()。実 DB 操作は APPLY=1 のときだけ行う。入力は共有ヘルパ
 # resolve_restore_input()（restore-local.d/configs.sh で定義）が manifest の
 # role/format 記述子から解決するパス。固定名 postgres-jarvis.sql.gz は
 # role 列を持たない legacy 3列行のフォールバックとしてのみ使う（I75-B）。
@@ -24,6 +25,132 @@
 # 呼び出し側が --keep-isolated-db を明示する（KEEP_ISOLATED_DB=1）。
 # CREATE 成功後 DROP 完了前に異常終了した分は restore-local.sh の EXIT trap が
 # ISOLATED_DB_CREATED を見て片付ける（既存のサービス再起動 trap は変更しない）。
+#
+# 本番反映（CONFIRM=1）のロールバック方針:
+# 旧DB を TEMPLATE で退避した後に本番DB を DROP した以降の失敗
+# （CREATE 失敗 / ダンプ適用失敗 / 再検証失敗）では、退避DB の実在を確認してから
+# 本番DB を退避コピーで再作成する。DROP 自体が失敗した分岐は本番DB が無傷のため
+# ロールバックしない（二重に壊すリスクを避ける）。退避DB を確認できない場合は
+# 何も触らず fail-closed にする。
+# 呼び出し側の fail() は exit 1 するため、ロールバックが必要な分岐では
+# 先に rollback_from_backup() を呼び、その後に従来の fail() 語彙で終了する。
+
+# exit せず固定語彙だけを stderr に出す（値・SQL・DB 名は埋め込まない）。
+# 呼び出し側が元の fail() を呼べるようにするための補助。
+pg_fixed_error() {
+  printf '[restore-local] ERROR: PG: %s\n' "$1" >&2
+  return 1
+}
+
+# 期待する sqlx マイグレーション version を repo から動的に導出する。
+# rust/migrations/*.sql のファイル名プレフィクス（3 桁）の最大値を採用。
+# 単体実行で migrations ディレクトリが見つからない場合の既定 007 の根拠:
+# 本リポジトリは 001_initial.sql から
+# 007_pending_embeddings_active_index.sql まで連番で、最大番号が 007 のため。
+expected_sqlx_version() {
+  local fallback="007"
+  local mod_dir repo_root f name candidate max=""
+  mod_dir="$(dirname -- "${BASH_SOURCE[0]}")" || {
+    printf '%s\n' "$fallback"
+    return 0
+  }
+  repo_root="$(cd -- "$mod_dir/../.." 2>/dev/null && pwd -P)" || {
+    printf '%s\n' "$fallback"
+    return 0
+  }
+  if [ ! -d "$repo_root/rust/migrations" ]; then
+    printf '%s\n' "$fallback"
+    return 0
+  fi
+  for f in "$repo_root"/rust/migrations/*.sql; do
+    [ -f "$f" ] || continue
+    name="${f##*/}"
+    case "$name" in
+      [0-9][0-9][0-9]_*) candidate="${name%%_*}" ;;
+      *) continue ;;
+    esac
+    if [ -z "$max" ] || [ "$((10#$candidate))" -gt "$((10#$max))" ]; then
+      max="$candidate"
+    fi
+  done
+  printf '%s\n' "${max:-$fallback}"
+}
+
+# 復元先 DB の _sqlx_migrations を検証する（存在 + 最新 version の照合）。
+# 引数: target_db, mode(strict|lenient)
+#   strict  : version が取得できない場合も失敗（本番反映後の再検証）。
+#   lenient : version が取得できない場合は legacy ペイロードとして警告のみ。
+#             隔離検証では sqlx 情報を持たない合成/レガシー dump を許容するため。
+# 値が取得できて期待値と異なる場合は常に失敗（fail-closed）。
+verify_sqlx_migrations() { # target_db mode
+  local target_db="$1" mode="${2:-strict}"
+  local expected="" mgmt_count="" actual=""
+  expected="$(expected_sqlx_version)" || return 1
+
+  mgmt_count="$(psql -v ON_ERROR_STOP=1 -d "$target_db" -tAc \
+    "SELECT count(*) FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema') AND table_name = '_sqlx_migrations'" 2>/dev/null)" || {
+    pg_fixed_error "マイグレーション管理表の確認に失敗しました"
+    return 1
+  }
+  case "$mgmt_count" in
+    ''|*[!0-9]*) pg_fixed_error "マイグレーション管理表の確認結果が不正です"; return 1 ;;
+  esac
+  if [ "$mgmt_count" -eq 0 ]; then
+    pg_fixed_error "マイグレーション管理表が見つかりません"
+    return 1
+  fi
+
+  actual="$(psql -v ON_ERROR_STOP=1 -d "$target_db" -tAc \
+    "SELECT max(version) FROM _sqlx_migrations" 2>/dev/null)" || {
+    pg_fixed_error "マイグレーション version の取得に失敗しました"
+    return 1
+  }
+  if [ -z "$actual" ]; then
+    if [ "$mode" = "strict" ]; then
+      pg_fixed_error "マイグレーション version が取得できませんでした"
+      return 1
+    fi
+    log "PG: マイグレーション version が未記録のため照合をスキップしました"
+    return 0
+  fi
+  case "$actual" in
+    ''|*[!0-9]*) pg_fixed_error "マイグレーション version の形式が不正です"; return 1 ;;
+  esac
+  if [ "$((10#$actual))" -ne "$((10#$expected))" ]; then
+    pg_fixed_error "マイグレーション version が期待値と一致しません"
+    return 1
+  fi
+  log "PG: マイグレーション version の照合に成功しました"
+  return 0
+}
+
+# 退避DB から本番DB を再作成する。exit せず 0/1 を返す。
+# 退避DB の実在を確認できなければ何も壊さず失敗（fail-closed）。
+rollback_from_backup() { # backup_db prod_db
+  local backup_db="$1" prod_db="$2"
+  local rb_exists=""
+  rb_exists="$(psql -v ON_ERROR_STOP=1 -d postgres -tAc \
+    "SELECT 1 FROM pg_database WHERE datname = '$backup_db'" 2>/dev/null)" || {
+    pg_fixed_error "ロールバックできません（退避DB の確認に失敗しました）"
+    return 1
+  }
+  if [ -z "$rb_exists" ]; then
+    pg_fixed_error "ロールバックできません（退避DB が見つかりません）"
+    return 1
+  fi
+  psql -v ON_ERROR_STOP=1 -d postgres -tAc \
+    "DROP DATABASE IF EXISTS \"$prod_db\"" >/dev/null 2>&1 || {
+    pg_fixed_error "ロールバックに失敗しました（本番DB の削除に失敗）"
+    return 1
+  }
+  psql -v ON_ERROR_STOP=1 -d postgres -tAc \
+    "CREATE DATABASE \"$prod_db\" TEMPLATE \"$backup_db\"" >/dev/null 2>&1 || {
+    pg_fixed_error "ロールバックに失敗しました（本番DB の再作成に失敗）"
+    return 1
+  }
+  log "PG: 退避DB から本番DB を再作成しました（ロールバック完了）"
+  return 0
+}
 
 restore_pg() {
   # DB_NAME is defined by restore-local.sh; honour it here so the dry-run plan
@@ -57,6 +184,7 @@ restore_pg() {
     log "PG: 入力 = $dump_file"
     log "PG: 隔離DB '$isolated_db' へ gzip -cd | psql -v ON_ERROR_STOP=1 で復元する計画"
     log "PG: information_schema.tables の件数を検証する計画（件数のみ記録）"
+    log "PG: _sqlx_migrations の存在と最新 version を repo の期待値と照合する計画"
     if [ "${KEEP_ISOLATED_DB:-0}" -eq 1 ]; then
       log "PG: [計画] 隔離DB '$isolated_db' は --keep-isolated-db により検証後も保持"
     else
@@ -64,6 +192,7 @@ restore_pg() {
     fi
     if [ "${CONFIRM:-0}" -eq 1 ]; then
       log "PG: [計画] CONFIRM あり — 旧DB '$db_name' を退避 → DROP/CREATE → 再復元 → 再検証"
+      log "PG: [計画] 本番反映後の失敗時は退避DB から本番DB を再作成する（退避未確認時は fail-closed）"
     else
       log "PG: [計画] 本番DB '$db_name' は触らない（CONFIRM なし）"
     fi
@@ -113,6 +242,13 @@ restore_pg() {
   fi
   log "PG: 隔離DB '$isolated_db' のテーブル数 = $table_count"
 
+  # 復元後検証の強化: テーブル件数だけでなく sqlx マイグレーション管理表の
+  # 存在と最新 version を照合する。隔離段は legacy ペイロード互換のため
+  # version 未記録のみ許容し、不一致は fail-closed にする。
+  if ! verify_sqlx_migrations "$isolated_db" lenient; then
+    fail "PG: 隔離DB のマイグレーション検証に失敗しました"
+  fi
+
   # --- 隔離 DB の後始末（Qdrant の隔離コレクション削除と対称）---------------
   # 既定は検証直後に DROP し、本番データのコピーを残さない。
   # 残す場合は --keep-isolated-db（KEEP_ISOLATED_DB=1）の明示指定のみ。
@@ -153,28 +289,53 @@ restore_pg() {
     fi
 
     psql -v ON_ERROR_STOP=1 -d postgres -tAc "DROP DATABASE \"$db_name\"" >/dev/null 2>&1 || {
+      # DROP 自体の失敗では本番DB は無傷。二重に壊さないようロールバックしない。
       fail "PG: 旧DB '$db_name' の DROP に失敗しました"
       return 1
     }
     psql -v ON_ERROR_STOP=1 -d postgres -tAc "CREATE DATABASE \"$db_name\"" >/dev/null 2>&1 || {
+      # 以降は本番DB が消えた状態。退避DB から再作成してから従来の fail 語彙で終了。
+      rollback_from_backup "$backup_db" "$db_name" || true
       fail "PG: 本番DB '$db_name' の CREATE に失敗しました（退避DB '$backup_db' あり）"
       return 1
     }
 
     if ! gzip -cd "$dump_file" | psql -v ON_ERROR_STOP=1 -d "$db_name" >/dev/null; then
+      rollback_from_backup "$backup_db" "$db_name" || true
       fail "PG: 本番DB '$db_name' への復元に失敗しました（退避DB '$backup_db' あり）"
       return 1
     fi
 
     table_count="$(psql -v ON_ERROR_STOP=1 -d "$db_name" -tAc "$count_sql" 2>/dev/null)" || {
+      rollback_from_backup "$backup_db" "$db_name" || true
       fail "PG: 本番DB のテーブル件数取得に失敗しました"
       return 1
     }
     case "$table_count" in
-      ''|*[!0-9]*) fail "PG: 本番DB のテーブル件数が不正です"; return 1 ;;
+      ''|*[!0-9]*)
+        rollback_from_backup "$backup_db" "$db_name" || true
+        fail "PG: 本番DB のテーブル件数が不正です"
+        return 1 ;;
     esac
     if [ "$table_count" -eq 0 ]; then
+      rollback_from_backup "$backup_db" "$db_name" || true
       fail "PG: 本番DB のテーブル件数が 0 です"
+      return 1
+    fi
+    # sqlx マイグレーションの存在と最新 version を照合（本番は strict）。
+    if ! verify_sqlx_migrations "$db_name" strict; then
+      rollback_from_backup "$backup_db" "$db_name" || true
+      fail "PG: 本番DB のマイグレーション検証に失敗しました"
+      return 1
+    fi
+    # 復元後も退避DB が残っていることを確認（失われていたら成功にしない）。
+    exists="$(psql -v ON_ERROR_STOP=1 -d postgres -tAc \
+      "SELECT 1 FROM pg_database WHERE datname = '$backup_db'" 2>/dev/null)" || {
+      fail "PG: 復元後の退避DB 確認に失敗しました"
+      return 1
+    }
+    if [ -z "$exists" ]; then
+      fail "PG: 復元後に退避DB が見つかりません"
       return 1
     fi
     log "PG: 本番DB '$db_name' のテーブル数 = $table_count（退避: $backup_db）"
