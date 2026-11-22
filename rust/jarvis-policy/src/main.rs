@@ -163,6 +163,52 @@ fn warn_otlp_exporter_failure(endpoint_configured: bool, _endpoint: &str) {
 /// ordering, and `add_directive` replaces an equal-target directive.
 const OTEL_SDK_LOG_GUARD: [&str; 2] = ["opentelemetry_sdk=warn", "opentelemetry_otlp=warn"];
 
+/// Whether one `RUST_LOG` directive targets the OTel SDK/exporter (C43-R2-01).
+///
+/// Only an exact `opentelemetry_sdk` / `opentelemetry_otlp` target or one of
+/// their `::` subtargets counts. Global directives (no target) and unrelated
+/// targets are deliberately left alone.
+fn is_otel_sdk_directive(directive: &str) -> bool {
+    let target = match directive.split_once('=') {
+        Some((target, _)) => target,
+        None => directive,
+    };
+    let target = target.trim();
+    for prefix in ["opentelemetry_sdk", "opentelemetry_otlp"] {
+        if target
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Strip OTel SDK/exporter target directives from an operator `RUST_LOG` value
+/// before it reaches [`EnvFilter::new`] (C43-R2-01).
+///
+/// `DirectiveSet::add` replaces only a directive whose target compares `Equal`,
+/// and `Ord` sorts by target length. A longer target such as
+/// `opentelemetry_sdk::trace=debug` therefore coexists with the
+/// `opentelemetry_sdk=warn` guard and wins inside that subtree, re-enabling SDK
+/// DEBUG records that can carry the OTLP endpoint/credentials. Removing those
+/// directives here leaves the fixed guards as the only SDK/exporter directives.
+/// Comma-separated directives are trimmed individually. Global directives
+/// (`debug`, `info`, ...) are preserved verbatim so the I57-C contract stands.
+/// Pure over the supplied string: `None`/empty yields an empty filter string.
+fn sanitize_rust_log(rust_log: Option<&str>) -> String {
+    let Some(rust_log) = rust_log else {
+        return String::new();
+    };
+    rust_log
+        .split(',')
+        .map(str::trim)
+        .filter(|directive| !is_otel_sdk_directive(directive))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Build the global [`EnvFilter`] from the optional `RUST_LOG` value with the
 /// OTel SDK guard directives applied on top (I57-C).
 ///
@@ -171,7 +217,10 @@ const OTEL_SDK_LOG_GUARD: [&str; 2] = ["opentelemetry_sdk=warn", "opentelemetry_
 /// `set_var` unsafe and parallel tests racy). `EnvFilter::new("")` preserves the
 /// historical `from_default_env()` default of ERROR when `RUST_LOG` is unset.
 fn build_env_filter(rust_log: Option<&str>) -> EnvFilter {
-    let mut filter = EnvFilter::new(rust_log.unwrap_or(""));
+    // C43-R2-01: sanitise first, then keep the guards as a second layer of
+    // defence for the plain `RUST_LOG=debug` case (I57-C).
+    let sanitized = sanitize_rust_log(rust_log);
+    let mut filter = EnvFilter::new(sanitized.as_str());
     for directive in OTEL_SDK_LOG_GUARD {
         filter = filter.add_directive(
             directive
@@ -617,6 +666,66 @@ mod tests {
         assert!(
             log.contains(APP_DEBUG),
             "RUST_LOG=debug must still enable application DEBUG: {log}"
+        );
+    }
+
+    /// C43-R2-01: SDK/exporter target directives are stripped before
+    /// `EnvFilter::new`; global and unrelated directives stay byte-identical,
+    /// so the I57-C `RUST_LOG=debug` contract is unchanged.
+    #[test]
+    fn sanitize_rust_log_strips_otel_sdk_targets_only() {
+        let sanitized = super::sanitize_rust_log(Some(
+            "opentelemetry_sdk::trace=debug, info, opentelemetry_otlp=trace, jarvis_policy=debug",
+        ));
+        assert_eq!(sanitized, "info,jarvis_policy=debug");
+
+        assert_eq!(super::sanitize_rust_log(Some("debug")), "debug");
+        assert_eq!(super::sanitize_rust_log(Some(" info ")), "info");
+        assert_eq!(super::sanitize_rust_log(None), "");
+        assert_eq!(super::sanitize_rust_log(Some("")), "");
+    }
+
+    /// C43-R2-01 regression: a targeted `opentelemetry_sdk::trace=debug` used to
+    /// outrank the shorter `opentelemetry_sdk=warn` guard and leak SDK DEBUG.
+    /// After sanitization the guard is the only SDK directive and wins.
+    #[test]
+    fn targeted_otel_sdk_debug_directive_does_not_leak() {
+        // thread-local subscriber can be displaced by parallel tests; serialize
+        // log capture like the context/event helpers do (C43-R2-01 follow-up).
+        static CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CAPTURE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        const SDK_DEBUG: &str = "SDK-DEBUG-C43R201-probe";
+        const APP_INFO: &str = "APP-INFO-C43R201-probe";
+
+        let buffer = LogBuffer::default();
+        {
+            let subscriber = tracing_subscriber::registry()
+                .with(super::build_env_filter(Some(
+                    "opentelemetry_sdk::trace=debug,info",
+                )))
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .json()
+                        .with_writer(buffer.clone()),
+                );
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::debug!(target: "opentelemetry_sdk::trace", "{}", SDK_DEBUG);
+                tracing::info!(target: "jarvis_policy", "{}", APP_INFO);
+            });
+        }
+        let log = String::from_utf8(buffer.0.lock().expect("log buffer mutex poisoned").clone())
+            .expect("captured log must be UTF-8");
+
+        assert!(
+            !log.contains(SDK_DEBUG),
+            "targeted OTel SDK DEBUG leaked: {log}"
+        );
+        assert!(
+            log.contains(APP_INFO),
+            "global `info` must survive sanitization: {log}"
         );
     }
 }
