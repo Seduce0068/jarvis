@@ -151,7 +151,9 @@ generated:
   - `pii.rs` / `normalizer.rs` に `#[cfg(test)]` が皆無。無効パターンの
     サイレントスキップ、`enabled=false` バイパス、policy deny 時の
     dispatch 抑制を検証。設定読込失敗の fail-closed 化も。
-- [ ] **P2-2** review-gate の permissions と依存を修正（R4-GATE-001,
+- [ ] **P2-2** review-gate の permissions と依存を修正
+  - 2026-11-22 並列 Verify（V-56）: 一部解消・全体は未解決。checkout SHA 固定と未配線明記、安全版 .github/workflows/review-gate.yml の read-only permissions は完了。残るは ci/review-gate.yml の auto-merge 用 contents: write、fork PR トークン、OpenCode CLI 未固定 pipe 実行、autoaccept、認証情報経路の決定で、先頭コメントと remaining-tasks.md:728-729 が「判断待ち」と明記。
+（R4-GATE-001,
     R4-GATE-002, R4-GATE-004, R4-GATE-005）
   - **2026-11-18 監査**（[CI-1 監査節](docs/integration/remaining-tasks.md)）:
     監査対象は未配線の参照実装 `ci/review-gate.yml` のみ。安全版
@@ -224,7 +226,9 @@ generated:
     R3-RUN-005, R3-RUN-006）
   - （解消済み）旧状態: 起動→検証→停止（停止手順は 0 件）、手動変更のロールバック、
     `make verify-backup` が `/opt` へ書き込む矛盾、clippy 表記の不統一。
-- [ ] **P3-4** markdownlint / 索引を整備（2026-11-17 一部対応: `adr/index.md` と `adr/log.md` を追加。**2026-11-18 監査: 新規 lint 0・baseline 456 issues 残存**、リンク切れ0。既存 MD013 の全解消は未実施）（R5-FMT-003〜006）
+- [ ] **P3-4** markdownlint / 索引を整備
+  - 2026-11-22 並列 Verify（V-57）: 一部解消・全体は未解決。索引（adr/index.md / log.md / docs/*/index.md）と type 付与は完了、新規 lint 0・リンク切れ 0。残るは baseline 456 issues（MD013 等）の全解消方針と hooks.json:92-93 の `|| true` 解除判断で先送り明記。CI ゲート欠落は 3077 行目で別途追跡。
+（2026-11-17 一部対応: `adr/index.md` と `adr/log.md` を追加。**2026-11-18 監査: 新規 lint 0・baseline 456 issues 残存**、リンク切れ0。既存 MD013 の全解消は未実施）（R5-FMT-003〜006）
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
     `adr/index.md` と `log.md` の未配置。
 - [ ] **P3-5** レガシー資産の最終判断（R2-DEBT-006, R2-DEBT-011,
@@ -426,7 +430,8 @@ generated:
   `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
   `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
   event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
-- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** — **2026-11-19 スライス1-3＋強化対応済み: 再接続（接続世代の破棄＋上限3回リトライ、URL 非ログ）、専用 `ApprovalError::Persistence`（HTTP 503・固定本文、QueueFull と区別可能）。残るスライス: opt-in ロールアウトのみ** — **スライス1-3: `reconcile_pending()` を `PolicyEngine::new()` から呼び、未決定行を待機者なしで再登録、期限切れ行を Expired 決着＋audit（Noop では no-op）。R4 で `record_request` 失敗を fail-closed 化（メモリ登録取消し＋QueueFull/503）、`mark_expired` 失敗を warn 可視化。残るスライス: opt-in ロールアウト／再接続ロジック／専用 Persistence エラー型** — **スライス1-2: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
+- [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** —
+  - 2026-11-22 並列 Verify（V-60）: repo 側の整備は完了（config.rs:97-110,159 の pg_url/require_approval_persistence + fail-closed、lib.rs:80-126 の Pg 注入と reconcile_pending、migration 001+003）。残るは opt-in ロールアウトのみで、policy.env:30-32 はフラグ コメントアウト、:52 は op:// レガシー参照。実機への PG_URL 注入・DB 投入はユーザー判断待ち。 **2026-11-19 スライス1-3＋強化対応済み: 再接続（接続世代の破棄＋上限3回リトライ、URL 非ログ）、専用 `ApprovalError::Persistence`（HTTP 503・固定本文、QueueFull と区別可能）。残るスライス: opt-in ロールアウトのみ** — **スライス1-3: `reconcile_pending()` を `PolicyEngine::new()` から呼び、未決定行を待機者なしで再登録、期限切れ行を Expired 決着＋audit（Noop では no-op）。R4 で `record_request` 失敗を fail-closed 化（メモリ登録取消し＋QueueFull/503）、`mark_expired` 失敗を warn 可視化。残るスライス: opt-in ロールアウト／再接続ロジック／専用 Persistence エラー型** — **スライス1-2: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
   重大度 high / confirmed。再起動で保留が消え、誰がいつ承認したか残らない。
 - [x] **承認リクエストの id・タイムスタンプがクライアント申告で黙ってすり替わる**（2026-11-19 対応済み: id と requested_at はサーバ生成、expires_at は server timeout でクランプし生成値をレスポンスで返却。不正値は 400 で拒否。回帰テスト6件追加、policy 73 tests pass） — 根拠
@@ -2957,7 +2962,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **allowlist の同名ツール定義が最後勝ちで requires_approval を上書き** —
   `rust/jarvis-mcp-gw/src/allowlist.rs:14-22,44-66` / R3-AU01 / likely。
   既存 472 行は upstream 登録側の衝突検出で、設定側は未対応。
-- [ ] **OpenCode remote MCP 設定に認証手段がなくデータプレーンを無認証運用に追いやる** —
+- [ ] **OpenCode remote MCP 設定に認証手段がなくデータプレーンを無認証運用に追いやる**
+  - 2026-11-22 並列 Verify（V-59）: 未解決（confirmed）。opencode.jsonc の remote MCP は type=remote / url=http://127.0.0.1:8082/mcp / oauth=false のまま。gateway 側は admin_token 未設定時に無認証を許す設計（non fail-closed）。Tailscale のネットワーク境界は記録されるが公式クローズ判断なし。
+ —
   `infra/config/opencode/opencode.jsonc:10-14`, `rust/jarvis-mcp-gw/src/http.rs:75-81` /
   R3-AU01 / likely。
 - [ ] **verify と restore で legacy バックアップ set の受入条件が非対称** —
@@ -3074,7 +3081,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **CI で safety-test と個別ゲートが重複実行される** — 2026-11-22 対応済み: `Makefile:safety-test` の監査呼び出しで `DEPENDENCY_AUDIT_FETCH` を透伝するよう変更し、ci.yml の個別 `DEPENDENCY_AUDIT_FETCH=1 make check-dependency-audit` と `make test-restore-local` の2行を削除。`DEPENDENCY_AUDIT_FETCH=1 make safety-test` の1回で audit（fetch 付き）と restore-local 回帰がともに実行される。root:root 方針や fail-closed 契約は不変。根拠
   `Makefile:92-99`, `.github/workflows/ci.yml:114-121` / R1-CF02 / confirmed。
   - 検証: `make -n safety-test` で env 透伝を確認、`make safety-test` ok=435 fail=0、`make ci-local` all gates passed、YAML parse OK、`make secret-scan` exit 0、ci.yml に重複ゲート残存なし。
-- [ ] **markdownlint がフックのみで CI にゲートが無い** —
+- [ ] **markdownlint がフックのみで CI にゲートが無い**
+  - 2026-11-22 並列 Verify（V-58）: 未解決（confirmed）。markdownlint は hooks.json:68,92 の post-write/pre-commit（後者は `|| true` で非ブロック）のみ。ci.yml:61-125 の extra_gates、Makefile ci-local/safety-test、ci/scripts/ に呼び出し 0 件。docs/architecture/verify.rs:100 はローカル任意チェックで CI から呼ばれない。
+ —
   `hooks.json:62-65,85-89`, `.github/workflows/ci.yml:61-122` / R1-CF02 / confirmed。
 - [x] **check-workflow-pins の走査対象に ci/*.yml が含まれない** — 2026-11-22 対応済み（範囲明記）: runbook の「完全 SHA 固定以外のすべての ref」という表現を「`.github/workflows/*.yml` に含まれる…」へ限定し、`ci/review-gate.yml` が未配線の参照実装（P2-2 判断待ち）のため走査対象外である旨と、配線時に全 uses をフル SHA 化するか走査対象を追加する方針を記録。スクリプトの走査範囲自体は変更せず、外部 API アクセスや設計判断を伴わず記述を実態へ合わせた。根拠
   `docs/integration/evidence-regeneration.md:384-395`, `ci/scripts/check-workflow-pins.sh:70-76`, `ci/review-gate.yml:74,80,83,111` / R1-ST08,R1-CF02,R2-FG01 / confirmed。
