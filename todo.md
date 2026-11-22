@@ -2736,10 +2736,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-event --lib --locked` 94 passed（+1）、event 証跡 93→94 同期し `--check` 5件すべて MATCH、`cargo clippy -p jarvis-event --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [x] OpenCode dispatch 成功経路の回帰 — 2026-11-23 方針委譲で対応済み。opencode.rs:316-437 に loopback TcpListener モック（新規依存なし、http.rs の既存パターン流用）で POST /api/session（id 返却）と POST /api/session/{id}/prompt（200）を模擬し、dispatch が Ok(())・prompt 本文に format_prompt 由来キーワードが含まれる・session 生成が1回だけ（再利用）を検証。サーバスレッドは join で-cleanup。回帰 +1。根拠 V-109。
 - [ ] **kill switch の activated_by が公開経路で依然 "system"** —
+  - 2026-11-23 方針判断: **保留**。activate_with_actor は存在するが公開 HTTP/gRPC は admin_token 認証のみで「誰か」の身份を保持しない。actor をクライアント自己申告で受けると監査偽装リスク（P0-3 と同趣旨）、admin token から導出するには新規の token→operator マッピング設定設計が必要で、方針委譲だけでは安全な単一解が無い。
   `rust/jarvis-policy/src/kill_switch.rs:241-248,280-286`, `src/lib.rs:249-251` /
   R1-ST01 / confirmed。既存 622 行の対応は `activate_with_actor` 追加のみ。
   - 2026-11-22 並列 Verify（V-96）: 未解決（confirmed）。公開 HTTP/gRPC の ActivateKillSwitchRequest に actor フィールドが無く、activate() が "system" をハードコード（kill_switch.rs:237-239）。既存 I 系対応は persist 再-arm 時の actor 保持のみで公開側配線は未実施。wire DTO へ actor 追加＋activate_with_actor 接続が必要（設計判断）。
 - [ ] **再起動復元された承認保留にタイマーがなく prune 依存**
+  - 2026-11-23 方針判断: **保留**。lazy prune（try_request 先頭のみ）が timeout path として設計明記済みで、周期性タイマー追加は承認ライフサイクルの挙動変更を伴う設計判断。現状は機能保証上問題なし（期限切れは policy 側 410 で fail-closed）。
   - 2026-11-22 並列 Verify（V-70）: 未解決（confirmed）。reconcile_pending() が undecided 行を deadline 付きで再登録するが watch receiver を破棄し待機タイマーが無い（approval.rs:1266-1274,1309-1349）。モジュール doc :12-13 と classify_prune :1414-1416 が「lazy prune が timeout path」と明記。prune は try_request() 先頭のみで周期性なし。設計判断案件。
  —
   `rust/jarvis-policy/src/approval.rs:8-20,1325-1327,1407-1410` /
