@@ -2456,6 +2456,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [ ] major 更新待ち29件の解消（hickory 0.26 / rsa 0.10 / rmcp 3.9 /
       旧 rustls 0.22 系統 / libsqlite3-sys）— 再評価 2026-12-20。
+  - 2026-11-22 重複整理: 同一内容12件を1件へ統合。再評価日 2026-12-20 までは現状維持（advisory DB 更新と major 更新は外部依存・設計判断）。
 - [x] CI runner への cargo-audit 0.23.0 固定導入（冪等チェック付き、呼び出し側
       extra_gates）。共有 workflow は別リポジトリのため呼び出し側を選択。
 
@@ -2474,13 +2475,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 89 の残り指摘（未対応）
 
-- [ ] major 更新待ち29件の解消（hickory 0.26 / rsa 0.10 / rmcp 3.9 /
-      旧 rustls 0.22 系統 / libsqlite3-sys）— 再評価 2026-12-20。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-### Round 90（R4 で修正済み）
-
 - [x] **retain_days オーバーフロー**（confirmed high）→ 乗算前上限
       `106751991167300` 検証＋未来 cutoff ガード、境界回帰（backup-args 9件）。
 - [x] SSRF 判定を IANA/IETF 分類へ（is_global は toolchain で不安定のため
@@ -2494,12 +2488,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       secret_scan のテストリテラル、全ゲート再検証。
 
 ### Round 90 の残り指摘（未対応）
-
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-### Round 91（R4 で修正済み）
 
 - [x] **admin_token 空白 fail-open**（confirmed high）→ event/context に
       mcp-gw と同じ validate_admin_token を追加、未設定は互換維持。
@@ -2559,15 +2547,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] mcp-gw approver task の timeout 適用 — 2026-11-22 並列 Verify（V-27）: 既に解消済み（2609 行目 Round 94 完了記録）。`approval.rs:703-734` の approve_first_pending が deadline: Duration を受け `tokio::time::timeout(deadline, ...)`（:709）で poll ループを包む。回帰 `approver_poll_times_out_when_no_pending_ever_appears`（:738-762）と実 spawn（:775-779）が timeout 適用を検証。—
       成功経路ではハングしないが一貫性のため。
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-- 親が対応: tokio::spawn 所有値化、証跡再生成（4件）、index／Runbook の
-  参照同期、全ゲート再検証。
-
-### Round 94（R4 で修正済み）
-
 - [x] approval.rs:712 の approver task へ5sデッドライン＋タイムアウト回帰。
 - [x] mcp-gw の期限切れ理由を共有定数 APPROVAL_EXPIRED_BODY へ、UI 仕様へ
       410 契約、policy 仕様へ /health 503 degraded 契約を追加。
@@ -2581,14 +2560,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       ui 85）、REQ と notes キーワードを同期。
 
 ### Round 94 の残り指摘（未対応）
-
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-- 親が対応: 5証跡再生成、Runbook 参照同期、全ゲート再検証。
-
-### Round 95（R4 で修正済み）
 
 - [x] 4サービス設定構造体へ `deny_unknown_fields`、mcp-gw の直接 env キーを
       Figment `.ignore()` へ。タイポしたガードキーが起動拒否される回帰を各クレートへ追加。
@@ -2609,15 +2580,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] reconcile_pending の同時実行制御なし（low）— advisory lock または — **2026-11-22 重複整理**: 同一内容は 2668 行目で完了記録済み。
       条件付き UPDATE。
 - [x] mcp_allowlist.toml 行番号・CONTEXT_TOKEN_HEADER 重複 — 2026-11-22 Verify: 両方解消済み。(1) `infra/config/mcp_allowlist.toml:9-14` が「Line numbers are intentionally omitted to avoid drifting」と明記し行番号陳腐化を回避。(2) `CONTEXT_TOKEN_HEADER` は `jarvis-core/src/lib.rs:19` の `JARVIS_CONTEXT_TOKEN_HEADER` に集約され、context 側は alias（grpc.rs:9）＋core 定数との一致テスト（lib.rs:403）で重複を解消。根拠 `infra/config/mcp_allowlist.toml:9-14`, `rust/jarvis-core/src/lib.rs:19,400-403`, `rust/jarvis-context/src/{config.rs:942,grpc.rs:9}` / verified。
-- [ ] hickory / rsa / rmcp 等 major 更新待ち29件（再評価 2026-12-20）— ユーザー判断・外部依存の更新判断待ち。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-- 親が対応: 2体の途中終了を確認、矛盾する backup-multidb 差分を差し戻し、
-  全ゲート再検証。
-
-### Round 96（/swarm-limited・親が直接対応）
-
 - [x] source のスキーマ不一致（high）→ migration 006 で `TEXT` 化、
       ON CONFLICT へ `source` / `expires_at` を追加。
 - [x] DB_NAME が pg.sh で無視される（low）→ `${DB_NAME:-jarvis}` へ。
@@ -2633,26 +2595,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
       （`attempts <= $2`）へ、古いスナップショットの上書きを防止。
 - [x] mcp_allowlist.toml の行番号陳腐化 → 関数名参照へ変更。
 - [x] CONTEXT_TOKEN_HEADER 重複 → jarvis-core 定数の alias へ集約。
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-### Round 97（/swarm-limited・親が直接対応）
-
-- 新規サブエージェント起動数 0（セッション合計上限40を超過中）。
-- 親が上記3件を直接修正、全ゲート再検証。
-
-### Round 97 の残り指摘（未対応）
-
 - [x] 両 DB バックアップギャップ（high）— manifest role と verify/restore を — **2026-11-22 重複整理**: 同一内容は 2725 行目で完了記録済み。
       整合させた再設計が必要（前回の子実装は既存回帰と矛盾し差し戻し済み）。
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-### Round 98（/swarm-limited・親が直接対応）
-
-- 新規サブエージェント起動数 0（セッション合計上限40を超過中）。
 - [x] ADR-0003 の「影響」節に履歴の注記を追加（web.search の 400
       `no native handler` は決定時点の状態で、現行は upstream MCP 経由）。
 - 自動修正可能な既知タスクは枯渇。残るのは設計判断が必要な両 DB バックアップ
@@ -2661,13 +2605,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 ### Round 98 の残り指摘（未対応）
 
 - [x] 両 DB バックアップギャップ（high）— 設計判断が必要のため一旦保留。 — **2026-11-22 重複整理**: 同一内容は 2725 行目で完了記録済み。
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-### Round 99（/swarm-limited・親が直接対応）
-
-- 新規サブエージェント起動数 0（セッション合計上限40を超過中）。
 - [x] 両 DB バックアップギャップの判断材料を `local-restore-design.md` の
       「未決定事項」へ追記（現状、却下した実装の理由、3つの判断論点、
       S9 での検証方針）。設計判断が要るため実装は保留。
@@ -2677,22 +2614,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] 両 DB バックアップギャップ（high）— 設計判断待ち。判断材料は — **2026-11-22 重複整理**: 同一内容は 2725 行目で完了記録済み。
       `local-restore-design.md` に整備済み。
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
-- ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化、
-  push、共有 lib の実機配布。
-
-## 進行中（2026-11-21 / swarm-limited 予算上限による停止）
-
-/swarm-limited の制限プロファイルでセッション合計起動数（上限40）を超過したため、
-新規サブエージェントの起動を停止した。未完了項目を次回の再開指示まで保持する。
-
 - [x] 両 DB バックアップギャップ（high）→ 2026-11-21 決定: 両 env が同一
       `op://JARVIS/PostgreSQL/connection_string` を参照し現行は単一 DB。
       主 DB のみの契約を維持し、追加ペイロード拡張は行わない旨を
       `docs/integration/local-restore-design.md` に記録。将来別 DB 化する場合の
       案（独立セット）も同所に明記。
-- [ ] major 更新待ち29件の脆弱性 — 再評価日 2026-12-20。
-      patch 版8件は更新済み、残りは hickory / rsa / rmcp 等の major 更新待ち。
 - [ ] ユーザー判断が必要な項目: P1-6 暗号化鍵の注入先、8段階の P0 ガード有効化、
       Grafana Cloud 認証の供給、Webhook の公開範囲、S9 実機復元演習、
       バックアップ外部化、共有 lib の実機配布（再インストール）。
@@ -2714,7 +2640,6 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 102 の残り（未対応）
 
-- [ ] major 更新待ち29件（再評価 2026-12-20）。
 - [ ] ユーザー判断: P1-6、P0 ガード、Grafana、Webhook、S9、バックアップ外部化。
       （push は 2026-11-21 に実施済み。旧「push しない制約」の記述は訂正済み）
 
