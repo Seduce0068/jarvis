@@ -1504,4 +1504,37 @@ mod tests {
         assert!(err.to_string().contains("sensitive"), "{err}");
         let _ = std::fs::remove_dir_all(base);
     }
+
+    /// V-140: `is_textual_content_type` is the sole gate that decides whether a
+    /// fetched HTTP body is rendered into an agent-visible response. A miss
+    /// for a binary type would feed non-text bytes into the prompt; a false
+    /// positive for a harmless type would needlessly fail a legitimate fetch.
+    /// This pure test pins the classification without any network I/O.
+    #[test]
+    fn textual_content_type_classification_is_pinned() {
+        for ct in [
+            "text/plain",
+            "text/plain; charset=utf-8",
+            "TEXT/HTML",
+            "application/json",
+            "application/problem+json",
+            "application/xml",
+            "application/xhtml+xml",
+            "application/javascript",
+            "text/ecmascript",
+        ] {
+            assert!(is_textual_content_type(ct), "must accept {ct}");
+        }
+        for ct in [
+            "application/octet-stream",
+            "image/png",
+            "application/pdf",
+            "application/zip",
+            "audio/mpeg",
+            "video/mp4",
+            "",
+        ] {
+            assert!(!is_textual_content_type(ct), "must reject {ct}");
+        }
+    }
 }
