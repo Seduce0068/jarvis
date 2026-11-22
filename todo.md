@@ -2555,10 +2555,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 ### Round 95 の残り指摘（未対応・次ラウンド優先）
 
 - [x] source 列の長上限整合 — 2026-11-22 並列 Verify（V-91）: 既に解消済み（todo.md:2570-2571,2642-2643 の記録と整合）。001_initial.sql:9 の VARCHAR(100) は migration 006 で TEXT へ拡張済み、Rust 側 MAX_SOURCE_BYTES=4096 と境界回帰（config.rs:506-576 / http.rs:872 / grpc.rs:544）を保持。
-- [ ] **両 DB バックアップギャップ**（high、子の実装が既存10回帰と矛盾した
-      ため差し戻し）— JARVIS_PG_EXTRA_DATABASES を segment 単位で設計し直し、
-      manifest role と verify/restore の解決を整合させたうえで再実装。
-      DB_NAME 上書きが pg.sh:29 で無視される low も同時に解消する。
+- [x] 両 DB バックアップギャップ — 2026-11-22 並列 Verify（V-117）: 設計判断で解消済み。local-restore-design.md:304-333 に 2026-11-21 の決定記録（追加 DB ペイロード実装が「複数 postgres row ambiguous 拒否」回帰10件と矛盾し差し戻し、両 env は同一シークレットの単一 DB 構成を維持）。backup-local.sh:181-185 は pg_dump -d jarvis のみ、pg.sh:49-52 は role=postgres 一意ペイロードのみ fail-closed、test-restore-local.sh:1349-1373 の回帰も健在。
 - [x] smoke-mcp-gw.sh の /health 判定 — 2026-11-22 並列 Verify（V-54）: 既に解消済み。`smoke-mcp-gw.sh:93-100` が 200 に加え本文の `"status":"degraded"` を検出して Fail にし、deploy-mcp-gw-safe.sh:30-65,434-441 / deploy.rs:70-110 の degraded/503 拒否契約と整合。
       （medium、子が途中終了）— deploy と同じ契約へ。
 - [x] reconcile_pending の同時実行制御なし（low）— advisory lock または — **2026-11-22 重複整理**: 同一内容は 2668 行目で完了記録済み。
@@ -2699,6 +2696,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **build-selfhost の policy / otelcol 退避が EXIT trap で復元されない** —
   根拠 `infra/scripts/build-selfhost.sh:559-563,600-605` / R1-ST06 / confirmed。
   配置途中で `set -e` が発動すると `.bak` だけが残り途中状態が実効になる。
+  - 2026-11-22 並列 Verify（V-118）: 未解決（confirmed）。build-selfhost.sh:561-563,602-604 の policy/otelcol .bak 退避はその後参照されず、EXIT trap cleanup_selfhost（:212-242）が復元するのは STAGE_DIR / mcp_gw_env / migrations.service unmask のみ。退避後の exit 1 分岐が複数残り、I54-B の復元は mcp-gw env に限る（:614,619,649 コメント）。復元ロジック追加は設計判断。
 - [ ] **本番 DB 退避から自動ロールバックが無く失敗時に空 DB が残る** —
   根拠 `infra/scripts/restore-local.d/pg.sh:137-141,155-167`,
   `infra/scripts/restore-local.sh:665-710` / R1-ST06 / confirmed。
@@ -2706,9 +2704,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [ ] **PG 復元検証がテーブル件数>0 のみでスキーマ版を確認しない** —
   根拠 `infra/scripts/restore-local.d/pg.sh:34,103-114,169-180` /
   R2-DI01 / confirmed。古いダンプや 004/005/006 欠落が合格し得る。
+  - 2026-11-22 並列 Verify（V-119）: 未解決（confirmed）。pg.sh:102-114,169-180 の検証は information_schema.tables の count>0 のみで、_sqlx_migrations の version/checksum 照合なし（infra 全体で _sqlx_migrations 言及は build-selfhost.sh:47 のコメント1件のみ）。古いダンプや migration 欠落が合格しうる。スキーマ版検証追加は設計判断。
 - [ ] **Qdrant 本番検証が隔離検証の points_count と突き合わされない** —
   根拠 `infra/scripts/restore-local.d/qdrant.sh:82-93,131-142` /
   R2-DI01 / confirmed。部分スナップショットのサイレント欠損を検出できない。
+  - 2026-11-22 並列 Verify（V-120）: 未解決（confirmed）。qdrant.sh:107 の隔離 points_count は :118 のログ以降未参照、本番 :156 の prod_points と照合するガードなし（両者とも「>0 かつ数値」のみ）。部分スナップショットのサイレント欠損を検出できない。照合ガード追加は設計判断。
 - [x] **event source の正規化を両トランスポートで統一** — 2026-11-22 対応済み。jarvis-core に `EventSource::from_str_lossy`（未知値→Manual、case-insensitive）を追加（lib.rs:378-405）、HTTP `normalize_event_source`（http.rs:46-51）と gRPC `EmitEvent`（grpc.rs:88-115）の両方をそれへ委譲。gRPC の未知値拒否回帰を「Manual 受け付け」期待へ更新し、core に大文字/未知/既知の3ケース回帰を追加。根拠
   `rust/jarvis-core/src/lib.rs:378-405,710-721`, `rust/jarvis-event/src/{http.rs:46-51,grpc.rs:88-115,277-295}` / R1-AP01 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-core --lib --locked` 20 passed（+1）、`cargo test -p jarvis-event --lib --locked` 93 passed（+1）、event 証跡 92→93 同期し `--check` 5件すべて MATCH、`make ci-local` all gates passed、`make secret-scan` exit 0。
@@ -2868,9 +2868,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
  —
   `ci/scripts/check-dependency-audit.sh:39-40,122-126`,
   `rust/scripts/{deploy,backup,restore}.rs` / R4-DP01 / confirmed。
-- [ ] **audit.toml の再評価日が依存監査ゲートで検証されない** —
-  `audit.toml:18-20`, `ci/scripts/check-dependency-audit.sh:83,116` /
-  R1-ST08,R1-CF02 / confirmed。2026-12-20 を過ぎても ignore が黙って継続。
+- [x] audit.toml 再評価日の期限検証 — 2026-11-22 対応済み。`check-dependency-audit.sh:85-104` が `# 再評価日: <RFC3339>` をパースし、現在日時が超過なら `AUDIT_IGNORE_EXPIRED`、行欠落・パース不能も fail-closed（`AUDIT_REVIEW_DATE_MISSING` / `AUDIT_REVIEW_DATE_INVALID`）。値は失敗出力に含めない。現在 2026-11-23 は期限 2026-12-20 前でゲート結果不変。根拠 `ci/scripts/check-dependency-audit.sh:12-15,35-41,85-104` / V-116 / confirmed。
+  - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make check-dependency-audit` ok=2、`make ci-local` all gates passed。
 - [ ] **tokio-tungstenite 0.21.0 が古い TLS スタックを保持** —
   `rust/jarvis-event/Cargo.toml:54`, `rust/Cargo.lock:4910-4923,3796-3806` /
   R4-DP01 / confirmed。0.26 系への更新で rustls 0.22 系統を排除できる。

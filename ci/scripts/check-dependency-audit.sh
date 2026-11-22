@@ -11,7 +11,8 @@
 #
 # Fixed fail-closed vocabulary (no values or secrets in failure output):
 #   BAD_USAGE, AUDIT_TOOL_MISSING, AUDIT_CONFIG_MISSING,
-#   AUDIT_LOCKFILE_MISSING, AUDIT_FETCH_FAILED, AUDIT_VULNERABILITIES_FOUND
+#   AUDIT_LOCKFILE_MISSING, AUDIT_FETCH_FAILED, AUDIT_VULNERABILITIES_FOUND,
+#   AUDIT_REVIEW_DATE_MISSING, AUDIT_REVIEW_DATE_INVALID, AUDIT_IGNORE_EXPIRED
 # A non-zero `cargo audit` exit is mapped to AUDIT_VULNERABILITIES_FOUND and
 # fails closed. Its normal report is left on stdout for diagnosis; the gate
 # itself never prints advisory values, paths beyond the fixed lock list, or
@@ -31,6 +32,13 @@
 #     failed fetch is a hard failure; CI never degrades to UNVERIFIED.
 #   * We do NOT allow fetch implicitly during a scan, and we do NOT downgrade
 #     a real advisory finding to UNVERIFIED.
+#   * Temporary --ignore entries share the common re-evaluation date recorded
+#     in audit.toml (`# 再評価日: <RFC3339>`). The gate parses that single line
+#     with GNU date and compares it with the current time before any fetch or
+#     scan: a past deadline is AUDIT_IGNORE_EXPIRED, a missing line is
+#     AUDIT_REVIEW_DATE_MISSING and an unparsable line is
+#     AUDIT_REVIEW_DATE_INVALID. All three fail closed, and no date value is
+#     ever printed in the failure output.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -76,6 +84,24 @@ cargo audit --version >/dev/null 2>&1 || fail AUDIT_TOOL_MISSING
 for lock in "${LOCK_FILES[@]}"; do
   [ -f "$lock" ] || fail AUDIT_LOCKFILE_MISSING
 done
+
+# Temporary suppressions are time-boxed: audit.toml records one common
+# re-evaluation date (`# 再評価日: <RFC3339>`). Check it before any fetch, DB
+# freshness handling or scan, so an unreviewed ignore can never reach a scan.
+# Missing/unparsable dates are fail-closed too; the failure tokens are fixed
+# and never include the parsed value.
+review_deadline="$(sed -n 's/^[[:space:]]*#[[:space:]]*再評価日:[[:space:]]*\([0-9][^[:space:]（]*\).*/\1/p' "$CONFIG_FILE" | head -n 1)"
+[ -n "$review_deadline" ] || fail AUDIT_REVIEW_DATE_MISSING
+if ! deadline_epoch="$(date -d "$review_deadline" +%s 2>/dev/null)"; then
+  fail AUDIT_REVIEW_DATE_INVALID
+fi
+case "$deadline_epoch" in
+  ''|*[!0-9]*) fail AUDIT_REVIEW_DATE_INVALID ;;
+esac
+now_epoch="$(date +%s)"
+if [ "$now_epoch" -gt "$deadline_epoch" ]; then
+  fail AUDIT_IGNORE_EXPIRED
+fi
 
 cargo_home="${CARGO_HOME:-$HOME/.cargo}"
 db_dir="$cargo_home/advisory-db"
