@@ -439,6 +439,7 @@ generated:
   `rust/jarvis-event/Cargo.toml:47-50`, `src/lib.rs:30-33`,
   `src/normalizer.rs:104-116` / R1-AR2,R1-AR11,R1-CF11 / 重大度 high / confirmed。
   event 起動に PG/Qdrant と context 設定が必須化され障害分離を喪失。
+  - 2026-11-22 並列 Verify（V-136）: 未解決（残スライス）。既定 ContextMode は InProcess（config.rs:39-40,389）で lib.rs:56-63 が ContextBuilder を直接生成、grpc は opt-in。型依存（jarvis-core/policy/context）も残り、ADR-0002 にサイドカー境界・既定 grpc 化の改訂なし。設計判断（既定反転＋型依存削除）。
 - [ ] **承認の決定・保留がメモリのみで永続化・通知・監査が無い** —
   - 2026-11-22 並列 Verify（V-60）: repo 側の整備は完了（config.rs:97-110,159 の pg_url/require_approval_persistence + fail-closed、lib.rs:80-126 の Pg 注入と reconcile_pending、migration 001+003）。残るは opt-in ロールアウトのみで、policy.env:30-32 はフラグ コメントアウト、:52 は op:// レガシー参照。実機への PG_URL 注入・DB 投入はユーザー判断待ち。 **2026-11-19 スライス1-3＋強化対応済み: 再接続（接続世代の破棄＋上限3回リトライ、URL 非ログ）、専用 `ApprovalError::Persistence`（HTTP 503・固定本文、QueueFull と区別可能）。残るスライス: opt-in ロールアウトのみ** — **スライス1-3: `reconcile_pending()` を `PolicyEngine::new()` から呼び、未決定行を待機者なしで再登録、期限切れ行を Expired 決着＋audit（Noop では no-op）。R4 で `record_request` 失敗を fail-closed 化（メモリ登録取消し＋QueueFull/503）、`mark_expired` 失敗を warn 可視化。残るスライス: opt-in ロールアウト／再接続ロジック／専用 Persistence エラー型** — **スライス1-2: `ApprovalPersistence` seams＋`PgApprovalPersistence`（CAS＋audit INSERT を同一 tx、コミット後のみ watch::send）。003 migration（decided_by 追加、`IF NOT EXISTS`）、mock でコミット前不发火／rollback 非公開／二重 decide を検証。pg_url 設定時のみ注入、未設定は Noop 不変。`Client::transaction` が `&mut` を要求するため Mutex でラップ。残るスライス: 起動リコンサイル／opt-in ロールアウト。DB エラーは範囲外の http.rs を壊さないため既存 `QueueFull`（503）へマップ（専用バリアントは将来課題）** — **設計決定: 案A（jarvis-context と同一 PostgreSQL を共有、001 の approval_requests / audit_log を再利用、003 で decided_by 列を additive 追加）を推奨。4スライス（seams → PgPersistence → 起動リコンサイル → opt-in ロールアウト）。watch channel は維持し DB ポーリングしない。コミット前に audit INSERT を同じ tx で書き、コミット後のみ watch::send。再起動で復活するのは記録と UI 可視性のみで HTTP 待機者は復活しない** — 根拠
   `rust/jarvis-policy/src/approval.rs:5-6,41-45` / R1-ST1,R1-AR01 /
@@ -2086,6 +2087,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 72（R4 で修正済み）
 
+  - 2026-11-22 並列 Verify（V-137）: repo 側は解消済み（Makefile:160-163 と install-backup-timer.sh:28-31,47,169,172-173 に payload-descriptors.sh 配布を実装）。残るは実機への再インストール／/opt/jarvis/scripts/lib/ 配置確認で、todo.md:2104-2106,2613-2615 のユーザー判断・実機運用項目として掲載中（ユーザー操作待ち）。
 - [x] drift の casbin パスが JARVIS_DRIFT_POLICY_DIR を無視（low）→ 環境変数
   経路へ統一。web.fetch の requires_approval 検査を tomllib 厳密パースへ
   変更（grep -A8 の行距離依存を解消）、回帰2件。
@@ -2525,8 +2527,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] policy 仕様の 410 Gone 契約 — 2026-11-22 並列 Verify（V-86）: 既に解消済み。specs/test-policy-approval.md:47 の REQ-10、TC-D3（:292/:295）、Traceability（:347）に 410 Gone + 固定本文 APPROVAL_EXPIRED_BODY を明記。実装 http.rs:754 が Expired→GONE 写像、:709 が固定本文参照、:2687 が回帰検証。証跡 notes（:196）・specs/index.md:10 にも反映済み。
 - [x] 3仕様の /health degraded 契約 — 2026-11-22 並列 Verify（V-87）: 既に解消済み（todo.md:2529-2530 の完了記録と整合）。3仕様に I103-D Round 93 契約マーカー・REQ・Scenario TC-HC1〜3・Traceability を追加済み、各 http.rs の固定 degraded 本文と整合、4証跡 notes も HEALTH_*_BODY キーワードを充足。
 - [x] mcp-gw /health の upstream 登録判定 — 2026-11-22 並列 Verify（V-104）: 既に解消済み（todo.md:2527-2529 の完了記録と整合）。http.rs:261-284 の upstreams_registered() が allowlist 推論を廃止し config.upstreams と登録済みサーバ名を照合。死亡 upstream 除外・未登録 503＋固定 degraded 本文・回帰（:1118-1229）・deploy 側 rollback まで一貫。
-- [ ] deploy-mcp-gw-safe.sh が 503 degraded を消费せず劣化サービスを
-      DONE と報告（中）— スクリプト側にも degraded 検出と rollback。
+- [x] deploy-mcp-gw-safe.sh の degraded rollback — 2026-11-22 並列 Verify（V-138）: 既に解消済み（V-104 と重複）。deploy-mcp-gw-safe.sh:62-64 health_is_degraded が 503/固定 degraded 本文を検出し、:429-452 のヘルスゲートが rollback＋事後 drift OK 時のみ DONE: APPLIED。todo.md:2537-2538 の完了記録と整合。
 - [x] deploy.rs のヘルスゲート — 2026-11-22 並列 Verify（V-113）: 既に解消済み（todo.md:2525-2527,2905-2908 の完了記録と整合）。deploy.rs:140-153 の HEALTH_PROBE_ATTEMPTS=20 / INTERVAL=500ms / WAIT_DEADLINE=20s / PROBE_TIMEOUT=2s と上限付きリトライを実装。レガシーガード test-legacy-guards.sh:2330-2383 が検証。
 - [x] drift が casbin_model.conf の内容・owner/mode を未検査（中）。 — **2026-11-22 重複整理**: 同一内容は 2591 行目で完了記録済み。
 - [x] ui/README.md:39 と remaining-tasks.md:288 の clippy 例へ
@@ -2896,14 +2897,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **UI 証跡の risk_items が仕様のリスク表と乖離** — 2026-11-22 対応済み: 証跡の R-2 / R-10 の `description` を仕様の Risk & tier 表（`specs/test-ui.md:100,108`）へ同期。ASVS/controls は仕様側に根拠が無いため証跡現行値を維持（`check-evidence.sh:218` は description/controls を検証対象外と明記）。spec 未変更のため spec_hash は不変。根拠
   `specs/test-ui.md:100,108`, `evidence/index.md` の run-ui 証跡 / R1-ST09 / confirmed。
   - 検証: `make check-evidence` ok=6 errors=0、`make ci-local` all gates passed、`make secret-scan` exit 0。差分は description 2行のみ。
-- [ ] **backup 仕様の新規シナリオ（TC-B6/V5/R1/R2）に回帰テストが無い** —
-  `specs/test-backup.md:353,358`, `evidence/index.md:18` / R3-TQ01 / confirmed。
+- [x] backup 仕様シナリオの回帰テスト — 2026-11-22 並列 Verify（V-139）: 既に解消済み（V-90 と重複）。test-verify-backup.sh:302,319-365 に TC-B6/TC-V5、test-restore-local.sh:1135-1246 に TC-R1/TC-R2 の回帰が現存。todo.md:2050-2051,2068-2069 の完了記録（verify 25→37 / restore 80→105）と整合、backup 証跡 43 passed。
 - [x] トークン予算の境界値回帰 — 2026-11-22 対応済み。`token_budget_boundary_is_inclusive`（builder.rs:1860-1896）を追加し、`budget_bytes = max_tokens(10) * ESTIMATED_UTF8_BYTES_PER_TOKEN(4) = 40` に対して serde_json シリアライズ長がちょうど 40 bytes なら context 非変更・report=None、41 bytes なら memories/recent が空になり report=Some(before_bytes=41) を検証。パディング長はループで決定論的に算出（ハードコードなし、オーバーシュート防止アサート付き）。根拠
   `rust/jarvis-context/src/builder.rs:1319-1330,1860-1896` / V-98 / confirmed。
   - 検証: `cargo fmt --all -- --check` exit 0、`cargo test -p jarvis-context --all-targets --locked` 187 passed（+1）+ integration 6 passed、context 証跡 186→187 同期し `--check` 5件 MATCH、`cargo clippy -p jarvis-context --all-targets --locked -- -D warnings` exit 0、`make ci-local` all gates passed、`make secret-scan` exit 0。
 - [ ] **web.fetch の HTTP レスポンス処理分岐が実ネットワーク依存** —
   `rust/jarvis-mcp-gw/src/sandbox.rs:260,267,281,285,294,1110` /
   R3-TQ01 / confirmed。redirect 4 回・Location 欠落等が CI で未検証。
+  - 2026-11-22 並列 Verify（V-140）: 未解決（confirmed）。native_web_fetch の status/Location/content-type/content_length/chunk 分岐（sandbox.rs:263-307）は reqwest::Response 直接読みでレスポンス注入 seam なし。V-50 の DNS seam は別経路。CI はヘルパー直接テストと #[ignore] 実ネットテストのみ、redirect 超過・content-type 非対応・body 切り詰め分岐は未検証。
 - [ ] **kill switch の時刻逆行 fail-closed 分岐が実経路で未テスト** —
   `rust/jarvis-policy/src/kill_switch.rs:344,349,352,902` / R3-TQ01 / confirmed。
   - 2026-11-22 並列 Verify（V-129）: 未解決（confirmed）。kill_switch.rs:349-354 の SystemTime::now() Err 分岐のみで、「現在時刻 < activated_at」判定自体はコードに存在しない。SystemTime 注入 Seam が無く実経路回帰もなし（CLOCK_FAILURE_REASON は vocabulary 分類テスト :929-948 のみ）。テスト追加には Seam 設計が必要。
