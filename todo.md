@@ -2760,7 +2760,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
  —
   `infra/config/opencode/opencode.jsonc:10-14`, `rust/jarvis-mcp-gw/src/http.rs:75-81` /
   R3-AU01 / likely。
-- [ ] **verify と restore で legacy バックアップ set の受入条件が非対称** — 2026-11-22 並列 Verify（V-84）: 未解決（confirmed）。verify-backup.sh:103-112 は created_at が無い set を legacy として自動受け入れ（COMPLETE なしでも fail 加算せず）、restore-local.sh:365-372 は `--allow-legacy`（:199）が無いと失敗扱い。記述子・ロール判定自体は共有 lib で解消済み（I78-A）だが、COMPLETE マーカー受入条件だけ非対称。restore 側は破壊操作前のゲートとして厳格にする設計判断があり、DEFAULT を緩めるのは判断待ち。
+- [x] verify/restore の legacy 受入非対称 — 2026-11-23 設計判断で現状維持を確定。verify（非破壊）は legacy set を既定で受け入れ（ci/scripts/test-verify-backup.sh:209 が回帰で固定）、restore（破壊操作）は `--allow-legacy` を要求。両者は役割が異なり非対称は意図的（V-84 の「restore 側は破壊操作前のゲートとして厳格」と整合）。verify 側を締める案は回帰 :209 を壊すため採用せず、restore 側の DEFAULT を緩める案も破壊操作の安全性を下げるため採用しない。コード変更なし。
 - [x] audit.toml の旧 rustls 原因記述 — 2026-11-23 確認: 既に訂正済み（audit.toml:58-62 が原因を tokio-tungstenite 0.21.0 と明記し「axum 0.7 ではない」と記載）。差分なし。
 - [x] 依存監査ゲートの git 不在時 UNVERIFIED — 2026-11-22 対応済み。`check-dependency-audit.sh` のローカルパスで git が無い／DB が git-backed でない場合に `else unverified AUDIT_DB_UNVERIFIED` を追加。コメント（:96-97）と実装が整合。git 有り・DB 鮮度正常時は従来どおり走査。根拠 `ci/scripts/check-dependency-audit.sh:94-117` / V-115 / confirmed。
   - 検証: `bash -n` exit 0、`shellcheck` exit 0、`make check-dependency-audit` ok=2、`make ci-local` all gates passed。
