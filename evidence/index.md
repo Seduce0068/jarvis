@@ -12,7 +12,7 @@ JSON はテキスト形式のため、リンク先として記載しています
   225 passed / 0 failed。
 - [mcp-gateway の実行ログ][run-mcp]
   — [test-mcp-gateway.md](../specs/test-mcp-gateway.md) の実測結果。
-  165 passed / 0 failed / 1 skipped。
+  166 passed / 0 failed / 1 skipped。
 - [context の実行ログ][run-context]
   — [test-context.md](../specs/test-context.md) の実測結果。194 passed / 0 failed。
 - [backup の実行ログ][run-backup]

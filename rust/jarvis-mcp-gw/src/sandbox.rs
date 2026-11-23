@@ -267,7 +267,7 @@ impl Sandbox {
                     .and_then(|value| value.to_str().ok());
                 let next = redirect_target(&url, location)?;
                 redirects += 1;
-                if redirects > WEB_FETCH_MAX_REDIRECTS {
+                if redirect_limit_exceeded(redirects) {
                     return Err(client_error(format!(
                         "too many redirects (> {WEB_FETCH_MAX_REDIRECTS})"
                     )));
@@ -286,7 +286,7 @@ impl Sandbox {
                 return Err(client_error(message));
             }
             if let Some(len) = resp.content_length()
-                && len as usize > max_bytes
+                && content_length_exceeded(len, max_bytes)
             {
                 let message = format!("response too large ({len} bytes > {max_bytes})");
                 return Err(client_error(message));
@@ -304,8 +304,7 @@ impl Sandbox {
                     Ok(Err(err)) => return Err(client_context_error(err, "read response body")),
                     Ok(Ok(None)) => break,
                     Ok(Ok(Some(chunk))) => {
-                        if body.len() + chunk.len() > max_bytes {
-                            let take = max_bytes.saturating_sub(body.len());
+                        if let Some(take) = truncation_slice(body.len(), chunk.len(), max_bytes) {
                             body.extend_from_slice(&chunk[..take]);
                             truncated = true;
                             break;
@@ -828,6 +827,32 @@ fn is_textual_content_type(content_type: &str) -> bool {
         || ct.contains("xhtml")
         || ct.contains("javascript")
         || ct.contains("ecmascript")
+}
+
+/// Pure guard for the `web.fetch` redirect cap. Keeping the boundary check
+/// outside the HTTP loop makes it testable without injecting a
+/// `reqwest::Response`; the production loop only calls this helper.
+fn redirect_limit_exceeded(count: usize) -> bool {
+    count > WEB_FETCH_MAX_REDIRECTS
+}
+
+/// Pure guard for the `Content-Length` cap. The comparison happens in `u64`
+/// space: widening `max_bytes` (a `usize`, at most 64-bit) to `u64` is
+/// lossless, whereas narrowing `len` with `as usize` could truncate a large
+/// length on a 32-bit target and let an oversized response pass the check.
+fn content_length_exceeded(len: u64, max_bytes: usize) -> bool {
+    len > max_bytes as u64
+}
+
+/// Decide whether an incoming body chunk has to be clipped to the remaining
+/// budget. `Some(n)` is the number of bytes to keep
+/// (`max_bytes.saturating_sub(body_len)`); `None` means the whole chunk fits.
+fn truncation_slice(body_len: usize, chunk_len: usize, max_bytes: usize) -> Option<usize> {
+    if body_len + chunk_len > max_bytes {
+        Some(max_bytes.saturating_sub(body_len))
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -1536,5 +1561,30 @@ mod tests {
         ] {
             assert!(!is_textual_content_type(ct), "must reject {ct}");
         }
+    }
+
+    /// V-140: the three guards extracted from `native_web_fetch`'s response
+    /// path are pure, so their boundaries can be pinned without a live HTTP
+    /// response or any log capture.
+    #[test]
+    fn web_fetch_limit_guards_are_pinned() {
+        // Redirect: exactly at the cap is allowed, one more is refused.
+        assert!(!redirect_limit_exceeded(0));
+        assert!(!redirect_limit_exceeded(WEB_FETCH_MAX_REDIRECTS));
+        assert!(redirect_limit_exceeded(WEB_FETCH_MAX_REDIRECTS + 1));
+
+        // Content length: exactly at the cap is allowed, one byte more is not.
+        let max = 1024usize;
+        assert!(!content_length_exceeded(max as u64, max));
+        assert!(content_length_exceeded(max as u64 + 1, max));
+        // A length wider than a 32-bit `usize` must still be refused.
+        assert!(content_length_exceeded(u64::MAX, max));
+
+        // Truncation: no slice while the chunk fits, otherwise the remaining
+        // room in the budget. A body already at the cap yields an empty slice.
+        assert_eq!(truncation_slice(100, 50, 200), None);
+        assert_eq!(truncation_slice(100, 100, 200), None);
+        assert_eq!(truncation_slice(100, 101, 200), Some(100));
+        assert_eq!(truncation_slice(200, 10, 200), Some(0));
     }
 }
