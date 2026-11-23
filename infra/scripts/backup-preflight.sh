@@ -63,7 +63,7 @@ fi
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 op_refs=$(grep -rl 'op://' "$repo/infra/config" 2>/dev/null | wc -l)
 if [ "$op_refs" -gt 0 ]; then
-  warns "legacy op:// templates" "$op_refs files (reference only; BK-4 decision pending)"
+  warns "legacy op:// templates" "$op_refs files (reference-only legacy templates; BK-4 decision: keep, not used by active units)"
 else
   pass "legacy op:// templates"
 fi
