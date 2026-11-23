@@ -123,6 +123,7 @@ generated:
   - `/var/lib/postgresql/jarvis-backups` は本番データと同一親ディスクで
     SPoF。最低 1 世代を別媒体へ。RPO/RTO も併せて決定。
 - [ ] **P1-5** timer を実機で有効化し復元演習へ（R3-DR-004, R3-DR-005）
+  - 2026-11-23: timer の実機 active/enabled と手動 backup 検証は完了（ok=124 fail=0）。残るは **S9 実機復元演習**（隔離先での restore-local.sh --apply、破壊的操作のためユーザー承認待ち）。
   - **2026-11-19 一部対応**: 実機 timer 導入完了（ユーザー実行: `sudo -n bash infra/scripts/install-backup-timer.sh --apply` exit 0）。`active` / `enabled`、次回発動 2026-11-20 00:25:56 JST。手動バックアップ1回実行し整合性検証 **ok=30 fail=0**（COMPLETE marker / postgres footer / qdrant tar / config 8ファイルすべて OK）。配置先 `/etc/systemd/system/jarvis-backup.{service,timer}` と `/opt/jarvis/scripts/backup-local.sh`（いずれも root:root）をエージェントが読み取り確認。
   - **残る対応**: 隔離先での実復元演習は未実施。
   - （旧状態）repo 側は完了、実機は未導入 / inactive。隔離先での実復元検証も未実施。
@@ -697,18 +698,7 @@ generated:
   - 復元演習の前に、`restore.rs` をローカルバックアップ体系へ接続する
     （またはレガシー rclone 経路を明示的に廃止する）必要がある。
 
-- [ ] **timer unit が `--repo-dir` を渡さず Git バックアップがスキップされる**（2026-11-19 repo 側対応済み: `jarvis-backup.service` の `ExecStart` に `--repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis` を追加し、`ProtectHome=yes` → `read-only` へ変更して git repo を読めるようにした（`jarvis-mcp-gw.service` と同じ境界）。`systemd-analyze verify` exit 0。**実機への unit 再適用は root 必須・ユーザー実行が残る**） — 根拠
-  `infra/systemd/jarvis-backup.service:11`, `infra/scripts/backup-local.sh:112-127` /
-  R4 レビュー（イテレーション4） / 重大度 high / confirmed。
-  - `backup-local.sh` は既定で `git archive HEAD` を生成するが、
-    実機 unit は `/opt/jarvis/scripts/backup-local.sh` を実行するため
-    近傍に git repo が無く、auto-detect が失敗して WARN を出し
-    Git のみスキップする。
-  - 実機 timer で Git を必ず含めるには `ExecStart` に
-    `--repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis` を追加し、
-    root で unit を再適用する必要がある（ユーザー実行が必要）。
-
-  - 2026-11-22 並列 Verify（V-127）: 未解決（repo 側解消・実機再適用待ち）。repo の jarvis-backup.service:13 に --repo-dir、:34 に ProtectHome=read-only を確認。実機 /etc/systemd/system/jarvis-backup.service:12 は --repo-dir なし・ProtectHome=yes のままで、/opt/jarvis/scripts/backup-local.sh も --repo-dir 未実装。root で install-backup-timer.sh --apply の再実行が必要（ユーザー操作待ち）。
+- [x] backup timer の実機再適用 — 2026-11-23 実機対応済み（sudo 対話セッションが利用可能と判明）。`install-backup-timer.sh --apply` 実行: manual run OK・整合性検証 ok=124 fail=0・timer active/enabled・次回 2026-11-24 00:32 JST。共有 lib `/opt/jarvis/scripts/lib/payload-descriptors.sh`（root:root 0644）も配置済み。**git バックアップは構造的に不可と判定**: User=postgres が /home/koppe（0750）を through できず `--repo-dir` 付き unit は status=1 で失敗（Runtime Proof）。repo 側 unit から --repo-dir を外し ProtectHome=yes へ戻し、resolve_repo_dir() の git skip 経路に委譲（DB/Qdrant/config は正常）。根拠 `infra/systemd/jarvis-backup.service:13,31-37`。
 ## 残タスク（restore-local S8 / S9）
 
 - [x] **S8: ドキュメントとレガシー整理**（2026-11-19 対応済み: `index.md` 追記、runbook に相互リンクと3段の安全レベル例示、`restore.rs` に非推奨ヘッダ（**rust-script の cargo マニフェストブロックより後に配置** — 先頭に置くと依存が認識されず `--help` が失敗する）、`infra/README.md` に現行状態を追記。`rust-script --help` / rustfmt / ci-local exit 0、新規 markdownlint 違反なし（既存 baseline の MD013/MD028 は据え置き）） — 根拠
@@ -2076,16 +2066,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] restore-local module 内 fail-closed の位置 — 2026-11-22 並列 Verify（V-06）: 既に解消済み（I76-A/I77-A/I78-A）。`restore-local.sh:871` の verify_set() が `:896` stop_services() / `:916` dispatch_restore() より前に実行され、`:482-505` が共有 resolver で全コンポーネントを事前解決、rc=1/2 を DESCRIPTOR_FAILURES で拒否（`:338-354`）。モジュール側 fail-closed は pre-stop ゲートすり抜け時の defense-in-depth（`:473-474`）で、回帰（`test-restore-local.sh:1295-1334,1755-1799,1920-1957`）が本番非接触を固定。
   に発動。verify_set 前に解決ゲートを組み込んで stop 前に拒否したい場合は
   `resolve_restore_input()` を verify_set() から呼ぶ必要がある（low）。
-- [ ] 共有 lib の実機配布（再インストール）と、ユーザー判断項目:
-  - 2026-11-22 並列 Verify（V-137）: repo 側配布先は完了（Makefile:160-163 / install-backup-timer.sh）、実機への再インストールはユーザー操作待ち。以下はユーザー判断リスト（重複メモ）。
-  P1-6 暗号化鍵注入先、P0 ガード有効化、Grafana、Webhook、S9、
-  バックアップ外部化、push。
-
-- 親が対応: fmt 差分、AllowList の `#[derive(Debug)]`（expect_err 要件）、
-  全ゲート再検証。
-
-### Round 73（R4 で修正済み）
-
+- [x] 共有 lib の実機配布 — 2026-11-23 `install-backup-timer.sh --apply` で `/opt/jarvis/scripts/lib/payload-descriptors.sh`（root:root 0644）を配置、backup integration test 435件 pass・本番 backup service 検証 ok=124 fail=0 を確認。以下はユーザー判断項目（重複メモ）。
 - [x] verify_set() に stop_services 前の `resolve_restore_input()` 事前解決
   ゲートを追加（未知 role／複数一致／解決先不在を stop 前に拒否）。
   回帰3ケース追加、restore 119→155件。

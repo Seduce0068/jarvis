@@ -10,7 +10,7 @@ Type=oneshot
 User=postgres
 Group=postgres
 # Script is installed to /opt/jarvis/scripts/backup-local.sh by the deploy step.
-ExecStart=/usr/bin/bash /opt/jarvis/scripts/backup-local.sh --backup-dir /var/lib/postgresql/jarvis-backups --repo-dir /home/koppe/ドキュメント/作業用/jarvis/jarvis --apply
+ExecStart=/usr/bin/bash /opt/jarvis/scripts/backup-local.sh --backup-dir /var/lib/postgresql/jarvis-backups --apply
 
 # Round 19 B4 / I73-C (b): the integrity check used to run only at timer
 # installation, so a nightly set carrying COMPLETE but missing a mandatory
@@ -28,10 +28,13 @@ ExecStartPost=/usr/bin/bash /opt/jarvis/scripts/verify-backup.sh --latest --back
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-# Git archive needs read access to the jarvis repo passed via --repo-dir.
-# ProtectHome=yes masks /home entirely; read-only matches jarvis-mcp-gw.service
-# and keeps writes confined to ReadWritePaths.
-ProtectHome=read-only
+# ProtectHome=yes masks /home entirely. This service runs as postgres and the
+# jarvis git working tree lives under /home/koppe (mode 0750, not traversable
+# by postgres), so a --repo-dir git archive cannot work from this unit.
+# backup-local.sh's resolve_repo_dir() then skips git archive (documented
+# limitation) while PostgreSQL/Qdrant/config backups still run. To archive
+# the repo, run backup-local.sh from an account that can read it.
+ProtectHome=yes
 ReadWritePaths=/var/lib/postgresql/jarvis-backups
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
