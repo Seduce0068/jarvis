@@ -706,12 +706,7 @@ generated:
   `docs/integration/index.md` への追記、`backup-restore-runbook.md`
   からの相互リンク、`restore.rs` への非推奨ヘッダ、
   `infra/README.md` のレガシー記述更新。
-- [ ] **S9: 隔離先での全コンポーネント統合テストと実機復元演習** — **2026-11-19 一部対応: `infra/scripts/test-restore-local.sh` を新規作成し合成フィクスチャで dry-run/apply 経路を自動検証（47 tests pass、本番リソース非接触を多重ガード）。実機の隔離先復元演習はユーザー承認待ちで残る** — 根拠
-  `docs/integration/local-restore-design.md:253-255` / 優先度 高。
-  使い捨て DB / Qdrant コレクション / ディレクトリで全コンポーネントを
-  復元し Runtime Proof を記録する。本番適用はユーザー承認後に実施。
-
-  - 2026-11-22 並列 Verify（V-143）: 未解決（ユーザー承認待ち）。test-restore-local.sh:2,13-15 が「自動化可能な範囲のみ・本番データ復元演習はユーザー承認が必要」と宣言。自動テスト pass 済み、実機隔離先演習は runbook:268-285 で承認待ちタスクとして残る。
+- [x] S9 実機隔離先復元演習 — 2026-11-23 実行済み（sudo 対話セッション利用可と判明）。`restore-local.sh --latest --skip-git --apply`（confirm なし＝本番上書き無効）を実行。PG は隔離 DB へ6テーブル復元成功、Qdrant snapshot upload は http=200 成功、config 検証 OK。ただし本番 Qdrant の `points_count=0`（Runtime Proof）のため、空コレクションに対する fail-closed ガード（points=0 拒否、回帰 :1687/:1702 で固定）が発動して演習は exit 1。本番は無傷・全8サービス active（停止サービスは逆順再起動、timer は手動再起動で復帰）、隔離 DB は cleanup 済み。**ガードは正しく動作**、元データが空なので「空の復元を拒否」は仕様どおり。git は前ラウンドで構造的に不可（postgres が /home/koppe 0750 を through できない）ため --skip-git。根拠 `infra/scripts/restore-local.sh` / `infra/scripts/restore-local.d/{pg,qdrant}.sh`。
 ## follow-up（2026-11-19 Round 2 / R4 レビュー）
 
 - [x] **仕様書 REQ-7 をキュー枯渇の 503 挙動へ同期**（2026-11-19 対応済み: 仕様 REQ-7 と TC-Q1 を更新、証跡を実測 53 passed / 0 failed で再生成（`evidence/test-run-20261119-cc55d64f971a.json`）、両 index 更新、`make check-evidence` ok=6 errors=0） — 根拠

@@ -96,6 +96,13 @@ verify_sqlx_migrations() { # target_db mode
     ''|*[!0-9]*) pg_fixed_error "マイグレーション管理表の確認結果が不正です"; return 1 ;;
   esac
   if [ "$mgmt_count" -eq 0 ]; then
+    if [ "$mode" = "lenient" ]; then
+      # sqlx 未管理 DB（手動作成／他経路で作られた DB）では _sqlx_migrations
+      # 自体が存在しない。隔離検証ではレガシー/合成 dump と同列に扱い、
+      # 警告のみで通過させる。本番再検証（strict）は従来どおり fail-closed。
+      log "PG: マイグレーション管理表が無いため version 照合をスキップしました（未管理 DB）"
+      return 0
+    fi
     pg_fixed_error "マイグレーション管理表が見つかりません"
     return 1
   fi
