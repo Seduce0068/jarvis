@@ -2581,9 +2581,11 @@ mod tests {
             status["reason"],
             crate::kill_switch::status_vocabulary::REASON_OPERATOR_DEFINED
         );
+        // Token-authenticated activation records `admin:token` internally;
+        // the public status redacts any non-system actor to `operator`.
         assert_eq!(
             status["activated_by"],
-            crate::kill_switch::status_vocabulary::ACTOR_SYSTEM
+            crate::kill_switch::status_vocabulary::ACTOR_OPERATOR
         );
 
         std::fs::remove_dir_all(dir).expect("clean temp dir");

@@ -31,6 +31,15 @@ const PERSIST_ERROR_CONTEXT: &str =
 /// module lets HTTP and gRPC agree without changing the protobuf schema.
 pub(crate) const KILL_SWITCH_TOKEN_HEADER: &str = "x-jarvis-kill-switch-token";
 
+/// Fixed actor recorded for activations that passed the admin-token gate.
+///
+/// The public `ActivateKillSwitchRequest` (HTTP/gRPC) has no actor field, and a
+/// client-supplied actor would be an audit-spoofing risk. The admin token is a
+/// shared secret that cannot identify an individual, so the audit slot records
+/// this fixed label to mark the path as token-authenticated. It never carries a
+/// token value, a personal name, or any caller-supplied string.
+pub(crate) const TOKEN_ACTOR_LABEL: &str = "admin:token";
+
 /// Closed vocabulary returned in place of the free-form `reason` / `activated_by`
 /// strings by the status surfaces. Internal callers still see the raw values
 /// (audit log, persistence); only the wire projections use these literals.
@@ -262,9 +271,9 @@ impl KillSwitch {
     ///
     /// `lib.rs` / `http.rs` are outside this file's ownership, so this is
     /// added now as the future connection point: once those callers are
-    /// updated they can pass the authenticated principal here. Until then
-    /// every existing path goes through [`Self::activate`] and still records
-    /// `"system"`.
+    /// updated they can pass the authenticated principal here. Internal and
+    /// legacy callers still go through [`Self::activate`] and record
+    /// `"system"`; the token-gated path passes [`TOKEN_ACTOR_LABEL`] here.
     pub fn activate_with_actor(&self, reason: String, actor: String) {
         self.arm_with_actor(reason.clone(), actor);
         if self.persist().is_err() {
@@ -296,12 +305,15 @@ impl KillSwitch {
     ///
     /// The unauthenticated [`Self::activate`] remains for internal callers
     /// (restore, tests); every external surface must use this method so a
-    /// local process cannot stop the system unilaterally.
+    /// local process cannot stop the system unilaterally. The audit slot
+    /// records the fixed [`TOKEN_ACTOR_LABEL`] rather than a client claim,
+    /// since the wire request carries no actor and the token is a shared
+    /// secret that cannot identify an individual.
     pub fn activate_with_token(&self, reason: String, admin_token: &str) -> Result<()> {
         if !self.hash_matches(admin_token) {
             return Err(KillSwitchError::InvalidAdminToken.into());
         }
-        self.activate(reason);
+        self.activate_with_actor(reason, TOKEN_ACTOR_LABEL.into());
         Ok(())
     }
 
@@ -755,22 +767,46 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).expect("clean temp dir");
     }
 
-    /// The legacy entry point and the token-gated path must keep their
-    /// historical `"system"` attribution until their callers pass an actor.
+    /// The unauthenticated legacy entry point keeps its historical `"system"`
+    /// attribution. The token-gated path is covered separately below: it now
+    /// records the fixed [`TOKEN_ACTOR_LABEL`] instead of `"system"`.
     #[test]
-    fn legacy_activation_paths_keep_system_actor() {
+    fn legacy_activate_keeps_system_actor() {
         let switch = KillSwitch::new("admin-token", None);
         switch.activate("legacy".into());
         assert_eq!(switch.status().activated_by.as_deref(), Some("system"));
+    }
 
-        let token_switch = KillSwitch::new("admin-token", None);
-        token_switch
-            .activate_with_token("token-request".into(), "admin-token")
-            .expect("valid admin token");
-        assert_eq!(
-            token_switch.status().activated_by.as_deref(),
-            Some("system")
+    /// A token-authenticated activation must record the fixed
+    /// [`TOKEN_ACTOR_LABEL`] in `activated_by` — never a client claim, a token
+    /// value, or a personal name — while a wrong token changes no state at all
+    /// (fail-closed, including the actor slot).
+    #[test]
+    fn token_activation_records_fixed_actor_label() {
+        let switch = KillSwitch::new("admin-token", None);
+
+        // Seed a known actor, then reject a wrong token: the actor slot must
+        // keep its prior value because activation returns before any write.
+        switch.activate_with_actor("setup".into(), "admin:alice".into());
+        assert!(
+            switch
+                .activate_with_token("must-not-arm".into(), "wrong-token")
+                .is_err(),
+            "a wrong token must be rejected"
         );
+        let rejected = switch.status();
+        assert_eq!(rejected.activated_by.as_deref(), Some("admin:alice"));
+        assert_eq!(rejected.reason.as_deref(), Some("setup"));
+
+        // A valid token records the fixed label; no optional state path is
+        // configured, so persistence cannot obscure the in-memory result.
+        switch
+            .activate_with_token("maintenance".into(), "admin-token")
+            .expect("valid admin token activates");
+        let activated = switch.status();
+        assert!(activated.activated);
+        assert_eq!(activated.reason.as_deref(), Some("maintenance"));
+        assert_eq!(activated.activated_by.as_deref(), Some(TOKEN_ACTOR_LABEL));
     }
 
     /// The new actor-aware entry point must not weaken the fail-closed
@@ -1118,8 +1154,7 @@ mod tests {
         assert!(!switch.is_activated());
 
         // Make the configured parent unwritable so persist() fails on the real
-        // token-gated path: activate_with_token -> activate ->
-        // activate_with_actor -> persist.
+        // token-gated path: activate_with_token -> activate_with_actor -> persist.
         let parent = path.parent().expect("state path has a parent");
         std::fs::remove_dir_all(parent).expect("remove temp dir");
         std::fs::write(parent, b"blocker").expect("create blocker file");
