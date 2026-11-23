@@ -78,13 +78,7 @@ generated:
     `BWS_ACCESS_TOKEN` 等が継承される。spawn 前に `env_clear()` し
     `PATH` / `HOME` 等最小限を明示（`gateway.rs:110-113`,
     `sandbox.rs:225-229`）。サービス間でも bws プロジェクト分离が必要。
-- [ ] **P0-6** otelcol の `0.0.0.0` バインドを `127.0.0.1` へ（R1-SEC-002）
-  - 2026-11-22 並列 Verify（V-123）: repo 側は解消済み（otelcol-config.yaml の6リスナーすべて 127.0.0.1）。実機は 4317/4318/8888 のみ確認済み（todo.md:849）で health/pprof/zpages は未確認、実機設定は /etc/jarvis の別パスを読む（otelcol.service:21）。再デプロイ＋ss -lnt 確認はユーザー操作待ち。
-  - **2026-11-18 現状**: repo 側 `infra/config/otelcol-config.yaml` の
-    6リスナー（health 13133 / pprof 1777 / zpages 55679 / OTLP 4317,4318 /
-    internal 8888）を `127.0.0.1` へ変更済み（`:8,10,12,18,20,165`）。
-  - **実機対応は残る**: 実機は `/etc/jarvis/otelcol-config.yaml` を読み込む
-    ため、repo テンプレートの同期と `ss -lnt` による確認は未実施。
+- [x] P0-6 otelcol リスナーのローカルバインド — 2026-11-23 実機確認で完了。Runtime Proof: `ss -lntp` で 4317/4318/8888 すべて `127.0.0.1` で otelcol-contrib (pid) が待ち受け、0.0.0.0 バインドはゼロ。repo テンプレート（infra/config/otelcol-config.yaml:8-20）も全6リスナー 127.0.0.1。残る health/pprof/zpages（13133/1777/55679）は実機 config で未定義＝リスナー自体が無く露出リスク無し。repo テンプレートを丸ごと配布すると Grafana 認証未設定（P0-7 未確定）で otelcol 起動失敗リスクがあるため、extension 追加は P0-7 確定後に別途対応。S9 演習後の再起動でも 4317/4318/8888 は健全（journald で Starting GRPC/HTTP server endpoint=127.0.0.1 確認）。
 - [ ] **P0-7** Grafana 認証情報の供給経路を確定（R1-SEC-003）
   - 2026-11-22 並列 Verify（V-131）: 未解決（needs_user）。案A（bws run 経由注入）を推奨する設計調査はあるが、7項目のユーザー確認が必要で判断未確定（todo.md:80-91,864-866,2991）。AGENTS.md:188-190 も「credential supply path not yet identified」と明記、infra/config/otel.env:6-7 はレガシー op:// テンプレートで現行 unit 未使用。
   - **2026-11-19 設計調査**: 3案を比較し **案A（bws run 経由で注入）を推奨**。
