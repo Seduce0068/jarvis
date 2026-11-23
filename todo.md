@@ -190,6 +190,7 @@ generated:
   - `set -uo pipefail` で配置失敗が fail-open。ヘルス確認も `curl -f` /
     `200` 判定が無い。Runtime Proof で `set -uo pipefail` 確認済み。
 - [ ] **P2-9** systemd hardening を全 unit へ底上げ（
+  - 2026-11-23 実機 Runtime Proof: 自社6 unit は hardening 10〜12項目、jarvis-backup は SystemCallFilter=1/UMask=1 で健全。一方 third-party 4 unit（code-server/opencode/otelcol/qdrant）は SystemCallFilter=0 かつ UMask=0 で repo テンプレート（UMask=1）と drift。SystemCallFilter 追加はサードパーティバイナリの起動失敗リスク、UMask もファイル生成権限変更で挙動影響があり、いずれも再起動を伴うため V-30 の「実機起動確認が必要で自律対応不可」判断を維持し保留。
   - 2026-11-22 並列 Verify（V-30）: 保留根拠は妥当。10 unit すべてに UMask/ProtectControlGroups/RestrictSUIDSGID、自社6 unit に SystemCallFilter を確認。残るは code-server/opencode/otelcol/qdrant の third-party 4 unit への SystemCallFilter（実機起動確認が必要）と /etc/jarvis の ReadWritePaths 個別化（実機の書き込み先把握が必要）で、いずれも自律対応不可。2026-11-18 一部対応: 全9 service に `UMask=0077`、欠落 unit に `ProtectControlGroups` / `RestrictSUIDSGID` を追加、自社スクリプトの backup に `SystemCallFilter=@system-service`。`systemd-analyze verify` 全 unit 成功。**SystemCallFilter を code-server / opencode / otelcol / qdrant のサードパーティバイナリへ追加するのは実機起動確認が必要なため保留**。`/etc/jarvis` の ReadWritePaths 個別ファイル化も書き込み先の把握が必要で保留）（R1-SEC-004,
     R1-SEC-009）
   - otelcol / opencode / code-server / qdrant / backup で
