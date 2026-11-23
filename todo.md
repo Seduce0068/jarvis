@@ -2729,6 +2729,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] allowlist 同名ツール定義の fail-closed 化 — 2026-11-22 対応済み。allowlist.rs:64-71 のロードループで `tools.insert()` の戻り値を検査し、重複名なら `bail!("allowlist contains a duplicate tool name: ...")` でファイル全体を拒否（後勝ちで requires_approval が上書きされる経路を遮断）。回帰 `new_rejects_duplicate_tool_name` を追加。根拠 `rust/jarvis-mcp-gw/src/allowlist.rs:64-71,243-276` / V-97 / confirmed。
   - 検証: fmt exit 0、mcp-gw 161 passed（+1）、証跡 160→161 同期し `--check` 5件 MATCH、clippy -D warnings exit 0。
 - [ ] **OpenCode remote MCP 設定に認証手段がなくデータプレーンを無認証運用に追いやる**
+  - 2026-11-23 方針判断: **保留**。gateway の admin_token は Option<String> で None（未設定）が有効な legacy loopback 挙動（config.rs:79-81,145-151）。実機 jarvis-mcp-gw.service は bws run 経由でトークン注入され得るが、値は確認不可。fail-closed 化には gateway 側 require_admin_token 反転＋opencode.jsonc の remote MCP へヘッダ/トークン注入（現状 headers 指定なし）の両側変更が必要で、OpenCode 側の headers 構文確認とトークン値連携が伴う。Tailscale ネットワーク境界で代替する記録（V-59）はあるが公式クローズは保留。
   - 2026-11-22 並列 Verify（V-59）: 未解決（confirmed）。opencode.jsonc の remote MCP は type=remote / url=http://127.0.0.1:8082/mcp / oauth=false のまま。gateway 側は admin_token 未設定時に無認証を許す設計（non fail-closed）。Tailscale のネットワーク境界は記録されるが公式クローズ判断なし。
  —
   `infra/config/opencode/opencode.jsonc:10-14`, `rust/jarvis-mcp-gw/src/http.rs:75-81` /
