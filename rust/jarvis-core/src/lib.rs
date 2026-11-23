@@ -7,6 +7,7 @@ pub mod approval;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Canonical HTTP header / gRPC metadata key carrying the context admin token.
@@ -104,6 +105,24 @@ pub fn constant_time_eq(a: &str, b: &str) -> bool {
         diff |= (x.copied().unwrap_or(0) ^ y.copied().unwrap_or(0)) as usize;
     }
     diff == 0
+}
+
+/// Compute the fixed-size SHA-256 digest used by every token gate.
+///
+/// Reducing both operands to `[u8; 32]` absorbs their lengths into the digest,
+/// so a comparison over the digests always covers exactly 32 bytes regardless
+/// of how long the presented token is. This is the canonical primitive shared
+/// by the policy kill switch and both MCP gateway transports; it was moved
+/// here unchanged from `jarvis_policy::kill_switch` (R2 / V-48) so no transport
+/// has to reach through `jarvis-policy` for hashing. No `unsafe` code is
+/// involved and no token value is logged.
+pub fn sha256_digest(token: &str) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let output = hasher.finalize();
+    let mut digest = [0u8; 32];
+    digest.copy_from_slice(output.as_ref());
+    digest
 }
 
 /// Closed field vocabulary of the policy service's `GET /health` wire contract

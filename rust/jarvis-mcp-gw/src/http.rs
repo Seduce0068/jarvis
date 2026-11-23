@@ -97,12 +97,12 @@ pub fn router(gateway: Arc<McpGateway>) -> Router {
 /// exit on content or length. This replaces the previous length-inclusive
 /// padded XOR loop, whose iteration count depended on the input length, and
 /// is equivalent to `jarvis_policy::kill_switch::constant_time_eq` and the
-/// gRPC gate. The digest primitive is reused from `jarvis-policy` because
-/// this crate has no direct `sha2` dependency. No `unsafe` code is involved
-/// and neither token value is logged.
+/// gRPC gate. The digest primitive is the shared `jarvis_core::sha256_digest`
+/// (R2 / V-48), so this transport no longer hashes through `jarvis-policy`.
+/// No `unsafe` code is involved and neither token value is logged.
 fn fixed_size_digest_eq(a: &str, b: &str) -> bool {
-    let a: [u8; 32] = jarvis_policy::kill_switch::sha256_digest(a);
-    let b: [u8; 32] = jarvis_policy::kill_switch::sha256_digest(b);
+    let a: [u8; 32] = jarvis_core::sha256_digest(a);
+    let b: [u8; 32] = jarvis_core::sha256_digest(b);
     let mut diff = 0u8;
     for (x, y) in a.iter().zip(b.iter()) {
         diff |= *x ^ *y;

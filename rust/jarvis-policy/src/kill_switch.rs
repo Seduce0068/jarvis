@@ -94,23 +94,12 @@ fn resolve_activation_time(
     }
 }
 
-/// Compute the fixed-size SHA-256 digest used as the comparison target by
-/// every token gate. Reducing both operands to `[u8; 32]` absorbs their
-/// lengths into the digest, so the comparison itself always covers exactly 32
-/// bytes regardless of how long the presented token is.
-///
-/// This is public because `jarvis-mcp-gw` already depends on this crate but
-/// does not declare `sha2` as a direct dependency: sharing this primitive
-/// keeps both crates' gates on the same digest without a new dependency or a
-/// shared crate. No `unsafe` code is involved and no token value is logged.
-pub fn sha256_digest(token: &str) -> [u8; 32] {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    let output = hasher.finalize();
-    let mut digest = [0u8; 32];
-    digest.copy_from_slice(output.as_ref());
-    digest
-}
+/// Backward-compatible re-export of the canonical SHA-256 primitive, now owned
+/// by `jarvis-core` (R2 / V-48). The MCP gateway calls
+/// `jarvis_core::sha256_digest` directly; this alias preserves the historical
+/// `jarvis_policy::kill_switch::sha256_digest` path and keeps this module's
+/// internal callers unchanged.
+pub use jarvis_core::sha256_digest;
 
 /// Fixed-size digest comparison for every token gate in this crate.
 ///
