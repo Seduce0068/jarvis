@@ -39,6 +39,7 @@ generated:
 ## P0: 認証・承認・シークレット（至急）
 
 - [ ] **P0-1** 承認 API の既定無認証を解消（R1-AUTH-001）
+  - 2026-11-23 方針判断: P0-10 と同じ理由で opt-in ガード有効化は保留（トークン実値が bws 側にあり確認不可、起動失敗リスク回避）。
   - 2026-11-22 並列 Verify（V-121）: 未解決（opt-in 実装済み・本番有効化待ち）。require_approval_api_token は serde default=false（config.rs:84-85）、ガード true 時のみ未設定トークンで 503 fail-closed（http.rs:297-305）。回帰は整備済み（:1782-2016）。残るは実機 policy.env へのトークン注入＋フラグ true 化（ユーザー判断）。
   - **2026-11-18 一部対応**: opt-in strict ガード実装済み。本番有効化は残る。
     `require_approval_api_token`（既定 `false`）が `true` のとき、トークン
@@ -55,6 +56,7 @@ generated:
     `approval.rs:76-78`）。設定すると全承認ツールが 401 で fail-closed
     になる可用性障害も併発している。
 - [ ] **P0-3** `/v1/execute` と gRPC の principal 自己申告を廃止（R1-AUTH-003）
+  - 2026-11-23 方針判断: P0-10 と同じ理由で既定反転は保留（トークン実値確認不可、起動失敗リスク回避）。
   - 2026-11-22 並列 Verify（V-122）: 未解決（opt-in 実装済み・既定反転待ち）。require_server_side_principal=true のとき server 管理 mcp_principal で上書き（lib.rs:99-107）するが既定 false（config.rs:87-91）。policy_context の caller 引数遮断（lib.rs:26-47）は別問題で対応済み。既定値反転は本番運用判断（todo.md:2630-2633 で却下記録あり）。
   - 呼び出し側が `opencode` 等を名乗れり、承認も自分で通せば実質任意操作。
     `/mcp` と同様にサーバ側固定または認証済み Identity から導出
@@ -315,6 +317,7 @@ generated:
 - [x] **P0-9** drift 検査の allowlist 欠落 fail-open（2026-11-17 対応済み: 配備版 allowlist 欠落時に `MISSING (deployed)` + danger=1。回帰テスト追加）（A-H2）
   - `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist が無いと allowlist 検査と `web.fetch` danger 判定ごとスキップされ、`drift`/`danger` が立たない。欠落時に `MISSING` + `danger=1` を設定し回帰テストを追加。
 - [ ] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
+  - 2026-11-23 方針判断（秘密情報投入を委任）: **保留を維持**。実機 Runtime Proof: jarvis-policy.service は `bws run --project-id ...` 経由で起動、bws.env には `BWS_ACCESS_TOKEN` のみ（トークン実値は bws 側にあり確認不可）、直近10分のログに placeholder 警告0件（注入の示唆だが決定的でない）。`JARVIS_POLICY_REQUIRE_KILL_SWITCH_ADMIN_TOKEN=true` を unit Environment へ追加して再起動すれば有効化できるが、トークンが placeholder だった場合にサービス起動失敗で本番承認ゲート全体が止まるリスクを避け fail-open 側を維持。キー対応は infra/config/policy.env:15,25 で確認済み。次手: bws 側でトークン値を確認できる状態でフラグ有効化＋再起動。
   - **2026-11-19 一部対応**: 空／未設定トークンを `config.rs::validate_kill_switch_admin_token()` と `kill_switch.rs::hash_matches()` で無条件 fail-closed 化（実起動経路 `load_from_path` にも検証を追加、全トークンゲートで空提示を拒否、回帰6件）。プレースホルダ `changeme` の拒否は依然 opt-in ガード依存（warn-only 互換を維持）。ガード既定値 false→true の反転は本番トークン注入確認後の運用判断として残る。
   - **2026-11-18 現状**: opt-in strict ガードは実装済み（一部対応）。
     `require_kill_switch_admin_token`（既定 `false`）が `true` のときだけ
