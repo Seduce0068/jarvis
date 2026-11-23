@@ -1,0 +1,9 @@
+# Secret scanning: Betterleaks is the primary pre-commit gate so a secret is
+# blocked before it enters commit history (AGENTS.md §4). The CI workflow keeps
+# `make secret-scan` as a separate final gate; `betterleaks git` can also be run
+# manually over the whole history.
+repos:
+  - repo: https://github.com/betterleaks/betterleaks
+    rev: v1.10.1
+    hooks:
+      - id: betterleaks

@@ -14,6 +14,10 @@ generated:
 ## 方針（2026-11-23: ユーザーが「2 を任せる」= 方針判断をエージェントへ委譲）
 
 - 実機操作・秘密情報の実値投入（root 対話承認、トークン注入、S9 実機演習、timer/unit 再適用、otelcol 実機確認、bws.env 再投入、共有 lib 実機配布）はエージェント権限外のためユーザー操作として残す。
+## Betterleaks 全履歴走査（2026-11-23、AGENTS.md §4 更新に伴う）
+
+- `betterleaks git`（全コミット）: 14 件検出、すべて `generic-credential-uri`。`betterleaks dir .` の追跡対象: 8 件。いずれもテスト用固定プローブ／doc サンプル（`user:token@host` / `svc:pw` / `policy:probe-secret` / `admin:s3cr3t` / `admin:I51A-do-not-log`）で実機の秘密情報ではない。HEAD の該当行を確認済み（builder.rs:4174 / main.rs 各:193-198 / grpc.rs:786 / persistence.rs:1642 / http.rs:1118）。
+- 既存の `ci/scripts/secret_scan.py` がこれらプレースホルダを「known-safe」と分類し CI 最終ゲートとして機能しているため、Betterleaks を CI へ追加すると誤検知で失敗する。方針: `.pre-commit-config.yaml`（betterleaks v1.10.1 ピン）を pre-commit 主軸として追加し、CI ゲートは既存 `make secret-scan` を維持。Betterleaks の CI 追加は allowlist 設計が必要なため見送り。
 - 再評価日 2026-12-20 の major 更新（hickory / rsa / rmcp / tokio-tungstenite）は現状 2026-11-23 で日付前につき保留。
 - `panic=abort` 解除（release profile）は本番バイナリのクラッシュ挙動が変わるため保留。
 - P0 ガード既定反転（require_approval_api_token / require_server_side_principal / require_kill_switch_admin_token 等）は、トークン未設定の実機で起動失敗するリスクがあるため、実機への値投入確認まで保留（opt-in 実装は維持）。
