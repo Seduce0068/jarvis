@@ -13,7 +13,7 @@ version = "0.1.0"
 edition = "2024"
 # MSRV: matches the locally installed stable toolchain (rustup channel manifest, read-only check).
 rust-version = "1.100"
-license = "MIT OR Apache-2.0"
+license = "AGPL-3.0-or-later"
 authors = ["Sovereign AI Agent"]
 repository = "https://github.com/Seduce0068/jarvis"
 

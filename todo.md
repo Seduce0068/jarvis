@@ -228,10 +228,10 @@ generated:
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
     `adr/index.md` と `log.md` の未配置。
 - [ ] **P3-5** レガシー資産の最終判断（R2-DEBT-006, R2-DEBT-011,
-  - 2026-11-23 方針判断: 凍結・実行経路遮断は完了（V-125）。残る物理削除は破壊的操作でユーザー確認が必要なため実行しない。ライセンス方針（todo.md:245-249）はレガシー資産とは別案件。
-  - 2026-11-22 並列 Verify（V-125）: レガシー資産の凍結・削除実行判断は解消済み（ADR-0004:25,30-34 の別途判断記録、backup.sh/restore.sh/deploy.sh の exit 2 fail-closed、remaining-tasks.md:392-399/421）。 items の物理削除とライセンス方針は意図的に保留で open 維持。
+  - 2026-11-23 方針判断: 凍結・実行経路遮断は完了（V-125）。残る物理削除は破壊的操作でユーザー確認が必要なため実行しない。ライセンス方針（todo.md:243-247）はレガシー資産とは別案件で、2026-11-25 に AGPL 統一済み（下記）。
+  - 2026-11-22 並列 Verify（V-125）: レガシー資産の凍結・削除実行判断は解消済み（ADR-0004:25,30-34 の別途判断記録、backup.sh/restore.sh/deploy.sh の exit 2 fail-closed、remaining-tasks.md:392-399/421）。 items の物理削除は意図的に保留で open 維持（ライセンス方針は解消済み）。
     R3-DR-015, R5-RULES-002）
-  - **2026-11-18 現状**: 4下位項目のうち3件は判断・担保済み。
+  - **2026-11-25 現状**: 4下位項目すべて判断・担保済み（ライセンスは AGPL 統一で解消）。
     - `op://` テンプレート4件（`context.env` / `event.env` / `policy.env` /
       `otel.env`）は値なし参照テンプレートとして tracked 維持と判断済み
       （[判断記録](docs/integration/remaining-tasks.md)）。実機起動は
@@ -240,11 +240,12 @@ generated:
       削除を実行しないと判断済み。後始末スクリプトは参照用に保留。
     - 破壊的な `rust/scripts/restore.rs` は `infra/scripts/restore.sh` が
       fail-closed（exit 2）で委譲を止め、`make safety-test` が回帰担保。
-    - ライセンスは `LICENSE` と `ui/Cargo.toml` が AGPL-3.0-or-later、
-      `rust/Cargo.toml` の workspace が `MIT OR Apache-2.0`（5 crate 継承）。
-      法的判断のため自動変更せず、ユーザー判断待ち。
-  - **残る未完了はライセンス方針のみ**。判断は確定させない（ライセンス
-    変更・OCI 実操作・テンプレート削除はいずれも別途判断）。
+    - ライセンスは `LICENSE` / `ui/Cargo.toml` / `rust/Cargo.toml` の workspace
+      すべて `AGPL-3.0-or-later` に統一済み（2026-11-25、IT1-FIX4）。
+      旧 workspace 値は `MIT OR Apache-2.0`（5 crate 継承）で IDE と不一致
+      だったが、意図的な例外の記録が無いため安全側の統一を選択。
+  - **残る未完了はレガシー資産の物理削除のみ**。ライセンス変更は完了
+    （OCI 実操作・テンプレート削除は別途判断）。
 - [x] **P3-6** UI の監査性と細部（R2-UI-003, R2-UI-004, R2-UI-006〜009）
   - **2026-11-18 一部対応**: 期限切れ強調、テスト数表記（7）、
     `approved_by` 固定値とトークン注入経路を README に記録。
