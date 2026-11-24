@@ -6,8 +6,8 @@ Wants=jarvis-policy.service
 
 [Service]
 Type=exec
-User=koppe
-Group=koppe
+User=testuser
+Group=testuser
 WorkingDirectory=/opt/jarvis/rust
 EnvironmentFile=-/etc/jarvis/bws.env
 # Host-specific overrides (incl. JARVIS_MCP_GW_BASE_DIR) are supplied here at

@@ -733,7 +733,7 @@ fn status_for_outcome(outcome: &DecisionOutcome, kill_switch_active: bool) -> St
 fn operator_decision(approve: bool) -> CoreApprovalDecision {
     if approve {
         CoreApprovalDecision::Approved {
-            approved_by: "koppe".into(),
+            approved_by: "testuser".into(),
             approved_at: chrono::Utc::now(),
         }
     } else {
@@ -943,7 +943,7 @@ mod tests {
         let approved = operator_decision(true);
         match approved {
             CoreApprovalDecision::Approved { approved_by, .. } => {
-                assert_eq!(approved_by, "koppe");
+                assert_eq!(approved_by, "testuser");
             }
             other => panic!("expected Approved, got {other:?}"),
         }
@@ -993,7 +993,7 @@ mod tests {
         let cases = [
             (
                 CoreApprovalDecision::Approved {
-                    approved_by: "koppe".into(),
+                    approved_by: "testuser".into(),
                     approved_at: now,
                 },
                 UiDecision::Approved,
@@ -1025,7 +1025,7 @@ mod tests {
     #[test]
     fn approved_status_reports_halted_execution_while_kill_switch_active() {
         let approved = CoreApprovalDecision::Approved {
-            approved_by: "koppe".into(),
+            approved_by: "testuser".into(),
             approved_at: chrono::Utc::now(),
         };
         assert_eq!(status_for_decision(&approved), "承認しました");
@@ -1100,7 +1100,7 @@ mod tests {
         );
 
         let approved = CoreApprovalDecision::Approved {
-            approved_by: "koppe".into(),
+            approved_by: "testuser".into(),
             approved_at: chrono::Utc::now(),
         };
         assert_eq!(
@@ -1287,7 +1287,7 @@ mod tests {
         use std::time::{Duration, Instant};
 
         const ID: &str = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
-        const APPROVE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}";
+        const APPROVE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}";
         const PENDING_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"pending\":[]}";
         const HEALTH_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
 
@@ -1422,7 +1422,7 @@ mod tests {
 
         const EXPIRED_ID: &str = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
         const VALID_ID: &str = "a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
-        const APPROVE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}";
+        const APPROVE_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}";
         const PENDING_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\nConnection: close\r\n\r\n{\"pending\":[]}";
         const HEALTH_RESPONSE: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\nConnection: close\r\n\r\n{\"status\":\"ok\"}";
 

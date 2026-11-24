@@ -35,7 +35,7 @@ OCI / rclone / `op` に依存しない。設計と決定理由は
 
 **実行ユーザーは root に固定する。** バックアップ dir は `postgres:postgres 0700`
 （[install-backup-timer.sh:163-165](../../infra/scripts/install-backup-timer.sh)）であり、
-一般ユーザー（`koppe` 等）は manifest を読めない。逆に `sudo -u postgres` で
+一般ユーザー（`testuser` 等）は manifest を読めない。逆に `sudo -u postgres` で
 スクリプト全体を起動すると polkit により `systemctl stop` が拒否される。
 したがって下記 3 コマンドはすべて `sudo bash ...`（root）で実行する。
 DB 接続はスクリプト内の `psql()` ラッパーが

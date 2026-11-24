@@ -105,7 +105,7 @@ JARVIS_POLICY_HTTP_URL=http://127.0.0.1:8081 cargo run --locked
 
 ### 決定者の識別 (`approved_by`) — P0-3 関連の設計判断
 
-- 現状: `approvals.rs` の `decide` が固定値 `"koppe"` を `approved_by` として
+- 現状: `approvals.rs` の `decide` が固定値 `"testuser"` を `approved_by` として
   送信します。本タスクでは設計判断としてコードを変更しません。
 - 背景: 現行の jarvis-policy HTTP API は `approved_by` をリクエスト本文から
   受け取り、principal の自己申告を前提としています。UI 側で別の値を名乗って

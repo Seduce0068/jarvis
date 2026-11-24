@@ -111,7 +111,7 @@ generated:
      unit のフォールバック値は
      `<home>/ドキュメント/作業用/jarvis/jarvis`
      （`infra/systemd/jarvis-mcp-gw.service` の `Environment=` 行、実機は上書き値を優先）。
-  - デプロイ実態に合わせて `User`/`Group` を `koppe` に同期
+  - デプロイ実態に合わせて `User`/`Group` を `testuser` に同期
 - `infra/config/mcp_allowlist.toml`
   - ネイティブ未実装の `web.search` / `homeassistant.get_state` / `android.get_device_info`
     を `requires_approval = true` に変更
@@ -143,7 +143,7 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 |---|---|
 | `deploy-mcp-gw-safe.sh --apply` | `DONE: APPLIED（事後確認 OK）` / `DEPLOY_EXIT=0` |
 | `check-deploy-drift.sh`（独立再実行） | binary/allowlist/policy/unit **全て OK**、`RESULT: OK`（exit 0） |
-| 稼働 unit | `User=koppe`, `ProtectHome=read-only`, `JARVIS_MCP_GW_BASE_DIR=<home>` |
+| 稼働 unit | `User=testuser`, `ProtectHome=read-only`, `JARVIS_MCP_GW_BASE_DIR=<home>` |
 | サービス | `jarvis-mcp-gw` active（2026-11-15 11:36:49 起動） |
 | `/health` | OK |
 | `tools/list` | **4ツールのみ**（filesystem.list/read, git.diff/status） |

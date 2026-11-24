@@ -47,7 +47,7 @@ status: active
 
 | ID | タイトル | 優先度 | 証拠 | 次のアクション | 出典観点 |
 |---|---|---|---|---|---|
-| A-H1 | otelcol が `0.0.0.0` にリッスンし「localhost only」方針と矛盾 | 高 | `infra/config/otelcol-config.yaml:6,8,10,16,18` が `0.0.0.0`。`infra/systemd/otelcol.service:9,18` は `User=koppe`・直接実行で境界なし | 全端点を `127.0.0.1` へ変更し、実機 unit と合わせて `ss -lnt` で確認。方針文書との整合も明記 | IN / INF-1 |
+| A-H1 | otelcol が `0.0.0.0` にリッスンし「localhost only」方針と矛盾 | 高 | `infra/config/otelcol-config.yaml:6,8,10,16,18` が `0.0.0.0`。`infra/systemd/otelcol.service:9,18` は `User=testuser`・直接実行で境界なし | 全端点を `127.0.0.1` へ変更し、実機 unit と合わせて `ss -lnt` で確認。方針文書との整合も明記 | IN / INF-1 |
 | A-H2 | drift 検査が allowlist 欠落を見逃し fail-open | 高 | `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist 不在だと allowlist 検査と `web.fetch` の danger 判定ごとスキップされ `drift`/`danger` が立たない | 欠落時に `say "allowlist" "MISSING"; danger=1` を設定し、事後ゲートが失敗する回帰テストを追加 | IN / INF-2 |
 | A-H3 | kill switch 既定トークン `changeme` は opt-in strict ガードで拒否可能 | 高 | `rust/jarvis-policy/src/config.rs:38` が opt-in フィールド（既定 false）、`:66` が既定値 `PLACEHOLDER_KILL_SWITCH_TOKEN` = `"changeme"`。`rust/jarvis-policy/src/lib.rs:35-48` は flag=true のときだけ bail し、既定は warn で起動継続 | ガードは実装済み。本番有効化はトークン注入を値を見ずに確認した後に判断（[local-operations-runbook.md](local-operations-runbook.md) の P0-10 節） | SE / SEC-KS-01 |
 | A-H4 | `store_memory` に PII フィルタ未適用 | 高 | `rust/jarvis-context/src/builder.rs:72` は組み立て時に `pii_filter.filter(context)` を通すが `:80` の `store_memory` は生の `content`/`metadata` を DB・Qdrant へ保存。※設計意図が「LLM 送信時のみ」なら保存時は対象外の可能性あり、要方針確認 | 保存前にも `pii_filter.filter()` を通すか、「保存データは対象外」と明文化するテストを追加。既存保存データの再スキャン方針も決定 | SE / PII-01 |

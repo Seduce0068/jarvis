@@ -1521,7 +1521,7 @@ mod tests {
 
         client
             .post(format!("{base}/v1/approval/{id}/approve"))
-            .json(&serde_json::json!({ "approved_by": "koppe" }))
+            .json(&serde_json::json!({ "approved_by": "testuser" }))
             .send()
             .await
             .expect("approve");

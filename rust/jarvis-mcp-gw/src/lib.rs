@@ -515,7 +515,7 @@ requires_approval = false
         .await
         .expect("approval must become pending within 5s");
         http.post(format!("{policy_http}/v1/approval/{id}/approve"))
-            .json(&json!({ "approved_by": "koppe" }))
+            .json(&json!({ "approved_by": "testuser" }))
             .send()
             .await
             .expect("approve");
@@ -568,7 +568,7 @@ requires_approval = false
             .activate_kill_switch("test".into(), "test-admin-token")
             .expect("kill switch activates");
         http.post(format!("{policy_http}/v1/approval/{id}/approve"))
-            .json(&json!({ "approved_by": "koppe" }))
+            .json(&json!({ "approved_by": "testuser" }))
             .send()
             .await
             .expect("approve");

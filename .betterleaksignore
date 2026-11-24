@@ -1,5 +1,3 @@
-# False positives verified 2026-11-24: documentation/test placeholders
-# (postgres://user:pass@host, admin:I51A-do-not-log@..., etc.)
 2d5e84787b3d1ed3f4758b802c89a94def184571:rust/jarvis-policy/src/persistence.rs:generic-credential-uri:1531
 5152d6112622bbfab6377c69f91729b36685330c:rust/jarvis-context/src/config.rs:generic-credential-uri:47
 79fd977bab0ec04581e89910e8f49543ead7802b:rust/jarvis-context/src/main.rs:generic-credential-uri:20
@@ -12,3 +10,4 @@ b3fe910035142d4eba1821b1b42e1d922365e742:infra/systemd/jarvis-context.service:ge
 b3fe910035142d4eba1821b1b42e1d922365e742:rust/jarvis-context/src/config.rs:generic-credential-uri:37
 b6c8948bf8436248f5b2eda83d3d15c21311a2dd:rust/jarvis-context/src/http.rs:generic-credential-uri:440
 be0fc662d026474cde7bb6d66dff0ccaf7af9163:rust/jarvis-context/src/builder.rs:generic-credential-uri:2002
+35d4ece41ae1cade9f251758cb3e7bcaed3850fb:.betterleaksignore:generic-credential-uri:2

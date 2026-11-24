@@ -6,6 +6,7 @@
 # applied before runcmd, so the directories must exist here.
 bootcmd:
   - mkdir -p /opt/jarvis/{backups,bin,data,logs,scripts,rust} /opt/jarvis/data/qdrant /var/lib/jarvis /etc/jarvis
+  - mkdir -p /etc/systemd/system/jarvis-policy.service.d
   - chown -R jarvis:jarvis /opt/jarvis /var/lib/jarvis
 
 package_update: true
@@ -35,12 +36,12 @@ packages:
   - docker-compose-v2
   - ufw
 
-# Create jarvis user
+# Create jarvis user with least privilege: no passwordless sudo and no docker
+# group membership (container-runtime access is effectively root-equivalent).
 users:
   - name: jarvis
-    groups: [sudo, docker]
+    groups: []
     shell: /bin/bash
-    sudo: ["ALL=(ALL) NOPASSWD:ALL"]
     lock_passwd: true
     ssh_authorized_keys:
       - ${ssh_public_key}
@@ -92,6 +93,14 @@ write_files:
     permissions: "0644"
     content: |
       ${indent(6, file("${config_dir}/opencode/opencode.jsonc"))}
+  # Fail closed by default: the policy service must refuse to start while the
+  # kill-switch admin token is still a placeholder. The real token is injected
+  # by the secret manager (bws) at service start.
+  - path: /etc/systemd/system/jarvis-policy.service.d/10-fail-closed.conf
+    permissions: "0644"
+    content: |
+      [Service]
+      Environment=JARVIS_POLICY_REQUIRE_KILL_SWITCH_ADMIN_TOKEN=true
 
 # Directories
 runcmd:
@@ -129,8 +138,19 @@ runcmd:
   # Install OpenTelemetry Collector (latest release)
   - OTELCOL_VERSION=$(curl -fsSL https://api.github.com/repos/open-telemetry/opentelemetry-collector-releases/releases/latest | jq -r .tag_name | sed 's/^v//') && curl -fsSL -o /tmp/otelcol-contrib.tar.gz "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v$${OTELCOL_VERSION}/otelcol-contrib_$${OTELCOL_VERSION}_linux_arm64.tar.gz" && tar -xzf /tmp/otelcol-contrib.tar.gz -C /usr/local/bin/ otelcol-contrib && chmod 0755 /usr/local/bin/otelcol-contrib
 
-  # Configure PostgreSQL
-  - sudo -u postgres psql -c "CREATE USER jarvis WITH PASSWORD 'jarvis';" || true
+  # Configure PostgreSQL. The role password is resolved from the secret
+  # manager at provision time; no literal credential is stored here. When the
+  # secret is unavailable, role creation is skipped (provision out-of-band).
+  - |
+    JARVIS_DB_PASSWORD="$$(op read 'op://JARVIS/PostgreSQL/password' 2>/dev/null || true)"
+    if [ -n "$$JARVIS_DB_PASSWORD" ]; then
+      sudo -u postgres psql -v pw="$$JARVIS_DB_PASSWORD" <<'SQL' || true
+    CREATE USER jarvis WITH PASSWORD :'pw';
+    SQL
+      unset JARVIS_DB_PASSWORD
+    else
+      echo "DB secret unavailable; skipping PostgreSQL role creation." >&2
+    fi
   - sudo -u postgres psql -c "CREATE DATABASE jarvis OWNER jarvis;" || true
   - sudo -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE jarvis TO jarvis;" || true
 
@@ -144,7 +164,8 @@ runcmd:
   # Configure Tailscale (official install script; not in the Ubuntu repos)
   - curl -fsSL https://tailscale.com/install.sh | sh
   - systemctl enable --now tailscaled
-  - if [ -n "${tailscale_auth_key}" ]; then tailscale up --authkey="${tailscale_auth_key}" --hostname=jarvis-host; fi
+  # Use the system hostname; no environment-specific name is hard-coded here.
+  - if [ -n "${tailscale_auth_key}" ]; then tailscale up --authkey="${tailscale_auth_key}"; fi
 
   # Configure UFW (allow Tailscale, deny public except SSH)
   - ufw default deny incoming
@@ -173,7 +194,7 @@ runcmd:
   - sudo -u jarvis /usr/local/bin/rust-script --package --pkg-path /home/jarvis/.cache/jarvis-backup-check /opt/jarvis/scripts/backup.rs
   - sudo -u jarvis /home/jarvis/.cargo/bin/cargo check --manifest-path /home/jarvis/.cache/jarvis-backup-check/Cargo.toml
 
-  # Install rclone for OCI Object Storage backup
+  # Install rclone for S3-compatible backup storage
   - curl https://rclone.org/install.sh | bash
 
   # Create placeholder config files (populated by deploy.rs / secrets)
@@ -183,17 +204,29 @@ runcmd:
   - chown jarvis:jarvis /etc/jarvis/*.env && chmod 600 /etc/jarvis/*.env
   - chown root:root /etc/jarvis/op.env && chmod 600 /etc/jarvis/op.env
 
-  # Configure rclone for OCI Object Storage (via 1Password)
+  # Configure rclone for a provider-neutral S3-compatible backup target.
+  # Endpoint, region and credentials are resolved from the secret manager;
+  # the `oci` remote is retained only as a legacy alias for older scripts.
   - mkdir -p /home/jarvis/.config/rclone
   - |
     cat > /home/jarvis/.config/rclone/rclone.conf << 'RCLONE_EOF'
+    [backup]
+    type = s3
+    provider = Other
+    env_auth = false
+    access_key_id = op://JARVIS/OCI/access_key_id
+    secret_access_key = op://JARVIS/OCI/secret_access_key
+    region = op://JARVIS/OCI/region
+    endpoint = op://JARVIS/OCI/endpoint
+    acl = private
+
     [oci]
     type = s3
     provider = Other
     env_auth = false
     access_key_id = op://JARVIS/OCI/access_key_id
     secret_access_key = op://JARVIS/OCI/secret_access_key
-    region = ap-tokyo-1
+    region = op://JARVIS/OCI/region
     endpoint = op://JARVIS/OCI/endpoint
     acl = private
     RCLONE_EOF

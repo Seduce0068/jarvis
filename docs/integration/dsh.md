@@ -158,7 +158,7 @@ DSH 側の設定箇所（2026-11-15 確認）:
   未設定ならヘッダ不要（後方互換）。admin 未設定時は API トークンへ
   フォールバックし、職務分離は効かない。
   1. `curl -s -H "X-Jarvis-Approval-Token: $APPROVAL_API_TOKEN" http://127.0.0.1:8081/v1/approvals` で保留中の要求を確認
-  2. 承認: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/approve -H 'content-type: application/json' -H "X-Jarvis-Approval-Token: $APPROVAL_ADMIN_TOKEN" -d '{"approved_by":"koppe"}'`
+  2. 承認: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/approve -H 'content-type: application/json' -H "X-Jarvis-Approval-Token: $APPROVAL_ADMIN_TOKEN" -d '{"approved_by":"testuser"}'`
      却下: `curl -s -X POST http://127.0.0.1:8081/v1/approval/<id>/deny -H 'content-type: application/json' -H "X-Jarvis-Approval-Token: $APPROVAL_ADMIN_TOKEN" -d '{"reason":"not now"}'`
 - jarvis-policy の HTTP（8081）に到達できない場合の呼び出しは fail-closed で拒否される。
 - 承認UI と監査永続化（PostgreSQL）は実装済み、通知（ntfy 橋渡し）は実装見送り

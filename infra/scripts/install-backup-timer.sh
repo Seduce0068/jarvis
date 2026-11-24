@@ -163,7 +163,7 @@ backup_configs
 install -o root -g root -m 0755 "$script_src" "$script_dst"
 # I73-C (b): install the verifier BEFORE the timer is enabled / the service is
 # started below. jarvis-backup.service ExecStartPost runs this exact path as
-# User=postgres; the repo working copy is 0711 koppe and is not readable by
+# User=postgres; the repo working copy is 0711 testuser and is not readable by
 # postgres, so the unit used to fail on every run. Installed root:root 0755.
 [ -f "$verify_src" ] || fail "verify-backup.sh working copy is required for daily verification: $verify_src"
 [ -f "$verify_lib_src" ] || fail "shared payload descriptor library is required by verify-backup.sh: $verify_lib_src"

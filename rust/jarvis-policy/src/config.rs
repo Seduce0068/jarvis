@@ -7,10 +7,9 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-/// Placeholder kill-switch admin token used until a real secret is injected.
-/// The opt-in strict guard rejects this value at startup; an unset/blank token
-/// is rejected unconditionally (see
-/// [`PolicyConfig::validate_kill_switch_admin_token`]).
+/// Known placeholder kill-switch admin token. It is rejected at startup on
+/// every path (blank tokens are rejected as well); it is not a usable secret
+/// (see [`PolicyConfig::validate_kill_switch_admin_token`]).
 pub const PLACEHOLDER_KILL_SWITCH_TOKEN: &str = "changeme";
 
 /// Absolute default location of the policy TOML. The former CWD-relative
@@ -83,9 +82,10 @@ pub struct PolicyConfig {
     /// loopback-only, unauthenticated behavior.
     #[serde(default)]
     pub require_approval_api_token: bool,
-    /// Opt-in P0-10 guard: when true, startup fails if the kill-switch admin
-    /// token is still `PLACEHOLDER_KILL_SWITCH_TOKEN`. Default false keeps the
-    /// legacy warn-only behavior.
+    /// Legacy compatibility key. The placeholder kill-switch token is now
+    /// rejected unconditionally, so this flag no longer gates that check; it
+    /// stays parsed to avoid breaking older configs under
+    /// `deny_unknown_fields`.
     #[serde(default)]
     pub require_kill_switch_admin_token: bool,
     /// Opt-in I8-E guard: when true, startup fails if
@@ -216,25 +216,22 @@ impl PolicyConfig {
     /// A blank (unset or whitespace-only) token is rejected unconditionally:
     /// an empty admin token would make `KillSwitch::verify_admin_token("")`
     /// succeed, so any caller able to send an empty header could arm or
-    /// disarm the emergency stop. This closes the gap that the existing
-    /// placeholder-only guard does not cover.
+    /// disarm the emergency stop.
     ///
-    /// The known [`PLACEHOLDER_KILL_SWITCH_TOKEN`] stays guard-gated: it is
-    /// rejected only when `require_kill_switch_admin_token` is enabled. That
-    /// preserves the documented staged-rollout compatibility (todo.md P0-10:
-    /// enabling the guard in production is a separate operator decision).
-    /// With the guard off the placeholder is still allowed and only logged as
-    /// a warning, so the default remains warn-only.
+    /// The known [`PLACEHOLDER_KILL_SWITCH_TOKEN`] is now rejected on every
+    /// path as well. Previously it was only rejected when
+    /// `require_kill_switch_admin_token` was enabled, which left a default
+    /// deployment controlling the emergency stop with a publicly known
+    /// credential. The legacy flag is still parsed for compatibility but no
+    /// longer gates this check.
     ///
-    /// This is now the single source of truth for the startup guard: both the
-    /// file-based path (`load()` -> `load_from_path_with`) and the
-    /// programmatic path (`PolicyEngine::new`) call it, so the same blank
-    /// rejection and placeholder rule apply to either route.
+    /// Both the file-based path (`load()` -> `load_from_path_with`) and the
+    /// programmatic path (`PolicyEngine::new`) call this single validator.
     ///
     /// No configured secret is interpolated into either error: secrets must
-    /// never reach logs. The guard's error names the public
-    /// [`PLACEHOLDER_KILL_SWITCH_TOKEN`] marker (a known, non-secret constant)
-    /// so operators and callers can identify which value was rejected.
+    /// never reach logs. The errors name only the public
+    /// [`PLACEHOLDER_KILL_SWITCH_TOKEN`] marker and the env override, not the
+    /// configured value.
     pub fn validate_kill_switch_admin_token(&self) -> Result<()> {
         if self.kill_switch_admin_token.trim().is_empty() {
             anyhow::bail!(
@@ -243,20 +240,11 @@ impl PolicyConfig {
                  before starting the policy service"
             );
         }
-        if self.require_kill_switch_admin_token
-            && self.kill_switch_admin_token == PLACEHOLDER_KILL_SWITCH_TOKEN
-        {
+        if self.kill_switch_admin_token == PLACEHOLDER_KILL_SWITCH_TOKEN {
             anyhow::bail!(
                 "kill switch admin token is still the known placeholder value \
-                 '{}' but require_kill_switch_admin_token = true; set \
-                 JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN to a real secret",
-                PLACEHOLDER_KILL_SWITCH_TOKEN
-            );
-        }
-        if self.kill_switch_admin_token == PLACEHOLDER_KILL_SWITCH_TOKEN {
-            tracing::warn!(
-                "Kill switch admin token is still the default '{}'; \
-                 set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN",
+                 '{}'; set JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN to a real \
+                 secret (require_kill_switch_admin_token is now unconditional)",
                 PLACEHOLDER_KILL_SWITCH_TOKEN
             );
         }
@@ -870,32 +858,27 @@ default_deny = true
         }
     }
 
-    /// The known placeholder stays guard-gated for compatibility: warn-only
-    /// when the flag is off (the documented default), fail-closed when on.
+    /// The known placeholder is rejected regardless of the legacy flag.
     #[test]
-    fn placeholder_admin_token_is_guard_gated() {
-        let legacy = PolicyConfig {
-            kill_switch_admin_token: PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
-            require_kill_switch_admin_token: false,
-            ..Default::default()
-        };
-        legacy
-            .validate_kill_switch_admin_token()
-            .expect("guard off keeps the legacy warn-only behavior");
-
-        let strict = PolicyConfig {
-            require_kill_switch_admin_token: true,
-            ..legacy
-        };
-        let error = strict
-            .validate_kill_switch_admin_token()
-            .expect_err("guard on rejects the placeholder");
-        assert!(
-            error
-                .to_string()
-                .contains("require_kill_switch_admin_token"),
-            "error names the opt-in flag"
-        );
+    fn placeholder_admin_token_is_rejected_with_or_without_guard() {
+        for guard in [false, true] {
+            let config = PolicyConfig {
+                kill_switch_admin_token: PLACEHOLDER_KILL_SWITCH_TOKEN.into(),
+                require_kill_switch_admin_token: guard,
+                ..Default::default()
+            };
+            let error = config
+                .validate_kill_switch_admin_token()
+                .expect_err("the placeholder is never a usable admin token");
+            assert!(
+                error.to_string().contains(PLACEHOLDER_KILL_SWITCH_TOKEN),
+                "error names the placeholder"
+            );
+            assert!(
+                error.to_string().contains("require_kill_switch_admin_token"),
+                "error names the legacy flag"
+            );
+        }
     }
 
     /// A real secret satisfies the guard, and startup errors must never echo
@@ -1157,7 +1140,12 @@ default_deny = true
     /// Unset tokens keep the legacy behavior; real tokens still pass.
     #[test]
     fn unset_and_nonblank_approval_tokens_pass_validation() {
-        let legacy = PolicyConfig::default();
+        let legacy = PolicyConfig {
+            // Default() carries the rejected placeholder; a real token is
+            // required to exercise the approval-token behavior under test.
+            kill_switch_admin_token: "test-admin-token".into(),
+            ..Default::default()
+        };
         assert!(legacy.approval_api_token.is_none());
         assert!(legacy.approval_admin_token.is_none());
         legacy
@@ -1166,6 +1154,7 @@ default_deny = true
         validate_startup(&legacy).expect("startup chain is unchanged for legacy configs");
 
         let configured = PolicyConfig {
+            kill_switch_admin_token: "test-admin-token".into(),
             approval_api_token: Some("api-secret".into()),
             approval_admin_token: Some("admin-secret".into()),
             ..Default::default()
@@ -1183,11 +1172,14 @@ default_deny = true
     /// irrelevant here because no env provider participates in the parse.
     #[test]
     fn load_from_path_rejects_blank_approval_token_from_toml() {
+        // Use a real (test-only) token so this test exercises the blank
+        // approval-token guard rather than the placeholder-token guard.
+        let safe_toml = base_toml().replace(PLACEHOLDER_KILL_SWITCH_TOKEN, "test-admin-token");
         for (key, env_key) in [
             ("approval_api_token", "JARVIS_POLICY_APPROVAL_API_TOKEN"),
             ("approval_admin_token", "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN"),
         ] {
-            let toml = format!("{}\n{key} = \"\"\n", base_toml());
+            let toml = format!("{safe_toml}\n{key} = \"\"\n");
             let file_name = format!("jarvis-policy-r4a-{key}-toml.toml");
             let path = std::env::temp_dir().join(&file_name);
             std::fs::write(&path, &toml).expect("write temp config");
@@ -1215,11 +1207,14 @@ default_deny = true
     /// the override.
     #[test]
     fn load_from_path_env_override_rejects_blank_token_without_skipping_validation() {
+        // Use a real (test-only) token so the only rejection can be the blank
+        // override under test.
+        let safe_toml = base_toml().replace(PLACEHOLDER_KILL_SWITCH_TOKEN, "test-admin-token");
         for (key, env_key) in [
             ("approval_api_token", "JARVIS_POLICY_APPROVAL_API_TOKEN"),
             ("approval_admin_token", "JARVIS_POLICY_APPROVAL_ADMIN_TOKEN"),
         ] {
-            let toml = format!("{}\n{key} = \"from-toml\"\n", base_toml());
+            let toml = format!("{safe_toml}\n{key} = \"from-toml\"\n");
             let file_name = format!("jarvis-policy-r4a-{key}-env.toml");
             let path = std::env::temp_dir().join(&file_name);
             std::fs::write(&path, &toml).expect("write temp config");

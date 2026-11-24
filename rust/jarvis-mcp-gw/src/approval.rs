@@ -353,14 +353,14 @@ mod tests {
     fn decisions_deserialize_from_policy_shape() {
         let approved_wire: ApprovalOutcomeWire = serde_json::from_value(json!({
             "decision": "Approved",
-            "approved_by": "koppe",
+            "approved_by": "testuser",
             "approved_at": "2026-11-15T08:00:00Z",
         }))
         .expect("approved decision parses");
         assert_eq!(
             outcome_from_wire(approved_wire).expect("approved decision converts"),
             ApprovalOutcome::Approved {
-                approved_by: "koppe".into(),
+                approved_by: "testuser".into(),
                 approved_at: DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
                     .expect("timestamp parses")
                     .with_timezone(&Utc),
@@ -427,7 +427,7 @@ mod tests {
         // noise; serde ignores them, as it did before the boundary conversion.
         let approved_json = json!({
             "decision": "Approved",
-            "approved_by": "koppe",
+            "approved_by": "testuser",
             "approved_at": "2026-11-15T08:00:00Z",
             "id": "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88",
             "requested_at": "2026-11-15T07:50:00Z",
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(
             outcome_from_wire(approved_wire).expect("converts"),
             ApprovalOutcome::Approved {
-                approved_by: "koppe".into(),
+                approved_by: "testuser".into(),
                 approved_at: DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
                     .expect("timestamp parses")
                     .with_timezone(&Utc),
@@ -478,7 +478,7 @@ mod tests {
     fn malformed_approved_at_fails_closed() {
         let wire: ApprovalOutcomeWire = serde_json::from_value(json!({
             "decision": "Approved",
-            "approved_by": "koppe",
+            "approved_by": "testuser",
             "approved_at": "not-a-timestamp",
         }))
         .expect("wire DTO parses");
@@ -530,7 +530,7 @@ mod tests {
         .expect("approval must become pending within 5s");
         let decision: serde_json::Value = http
             .post(format!("{base}/v1/approval/{id}/approve"))
-            .json(&json!({ "approved_by": "koppe" }))
+            .json(&json!({ "approved_by": "testuser" }))
             .send()
             .await
             .expect("approve request")
@@ -544,7 +544,7 @@ mod tests {
             .expect("requester task")
             .expect("approval outcome");
         assert!(
-            matches!(outcome, ApprovalOutcome::Approved { ref approved_by, .. } if approved_by == "koppe"),
+            matches!(outcome, ApprovalOutcome::Approved { ref approved_by, .. } if approved_by == "testuser"),
             "unexpected outcome: {outcome:?}"
         );
     }
@@ -725,7 +725,7 @@ mod tests {
                     let id = entry["id"].as_str().expect("id").to_owned();
                     http.post(format!("{base}/v1/approval/{id}/approve"))
                         .header("X-Jarvis-Approval-Token", token)
-                        .json(&json!({ "approved_by": "koppe" }))
+                        .json(&json!({ "approved_by": "testuser" }))
                         .send()
                         .await
                         .expect("approve");

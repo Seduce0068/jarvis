@@ -19,7 +19,7 @@ restore_git() {
   local archive="" resolve_rc=0
   local repo='<home>/ドキュメント/作業用/jarvis/jarvis'
   local tmp_dir='' bad='' status_out='' ts='' tag='' top='' real_repo='' suggested=''
-  # I77-C: root 実行 + tar 既定の owner 復元で koppe 所有ファイルが root:root に
+  # I77-C: root 実行 + tar 既定の owner 復元で testuser 所有ファイルが root:root に
   # なる問題への対策用（repo 既存 owner と展開エントリ）。
   local repo_owner='' tar_entry='' chown_target='' chown_rc=0
   # backup-local.sh の拒否条件 (.git / .env / *.key) を基数に、
@@ -160,11 +160,11 @@ restore_git() {
 
   # I77-C (a): 実行ユーザーは root 固定（restore-local.sh:73-76）。tar を root で
   # 実行するとアーカイブに記録された owner（root/root）が復元され、
-  # <home>/.../jarvis のファイルを koppe が編集できなくなる。
+  # <home>/.../jarvis のファイルを testuser が編集できなくなる。
   # 採用方針: 「precondition で repo 所有者 == 実行ユーザーを要求し不一致なら
   # fail-closed」ではなく、「--no-same-owner で展開し、展開前に取得した repo
   # ディレクトリの既存 owner:group（stat -c %U:%G）へ明示的に chown する」を選ぶ。
-  # これにより root 実行でも既存所有者（koppe:koppe）が保持され、退避タグ作成後
+  # これにより root 実行でも既存所有者（testuser:testuser）が保持され、退避タグ作成後
   # の展開途中で owner が取得できない場合は fail-closed とする。
   repo_owner="$(stat -c '%U:%G' -- "$repo" 2>/dev/null || true)"
   if [ -z "$repo_owner" ] || [[ "$repo_owner" != *:* ]]; then

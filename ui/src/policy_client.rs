@@ -1084,7 +1084,7 @@ mod tests {
                 *seen_for_thread.lock().expect("lock") = Some(request);
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
                 );
             },
             1,
@@ -1094,7 +1094,7 @@ mod tests {
             format!("http://{addr}"),
             Some("approve-token".to_string()),
         );
-        let result = client.approve("req-1", "koppe");
+        let result = client.approve("req-1", "testuser");
         handle.join().expect("server thread");
         assert!(result.is_ok(), "2xx approve must succeed: {result:?}");
         assert!(matches!(
@@ -1165,7 +1165,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let approved = client.approve("req-1", "koppe");
+        let approved = client.approve("req-1", "testuser");
         let denied = client.deny("req-2", "because");
         server.join().expect("server thread");
         assert!(
@@ -1198,20 +1198,20 @@ mod tests {
             |stream, _request| {
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
                 );
             },
             1,
         );
         let client = PolicyClient::new(format!("http://{addr}"));
-        let decision = client.approve("4d1a1f2e-0000-0000-0000-000000000000", "koppe");
+        let decision = client.approve("4d1a1f2e-0000-0000-0000-000000000000", "testuser");
         handle.join().expect("server thread");
         match decision.expect("approve response parses as canonical decision") {
             Decision::Approved {
                 approved_by,
                 approved_at,
             } => {
-                assert_eq!(approved_by, "koppe");
+                assert_eq!(approved_by, "testuser");
                 assert_eq!(
                     approved_at,
                     chrono::DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
@@ -1252,13 +1252,13 @@ mod tests {
             |stream, _request| {
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 77\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"not-a-timestamp\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 77\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"not-a-timestamp\"}",
                 );
             },
             1,
         );
         let client = PolicyClient::new(format!("http://{addr}"));
-        let decision = client.approve("4d1a1f2e-0000-0000-0000-000000000000", "koppe");
+        let decision = client.approve("4d1a1f2e-0000-0000-0000-000000000000", "testuser");
         handle.join().expect("server thread");
         assert!(
             decision.is_err(),
@@ -1272,13 +1272,13 @@ mod tests {
     fn tagged_decision_json_converts_to_canonical_core() {
         let approved = serde_json::json!({
             "decision": "Approved",
-            "approved_by": "koppe",
+            "approved_by": "testuser",
             "approved_at": "2026-11-15T08:00:00Z",
         });
         assert_eq!(
             decision_from_json(&approved).expect("approved converts"),
             Decision::Approved {
-                approved_by: "koppe".into(),
+                approved_by: "testuser".into(),
                 approved_at: chrono::DateTime::parse_from_rfc3339("2026-11-15T08:00:00Z")
                     .expect("timestamp parses")
                     .with_timezone(&chrono::Utc),
@@ -1316,7 +1316,7 @@ mod tests {
 
         let malformed = serde_json::json!({
             "decision": "Approved",
-            "approved_by": "koppe",
+            "approved_by": "testuser",
             "approved_at": "not-a-timestamp",
         });
         assert!(
@@ -1504,7 +1504,7 @@ mod tests {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_for_thread = seen.clone();
         let mut responses = [
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
         ]
         .into_iter();
@@ -1521,7 +1521,7 @@ mod tests {
             Some("api-scope-value".to_string()),
             Some("admin-scope-value".to_string()),
         );
-        assert!(client.approve("req-1", "koppe").is_ok());
+        assert!(client.approve("req-1", "testuser").is_ok());
         assert!(client.deny("req-2", "because").is_ok());
         handle.join().expect("server thread");
         let requests = seen.lock().expect("lock");
@@ -1600,7 +1600,7 @@ mod tests {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_for_thread = seen.clone();
         let mut responses = [
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"koppe\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
         ]
         .into_iter();
@@ -1613,7 +1613,7 @@ mod tests {
         );
 
         let client = client_factory(format!("http://{addr}"));
-        let approved = client.approve("req-1", "koppe");
+        let approved = client.approve("req-1", "testuser");
         let denied = client.deny("req-2", "because");
         handle.join().expect("server thread");
         assert!(approved.is_ok(), "approve must succeed against the stub");
@@ -2220,7 +2220,7 @@ mod tests {
 
         let id = "3f9a1c2e-7b4d-4a1f-9c33-0d2e5f6a7b88";
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome(id, "koppe");
+        let outcome = client.approve_outcome(id, "testuser");
         handle.join().expect("server thread");
 
         let outcome = outcome.expect("409 resolves to the winner decision");
@@ -2300,7 +2300,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
         assert!(outcome.is_err(), "unreadable winner must fail closed");
     }
@@ -2379,7 +2379,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
 
         assert_eq!(
@@ -2417,7 +2417,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
 
         assert_eq!(
@@ -2453,7 +2453,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
 
         assert_eq!(
@@ -2491,7 +2491,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
 
         assert_eq!(
@@ -2597,7 +2597,7 @@ mod tests {
         );
 
         let client = client_factory(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
         assert!(outcome.is_ok(), "409 must resolve to the winner");
         let requests = seen.lock().expect("lock").clone();
@@ -2665,7 +2665,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let approved = client.approve_outcome("req-1", "koppe");
+        let approved = client.approve_outcome("req-1", "testuser");
         let denied = client.deny_outcome("req-2", "because");
         handle.join().expect("server thread");
 
@@ -2747,7 +2747,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
 
         assert!(outcome.is_err(), "an unverified 410 must fail closed");
@@ -2782,7 +2782,7 @@ mod tests {
         );
 
         let client = PolicyClient::new(format!("http://{addr}"));
-        let outcome = client.approve_outcome("req-1", "koppe");
+        let outcome = client.approve_outcome("req-1", "testuser");
         handle.join().expect("server thread");
 
         assert!(outcome.is_err(), "an unreadable 410 must fail closed");

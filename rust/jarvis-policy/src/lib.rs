@@ -28,12 +28,11 @@ pub struct PolicyEngine {
 
 impl PolicyEngine {
     pub async fn new(config: config::PolicyConfig) -> Result<Self> {
-        // P0-10 staged rollout: the single startup guard for the kill-switch
-        // admin token (blank rejection + opt-in placeholder rejection +
-        // warn-only default) now lives in `PolicyConfig::validate_...`, shared
-        // with the file-based load path. Keeping this call first preserves the
-        // fail-closed contract for programmatically built configs too; the
-        // default stays warn-only because the P0 default reversal is on hold.
+        // The single startup guard for the kill-switch admin token (blank
+        // rejection + unconditional placeholder rejection) lives in
+        // `PolicyConfig::validate_...`, shared with the file-based load path.
+        // Keeping this call first preserves the fail-closed contract for
+        // programmatically built configs too.
         config.validate_kill_switch_admin_token()?;
         let cedar_engine = Arc::new(policy::CedarEngine::new(&config).await?);
         let casbin_enforcer = Arc::new(
@@ -420,7 +419,7 @@ mod tests {
             .expect("activate");
 
         assert!(matches!(
-            engine.approve(id, "koppe").await,
+            engine.approve(id, "testuser").await,
             Err(crate::approval::ApprovalError::KillSwitchActivated)
         ));
         assert!(matches!(
@@ -432,7 +431,7 @@ mod tests {
         engine
             .deactivate_kill_switch("test-admin-token")
             .expect("deactivate");
-        assert!(engine.approve(id, "koppe").await.is_ok());
+        assert!(engine.approve(id, "testuser").await.is_ok());
         let _ = waiter.await.expect("waiter task");
     }
 
@@ -471,10 +470,9 @@ mod tests {
         std::fs::remove_dir_all(unique_temp_dir(label)).expect("clean temp dir");
     }
 
-    /// With the guard off (the default), the placeholder token still starts
-    /// and only logs a warning, so existing deployments are unaffected.
+    /// The placeholder token is rejected even with the legacy guard off.
     #[tokio::test]
-    async fn strict_token_guard_off_keeps_warn_only_startup() {
+    async fn placeholder_token_is_rejected_with_guard_off() {
         let label = "strict-token-off";
         let (casbin_model_path, casbin_policy_path) = shipped_casbin(label);
         let config = config::PolicyConfig {
@@ -489,9 +487,15 @@ mod tests {
             ..Default::default()
         };
 
-        PolicyEngine::new(config)
+        let err = PolicyEngine::new(config)
             .await
-            .expect("placeholder token is allowed when the strict guard is off");
+            .err()
+            .expect("placeholder token is never accepted at startup");
+        assert!(
+            err.to_string()
+                .contains(config::PLACEHOLDER_KILL_SWITCH_TOKEN),
+            "error names the placeholder"
+        );
 
         std::fs::remove_dir_all(unique_temp_dir(label)).expect("clean temp dir");
     }
@@ -614,7 +618,7 @@ mod tests {
         );
 
         let error = engine
-            .approve(id, "koppe")
+            .approve(id, "testuser")
             .await
             .expect_err("the commit boundary must block the decision");
         assert!(
@@ -638,7 +642,7 @@ mod tests {
             .deactivate_kill_switch("test-admin-token")
             .expect("deactivate");
         engine
-            .approve(id, "koppe")
+            .approve(id, "testuser")
             .await
             .expect("decision succeeds once the stop is lifted");
         assert!(matches!(
@@ -722,7 +726,7 @@ mod tests {
         let (id, waiter) = register_pending(&engine).await;
 
         engine
-            .approve(id, "koppe")
+            .approve(id, "testuser")
             .await
             .expect("the committed row is the authority and is published");
         assert_eq!(

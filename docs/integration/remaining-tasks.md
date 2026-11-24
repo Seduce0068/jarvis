@@ -417,7 +417,7 @@ owner/mode 表の3経路統一、記述子ロジックの共有 lib 抽出、
 
 | ID | タスク | 現状・根拠 | 次のアクション（案） |
 |---|---|---|---|
-| SEC-1 | otelcol unit の repo/実機差分の整合 | **2026-11-16 解消（repo側）**: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) を実機の稼働 unit と機能一致させた（`User/Group=koppe`、`op run`/`EnvironmentFile` 撤去、直接 `otelcol-contrib --config`）。functional diff で一致を確認。資格情報の供給元は未特定（secret 値は未確認）。 | 実機適用は不要（repo が実機に追従）。Grafana 認証の供給経路が判明した場合に unit 注記を更新する。 **0.0.0.0 バインドの監査記録は後述「SEC-1 関連: otelcol の 0.0.0.0 バインド監査」を参照。** |
+| SEC-1 | otelcol unit の repo/実機差分の整合 | **2026-11-16 解消（repo側）**: [infra/systemd/otelcol.service](../../infra/systemd/otelcol.service) を実機の稼働 unit と機能一致させた（`User/Group=testuser`、`op run`/`EnvironmentFile` 撤去、直接 `otelcol-contrib --config`）。functional diff で一致を確認。資格情報の供給元は未特定（secret 値は未確認）。 | 実機適用は不要（repo が実機に追従）。Grafana 認証の供給経路が判明した場合に unit 注記を更新する。 **0.0.0.0 バインドの監査記録は後述「SEC-1 関連: otelcol の 0.0.0.0 バインド監査」を参照。** |
 | SEC-2 | バックアップ系の 1Password 依存解消 | **2026-11-17 実質解消**: 現行バックアップは [backup-local.sh](../../infra/scripts/backup-local.sh) で OCI/rclone/op 非依存、実バックアップ検証済み。レガシー [backup.rs](../../rust/scripts/backup.rs) / [restore.rs](../../rust/scripts/restore.rs) の `op inject` は残存するが、[backup.sh](../../infra/scripts/backup.sh) / [restore.sh](../../infra/scripts/restore.sh) は fail-closed 化され実機では呼ばれない（`make safety-test` が担保）。unit も `op.env` 参照を撤去済み。 | レガシー実装の `op inject` コード自体は参照用として残置。実機 secret 変更は不要（新バックアップは secret を読まない）。 |
 
 | P2-10 | `.gitignore` 拡張の判断 | **採用しない**（詳細は後述）。 | 判断記録を追加。 |
@@ -437,7 +437,7 @@ owner/mode 表の3経路統一、記述子ロジックの共有 lib 抽出、
   `service.extensions` に auth 拡張はなく、受信側の認証設定は見当たらない。
 - 内部テレメトリ: `service.telemetry.metrics` の pull exporter が
   host 0.0.0.0 / port 8888 を使用（記載の4系統に加えて発見）。
-- systemd unit: `User/Group=koppe`、`UMask=0077`、`NoNewPrivileges`、
+- systemd unit: `User/Group=testuser`、`UMask=0077`、`NoNewPrivileges`、
   `ProtectSystem=strict`、`ProtectHome=yes`、`PrivateTmp=yes`、
   `ReadWritePaths=/etc/jarvis /var/log/jarvis` などのハードニングはある。
   一方 `IPAddressDeny=` / `IPAddressAllow=` / `RestrictAddressFamilies=` /

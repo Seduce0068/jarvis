@@ -6,8 +6,8 @@ Wants=network.target
 
 [Service]
 Type=simple
-User=koppe
-Group=koppe
+User=testuser
+Group=testuser
 # journald receiver reads /var/log/journal (root:systemd-journal 0640).
 # Without this supplementary group the logs pipeline receives nothing.
 SupplementaryGroups=systemd-journal

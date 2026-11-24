@@ -667,7 +667,7 @@ requires_approval = true
         .expect("approval must become pending within 5s");
         let decision: Value = http
             .post(format!("{policy_http}/v1/approval/{id}/approve"))
-            .json(&json!({ "approved_by": "koppe" }))
+            .json(&json!({ "approved_by": "testuser" }))
             .send()
             .await
             .expect("approve request runs")
