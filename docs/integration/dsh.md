@@ -39,8 +39,8 @@ generated:
 - `sandbox.rs` の `execute_native` を **Rustネイティブ実装**へ置換（opencode CLI依存を排除）。
   - `filesystem.read` / `filesystem.list` / `git.status` / `git.diff`
   - パスは `JARVIS_MCP_GW_BASE_DIR` 配下に制限（canonicalizeで脱出拒否）。
-     コード既定は `/home/koppe` だが、unit のフォールバックは
-     `/home/koppe/ドキュメント/作業用/jarvis/jarvis` である
+     コード既定は `<home>` だが、unit のフォールバックは
+     `<home>/ドキュメント/作業用/jarvis/jarvis` である
      （`infra/systemd/jarvis-mcp-gw.service` の `Environment=` 行）。
      実機の有効値は unit／上書きファイルを正とする。
   - 読み取り上限 1MiB、gitはツール設定のtimeoutを適用
@@ -104,14 +104,14 @@ DSH からの接続自体は成立している（jarvis-mcp-gw のログに `dsh
 initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の実サービスでは
 `tools/list` に出る全ツールが実行不能だった。
 
-- 症状: `filesystem.*` / `git.*` は `canonicalize base /home/koppe: Permission denied`、
+- 症状: `filesystem.*` / `git.*` は `canonicalize base <home>: Permission denied`、
   `web.search` / `homeassistant.get_state` は firejail フォールバック失敗。
   注: この「firejail フォールバック失敗」は 2026-11-15 時点の履歴記録であり、
   現行に firejail 実行経路が存在する根拠ではない（前述
   「更新（2026-11-09）: ネイティブハンドラ実装」節の fallback 撤去と
   設定値残存の説明を参照）。
-- 原因: unit の `ProtectHome=yes` と基準ディレクトリ既定値 `/home/koppe` の不整合。
-- 修正: unit を `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=/home/koppe` に変更し、
+- 原因: unit の `ProtectHome=yes` と基準ディレクトリ既定値 `<home>` の不整合。
+- 修正: unit を `ProtectHome=read-only` + `JARVIS_MCP_GW_BASE_DIR=<home>` に変更し、
   未実装ツールを承認必須化（**当時は `tools/list` 非表示**。現行は表示＋呼び出し時承認）。
   **2026-11-15 11:36 にデプロイ適用済み。**
 - デプロイ: `sudo bash infra/scripts/deploy-mcp-gw-safe.sh --apply`
@@ -137,7 +137,7 @@ initialize を確認、直近 2026-11-15 00:59）。ただし systemd 配下の�
 
 DSH 側の設定箇所（2026-11-15 確認）:
 
-- このセッションの DSH は `DSH_HOME=/home/koppe/.dsh-agentrouter` で起動しており、
+- このセッションの DSH は `DSH_HOME=<home>/.dsh-agentrouter` で起動しており、
   `~/.dsh-agentrouter/profiles/agentrouter/cordis.patch.yml` に
   `mcp-jarvis`（`serverName: jarvis`, `transport: streamable-http`,
   `url: http://127.0.0.1:8082/mcp`, `failOnStartupError: false`）が定義されている。

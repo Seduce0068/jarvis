@@ -5,7 +5,7 @@
 # シェルオプション・trap は呼び出し側が所有するため、ここでは変更しない。
 #
 # 対象リポジトリは設計文書の --repo-dir 相当の固定パス。
-#   /home/koppe/ドキュメント/作業用/jarvis/jarvis
+#   <home>/ドキュメント/作業用/jarvis/jarvis
 # 入力は git archive HEAD の成果物（.git/ 不包含・追跡ファイルのみ）。
 # I75-B: 入力パスは共有ヘルパ resolve_restore_input() が manifest の
 # role/format 記述子から解決する。git-jarvis-head.tar.gz は legacy 3列行の
@@ -17,7 +17,7 @@
 restore_git() {
   local rc=0
   local archive="" resolve_rc=0
-  local repo='/home/koppe/ドキュメント/作業用/jarvis/jarvis'
+  local repo='<home>/ドキュメント/作業用/jarvis/jarvis'
   local tmp_dir='' bad='' status_out='' ts='' tag='' top='' real_repo='' suggested=''
   # I77-C: root 実行 + tar 既定の owner 復元で koppe 所有ファイルが root:root に
   # なる問題への対策用（repo 既存 owner と展開エントリ）。
@@ -160,7 +160,7 @@ restore_git() {
 
   # I77-C (a): 実行ユーザーは root 固定（restore-local.sh:73-76）。tar を root で
   # 実行するとアーカイブに記録された owner（root/root）が復元され、
-  # /home/koppe/.../jarvis のファイルを koppe が編集できなくなる。
+  # <home>/.../jarvis のファイルを koppe が編集できなくなる。
   # 採用方針: 「precondition で repo 所有者 == 実行ユーザーを要求し不一致なら
   # fail-closed」ではなく、「--no-same-owner で展開し、展開前に取得した repo
   # ディレクトリの既存 owner:group（stat -c %U:%G）へ明示的に chown する」を選ぶ。

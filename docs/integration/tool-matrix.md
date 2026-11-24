@@ -89,13 +89,13 @@ generated:
 | 確認項目 | 結果 |
 |---|---|
 | `tools/list` | 6ツール（filesystem.list/read, git.diff/status, homeassistant.get_state, web.search） |
-| filesystem.list/read, git.status/diff の `tools/call` | `canonicalize base /home/koppe: Permission denied (os error 13)` |
+| filesystem.list/read, git.status/diff の `tools/call` | `canonicalize base <home>: Permission denied (os error 13)` |
 | web.search, homeassistant.get_state の `tools/call` | firejail フォールバックが `create_empty_dir_as_root: Permission denied` で失敗 |
 | DSH から呼び出した場合 | 同じエラー（ゲートウェイ経由で再現） |
 
 原因は2点:
 
-1. unit の `ProtectHome=yes` が `/home` をマスクする一方、ネイティブハンドラの基準ディレクトリ既定値が `/home/koppe`（`JARVIS_MCP_GW_BASE_DIR` 未設定）だったため、`canonicalize` が EACCES で失敗。
+1. unit の `ProtectHome=yes` が `/home` をマスクする一方、ネイティブハンドラの基準ディレクトリ既定値が `<home>`（`JARVIS_MCP_GW_BASE_DIR` 未設定）だったため、`canonicalize` が EACCES で失敗。
 2. ネイティブ未実装ツールがレガシー firejail 経路へ落ちるが、`NoNewPrivileges` 等の hardening 下では firejail が起動できない。
 
 従来のスモークテストは systemd 外で別ポート起動していたため、この乖離を検出できなかった。
@@ -109,7 +109,7 @@ generated:
   - `ProtectHome=yes` → `ProtectHome=read-only`（`/home` を読み取り専用で参照可能に）
   - `JARVIS_MCP_GW_BASE_DIR` を明示（読み取り境界を unit 上で明確化）。
      unit のフォールバック値は
-     `/home/koppe/ドキュメント/作業用/jarvis/jarvis`
+     `<home>/ドキュメント/作業用/jarvis/jarvis`
      （`infra/systemd/jarvis-mcp-gw.service` の `Environment=` 行、実機は上書き値を優先）。
   - デプロイ実態に合わせて `User`/`Group` を `koppe` に同期
 - `infra/config/mcp_allowlist.toml`
@@ -143,7 +143,7 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 |---|---|
 | `deploy-mcp-gw-safe.sh --apply` | `DONE: APPLIED（事後確認 OK）` / `DEPLOY_EXIT=0` |
 | `check-deploy-drift.sh`（独立再実行） | binary/allowlist/policy/unit **全て OK**、`RESULT: OK`（exit 0） |
-| 稼働 unit | `User=koppe`, `ProtectHome=read-only`, `JARVIS_MCP_GW_BASE_DIR=/home/koppe` |
+| 稼働 unit | `User=koppe`, `ProtectHome=read-only`, `JARVIS_MCP_GW_BASE_DIR=<home>` |
 | サービス | `jarvis-mcp-gw` active（2026-11-15 11:36:49 起動） |
 | `/health` | OK |
 | `tools/list` | **4ツールのみ**（filesystem.list/read, git.diff/status） |
@@ -164,7 +164,7 @@ bash infra/scripts/check-deploy-drift.sh              # RESULT: OK を確認
 ## 残リスク（要検討）
 
 - **解消済み（2026-11-15/16）**: 承認フローは実装済み（MCP-1 + GPUI コンソール）。
-  基準ディレクトリも `/home/koppe` から repo ルートへ絞り込み済み（MCP-4）。
+  基準ディレクトリも `<home>` から repo ルートへ絞り込み済み（MCP-4）。
   ただし両者とも repo 側の変更であり、**実機 `/etc` への反映は次回デプロイ適用時**。
 - 未実装ツールは承認を通過しても `no native handler` で fail-closed となる
   （MCP-2）。外部サービス接続・資格情報・`ReadWritePaths` の判断待ち。

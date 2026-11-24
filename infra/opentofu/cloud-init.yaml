@@ -149,9 +149,9 @@ runcmd:
   # Configure UFW (allow Tailscale, deny public except SSH)
   - ufw default deny incoming
   - ufw default allow outgoing
-  - ufw allow from 100.64.0.0/10 to any port 8080  # code-server via Tailscale
-  - ufw allow from 100.64.0.0/10 to any port 49374 # OpenCode Web via Tailscale
-  - ufw allow from 100.64.0.0/10 to any port 22   # SSH via Tailscale
+  - ufw allow from <tailnet-ip>/10 to any port 8080  # code-server via Tailscale
+  - ufw allow from <tailnet-ip>/10 to any port 49374 # OpenCode Web via Tailscale
+  - ufw allow from <tailnet-ip>/10 to any port 22   # SSH via Tailscale
   - ufw --force enable
 
   # Generate code-server password

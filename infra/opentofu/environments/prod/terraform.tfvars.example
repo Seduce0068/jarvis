@@ -22,11 +22,11 @@ tailscale_auth_key = "tskey-auth-xxxxx"
 # block_volume_size_gbs = 100
 # backup_policy_id = ""
 
-# SSH access CIDRs (default: Tailscale only 100.64.0.0/10)
-allowed_ssh_cidrs = ["100.64.0.0/10"]
+# SSH access CIDRs (default: Tailscale only <tailnet-ip>/10)
+allowed_ssh_cidrs = ["<tailnet-ip>/10"]
 
-# Web access CIDRs (default: Tailscale only 100.64.0.0/10)
-allowed_web_cidrs = ["100.64.0.0/10"]
+# Web access CIDRs (default: Tailscale only <tailnet-ip>/10)
+allowed_web_cidrs = ["<tailnet-ip>/10"]
 
 # SSH private key path for output command
 ssh_private_key_path = "~/.ssh/id_ed25519"

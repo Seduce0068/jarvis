@@ -63,7 +63,7 @@ Environment=OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 # The ONLY override path is the existing
 # EnvironmentFile=-/etc/jarvis/jarvis-mcp-gw.env above; values read from an
 # EnvironmentFile= take precedence over Environment= values.
-Environment=JARVIS_MCP_GW_BASE_DIR=/home/koppe/ドキュメント/作業用/jarvis/jarvis
+Environment=JARVIS_MCP_GW_BASE_DIR=<home>/ドキュメント/作業用/jarvis/jarvis
 # web.fetch egress allowlist (comma-separated host patterns). Empty/invalid
 # means deny-all (fail-closed). This is a LITERAL default (no ${...} expansion
 # in Environment=; see systemd.exec(5)). The ONLY override path is the

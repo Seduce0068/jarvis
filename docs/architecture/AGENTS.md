@@ -64,7 +64,7 @@ Before marking any task complete in this directory:
 
 ```bash
 # Verify calculations
-cd /home/koppe/ドキュメント/作業用/jarvis/jarvis/docs/architecture
+cd <home>/ドキュメント/作業用/jarvis/jarvis/docs/architecture
 rust-script calc.rs
 
 # Optional local verification (skips cleanly if the tool is absent)

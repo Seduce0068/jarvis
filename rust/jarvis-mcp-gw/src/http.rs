@@ -711,7 +711,7 @@ requires_approval = true
             "missing 'url' argument",
             "too many redirects (> 3)",
             "host 'attacker.example' is not in the egress allowlist",
-            "stat /home/koppe/.secret/token: permission denied",
+            "stat <home>/.secret/token: permission denied",
             "completely unknown caller text",
         ] {
             let (status, body) = http_error(client_error(message));
@@ -807,7 +807,7 @@ requires_approval = true
         for message in [
             "build http client: invalid configuration",
             "build pinned http client: invalid configuration",
-            "canonicalize base /home/koppe: permission denied",
+            "canonicalize base <home>: permission denied",
         ] {
             let (status, _) = http_error(anyhow::anyhow!(message));
             assert_eq!(
@@ -832,15 +832,15 @@ requires_approval = true
                 "git command failed",
             ),
             (
-                "refusing to read sensitive file: /home/koppe/.ssh/id_rsa",
+                "refusing to read sensitive file: <home>/.ssh/id_rsa",
                 "refusing to read a sensitive file",
             ),
             (
-                "path is a directory: /home/koppe/some-dir",
+                "path is a directory: <home>/some-dir",
                 "path is a directory",
             ),
             (
-                "path escapes workspace: /home/koppe/../../etc/passwd",
+                "path escapes workspace: <home>/../../etc/passwd",
                 "path escapes workspace",
             ),
         ] {
@@ -866,7 +866,7 @@ requires_approval = true
     fn internal_error_details_never_reach_the_http_body() {
         use crate::error::McpGatewayError;
 
-        let probe_path = "/home/koppe/secret-project/token.txt";
+        let probe_path = "<home>/secret-project/token.txt";
         let errors: [anyhow::Error; 2] = [
             McpGatewayError::Sandbox(probe_path.to_owned()).into(),
             anyhow::anyhow!("canonicalize {probe_path}: permission denied"),

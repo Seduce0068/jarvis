@@ -162,7 +162,7 @@ status: draft
 jarvis-backup.service: Command /usr/local/bin/rust-script is not executable
 ```
 
-実機の `rust-script` は `/home/koppe/.cargo/bin/rust-script` に存在し
+実機の `rust-script` は `<home>/.cargo/bin/rust-script` に存在し
 `/usr/local/bin` には無い。ただしこの unit は `User=jarvis` /
 `/opt/jarvis/scripts` / `/run/rclone` / `op.env` 前提のレガシーであり、
 ExecStart パスだけ直しても導入可能にならない。**BK-1 の保存先・認証設計が

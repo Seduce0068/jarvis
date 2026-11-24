@@ -231,7 +231,7 @@ fi
 
 echo "== 0. 前提確認 =="
 id -u koppe >/dev/null 2>&1 || die "ユーザー koppe が存在しません（unit の User= と不一致）"
-[ -r /home/koppe ] || die "/home/koppe が読めません（ProtectHome=read-only と base dir の前提を確認）"
+[ -r <home> ] || die "<home> が読めません（ProtectHome=read-only と base dir の前提を確認）"
 python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$repo_allowlist" \
   || die "allowlist の TOML が不正です: $repo_allowlist"
 systemd-analyze verify "$repo_unit" >/dev/null 2>&1 || die "unit ファイルの検証に失敗: $repo_unit"

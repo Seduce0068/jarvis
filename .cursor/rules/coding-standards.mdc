@@ -36,7 +36,7 @@ async function fetchUser(id) {
 
 ## Rust
 
-- `/home/koppe/.gemini/references/languages/rust-advanced` および `reference` 準拠
+- `<home>/.gemini/references/languages/rust-advanced` および `reference` 準拠
 - `cargo fmt` / `cargo clippy` 通過必須
 - `unwrap()`/`expect()` 本番コードで禁止（`Result` 伝播または `?` 使用）
 

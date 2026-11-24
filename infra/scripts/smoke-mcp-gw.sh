@@ -4,7 +4,7 @@
 #   smoke-mcp-gw.sh [binary]              # repo の allowlist をそのまま使う（承認必須ツールも表示、呼び出し時に承認）
 #   smoke-mcp-gw.sh [binary] active       # web.fetch を強制的に承認不要へ戻し、取得実装を確認
 set -uo pipefail
-bin="${1:-/home/koppe/ドキュメント/作業用/jarvis/jarvis/rust/target/release/jarvis-mcp-gw}"
+bin="${1:-<home>/ドキュメント/作業用/jarvis/jarvis/rust/target/release/jarvis-mcp-gw}"
 mode="${2:-approval}"
 # Fail closed on an unknown mode. Without this guard any other value falls into
 # the `else` branch below and silently skips the approval verification.

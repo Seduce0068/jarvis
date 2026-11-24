@@ -634,12 +634,12 @@ requires_approval = true
         use crate::error::McpGatewayError;
 
         let sandbox: anyhow::Error = McpGatewayError::Sandbox(
-            "stat /home/koppe/.secret/token: permission denied".to_string(),
+            "stat <home>/.secret/token: permission denied".to_string(),
         )
         .into();
         let text = client_facing_tool_error(&sandbox);
         assert_eq!(text, INTERNAL_ERROR_MESSAGE);
-        assert!(!text.contains("/home/koppe"));
+        assert!(!text.contains("<home>"));
 
         let upstream: anyhow::Error =
             anyhow::anyhow!("MCP tool 'search.query' returned an error: upstream secret body");
@@ -650,12 +650,12 @@ requires_approval = true
         // A `client_error()` that interpolates a resolved absolute path is
         // rounded to the generic phrase, not echoed back to the client.
         let path_error: anyhow::Error = McpGatewayError::ClientError(
-            "stat /home/koppe/.secret/token: permission denied".to_string(),
+            "stat <home>/.secret/token: permission denied".to_string(),
         )
         .into();
         let text = client_facing_tool_error(&path_error);
         assert_eq!(text, "invalid tool arguments");
-        assert!(!text.contains("/home/koppe"));
+        assert!(!text.contains("<home>"));
 
         // Static, safe client wording is preserved.
         let missing_url: anyhow::Error =
@@ -704,7 +704,7 @@ requires_approval = true
             "dns lookup failed: missing.invalid",
             "no native handler for tool 'x'",
             "MCP server 'upstream' is unavailable",
-            "stat /home/koppe/.secret/token: permission denied",
+            "stat <home>/.secret/token: permission denied",
             "completely unknown caller text",
         ] {
             let shared = crate::http::safe_client_error_text(message);
@@ -737,7 +737,7 @@ requires_approval = true
         use crate::error::McpGatewayError;
 
         const REASON: &str = "operator note: https://internal.example/private/approval";
-        const PATH: &str = "/home/koppe/.secret/approval.json";
+        const PATH: &str = "<home>/.secret/approval.json";
 
         let denials: [anyhow::Error; 6] = [
             McpGatewayError::ApprovalDenied {

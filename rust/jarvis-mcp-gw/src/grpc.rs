@@ -522,7 +522,7 @@ requires_approval = false
             ),
             (
                 McpGatewayError::ClientError(
-                    "read /home/koppe/secret-project/token.txt: permission denied".into(),
+                    "read <home>/secret-project/token.txt: permission denied".into(),
                 )
                 .into(),
                 ErrorKind::ClientError,
@@ -624,7 +624,7 @@ requires_approval = false
             let message = status.message();
             for leaked in [
                 "/tmp",
-                "/home/koppe",
+                "<home>",
                 "secret",
                 "attacker.example",
                 "upstream.internal.example",

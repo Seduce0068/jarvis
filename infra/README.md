@@ -127,7 +127,7 @@ ssh_public_key     = "ssh-ed25519 AAAA..."
 tailscale_auth_key = "tskey-auth-xxxxx"
 # Optional overrides
 # availability_domain = "Uocm:AP-TOKYO-1-AD-1"
-# allowed_ssh_cidrs   = ["100.64.0.0/10"]  # Tailscale CIDR
+# allowed_ssh_cidrs   = ["<tailnet-ip>/10"]  # Tailscale CIDR
 EOF
 
 # 3. Initialize and plan

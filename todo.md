@@ -696,7 +696,7 @@ generated:
   - 復元演習の前に、`restore.rs` をローカルバックアップ体系へ接続する
     （またはレガシー rclone 経路を明示的に廃止する）必要がある。
 
-- [x] backup timer の実機再適用 — 2026-11-23 実機対応済み（sudo 対話セッションが利用可能と判明）。`install-backup-timer.sh --apply` 実行: manual run OK・整合性検証 ok=124 fail=0・timer active/enabled・次回 2026-11-24 00:32 JST。共有 lib `/opt/jarvis/scripts/lib/payload-descriptors.sh`（root:root 0644）も配置済み。**git バックアップは構造的に不可と判定**: User=postgres が /home/koppe（0750）を through できず `--repo-dir` 付き unit は status=1 で失敗（Runtime Proof）。repo 側 unit から --repo-dir を外し ProtectHome=yes へ戻し、resolve_repo_dir() の git skip 経路に委譲（DB/Qdrant/config は正常）。根拠 `infra/systemd/jarvis-backup.service:13,31-37`。
+- [x] backup timer の実機再適用 — 2026-11-23 実機対応済み（sudo 対話セッションが利用可能と判明）。`install-backup-timer.sh --apply` 実行: manual run OK・整合性検証 ok=124 fail=0・timer active/enabled・次回 2026-11-24 00:32 JST。共有 lib `/opt/jarvis/scripts/lib/payload-descriptors.sh`（root:root 0644）も配置済み。**git バックアップは構造的に不可と判定**: User=postgres が <home>（0750）を through できず `--repo-dir` 付き unit は status=1 で失敗（Runtime Proof）。repo 側 unit から --repo-dir を外し ProtectHome=yes へ戻し、resolve_repo_dir() の git skip 経路に委譲（DB/Qdrant/config は正常）。根拠 `infra/systemd/jarvis-backup.service:13,31-37`。
 ## 残タスク（restore-local S8 / S9）
 
 - [x] **S8: ドキュメントとレガシー整理**（2026-11-19 対応済み: `index.md` 追記、runbook に相互リンクと3段の安全レベル例示、`restore.rs` に非推奨ヘッダ（**rust-script の cargo マニフェストブロックより後に配置** — 先頭に置くと依存が認識されず `--help` が失敗する）、`infra/README.md` に現行状態を追記。`rust-script --help` / rustfmt / ci-local exit 0、新規 markdownlint 違反なし（既存 baseline の MD013/MD028 は据え置き）） — 根拠
@@ -704,7 +704,7 @@ generated:
   `docs/integration/index.md` への追記、`backup-restore-runbook.md`
   からの相互リンク、`restore.rs` への非推奨ヘッダ、
   `infra/README.md` のレガシー記述更新。
-- [x] S9 実機隔離先復元演習 — 2026-11-23 実行済み（sudo 対話セッション利用可と判明）。`restore-local.sh --latest --skip-git --apply`（confirm なし＝本番上書き無効）を実行。PG は隔離 DB へ6テーブル復元成功、Qdrant snapshot upload は http=200 成功、config 検証 OK。ただし本番 Qdrant の `points_count=0`（Runtime Proof）のため、空コレクションに対する fail-closed ガード（points=0 拒否、回帰 :1687/:1702 で固定）が発動して演習は exit 1。本番は無傷・全8サービス active（停止サービスは逆順再起動、timer は手動再起動で復帰）、隔離 DB は cleanup 済み。**ガードは正しく動作**、元データが空なので「空の復元を拒否」は仕様どおり。git は前ラウンドで構造的に不可（postgres が /home/koppe 0750 を through できない）ため --skip-git。根拠 `infra/scripts/restore-local.sh` / `infra/scripts/restore-local.d/{pg,qdrant}.sh`。
+- [x] S9 実機隔離先復元演習 — 2026-11-23 実行済み（sudo 対話セッション利用可と判明）。`restore-local.sh --latest --skip-git --apply`（confirm なし＝本番上書き無効）を実行。PG は隔離 DB へ6テーブル復元成功、Qdrant snapshot upload は http=200 成功、config 検証 OK。ただし本番 Qdrant の `points_count=0`（Runtime Proof）のため、空コレクションに対する fail-closed ガード（points=0 拒否、回帰 :1687/:1702 で固定）が発動して演習は exit 1。本番は無傷・全8サービス active（停止サービスは逆順再起動、timer は手動再起動で復帰）、隔離 DB は cleanup 済み。**ガードは正しく動作**、元データが空なので「空の復元を拒否」は仕様どおり。git は前ラウンドで構造的に不可（postgres が <home> 0750 を through できない）ため --skip-git。根拠 `infra/scripts/restore-local.sh` / `infra/scripts/restore-local.d/{pg,qdrant}.sh`。
 ## follow-up（2026-11-19 Round 2 / R4 レビュー）
 
 - [x] **仕様書 REQ-7 をキュー枯渇の 503 挙動へ同期**（2026-11-19 対応済み: 仕様 REQ-7 と TC-Q1 を更新、証跡を実測 53 passed / 0 failed で再生成（`evidence/test-run-20261119-cc55d64f971a.json`）、両 index 更新、`make check-evidence` ok=6 errors=0） — 根拠

@@ -143,7 +143,7 @@ pub struct Sandbox {
 impl Sandbox {
     pub async fn new(config: &crate::config::McpGatewayConfig) -> Result<Self> {
         let base_dir =
-            std::env::var("JARVIS_MCP_GW_BASE_DIR").unwrap_or_else(|_| "/home/koppe".to_string());
+            std::env::var("JARVIS_MCP_GW_BASE_DIR").unwrap_or_else(|_| "<home>".to_string());
         // `config.sandbox_config` is kept in the gateway config for
         // compatibility; the sandbox itself no longer shells out (ADR-0002).
         let _ = &config.sandbox_config;
@@ -638,7 +638,7 @@ fn resolve_redirect(base: &reqwest::Url, location: &str) -> Result<reqwest::Url>
 /// Public = globally routable according to the standard library's IANA-based
 /// classification. Replacing the hand-written denylist with `is_global()`
 /// closes the SSRF gap for IETF special-purpose ranges (192.0.0.0/24,
-/// 192.88.99.0/24, 198.18.0.0/15, 240.0.0.0/4, 100.64.0.0/10, ...), which the
+/// 192.88.99.0/24, 198.18.0.0/15, 240.0.0.0/4, <tailnet-ip>/10, ...), which the
 /// old list treated as public and that DNS resolution could return.
 fn is_public_ip(ip: &std::net::IpAddr) -> bool {
     use std::net::IpAddr;
@@ -889,11 +889,11 @@ mod tests {
             "127.0.0.1",
             "10.0.0.1",
             "172.16.0.1",
-            "192.168.1.1",
+            "<private-ip>",
             "169.254.1.1",
             "0.0.0.0",
             "224.0.0.1",
-            "100.64.0.1",
+            "<tailnet-ip>",
             // IETF reserved / special-purpose ranges: `is_global()` denies
             // these even though the old hand-written denylist allowed them.
             "192.0.0.1",
