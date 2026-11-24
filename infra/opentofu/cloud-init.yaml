@@ -1,5 +1,12 @@
 #cloud-config
-# JARVIS Host Cloud-Init Configuration
+# =============================================================================
+# 未使用・レガシー / UNUSED LEGACY — DO NOT APPLY
+# ADR-0004 (adr/0004-local-only-no-oci.md:29-37) により OCI/OpenTofu は不使用。
+# 現行運用は self-host の Kubuntu + systemd であり、本ファイルは参照用として
+# 凍結されている。backup.sh / restore.sh / deploy.sh は fail-closed (exit 2)。
+# 設定変更・適用・削除は管理者の明示判断が必要。
+# =============================================================================
+# JARVIS Host Cloud-Init Configuration (legacy reference only)
 # Target: Ubuntu 22.04 LTS on OCI Ampere A1 (Arm64)
 
 # Create the runtime directories before write_files runs; write_files is

@@ -2,7 +2,7 @@
 # Self-hosted host setup for JARVIS (Ubuntu/Debian, x86_64).
 #
 # Run as root on the target host:
-#   sudo JARVIS_USER=testuser bash setup-selfhost.sh
+#   sudo JARVIS_USER=jarvis bash setup-selfhost.sh
 #
 # Installs the runtime dependencies, creates the JARVIS directories, and
 # provisions PostgreSQL. Building and deploying the Rust services is handled
@@ -14,7 +14,7 @@ if [[ ${EUID} -ne 0 ]]; then
   exit 1
 fi
 
-JARVIS_USER="${JARVIS_USER:-testuser}"
+JARVIS_USER="${JARVIS_USER:-jarvis}"
 QDRANT_VERSION="${QDRANT_VERSION:-v1.14.1}"
 BWS_VERSION="${BWS_VERSION:-2.1.0}"
 ARCH="$(uname -m)"

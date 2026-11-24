@@ -17,7 +17,8 @@ WorkingDirectory=/opt/jarvis/rust
 EnvironmentFile=-/etc/jarvis/bws.env
 
 # Secrets are resolved by bws run (Bitwarden Secrets Manager) at service start
-ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /opt/jarvis/bin/jarvis-event
+# Project ID comes from /etc/jarvis/bws.env (JARVIS_BWS_PROJECT_ID) as the single source of truth.
+ExecStart=/usr/local/bin/bws run --project-id ${JARVIS_BWS_PROJECT_ID} -- /opt/jarvis/bin/jarvis-event
 Restart=on-failure
 RestartSec=5
 TimeoutStartSec=60

@@ -55,7 +55,9 @@ Environment=RUST_LOG=info
 # the Noop store and the second run is skipped. When both URLs resolve to the
 # same DB, the second `migrate run` is a no-op (checksum-recorded and
 # advisory-lock serialized). JARVIS_CONTEXT_PG_URL stays mandatory, as before.
-ExecStart=/usr/local/bin/bws run --project-id 6108d695-14ce-42ec-aded-b4f50084d403 -- /usr/bin/bash -c 'set -e; /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_CONTEXT_PG_URL:?JARVIS_CONTEXT_PG_URL is required}"; if [[ -n "$${JARVIS_POLICY_PG_URL:-}" ]]; then /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_POLICY_PG_URL}"; fi'
+# Project ID comes from /etc/jarvis/bws.env (JARVIS_BWS_PROJECT_ID) as the single source of truth.
+# Single `$` is intentional here: systemd expands it from EnvironmentFile before bws starts.
+ExecStart=/usr/local/bin/bws run --project-id ${JARVIS_BWS_PROJECT_ID} -- /usr/bin/bash -c 'set -e; /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_CONTEXT_PG_URL:?JARVIS_CONTEXT_PG_URL is required}"; if [[ -n "$${JARVIS_POLICY_PG_URL:-}" ]]; then /usr/local/bin/cargo sqlx migrate run --source /opt/jarvis/rust/migrations --url "$${JARVIS_POLICY_PG_URL}"; fi'
 TimeoutStartSec=120
 
 # Security hardening (same baseline as the other jarvis units).
