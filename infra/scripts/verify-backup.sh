@@ -22,6 +22,10 @@ while [ "$#" -gt 0 ]; do
       [ -n "$2" ] || { echo "ERROR: --backup-dir requires a non-empty value" >&2; exit 2; }
       backup_dir="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
+    # Any other dash-prefixed token is a typo, not a positional backup-set dir.
+    # --backup-dir values are consumed as $2 above and are never re-parsed here,
+    # so a value like "--foo" stays a value.
+    --*) echo "unknown option: $1" >&2; exit 2 ;;
     *) target="$1"; shift ;;
   esac
 done

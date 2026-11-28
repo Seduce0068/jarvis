@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2031
+# Many isolated probes redefine `repo` inside a subshell; those are read-only
+# fixtures, not leaked mutations. Suppress the false positive file-wide.
 # Regression guard: the legacy OCI/destructive launchers must stay disabled.
 # A future edit that re-enables delegation to backup.rs/restore.rs/deploy.rs
 # would silently reintroduce data loss or an out-of-policy OCI upload.
@@ -2953,6 +2956,151 @@ if [ "$pending_present_rc" -eq 1 ] && [ "$pending_absent_rc" -eq 3 ]; then
   ok=$((ok+1))
 else
   echo "  FAIL: rollback swallowed a missing binary under PENDING"
+  fail=$((fail+1))
+fi
+
+# b4-scripts / 2026-11-28: 未知オプションは deploy-mcp-gw-safe.sh:10-16 と
+# 同じく先頭で exit 2 に拒否する。typo が黙って dry-run になり
+# 「適用したつもり」になるのを防ぐ。未知オプションは先頭で終了するため
+# root・実機操作・外部送信・ファイル変更は一切伴わない。
+# 失敗時はケース名と終了コードのみを出し、値はエコーしない。
+unknown_opt_guard() { # label script option
+  local label="$1" script="$2" option="$3" out code
+  out=$(bash "$repo/$script" "$option" 2>&1); code=$?
+  if [ "$code" -eq 2 ] \
+     && printf '%s\n' "$out" | grep -F "unknown option: $option" >/dev/null 2>&1; then
+    echo "  PASS: $label"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: $label (code=$code, output withheld)"
+    fail=$((fail+1))
+  fi
+}
+
+unknown_opt_guard "install-mcp-gateway.sh rejects --aply" \
+  infra/scripts/install-mcp-gateway.sh --aply
+unknown_opt_guard "install-backup-timer.sh rejects --aply" \
+  infra/scripts/install-backup-timer.sh --aply
+unknown_opt_guard "check-deploy-drift.sh rejects --env-onyl" \
+  infra/scripts/check-deploy-drift.sh --env-onyl
+unknown_opt_guard "verify-backup.sh rejects --bogus" \
+  infra/scripts/verify-backup.sh --bogus
+
+# 有効な引数が従来どおり受理されることも確認する。
+# (a) install-mcp-gateway.sh: --apply は root 必須なので、引数なしの乾燥実行を
+#     一時ツリーのスタブバイナリで確認する（実 /opt やサービスは触らない）。
+gw_valid="$tmp/install_gw_valid"
+mkdir -p "$gw_valid/infra/scripts" "$gw_valid/rust/target/release"
+cp "$repo/infra/scripts/install-mcp-gateway.sh" "$gw_valid/infra/scripts/"
+printf 'stub\n' > "$gw_valid/rust/target/release/jarvis-mcp-gw"
+chmod 0755 -- "$gw_valid/rust/target/release/jarvis-mcp-gw"
+out=$(bash "$gw_valid/infra/scripts/install-mcp-gateway.sh" 2>&1); code=$?
+if [ "$code" -eq 0 ] \
+   && printf '%s\n' "$out" | grep -F '乾燥実行のみ' >/dev/null 2>&1 \
+   && ! printf '%s\n' "$out" | grep -F 'unknown option' >/dev/null 2>&1; then
+  echo "  PASS: install-mcp-gateway.sh still accepts the dry-run default"
+  ok=$((ok+1))
+else
+  echo "  FAIL: install-mcp-gateway.sh dry run regressed (code=$code)"
+  fail=$((fail+1))
+fi
+
+# (b) install-backup-timer.sh: 引数なしは従来どおり dry-run で終了する。
+out=$(bash "$repo/infra/scripts/install-backup-timer.sh" 2>&1); code=$?
+if [ "$code" -eq 0 ] \
+   && printf '%s\n' "$out" | grep -F 'DRY:' >/dev/null 2>&1 \
+   && ! printf '%s\n' "$out" | grep -F 'unknown option' >/dev/null 2>&1; then
+  echo "  PASS: install-backup-timer.sh still accepts the dry-run default"
+  ok=$((ok+1))
+else
+  echo "  FAIL: install-backup-timer.sh dry run regressed (code=$code)"
+  fail=$((fail+1))
+fi
+
+# (c) check-deploy-drift.sh --env-only: 有効な env fixture は従来どおり OK。
+valid_drift_env="$tmp/unknown_opt_valid.env"
+printf '%s\n' \
+  'JARVIS_MCP_GW_BASE_DIR=/opt/jarvis' \
+  'JARVIS_MCP_GW_EGRESS_ALLOWLIST=' \
+  > "$valid_drift_env"
+out=$(JARVIS_DRIFT_ENV="$valid_drift_env" \
+      bash "$repo/infra/scripts/check-deploy-drift.sh" --env-only 2>&1); code=$?
+if [ "$code" -eq 0 ] \
+   && printf '%s\n' "$out" | grep -F 'OK (env-only)' >/dev/null 2>&1; then
+  echo "  PASS: check-deploy-drift.sh still accepts --env-only"
+  ok=$((ok+1))
+else
+  echo "  FAIL: check-deploy-drift.sh rejected --env-only (code=$code)"
+  fail=$((fail+1))
+fi
+
+# (d) verify-backup.sh: --latest と位置引数 (backup-set-dir) の両方を維持する。
+#     有効な set を一時ツリーに作るだけなので実バックアップは触らない。
+latest_base="$tmp/verify_latest_valid"
+# Staging dir must live OUTSIDE latest_base: --latest picks the lexically last
+# directory under it, so a sibling "qdrant" would be mistaken for the backup set.
+qdrant_stage="$tmp/qdrant_stage"
+mkdir -p "$latest_base/good" "$qdrant_stage"
+printf 'content-A' > "$latest_base/good/a.txt"
+{
+  printf '%s\n' '-- PostgreSQL database dump' '-- PostgreSQL database dump complete'
+} | gzip > "$latest_base/good/postgres-jarvis.sql.gz"
+printf 'snapshot' > "$qdrant_stage/snapshot.json"
+tar -cf "$latest_base/good/qdrant-snapshot.bin" -C "$qdrant_stage" snapshot.json
+printf 'allow = ["tool.read"]\n' > "$latest_base/good/config-mcp_allowlist.toml"
+{
+  printf '# created_at=2026-11-28T00:00:00Z\n'
+  for name in a.txt postgres-jarvis.sql.gz qdrant-snapshot.bin config-mcp_allowlist.toml; do
+    bytes="$(wc -c < "$latest_base/good/$name" | tr -d ' ')"
+    sha="$(sha256sum "$latest_base/good/$name" | cut -d' ' -f1)"
+    printf '%s %s %s\n' "$name" "$bytes" "$sha"
+  done
+} > "$latest_base/good/manifest.txt"
+printf 'complete 2026-11-28T00:00:00Z\n' > "$latest_base/good/COMPLETE"
+out=$(bash "$repo/infra/scripts/verify-backup.sh" --latest --backup-dir "$latest_base" 2>&1); code=$?
+if [ "$code" -eq 0 ] \
+   && printf '%s\n' "$out" | grep -F 'result: ok=' >/dev/null 2>&1 \
+   && ! printf '%s\n' "$out" | grep -F 'unknown option' >/dev/null 2>&1; then
+  echo "  PASS: verify-backup.sh still accepts --latest"
+  ok=$((ok+1))
+else
+  echo "  FAIL: verify-backup.sh rejected --latest (code=$code)"
+  fail=$((fail+1))
+fi
+
+out=$(bash "$repo/infra/scripts/verify-backup.sh" "$latest_base/good" 2>&1); code=$?
+if [ "$code" -eq 0 ] \
+   && ! printf '%s\n' "$out" | grep -F 'unknown option' >/dev/null 2>&1; then
+  echo "  PASS: verify-backup.sh still accepts a positional backup-set dir"
+  ok=$((ok+1))
+else
+  echo "  FAIL: verify-backup.sh rejected a positional backup-set dir (code=$code)"
+  fail=$((fail+1))
+fi
+
+# (e) --backup-dir の値が -- で始まっても値として扱う既存挙動を維持する。
+out=$(bash "$repo/infra/scripts/verify-backup.sh" --backup-dir --foo 2>&1); code=$?
+if [ "$code" -eq 1 ] \
+   && ! printf '%s\n' "$out" | grep -F 'unknown option' >/dev/null 2>&1; then
+  echo "  PASS: verify-backup.sh keeps --backup-dir --foo as a value"
+  ok=$((ok+1))
+else
+  echo "  FAIL: verify-backup.sh reclassified a --backup-dir value (code=$code)"
+  fail=$((fail+1))
+fi
+
+# 実装形式の静的ガード（deploy-mcp-gw-safe.sh:10-16 と同じ case 契約）。
+# shellcheck disable=SC2016
+if grep -Fq 'for arg in "$@"; do' "$install_gw_script" \
+   && grep -Fq '*) echo "unknown option: $arg" >&2; exit 2 ;;' "$install_gw_script" \
+   && grep -Fq 'for arg in "$@"; do' "$install_script" \
+   && grep -Fq '*) echo "unknown option: $arg" >&2; exit 2 ;;' "$install_script" \
+   && grep -Fq '*) echo "unknown option: $arg" >&2; exit 2 ;;' "$drift_src" \
+   && grep -Fq -- '--*) echo "unknown option: $1" >&2; exit 2 ;;' "$repo/infra/scripts/verify-backup.sh"; then
+  echo "  PASS: all four scripts use the deploy-style unknown-option guard"
+  ok=$((ok+1))
+else
+  echo "  FAIL: an unknown-option guard diverged from the deploy style"
   fail=$((fail+1))
 fi
 

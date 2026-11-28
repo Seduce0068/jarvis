@@ -2968,7 +2968,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **HIGH: P0-10 の opt-in 記述が現行コード（無条件拒否）と矛盾** — 2026-11-28 対応済み（完了記録は末尾イテレーション10節を参照） — `docs/integration/local-operations-runbook.md:165-171`、`todo.md:317,329`、`docs/integration/unknown-tasks-survey.md:38,52`。現行 `validate_kill_switch_admin_token` は placeholder を無条件 bail し、フラグは互換解析のみ（b3-docs）。
 - [x] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション11節を参照）。
 - [x] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査／step2 の `grep -A8` 判定が drift 側と分岐／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション12節を参照）。
-- [ ] MEDIUM: 複数スクリプトで未知引数が無視され typo が dry-run として通る（`install-mcp-gateway.sh:5`、`install-backup-timer.sh:12`、`verify-backup.sh:25`、b4-scripts）。
+- [x] MEDIUM: 複数スクリプトで未知引数が無視され typo が dry-run として通る（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション13節を参照）。
 - [ ] MEDIUM: `smoke-mcp-gw.sh` のデッド既定バイナリパスと `ss` 欠落時の fail-open（`:4-7,80-93`、b4-scripts）。
 - [ ] MEDIUM: `backup-local.sh` の `tar -tzf` 失敗が `|| true` で握り潰され完全扱い（`:239-249`、b4-scripts）。
 - [ ] MEDIUM: `McpGatewayError::kind` の Internal 4 バリアントが untested（`rust/jarvis-mcp-gw/src/error.rs:78-82`、b1-tests）。
@@ -3079,4 +3079,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 回帰: `test-legacy-guards.sh` に 6 ケース追加（step3 配置失敗 2 + 成功 control、webfetch 実関数 6 fixture、drift 同等性の静的ガード、PENDING+バイナリ不在昇格）→ legacy guards **ok=118 fail=0**（3 回連続）。
   - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**。
   - 残タスク: `webfetch_approval_ok()` を共有 lib へ切り出し drift / deploy の二重定義を解消する（今回は意味一致を静的ガードで固定）。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション13 / 未知引数 fail-closed）
+
+- [x] **4 スクリプトの未知引数を exit 2 で拒否** — b4-scripts の MEDIUM 指摘を R2（1体・11件）→ R5（親）→ R6（検証）で完了。
+  - `install-mcp-gateway.sh` / `install-backup-timer.sh` / `check-deploy-drift.sh`: deploy と同じ `for arg in "$@"; do case ... *) exit 2 ;; esac; done` 形式へ統一。`install-backup-timer.sh` は既存回帰が要求する `-h|--help` の exit 0 を明示アームとして維持。
+  - `verify-backup.sh`: 位置引数（backup-set-dir）は従来どおり受理しつつ、`--` 始まりの未知オプションのみ exit 2。`--backup-dir` の値が `--foo` でも値として扱う既存挙動を維持。
+  - 回帰: `test-legacy-guards.sh` に 11 ケース追加（typo 拒否 4 / 有効引数受理 7 / 静的ガード）→ legacy guards **ok=129 fail=0**。検証中に 2 件の回帰側バグを修正: (1) `--latest` fixture のステージング dir が `$latest_base` 直下にあり辞書順最後の `qdrant` が set と誤認されていた（ステージングを外へ移動）、(2) `grep -Fq --*` がパターンをオプションと解釈していた（`--` 区切りを追加）。
+  - 検証: `bash -n` / `shellcheck` 5ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**。
 

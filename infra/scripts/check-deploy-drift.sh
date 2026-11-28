@@ -50,6 +50,7 @@ env_only=0
 for arg in "$@"; do
   case "$arg" in
     --env-only) env_only=1 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 

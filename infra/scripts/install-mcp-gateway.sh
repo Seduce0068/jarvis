@@ -2,7 +2,13 @@
 # jarvis-mcp-gw のリリースバイナリを /opt/jarvis/bin へ配置しサービス再起動（要root）
 # 既定は乾燥実行。--apply で実行。失敗時は旧バイナリへロールバック。
 set -euo pipefail
-apply=0; [ "${1:-}" = "--apply" ] && apply=1
+apply=0
+for arg in "$@"; do
+  case "$arg" in
+    --apply) apply=1 ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 if [ "$apply" -eq 1 ] && [ "$(id -u)" -ne 0 ]; then echo "rootで実行してください" >&2; exit 1; fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$script_dir/../.." && pwd)"

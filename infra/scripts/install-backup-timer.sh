@@ -9,7 +9,18 @@ set -euo pipefail
 
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 apply=0
-[ "${1:-}" = "--apply" ] && apply=1
+for arg in "$@"; do
+  case "$arg" in
+    --apply) apply=1 ;;
+    # --help was previously ignored and fell through to the dry run. Keep its
+    # exit-0 behaviour explicit instead of treating it as an unknown option.
+    -h|--help)
+      echo "Usage: install-backup-timer.sh [--apply]"
+      exit 0
+      ;;
+    *) echo "unknown option: $arg" >&2; exit 2 ;;
+  esac
+done
 
 service_src="$repo/infra/systemd/jarvis-backup.service"
 timer_src="$repo/infra/systemd/jarvis-backup.timer"
