@@ -79,6 +79,7 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks && cargo test --locked
 	@$(MAKE) lint-md
 	@bash ci/scripts/test-lint-md.sh
+	@bash ci/scripts/test-setup-selfhost-tmp.sh
 	@python3 ci/scripts/secret_scan.py
 	@bash ci/scripts/check-shell.sh
 	@bash ci/scripts/check-workflow-pins.sh
@@ -102,6 +103,7 @@ secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は�
 safety-test: ## レガシー fail-closed とバックアップ検証ロジックを検証
 	@bash ci/scripts/test-legacy-guards.sh
 	@bash ci/scripts/test-lint-md.sh
+	@bash ci/scripts/test-setup-selfhost-tmp.sh
 	@DEPENDENCY_AUDIT_FETCH=$${DEPENDENCY_AUDIT_FETCH:-} bash ci/scripts/check-dependency-audit.sh
 	@bash ci/scripts/test-workflow-pins.sh
 	@bash ci/scripts/test-verify-backup.sh

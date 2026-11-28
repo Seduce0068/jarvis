@@ -24,6 +24,9 @@ if [[ ${ARCH} != "x86_64" ]]; then
   exit 1
 fi
 
+WORK_DIR="$(mktemp -d /tmp/jarvis-setup.XXXXXX)" || { echo "FAIL: mktemp -d failed" >&2; exit 1; }
+trap 'rm -rf -- "$WORK_DIR"' EXIT
+
 apt-get update
 # I95 task (c): libssl-dev is deliberately NOT installed. CI dropped it when the
 # rationale disappeared: no `openssl-sys` dependency remains in the workspace
@@ -58,9 +61,10 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y \
 # -------------------------------------------------------------------------
 
 # Qdrant (musl static binary)
-curl -fsSL -o /tmp/qdrant.tar.gz \
+QDRANT_ARCHIVE="$WORK_DIR/qdrant.tar.gz"
+curl -fsSL -o "$QDRANT_ARCHIVE" \
   "https://github.com/qdrant/qdrant/releases/download/${QDRANT_VERSION}/qdrant-x86_64-unknown-linux-musl.tar.gz"
-tar -xzf /tmp/qdrant.tar.gz -C /usr/local/bin qdrant
+tar -xzf "$QDRANT_ARCHIVE" -C /usr/local/bin qdrant
 chmod 0755 /usr/local/bin/qdrant
 
 # code-server
@@ -93,17 +97,19 @@ fi
 # OpenTelemetry Collector (deb package; the tarball was retired)
 if ! command -v otelcol-contrib >/dev/null 2>&1; then
   OTELCOL_VERSION="${OTELCOL_VERSION:-0.164.0}"
-  curl -fsSL -o /tmp/otelcol.deb \
+  OTELCOL_DEB="$WORK_DIR/otelcol.deb"
+  OTELCOL_EXTRACT="$WORK_DIR/otelcol-extract"
+  curl -fsSL -o "$OTELCOL_DEB" \
     "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTELCOL_VERSION}/otelcol-contrib_${OTELCOL_VERSION}_linux_amd64.deb"
-  rm -rf /tmp/otelcol-extract
-  dpkg -x /tmp/otelcol.deb /tmp/otelcol-extract
-  install -m 0755 /tmp/otelcol-extract/usr/bin/otelcol-contrib /usr/local/bin/otelcol-contrib
+  dpkg -x "$OTELCOL_DEB" "$OTELCOL_EXTRACT"
+  install -o root -g root -m 0755 "$OTELCOL_EXTRACT/usr/bin/otelcol-contrib" /usr/local/bin/otelcol-contrib
 fi
 
 # Bitwarden Secrets Manager CLI (musl static binary)
-curl -fsSL -o /tmp/bws.zip \
+BWS_ZIP="$WORK_DIR/bws.zip"
+curl -fsSL -o "$BWS_ZIP" \
   "https://github.com/bitwarden/sdk-sm/releases/download/bws-v${BWS_VERSION}/bws-x86_64-unknown-linux-musl-${BWS_VERSION}.zip"
-unzip -o /tmp/bws.zip -d /usr/local/bin
+unzip -o "$BWS_ZIP" -d /usr/local/bin
 chmod 0755 /usr/local/bin/bws
 
 # OpenCode is installed in the user's home by its installer.

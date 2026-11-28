@@ -12,3 +12,4 @@ f148f98b7a00060d1f0ac98a7a0deeafd243f59b:rust/jarvis-context/src/config.rs:gener
 fa7818a66f6d6a15dc00b1a8e4434d93b2699c62:rust/jarvis-policy/src/main.rs:generic-credential-uri:97
 fb8e5189b829007d54b2e37d2743ed1783ab9e59:rust/jarvis-context/src/config.rs:generic-credential-uri:47
 fd39b473a52abef72dbe3365e833429c52343d5b:rust/jarvis-policy/src/persistence.rs:generic-credential-uri:1531
+749ba2773c99d2b4bcbf7edac495c08b5e1dc373:ci/scripts/test-legacy-guards.sh:generic-password:1082

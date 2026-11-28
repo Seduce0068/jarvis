@@ -2958,8 +2958,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### 新規バックログ（repo 内完結・優先度順）
 
-- [ ] **HIGH: `secret_scan.py` の PLACEHOLDER 部分一致が fail-open** — `ci/scripts/secret_scan.py:47-50,126-130,193-201`。`example` / `dummy` 等を部分一致で検査するため `PASSWORD=hunter2example` が placeholder と誤分類される。完全一致／明示トークン境界へ限定し negative test 追加（b4-scripts）。
-- [ ] **HIGH: `setup-selfhost.sh` が root で予測可能 `/tmp` パスへダウンロード・展開** — `infra/scripts/setup-selfhost.sh:61-63,96-107`。他ユーザーの symlink を root が辿り得る。`mktemp -d` + EXIT trap へ（b4-scripts）。
+- [x] **HIGH: `secret_scan.py` の PLACEHOLDER 部分一致が fail-open** — 2026-11-28 対応済み（完了記録は末尾イテレーション3節を参照） — `ci/scripts/secret_scan.py:47-50,126-130,193-201`。`example` / `dummy` 等を部分一致で検査するため `PASSWORD=hunter2example` が placeholder と誤分類される。完全一致／明示トークン境界へ限定し negative test 追加（b4-scripts）。
+- [x] **HIGH: `setup-selfhost.sh` が root で予測可能 `/tmp` パスへダウンロード・展開** — 2026-11-28 対応済み（完了記録は末尾イテレーション4節を参照） — `infra/scripts/setup-selfhost.sh:61-63,96-107`。他ユーザーの symlink を root が辿り得る。`mktemp -d` + EXIT trap へ（b4-scripts）。
 - [ ] **HIGH: `install-mcp-gateway.sh` が配置失敗時にロールバックしない** — `infra/scripts/install-mcp-gateway.sh:89-90`。退避済み・新バイナリ破損・サービス未再起動のまま終了し得る（b4-scripts）。
 - [ ] **HIGH: git archive の秘密語彙が MCP sandbox の拒否リストより狭い** — `infra/scripts/backup-local.sh:241-242` に対し `rust/jarvis-mcp-gw/src/sandbox.rs:461-473`。`*.pem` / `*token*` / `credentials` / `id_*` 等を追加（b6-ops）。
 - [ ] **HIGH: Qdrant snapshot が削除されずディスクに蓄積** — `infra/scripts/backup-local.sh:191,204`。ダウンロード検証後に DELETE を追加（失敗は WARN）（b6-ops）。
@@ -2995,4 +2995,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `make secret-scan` は before/after で `(path, key, kind)` 完全一致（**19 matches / exit 0**）、`make check-shell` **ok=43 fail=0**、`py_compile` OK、Betterleaks 既知 14 件のみ（新規 0）。
   - 副次修正: リモートのサニタイズ時に `deploy-mcp-gw-safe.sh:234` が `<home>` プレースホルダのまま残り shellcheck SC1073 で fail していたため、`getent passwd jarvis` による動的解決へ変更（機微情報をコードへ戻さない）。
   - R4 の残り指摘は次イテレーションへ: (1) 区切り文字（`_` / `-` / `.` / `/`）入りの実値 `A1B2C3_example_XYZ` が placeholder 化する問題（トークン文法への変更で baseline を壊すリスク）、(2) 動的ホーム解決が実効 `BASE_DIR` ではなく jarvis の passwd ホームを検査する問題（設計判断を伴う）。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション4 / setup-selfhost 一時パス隔離）
+
+- [x] **`setup-selfhost.sh` の予測可能 `/tmp` パスを root 所有の一時ディレクトリへ隔離** — R1（1体・10件）→ R2（2体）→ R4（1体・4件）→ R5（親）→ R6（検証）で完了。
+  - 変更: `infra/scripts/setup-selfhost.sh`、`ci/scripts/test-setup-selfhost-tmp.sh`（新規）、`Makefile`、`.betterleaksignore`、`todo.md`。
+  - root / arch チェック後・最初の curl 前に `WORK_DIR="$(mktemp -d /tmp/jarvis-setup.XXXXXX)"` と `trap 'rm -rf -- "$WORK_DIR"' EXIT` を登録。4 成果物（qdrant tar / otelcol deb / otelcol 展開 / bws zip）を `WORK_DIR` 配下の変数へ集約し、旧 `rm -rf /tmp/otelcol-extract` を削除。`rm -rf` は trap 内の `"$WORK_DIR"` のみ。otelcol の install に `-o root -g root` を明示。
+  - 新規回帰 `ci/scripts/test-setup-selfhost-tmp.sh` は固定 `/tmp` パス4文字列ゼロ・mktemp/trap 完全一致・`rm -rf` の trap 限定・root 所有 install を静的検査（**ok=8 fail=0**）。`Makefile:82`（ci-local）と `:106`（safety-test）へ配線。
+  - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make check-shell` **ok=43 fail=0**、legacy guards **ok=107 fail=0**、`make secret-scan` exit 0（value-like 0）。
+  - push 前の Betterleaks で `probe_key_password='PASSWORD'`（テスト用キー名変数）が `generic-password` に偽陽性検出されたため、既知 fingerprint を `.betterleaksignore` へ追加し既知 14 件へ戻した（実機の秘密情報ではない）。
+  - R4 の残り指摘（いずれも採用せず記録のみ）: 回帰の固定パス検査がコメント行も失敗扱いする点（現状コメントに該当文字列なしで ok=8）、qdrant / bws の配置権限が回帰未カバー（従来どおり）、code-server の `curl | sh` は R4-DP3 として記録済み。
 

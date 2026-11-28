@@ -153,7 +153,7 @@ def classify(value: str) -> str:
     """
     # A bare '#' is part of the credential value; only a whitespace-preceded
     # '#' starts a trailing comment (R4 / 2026-11-28).
-    stripped = re.split(r"\s+#", value.strip().strip("\"'"), 1)[0].strip()
+    stripped = re.split(r"\s+#", value.strip().strip("\"'"), maxsplit=1)[0].strip()
     if not stripped or len(stripped) < 8 or is_placeholder(stripped):
         return "placeholder"
     return "VALUE-LIKE"
