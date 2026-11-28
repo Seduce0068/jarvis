@@ -2600,5 +2600,121 @@ else
   fail=$((fail+1))
 fi
 
+# I2-FIX: backup/install failures must enter rollback() immediately. The old
+# `[ -f "$dst" ] && cp ...` also aborted under set -e when no old binary
+# existed. Exercise the real apply body with stubbed cp/install/systemctl/bash
+# and the real rollback body, so no service, /opt or /etc path is touched.
+gw_probe_dir="$tmp/install_gw_probe"
+mkdir -p "$gw_probe_dir"
+gw_rollback_body="$(sed -n '/^rollback()/,/^}/p' "$install_gw_script")"
+# shellcheck disable=SC2016
+# $apply / $src / $dst are literal sed patterns, not shell expansions.
+gw_apply_body="$(sed -n '/^if \[ "$apply" -eq 1 \]; then$/,/^  install -o root -g root -m 0755 "$src" "$dst" || rollback$/p' "$install_gw_script" | sed '1d')"
+
+gw_probe_out=; gw_probe_code=0
+gw_install_probe() { # mode: cp_fail | install_fail | ok
+  gw_probe_mode="$1"
+  gw_probe_out=$(
+    # shellcheck disable=SC2034
+    # Vars are consumed by the sourced apply body.
+    (
+      set -euo pipefail
+      apply=1
+      dst="$gw_probe_dir/dst"
+      src="$gw_probe_dir/src"
+      ts='probe'
+      health_code=000
+      # shellcheck disable=SC2329
+      cp() {
+        printf 'cp-called\n' >&2
+        if [ "$gw_probe_mode" = cp_fail ]; then return 1; fi
+        return 0
+      }
+      # shellcheck disable=SC2329
+      install() {
+        printf 'install-called\n' >&2
+        if [ "$gw_probe_mode" = install_fail ]; then return 1; fi
+        return 0
+      }
+      # shellcheck disable=SC2329
+      systemctl() { printf 'inactive\n'; return 0; }
+      # shellcheck disable=SC2329
+      bash() { return 0; }
+      # shellcheck disable=SC1090,SC2086
+      eval "$gw_rollback_body"
+      # shellcheck disable=SC1090,SC2086
+      eval "$gw_apply_body"
+      printf 'after-install-reached\n' >&2
+    ) 2>&1
+  )
+  gw_probe_code=$?
+}
+
+# rollback() must keep its terminal exit codes: exit 1 on a normal rollback and
+# exit 3 when the post-rollback drift gate reports DANGER/unknown.
+if printf '%s\n' "$gw_rollback_body" | grep -Fq 'exit 3' \
+   && printf '%s\n' "$gw_rollback_body" | grep -Eq '^[[:space:]]+exit 1$'; then
+  echo "  PASS: install-mcp-gateway.sh rollback keeps exit 1/exit 3 terminals"
+  ok=$((ok+1))
+else
+  echo "  FAIL: install-mcp-gateway.sh rollback lost a terminal exit code"
+  fail=$((fail+1))
+fi
+
+# (a) backup cp failure -> rollback, install never attempted, no continuation.
+printf 'old\n' > "$gw_probe_dir/dst"
+gw_install_probe cp_fail
+gw_out="$gw_probe_out"; code="$gw_probe_code"
+cp_calls=$(printf '%s\n' "$gw_out" | grep -c 'cp-called' || true)
+install_calls=$(printf '%s\n' "$gw_out" | grep -c 'install-called' || true)
+if [ "$code" -eq 1 ] \
+   && [ "$cp_calls" -eq 1 ] && [ "$install_calls" -eq 0 ] \
+   && printf '%s\n' "$gw_out" | grep -Fq '== ロールバック: 旧バイナリへ戻します ==' \
+   && ! printf '%s\n' "$gw_out" | grep -Fq 'after-install-reached' \
+   && ! printf '%s\n' "$gw_out" | grep -Fq -- "$gw_probe_dir"; then
+  echo "  PASS: install-mcp-gateway.sh rolls back when backup cp fails"
+  ok=$((ok+1))
+else
+  echo "  FAIL: install-mcp-gateway.sh did not roll back on cp failure (exit=$code)"
+  fail=$((fail+1))
+fi
+
+# (b) install failure -> rollback after a successful backup, no continuation.
+printf 'old\n' > "$gw_probe_dir/dst"
+gw_install_probe install_fail
+gw_out="$gw_probe_out"; code="$gw_probe_code"
+cp_calls=$(printf '%s\n' "$gw_out" | grep -c 'cp-called' || true)
+install_calls=$(printf '%s\n' "$gw_out" | grep -c 'install-called' || true)
+if [ "$code" -eq 1 ] \
+   && [ "$cp_calls" -eq 1 ] && [ "$install_calls" -ge 1 ] \
+   && printf '%s\n' "$gw_out" | grep -Fq '== ロールバック: 旧バイナリへ戻します ==' \
+   && ! printf '%s\n' "$gw_out" | grep -Fq 'after-install-reached' \
+   && ! printf '%s\n' "$gw_out" | grep -Fq -- "$gw_probe_dir"; then
+  echo "  PASS: install-mcp-gateway.sh rolls back when install fails"
+  ok=$((ok+1))
+else
+  echo "  FAIL: install-mcp-gateway.sh did not roll back on install failure (exit=$code)"
+  fail=$((fail+1))
+fi
+
+# (c) no old binary: [ -f "$dst" ] is false, cp must be skipped but install
+# must still run and the script must reach the restart phase.
+rm -f "$gw_probe_dir/dst"
+gw_install_probe ok
+gw_out="$gw_probe_out"; code="$gw_probe_code"
+cp_calls=$(printf '%s\n' "$gw_out" | grep -c 'cp-called' || true)
+install_calls=$(printf '%s\n' "$gw_out" | grep -c 'install-called' || true)
+if [ "$code" -eq 0 ] \
+   && [ "$cp_calls" -eq 0 ] && [ "$install_calls" -eq 1 ] \
+   && printf '%s\n' "$gw_out" | grep -Fq 'after-install-reached' \
+   && ! printf '%s\n' "$gw_out" | grep -Fq 'ロールバック' \
+   && ! printf '%s\n' "$gw_out" | grep -Fq -- "$gw_probe_dir"; then
+  echo "  PASS: install-mcp-gateway.sh skips cp when no old binary exists"
+  ok=$((ok+1))
+else
+  echo "  FAIL: install-mcp-gateway.sh skipped install or called cp (exit=$code)"
+  fail=$((fail+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

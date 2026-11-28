@@ -2960,7 +2960,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 - [x] **HIGH: `secret_scan.py` の PLACEHOLDER 部分一致が fail-open** — 2026-11-28 対応済み（完了記録は末尾イテレーション3節を参照） — `ci/scripts/secret_scan.py:47-50,126-130,193-201`。`example` / `dummy` 等を部分一致で検査するため `PASSWORD=hunter2example` が placeholder と誤分類される。完全一致／明示トークン境界へ限定し negative test 追加（b4-scripts）。
 - [x] **HIGH: `setup-selfhost.sh` が root で予測可能 `/tmp` パスへダウンロード・展開** — 2026-11-28 対応済み（完了記録は末尾イテレーション4節を参照） — `infra/scripts/setup-selfhost.sh:61-63,96-107`。他ユーザーの symlink を root が辿り得る。`mktemp -d` + EXIT trap へ（b4-scripts）。
-- [ ] **HIGH: `install-mcp-gateway.sh` が配置失敗時にロールバックしない** — `infra/scripts/install-mcp-gateway.sh:89-90`。退避済み・新バイナリ破損・サービス未再起動のまま終了し得る（b4-scripts）。
+- [x] **HIGH: `install-mcp-gateway.sh` が配置失敗時にロールバックしない** — 2026-11-28 対応済み（完了記録は末尾イテレーション5節を参照） — `infra/scripts/install-mcp-gateway.sh:89-90`。退避済み・新バイナリ破損・サービス未再起動のまま終了し得る（b4-scripts）。
 - [ ] **HIGH: git archive の秘密語彙が MCP sandbox の拒否リストより狭い** — `infra/scripts/backup-local.sh:241-242` に対し `rust/jarvis-mcp-gw/src/sandbox.rs:461-473`。`*.pem` / `*token*` / `credentials` / `id_*` 等を追加（b6-ops）。
 - [ ] **HIGH: Qdrant snapshot が削除されずディスクに蓄積** — `infra/scripts/backup-local.sh:191,204`。ダウンロード検証後に DELETE を追加（失敗は WARN）（b6-ops）。
 - [ ] **HIGH: `backup-preflight.sh` のツール検査に `gzip` / `curl` / `jq` が欠落** — `infra/scripts/backup-preflight.sh:32`。preflight fail=0 でも実バックアップが失敗し得る（b6-ops）。
@@ -3005,4 +3005,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make check-shell` **ok=43 fail=0**、legacy guards **ok=107 fail=0**、`make secret-scan` exit 0（value-like 0）。
   - push 前の Betterleaks で `probe_key_password='PASSWORD'`（テスト用キー名変数）が `generic-password` に偽陽性検出されたため、既知 fingerprint を `.betterleaksignore` へ追加し既知 14 件へ戻した（実機の秘密情報ではない）。
   - R4 の残り指摘（いずれも採用せず記録のみ）: 回帰の固定パス検査がコメント行も失敗扱いする点（現状コメントに該当文字列なしで ok=8）、qdrant / bws の配置権限が回帰未カバー（従来どおり）、code-server の `curl | sh` は R4-DP3 として記録済み。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション5 / install ロールバック接続）
+
+- [x] **`install-mcp-gateway.sh` の配置失敗時にロールバックが走らない問題を修正** — R1（b4-scripts の分析を流用）→ R2（1体）→ R5（親）→ R6（検証）で完了。
+  - 変更: `infra/scripts/install-mcp-gateway.sh`、`ci/scripts/test-legacy-guards.sh`、`todo.md`。
+  - 旧 `[ -f "$dst" ] && cp -a ...` を `if [ -f "$dst" ]; then cp -a ... || rollback; fi` へ変更し、続く `install ... || rollback` を追加。退避 cp と install のどちらが失敗しても即 rollback()（exit 1 / exit 3）へ入る。旧バイナリが無い場合も install へ進むようになり、set -e による中途終了を解消。
+  - rollback() 本体・再起動失敗／ヘルス degraded・非200 からの rollback・root チェック・乾燥実行・20回×0.5秒ゲート・値非出力契約は無変更。
+  - 回帰: `test-legacy-guards.sh` に 4 ケース追加（exit end state 静的ガード、backup cp 失敗、install 失敗、旧バイナリ無し時の cp スキップ）。スタブで /opt・systemd へ接触せず実行。legacy guards **ok=111 fail=0**。
+  - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make check-shell` **ok=44 fail=0**、`make secret-scan` exit 0（value-like 0）、Betterleaks 既知 14 件のみ。
+  - 副次的に shellcheck ディレクティブ（`# shellcheck disable=...` の `--` 付き書式）が SC1073 を起こしていたため、正しい形へ訂正（イテレーション4でも同型の誤りを経験済み）。
 

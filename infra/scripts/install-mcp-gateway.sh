@@ -86,8 +86,10 @@ echo "== 2. 配置計画 =="
 echo "  install -o root -g root -m 0755 $src $dst"
 echo "  backup: $dst.prev-$ts"
 if [ "$apply" -eq 1 ]; then
-  [ -f "$dst" ] && cp -a "$dst" "$dst.prev-$ts"
-  install -o root -g root -m 0755 "$src" "$dst"
+  if [ -f "$dst" ]; then
+    cp -a "$dst" "$dst.prev-$ts" || rollback
+  fi
+  install -o root -g root -m 0755 "$src" "$dst" || rollback
   echo "== 3. サービス再起動 =="
   if ! systemctl restart jarvis-mcp-gw; then
     echo "  再起動失敗: ロールバックします" >&2
