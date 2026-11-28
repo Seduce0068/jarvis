@@ -78,8 +78,14 @@ policy_http_addr = "http://127.0.0.1:8081"
 mcp_principal = "opencode"
 TOML
 
+# b4-scripts / 2026-11-28: a missing or failing `ss` made every port look free
+# and a stale process could satisfy the later health probe (fail-open).
+command -v ss >/dev/null 2>&1 || { echo "FAIL: ss is required for port check" >&2; exit 2; }
 for p in "$port" "$grpc"; do
-  if ss -lntH "( sport = :$p )" 2>/dev/null | grep -q .; then
+  if ! port_out="$(ss -lntH "( sport = :$p )" 2>&1)"; then
+    echo "FAIL: port check failed for $p" >&2; exit 2
+  fi
+  if printf '%s' "$port_out" | grep -q .; then
     echo "FAIL: port $p is already in use"; exit 1
   fi
 done

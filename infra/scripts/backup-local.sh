@@ -250,7 +250,14 @@ if [ -n "$git_top" ]; then
   # printed. Keep this list in sync with sandbox.rs.
   # Anchored forms avoid rejecting legitimate tracked sources such as
   # ci/scripts/secret_scan.py or infra/config/bws.env.example (2026-11-28 R5).
-  bad_paths="$(tar -tzf "$archive_tmp" 2>/dev/null \
+  # b4-scripts / 2026-11-28: `tar ... | grep ... || true` treated an unreadable
+  # archive (empty listing) as a clean one. Check tar's own status first.
+  archive_list="$(tar -tzf "$archive_tmp" 2>/dev/null)" || {
+    echo "ERROR: git archive is not a readable tar.gz; refusing it" >&2
+    rm -f "$archive_tmp"
+    exit 1
+  }
+  bad_paths="$(printf '%s\n' "$archive_list" \
     | grep -Ei '(^|/)\.env$|(^|/)bws\.env$|\.key$|\.pem$|(^|/)\.git(/|$)|(^|/)known_hosts$|(^|/)credentials$|(^|/)id_(rsa|ed25519|ecdsa|dsa)(\.|$)|(^|/)[^/]*(token|secret)[^/]*\.(env|txt|json|ya?ml|toml|ini|conf|pem|key|credential)$' \
     || true)"
   if [ -n "$bad_paths" ]; then

@@ -3104,5 +3104,35 @@ else
   fail=$((fail+1))
 fi
 
+# b4-scripts / 2026-11-28: smoke's port probe failed open when `ss` was absent
+# or errored; a stale process could then satisfy the later /health probe.
+smoke_src="$repo/infra/scripts/smoke-mcp-gw.sh"
+# Static guard: the real smoke script must check ss availability and its exit
+# status before treating a port as free. (A dynamic no-ss PATH probe proved
+# environment-dependent; the source guard is deterministic.)
+# shellcheck disable=SC2016
+if grep -Fq 'command -v ss >/dev/null 2>&1' "$smoke_src" \
+   && grep -Fq 'port check failed for' "$smoke_src" \
+   && grep -Fq 'port_out' "$smoke_src"; then
+  echo "  PASS: smoke port probe checks ss availability and result"
+  ok=$((ok+1))
+else
+  echo "  FAIL: smoke lost the ss availability/result guard"
+  fail=$((fail+1))
+fi
+
+# b4-scripts / 2026-11-28: `tar -tzf ... | grep ... || true` accepted an
+# unreadable archive. The extraction status must be checked before recording.
+backup_local_src="$repo/infra/scripts/backup-local.sh"
+# shellcheck disable=SC2016
+if grep -Fq 'archive_list="$(tar -tzf "$archive_tmp" 2>/dev/null)" || {' "$backup_local_src" \
+   && grep -Fq 'git archive is not a readable tar.gz; refusing it' "$backup_local_src"; then
+  echo "  PASS: backup refuses an unreadable git archive"
+  ok=$((ok+1))
+else
+  echo "  FAIL: backup accepted an unreadable git archive"
+  fail=$((fail+1))
+fi
+
 echo "result: ok=$ok fail=$fail"
 [ "$fail" -eq 0 ]

@@ -2969,8 +2969,8 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション11節を参照）。
 - [x] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査／step2 の `grep -A8` 判定が drift 側と分岐／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション12節を参照）。
 - [x] MEDIUM: 複数スクリプトで未知引数が無視され typo が dry-run として通る（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション13節を参照）。
-- [ ] MEDIUM: `smoke-mcp-gw.sh` のデッド既定バイナリパスと `ss` 欠落時の fail-open（`:4-7,80-93`、b4-scripts）。
-- [ ] MEDIUM: `backup-local.sh` の `tar -tzf` 失敗が `|| true` で握り潰され完全扱い（`:239-249`、b4-scripts）。
+- [x] MEDIUM: `smoke-mcp-gw.sh` のデッド既定バイナリパスと `ss` 欠落時の fail-open（b4-scripts）— 2026-11-28 対応済み（デッド既定パスはイテレーション9、ss はイテレーション14で対応、完了記録は末尾を参照）。
+- [x] MEDIUM: `backup-local.sh` の `tar -tzf` 失敗が `|| true` で握り潰され完全扱い（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション14節を参照）。
 - [ ] MEDIUM: `McpGatewayError::kind` の Internal 4 バリアントが untested（`rust/jarvis-mcp-gw/src/error.rs:78-82`、b1-tests）。
 - [ ] MEDIUM: `jarvis-context` の `install_metrics` が 3 クレート修正から漏れ警告分岐が到達不能（`rust/jarvis-context/src/http.rs:25-27`、b5-code）。
 - [ ] MEDIUM: Qdrant snapshot 取得待ちが固定 `sleep 2` で 404 になり得る／runbook の `JARVIS_QDRANT_TIMEOUT_SECS` がレガシー変数を案内（b6-ops）。
@@ -3087,4 +3087,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - `verify-backup.sh`: 位置引数（backup-set-dir）は従来どおり受理しつつ、`--` 始まりの未知オプションのみ exit 2。`--backup-dir` の値が `--foo` でも値として扱う既存挙動を維持。
   - 回帰: `test-legacy-guards.sh` に 11 ケース追加（typo 拒否 4 / 有効引数受理 7 / 静的ガード）→ legacy guards **ok=129 fail=0**。検証中に 2 件の回帰側バグを修正: (1) `--latest` fixture のステージング dir が `$latest_base` 直下にあり辞書順最後の `qdrant` が set と誤認されていた（ステージングを外へ移動）、(2) `grep -Fq --*` がパターンをオプションと解釈していた（`--` 区切りを追加）。
   - 検証: `bash -n` / `shellcheck` 5ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション14 / smoke と archive の fail-closed）
+
+- [x] **`smoke-mcp-gw.sh` の `ss` fail-open と `backup-local.sh` の tar 失敗握り潰しを修正** — b4-scripts の MEDIUM 2 件を R2（親直接）→ R6（検証）で完了。
+  - smoke: `command -v ss` の事前検査と `ss` 終了ステータスの明示検査を追加。不在／失敗時に固定メッセージ＋exit 2 とし、ポート衝突なしと誤判定しない（後続の /health が古いプロセスに応答する fail-open を遮断）。デッド既定バイナリパスはイテレーション9で既に修正済み。
+  - backup: `tar -tzf "$archive_tmp"` の出力を変数へ取り、終了ステータスを検査。失敗時は `ERROR: git archive is not a readable tar.gz; refusing it` を出して一時アーカイブを削除し exit 1（空一覧を「クリーン」と扱わない）。secret-like パスの拒否語彙は不変。
+  - 回帰: `test-legacy-guards.sh` に静的ガード 2 件を追加（`command -v ss` / `port check failed` / `port_out`、`archive_list=... || {` / `refusing it`）。動的な no-ss PATH プローブは環境依存で不安定なため静的ガードへ集約（理由をコメントに記録）。legacy guards **ok=131 fail=0**。
+  - 検証: `bash -n` / `shellcheck` 3ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**。
 
