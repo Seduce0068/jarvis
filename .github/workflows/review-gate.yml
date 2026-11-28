@@ -48,9 +48,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json number,title,state
       - name: Install cargo-audit (pinned 0.23.0)
-        # ci-local runs check-dependency-audit.sh (Makefile:73), which fails
+        # ci-local runs check-dependency-audit.sh (make check-dependency-audit), which fails
         # closed with AUDIT_TOOL_MISSING when cargo-audit is absent on the
-        # runner. Mirror the pinned install in .github/workflows/ci.yml:101-113.
+        # runner. Mirror the pinned install in ci.yml's cargo-audit install step.
         # The version probe keeps this idempotent on reused runners; --locked
         # freezes the installer's transitive dependencies.
         run: |
@@ -61,4 +61,7 @@ jobs:
         # Use the repo's own verified gate suite instead of opencode/CLI.
         # This avoids OpenCode credentials entirely while still checking
         # fmt / check / test / clippy / UI / secret scan / safety guards.
-        run: make ci-local
+        # R6: pass an explicit base so the markdownlint gate does not no-op on
+        # this clean PR-head checkout (ci.yml uses the same pattern). fetch-depth: 0
+        # above makes origin/master available.
+        run: MD_LINT_BASE=origin/master make ci-local

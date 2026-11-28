@@ -65,8 +65,8 @@
       },
       {
         "matcher": "**/*.md",
-        "command": "shell npx --yes markdownlint@0.50.1 --fix {file}",
-        "description": "Markdown編集後にlint自動修正（編集したファイルのみ。版は Makefile の MARKDOWNLINT_VERSION と同期）"
+        "command": "shell npx --yes markdownlint-cli@$(make -s print-markdownlint-version) --fix {file}",
+        "description": "Markdown編集後にlint自動修正（編集したファイルのみ。版は Makefile の MARKDOWNLINT_VERSION を print-markdownlint-version 経由で参照。パッケージは CLI を提供する markdownlint-cli）"
       }
     ],
     "post-write": [
