@@ -2941,5 +2941,47 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - R5 中に発見した回帰（差分を `"$base" HEAD` として未コミット変更を見失う）を親が修正し、`"$base"`（base→作業ツリー）へ戻した。CI クリーン checkout では base→HEAD と同義。
   - 却下: R4 の「todo.md:2822 の post-write 誤記」は根拠行に当該記述が無く Runtime Proof で確認できず却下。
   - あわせて陳腐化記録を訂正: V-141 の unit 記述（:128）、「3077 行目」参照（:226）、切れた `executor.rs` 参照（:785）、共有 lib の [ ]（:2037）、major 更新件数 29→31（:2402）、secret-scan「最終ゲート」表記（:209）。
-- [ ] 次イテレーション: 残る未完了はユーザー判断 / 実機操作 / 2026-12-20 の日付ゲート待ち。バックログ補充（swarm-project-review + swarm-todo-discovery）で repo 内完結タスクを探索する。
+- [x] 次イテレーション: 残る未完了はユーザー判断 / 実機操作 / 2026-12-20 の日付ゲート待ち。バックログ補充（swarm-project-review + swarm-todo-discovery）で repo 内完結タスクを探索する。
+
+## バックログ補充（2026-11-28 / swarm-unlimited イテレーション2）
+
+- 構成: review + discovery を 6 観点（tests / ci / docs / scripts / code / ops）で並列実行。51 件の生指摘から重複を吸収し、下記へ集約。すべて読み取り専用で実施し、子の指摘は親が Runtime Proof で確認したものだけ採用。
+
+### 即時修正済み（イテレーション2 内で完了・push 済み）
+
+- [x] markdownlint の pin が `markdownlint@0.50.1`（npm に存在せず ETARGET）を指していた — `markdownlint-cli@0.50.1` へ訂正。Runtime Proof: `npx --yes markdownlint@0.50.1 --version` → ETARGET、`markdownlint-cli@0.50.1` → 0.50.1。commit `54e1d73`。
+- [x] staged モードが作業ツリーを lint しており fail-open（ステージ後に作業ツリーを直すと違反がすり抜ける）— `git show :<path>` で index blob を展開して検査し、出力パスを元へマップ。commit `54e1d73`。
+- [x] review-gate.yml の `make ci-local` が `MD_LINT_BASE` 未指定で no-op — `MD_LINT_BASE=origin/master` を渡すよう配線。commit `54e1d73`。
+- [x] hooks.json の pin を `make -s print-markdownlint-version` 参照へ統一。commit `54e1d73`。
+- [x] working モードへ untracked `*.md` を追加。probe と real lint の同一 spec／バージョン照合、CLI 排他・不正 mode・改行パス・不在ファイル・複数 finding の回帰を追加（回帰 32/32 pass）。commit `54e1d73`。
+- [x] 旧ローカル master は `backup/markdownlint-gate-local` へ退避。`origin/master` は機微情報削除済み履歴を維持したまま fast-forward 更新（force push なし）。push 前に Betterleaks 既知 14 件のみ・value-like 0 を確認。
+
+### 新規バックログ（repo 内完結・優先度順）
+
+- [ ] **HIGH: `secret_scan.py` の PLACEHOLDER 部分一致が fail-open** — `ci/scripts/secret_scan.py:47-50,126-130,193-201`。`example` / `dummy` 等を部分一致で検査するため `PASSWORD=hunter2example` が placeholder と誤分類される。完全一致／明示トークン境界へ限定し negative test 追加（b4-scripts）。
+- [ ] **HIGH: `setup-selfhost.sh` が root で予測可能 `/tmp` パスへダウンロード・展開** — `infra/scripts/setup-selfhost.sh:61-63,96-107`。他ユーザーの symlink を root が辿り得る。`mktemp -d` + EXIT trap へ（b4-scripts）。
+- [ ] **HIGH: `install-mcp-gateway.sh` が配置失敗時にロールバックしない** — `infra/scripts/install-mcp-gateway.sh:89-90`。退避済み・新バイナリ破損・サービス未再起動のまま終了し得る（b4-scripts）。
+- [ ] **HIGH: git archive の秘密語彙が MCP sandbox の拒否リストより狭い** — `infra/scripts/backup-local.sh:241-242` に対し `rust/jarvis-mcp-gw/src/sandbox.rs:461-473`。`*.pem` / `*token*` / `credentials` / `id_*` 等を追加（b6-ops）。
+- [ ] **HIGH: Qdrant snapshot が削除されずディスクに蓄積** — `infra/scripts/backup-local.sh:191,204`。ダウンロード検証後に DELETE を追加（失敗は WARN）（b6-ops）。
+- [ ] **HIGH: `backup-preflight.sh` のツール検査に `gzip` / `curl` / `jq` が欠落** — `infra/scripts/backup-preflight.sh:32`。preflight fail=0 でも実バックアップが失敗し得る（b6-ops）。
+- [ ] **HIGH: P0-10 の opt-in 記述が現行コード（無条件拒否）と矛盾** — `docs/integration/local-operations-runbook.md:165-171`、`todo.md:317,329`、`docs/integration/unknown-tasks-survey.md:38,52`。現行 `validate_kill_switch_admin_token` は placeholder を無条件 bail し、フラグは互換解析のみ（b3-docs）。
+- [ ] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）。
+- [ ] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査（`:377,382`）／step2 の `grep -A8` 判定が drift 側と分岐（`:302`）／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）。
+- [ ] MEDIUM: 複数スクリプトで未知引数が無視され typo が dry-run として通る（`install-mcp-gateway.sh:5`、`install-backup-timer.sh:12`、`verify-backup.sh:25`、b4-scripts）。
+- [ ] MEDIUM: `smoke-mcp-gw.sh` のデッド既定バイナリパスと `ss` 欠落時の fail-open（`:4-7,80-93`、b4-scripts）。
+- [ ] MEDIUM: `backup-local.sh` の `tar -tzf` 失敗が `|| true` で握り潰され完全扱い（`:239-249`、b4-scripts）。
+- [ ] MEDIUM: `McpGatewayError::kind` の Internal 4 バリアントが untested（`rust/jarvis-mcp-gw/src/error.rs:78-82`、b1-tests）。
+- [ ] MEDIUM: `jarvis-context` の `install_metrics` が 3 クレート修正から漏れ警告分岐が到達不能（`rust/jarvis-context/src/http.rs:25-27`、b5-code）。
+- [ ] MEDIUM: Qdrant snapshot 取得待ちが固定 `sleep 2` で 404 になり得る／runbook の `JARVIS_QDRANT_TIMEOUT_SECS` がレガシー変数を案内（b6-ops）。
+- [ ] MEDIUM: `local-restore-design.md` の manifest 形式が 3 列のまま（現行 7 列記述子、b3-docs）。
+- [ ] LOW: `EventNormalizer` / `ContextBuilder` のデッドフィールドと `#[allow(dead_code)]` 削除（b5-code）。
+- [ ] LOW: Grafana README の scrape job 数 5→6、infra/README のツリー欠落、証跡再生成 Runbook の mcp-gw 件数 126→166、otelcol 行番号参照、backup-restore-runbook の根拠行（b3-docs / b6-ops、重複統合）。
+- [ ] LOW: `backup-local.sh` が HEAD のコミット ID を manifest に記録しない／COMPLETE の内容整合未検証（b6-ops）。
+- [ ] 契約変更のため保留: `ApprovalRequired` の `ErrorKind` 分離（HTTP/gRPC/MCP の status code 契約変更＋specs/evidence 再生成が必要、b5-code / autonomous=false）。
+
+### 却下・重複の吸収
+
+- Grafana job 数 / migration 範囲 / otelcol 行番号は b3-docs と b6-ops で重複 → 1 件へ統合。
+- lint-md 回帰の指摘は b1-tests と b2-ci で重複 → 即時修正済みのため新規バックログ化しない。
+- P0-10 は「方針保留」ではなく「文書が現行実装と矛盾」する点のみを採用（実装自体の変更ではない）。
 
