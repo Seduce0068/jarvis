@@ -2966,7 +2966,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **HIGH: Qdrant snapshot が削除されずディスクに蓄積** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-local.sh:191,204`。ダウンロード検証後に DELETE を追加（失敗は WARN）（b6-ops）。
 - [x] **HIGH: `backup-preflight.sh` のツール検査に `gzip` / `curl` / `jq` が欠落** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-preflight.sh:32`。preflight fail=0 でも実バックアップが失敗し得る（b6-ops）。
 - [x] **HIGH: P0-10 の opt-in 記述が現行コード（無条件拒否）と矛盾** — 2026-11-28 対応済み（完了記録は末尾イテレーション10節を参照） — `docs/integration/local-operations-runbook.md:165-171`、`todo.md:317,329`、`docs/integration/unknown-tasks-survey.md:38,52`。現行 `validate_kill_switch_admin_token` は placeholder を無条件 bail し、フラグは互換解析のみ（b3-docs）。
-- [ ] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）。
+- [x] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション11節を参照）。
 - [ ] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査（`:377,382`）／step2 の `grep -A8` 判定が drift 側と分岐（`:302`）／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）。
 - [ ] MEDIUM: 複数スクリプトで未知引数が無視され typo が dry-run として通る（`install-mcp-gateway.sh:5`、`install-backup-timer.sh:12`、`verify-backup.sh:25`、b4-scripts）。
 - [ ] MEDIUM: `smoke-mcp-gw.sh` のデッド既定バイナリパスと `ss` 欠落時の fail-open（`:4-7,80-93`、b4-scripts）。
@@ -3062,4 +3062,11 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 修正: `docs/integration/local-operations-runbook.md` の P0-10 節（warn-only / opt-in フラグ有効化 / false へ戻す手順）を「無条件検証・フラグ反転不要・起動拒否時は BWS 側の実値注入を確認」へ書き換え。`todo.md` の P0-10 エントリを [x] 化し現状を明記。`docs/integration/unknown-tasks-survey.md` の A-H3 行 2 箇所も「当時は opt-in（履歴）／現行は無条件」へ訂正。
   - 既知の設計判断は維持: トークン実値は BWS 側にありエージェントは読まない。値をログ・文書へ残さない契約も不変。
   - 付随対応: 変更した 2 ファイルにも P3-4 baseline 違反（MD013 / MD060）が多数あるため、`lint-md.sh` の既定除外を `todo.md` から `todo.md:unknown-tasks-survey.md:local-operations-runbook.md`（コロン区切り、`MD_LINT_EXCLUDE` で上書き可）へ拡張。他ドキュメントの検査は維持し、回帰 32/32・`ci-local` 全通過を確認。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション11 / drift ハッシュ fail-closed）
+
+- [x] **`check-deploy-drift.sh` の sha256sum fail-open を修正** — `set -uo pipefail`（`-e` なし）下で `sha256sum | cut` の失敗が握り潰され、両方が空文字のとき `binary OK (same)` と誤判定していた。
+  - 修正: 両側のダイジェストが `^[0-9a-f]{64}$` に一致することを必須化し、算出不能時は `binary DANGER (hash unavailable)` ＋ `danger=1`（最終 exit 2）へ昇格。比較一致・PENDING の既存挙動は有効ハッシュ時のみ維持。
+  - 回帰: `test-legacy-guards.sh` に実バイナリブロックを抽出して sha256sum 失敗をスタブする動的ケースを追加（`MISSING` 経路に落ちないよう実行可能なダミーを配置）→ legacy guards **ok=112 fail=0**。
+  - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**、`secret_scan` value-like 0、Betterleaks 既知 14 件のみ。
 

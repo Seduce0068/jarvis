@@ -204,9 +204,20 @@ if [ "$env_only" -eq 1 ]; then
 fi
 # 1) binary（I97-B: 内容検査も JARVIS_DRIFT_BINARY を適用）
 if [ -x "$deployed_binary" ] && [ -x "$repo/rust/target/release/jarvis-mcp-gw" ]; then
-  a=$(sha256sum "$deployed_binary" | cut -d' ' -f1)
-  b=$(sha256sum "$repo/rust/target/release/jarvis-mcp-gw" | cut -d' ' -f1)
-  if [ "$a" = "$b" ]; then say "binary" "OK (same)"; else say "binary" "PENDING (installed != repo)"; drift=1; fi
+  # b4-scripts / 2026-11-28: a failed sha256sum yields an empty string; two
+  # empty strings must not be reported as "OK (same)". Require a 64-hex digest
+  # from both sides before comparing, and escalate an unavailable hash to DANGER.
+  a="$(sha256sum "$deployed_binary" 2>/dev/null | cut -d' ' -f1)"
+  b="$(sha256sum "$repo/rust/target/release/jarvis-mcp-gw" 2>/dev/null | cut -d' ' -f1)"
+  if ! printf '%s' "$a" | grep -Eq '^[0-9a-f]{64}$' \
+     || ! printf '%s' "$b" | grep -Eq '^[0-9a-f]{64}$'; then
+    say "binary" "DANGER (hash unavailable)"
+    danger=1
+  elif [ "$a" = "$b" ]; then
+    say "binary" "OK (same)"
+  else
+    say "binary" "PENDING (installed != repo)"; drift=1
+  fi
 else
   say "binary" "MISSING"; drift=1
 fi

@@ -2600,6 +2600,52 @@ else
   fail=$((fail+1))
 fi
 
+# b4-scripts / 2026-11-28: a failed sha256sum produced two empty digests and
+# the drift gate reported "binary OK (same)". Exercise the real binary block
+# with a failing sha256sum stub and require DANGER, not OK/PENDING.
+binary_block="$(sed -n '/^# 1) binary/,/^# 2) allowlist/p' "$drift_src" | sed '$d')"
+binary_hash_guard() {
+  local out
+  mkdir -p "$tmp/rust/target/release"
+  printf '%s\n' 'stub' > "$tmp/bin"
+  printf '%s\n' 'stub' > "$tmp/rust/target/release/jarvis-mcp-gw"
+  chmod +x "$tmp/bin" "$tmp/rust/target/release/jarvis-mcp-gw"
+  out="$(
+    (
+      # shellcheck disable=SC2329
+      say() { printf '%s %s\n' "$1" "$2"; }
+      # shellcheck disable=SC2329
+      sha256sum() { return 1; }
+      danger=0; drift=0
+      repo="$tmp"
+      # shellcheck disable=SC2034
+      deployed_binary="$tmp/bin"
+      eval "$binary_block"
+      printf 'danger=%s drift=%s\n' "$danger" "$drift"
+    )
+  )" || return 1
+  case "$out" in
+    *'binary DANGER (hash unavailable)'*) ;;
+    *) return 1 ;;
+  esac
+  case "$out" in
+    *'danger=1'*) ;;
+    *) return 1 ;;
+  esac
+  case "$out" in
+    *'binary OK (same)'*) return 1 ;;
+  esac
+  return 0
+}
+
+if binary_hash_guard; then
+  echo "  PASS: drift binary check fails closed on unavailable hashes"
+  ok=$((ok+1))
+else
+  echo "  FAIL: drift binary check accepted an unavailable hash"
+  fail=$((fail+1))
+fi
+
 # I2-FIX: backup/install failures must enter rollback() immediately. The old
 # `[ -f "$dst" ] && cp ...` also aborted under set -e when no old binary
 # existed. Exercise the real apply body with stubbed cp/install/systemctl/bash
