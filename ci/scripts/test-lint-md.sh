@@ -272,21 +272,26 @@ case "${STUB_NPX_MODE:-ok}" in
       done
       [ "$found" -eq 1 ] || exit 0
     fi
+    # Real markdownlint-cli writes findings to stderr with a severity word
+    # ("error MD013/..."). Mirror that so the gate's stream/severity handling
+    # is exercised, not just an idealised stdout stub.
     if [ "${STUB_NPX_MODE:-}" = multi ]; then
       # Multiple findings plus an exact duplicate line: only distinct
       # "path: MDxxxx" pairs may survive, and the sentinel must not leak.
-      printf '%s:3:1 %s/first-line-heading First line [Context: "%s"]\n' \
-        "$mdarg" 'MD041' "${STUB_SENTINEL:-PROBE_DO_NOT_LEAK}"
-      printf '%s:5:1 %s/multiple-consecutive-blank-lines Blank lines\n' \
-        "$mdarg" 'MD012'
-      printf '%s:3:1 %s/first-line-heading duplicate [Context: "%s"]\n' \
-        "$mdarg" 'MD041' "${STUB_SENTINEL:-PROBE_DO_NOT_LEAK}"
-      printf '%s:7:1 %s/line-length Line length\n' \
-        "$mdarg" 'MD013'
+      {
+        printf '%s:3:1 error %s/first-line-heading First line [Context: "%s"]\n' \
+          "$mdarg" 'MD041' "${STUB_SENTINEL:-PROBE_DO_NOT_LEAK}"
+        printf '%s:5:1 error %s/multiple-consecutive-blank-lines Blank lines\n' \
+          "$mdarg" 'MD012'
+        printf '%s:3:1 error %s/first-line-heading duplicate [Context: "%s"]\n' \
+          "$mdarg" 'MD041' "${STUB_SENTINEL:-PROBE_DO_NOT_LEAK}"
+        printf '%s:7:1 error %s/line-length Line length\n' \
+          "$mdarg" 'MD013'
+      } >&2
       exit 1
     fi
-    printf '%s:3:1 %s/first-line-heading First line should be a top-level heading [Context: "%s"]\n' \
-      "$mdarg" 'MD041' "${STUB_SENTINEL:-PROBE_DO_NOT_LEAK}"
+    printf '%s:3:1 error %s/first-line-heading First line should be a top-level heading [Context: "%s"]\n' \
+      "$mdarg" 'MD041' "${STUB_SENTINEL:-PROBE_DO_NOT_LEAK}" >&2
     exit 1
     ;;
 esac

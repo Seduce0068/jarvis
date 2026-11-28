@@ -142,8 +142,9 @@ pub struct Sandbox {
 
 impl Sandbox {
     pub async fn new(config: &crate::config::McpGatewayConfig) -> Result<Self> {
+        // Neutral default; real deployments override via JARVIS_MCP_GW_BASE_DIR.
         let base_dir =
-            std::env::var("JARVIS_MCP_GW_BASE_DIR").unwrap_or_else(|_| "<home>".to_string());
+            std::env::var("JARVIS_MCP_GW_BASE_DIR").unwrap_or_else(|_| "/opt/jarvis".to_string());
         // `config.sandbox_config` is kept in the gateway config for
         // compatibility; the sandbox itself no longer shells out (ADR-0002).
         let _ = &config.sandbox_config;
@@ -889,11 +890,11 @@ mod tests {
             "127.0.0.1",
             "10.0.0.1",
             "172.16.0.1",
-            "<private-ip>",
+            "192.0.2.1",
             "169.254.1.1",
             "0.0.0.0",
             "224.0.0.1",
-            "<tailnet-ip>",
+            "100.64.0.1",
             // IETF reserved / special-purpose ranges: `is_global()` denies
             // these even though the old hand-written denylist allowed them.
             "192.0.0.1",

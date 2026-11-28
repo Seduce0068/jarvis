@@ -1084,7 +1084,7 @@ mod tests {
                 *seen_for_thread.lock().expect("lock") = Some(request);
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 85\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
                 );
             },
             1,
@@ -1198,7 +1198,7 @@ mod tests {
             |stream, _request| {
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 85\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
                 );
             },
             1,
@@ -1252,7 +1252,7 @@ mod tests {
             |stream, _request| {
                 respond(
                     stream,
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 77\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"not-a-timestamp\"}",
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 80\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"not-a-timestamp\"}",
                 );
             },
             1,
@@ -1504,7 +1504,7 @@ mod tests {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_for_thread = seen.clone();
         let mut responses = [
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 85\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
         ]
         .into_iter();
@@ -1600,7 +1600,7 @@ mod tests {
         let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let seen_for_thread = seen.clone();
         let mut responses = [
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 82\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 85\r\nConnection: close\r\n\r\n{\"decision\":\"Approved\",\"approved_by\":\"testuser\",\"approved_at\":\"2026-11-15T08:00:00Z\"}",
             "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 40\r\nConnection: close\r\n\r\n{\"decision\":\"Denied\",\"reason\":\"because\"}",
         ]
         .into_iter();

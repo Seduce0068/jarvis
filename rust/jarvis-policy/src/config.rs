@@ -875,7 +875,9 @@ default_deny = true
                 "error names the placeholder"
             );
             assert!(
-                error.to_string().contains("require_kill_switch_admin_token"),
+                error
+                    .to_string()
+                    .contains("require_kill_switch_admin_token"),
                 "error names the legacy flag"
             );
         }

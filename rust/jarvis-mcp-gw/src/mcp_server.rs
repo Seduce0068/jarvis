@@ -633,10 +633,9 @@ requires_approval = true
     fn tool_errors_do_not_leak_internal_details() {
         use crate::error::McpGatewayError;
 
-        let sandbox: anyhow::Error = McpGatewayError::Sandbox(
-            "stat <home>/.secret/token: permission denied".to_string(),
-        )
-        .into();
+        let sandbox: anyhow::Error =
+            McpGatewayError::Sandbox("stat <home>/.secret/token: permission denied".to_string())
+                .into();
         let text = client_facing_tool_error(&sandbox);
         assert_eq!(text, INTERNAL_ERROR_MESSAGE);
         assert!(!text.contains("<home>"));

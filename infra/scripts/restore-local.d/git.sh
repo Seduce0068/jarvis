@@ -17,7 +17,8 @@
 restore_git() {
   local rc=0
   local archive="" resolve_rc=0
-  local repo='<home>/ドキュメント/作業用/jarvis/jarvis'
+  # Neutral default; real deployments pass --repo-dir or override this path.
+  local repo="${JARVIS_RESTORE_REPO_DIR:-/opt/jarvis/repo}"
   local tmp_dir='' bad='' status_out='' ts='' tag='' top='' real_repo='' suggested=''
   # I77-C: root 実行 + tar 既定の owner 復元で testuser 所有ファイルが root:root に
   # なる問題への対策用（repo 既存 owner と展開エントリ）。
