@@ -205,6 +205,12 @@ if [ "$skip_qdrant" -eq 0 ]; then
     > "$set_dir/qdrant-snapshot.bin"
   record qdrant-snapshot.bin "$set_dir/qdrant-snapshot.bin" tar none none qdrant
   echo "Qdrant snapshot OK (collection=${qdrant_collection}, snapshot=${snapshot_name})"
+  # Remove the Qdrant-side snapshot once the downloaded copy is recorded;
+  # otherwise every daily timer run leaves another generation behind on the
+  # Qdrant host. Cleanup is best-effort: a failed DELETE must not fail a backup
+  # whose payload was already captured and verified. No values are printed.
+  curl -fsS -X DELETE "${qdrant_collection_url}/snapshots/${snapshot_name}" \
+    || echo "WARN: Qdrant snapshot cleanup failed (collection=${qdrant_collection})" >&2
 fi
 
 # Non-secret config allowlist. Never include .env / bws.env / token files.
@@ -238,8 +244,15 @@ if [ -n "$git_top" ]; then
   archive_tmp="$archive.tmp"
   git -C "$git_top" archive --format=tar HEAD | gzip > "$archive_tmp"
   # Fail closed if a tracked secret-like path ever enters the committed tree.
+  # Vocabulary mirrors the read-side gate in the MCP gateway sandbox: .env /
+  # .key / .git/ plus *.pem, *token*, *secret*, credentials, id_* keypairs,
+  # known_hosts and bws.env. Only the refusal is reported; values are never
+  # printed. Keep this list in sync with sandbox.rs.
+  # Anchored forms avoid rejecting legitimate tracked sources such as
+  # ci/scripts/secret_scan.py or infra/config/bws.env.example (2026-11-28 R5).
   bad_paths="$(tar -tzf "$archive_tmp" 2>/dev/null \
-    | grep -Ei '(^|/)\.env$|\.key$|(^|/)\.git(/|$)' || true)"
+    | grep -Ei '(^|/)\.env$|(^|/)bws\.env$|\.key$|\.pem$|(^|/)\.git(/|$)|(^|/)known_hosts$|(^|/)credentials$|(^|/)id_(rsa|ed25519|ecdsa|dsa)(\.|$)|(^|/)[^/]*(token|secret)[^/]*\.(env|txt|json|ya?ml|toml|ini|conf|pem|key|credential)$' \
+    || true)"
   if [ -n "$bad_paths" ]; then
     echo "ERROR: git archive contains secret-like paths; refusing it" >&2
     rm -f "$archive_tmp"

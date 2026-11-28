@@ -2961,9 +2961,9 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **HIGH: `secret_scan.py` の PLACEHOLDER 部分一致が fail-open** — 2026-11-28 対応済み（完了記録は末尾イテレーション3節を参照） — `ci/scripts/secret_scan.py:47-50,126-130,193-201`。`example` / `dummy` 等を部分一致で検査するため `PASSWORD=hunter2example` が placeholder と誤分類される。完全一致／明示トークン境界へ限定し negative test 追加（b4-scripts）。
 - [x] **HIGH: `setup-selfhost.sh` が root で予測可能 `/tmp` パスへダウンロード・展開** — 2026-11-28 対応済み（完了記録は末尾イテレーション4節を参照） — `infra/scripts/setup-selfhost.sh:61-63,96-107`。他ユーザーの symlink を root が辿り得る。`mktemp -d` + EXIT trap へ（b4-scripts）。
 - [x] **HIGH: `install-mcp-gateway.sh` が配置失敗時にロールバックしない** — 2026-11-28 対応済み（完了記録は末尾イテレーション5節を参照） — `infra/scripts/install-mcp-gateway.sh:89-90`。退避済み・新バイナリ破損・サービス未再起動のまま終了し得る（b4-scripts）。
-- [ ] **HIGH: git archive の秘密語彙が MCP sandbox の拒否リストより狭い** — `infra/scripts/backup-local.sh:241-242` に対し `rust/jarvis-mcp-gw/src/sandbox.rs:461-473`。`*.pem` / `*token*` / `credentials` / `id_*` 等を追加（b6-ops）。
-- [ ] **HIGH: Qdrant snapshot が削除されずディスクに蓄積** — `infra/scripts/backup-local.sh:191,204`。ダウンロード検証後に DELETE を追加（失敗は WARN）（b6-ops）。
-- [ ] **HIGH: `backup-preflight.sh` のツール検査に `gzip` / `curl` / `jq` が欠落** — `infra/scripts/backup-preflight.sh:32`。preflight fail=0 でも実バックアップが失敗し得る（b6-ops）。
+- [x] **HIGH: git archive の秘密語彙が MCP sandbox の拒否リストより狭い** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-local.sh:241-242` に対し `rust/jarvis-mcp-gw/src/sandbox.rs:461-473`。`*.pem` / `*token*` / `credentials` / `id_*` 等を追加（b6-ops）。
+- [x] **HIGH: Qdrant snapshot が削除されずディスクに蓄積** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-local.sh:191,204`。ダウンロード検証後に DELETE を追加（失敗は WARN）（b6-ops）。
+- [x] **HIGH: `backup-preflight.sh` のツール検査に `gzip` / `curl` / `jq` が欠落** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-preflight.sh:32`。preflight fail=0 でも実バックアップが失敗し得る（b6-ops）。
 - [ ] **HIGH: P0-10 の opt-in 記述が現行コード（無条件拒否）と矛盾** — `docs/integration/local-operations-runbook.md:165-171`、`todo.md:317,329`、`docs/integration/unknown-tasks-survey.md:38,52`。現行 `validate_kill_switch_admin_token` は placeholder を無条件 bail し、フラグは互換解析のみ（b3-docs）。
 - [ ] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）。
 - [ ] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査（`:377,382`）／step2 の `grep -A8` 判定が drift 側と分岐（`:302`）／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）。
@@ -3015,4 +3015,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 回帰: `test-legacy-guards.sh` に 4 ケース追加（exit end state 静的ガード、backup cp 失敗、install 失敗、旧バイナリ無し時の cp スキップ）。スタブで /opt・systemd へ接触せず実行。legacy guards **ok=111 fail=0**。
   - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make check-shell` **ok=44 fail=0**、`make secret-scan` exit 0（value-like 0）、Betterleaks 既知 14 件のみ。
   - 副次的に shellcheck ディレクティブ（`# shellcheck disable=...` の `--` 付き書式）が SC1073 を起こしていたため、正しい形へ訂正（イテレーション4でも同型の誤りを経験済み）。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション6 / バックアップ堅牢化）
+
+- [x] **バックアップ関連 HIGH 3件を修正** — R1（b6-ops の分析を流用）→ R2（2体並列）→ R5（親）→ R6（検証）で完了。
+  - 変更: `infra/scripts/backup-local.sh`、`infra/scripts/backup-preflight.sh`、`ci/scripts/test-backup-args.sh`、`todo.md`。
+  - `backup-local.sh`: git archive の秘密語彙を sandbox.rs:461-473 と同じ意図（`.env` / `.key` / `.git/` ＋ `bws.env` / `*.pem` / `*token*` / `*secret*` / `credentials` / `known_hosts` / `id_*`）へ拡張。ただし子の初版は tracked の `ci/scripts/secret_scan.py` と `infra/config/bws.env.example` に誤一致して実 `--apply` を拒否するため、親が R5 で境界付き形へ修正（`bws.env$` アンカー、`token|secret` は秘密系拡張子を持つ basename に限定）。Runtime Proof: tracked 誤検出 0／合成シークレット 8件検出／通常ファイル 0件。
+  - `backup-local.sh`: 取得済み Qdrant snapshot を生成側へ DELETE（ダウンロード・record 成功後、失敗は WARN のみでバックアップは fail させない）。
+  - `backup-preflight.sh`: 必須ツール検査へ `gzip` / `curl` / `jq` を追加（ツール名のみ出力・fail-closed 契約は維持）。`make backup-preflight` → **ok=19 warn=2 fail=0**。
+  - 回帰: `test-backup-args.sh` に `TC-ARCHIVE-secret-path-boundaries` を追加（実パターンをスクリプトから抽出し、tracked 誤検出 0 とシークレット検出を固定）→ **ok=10 fail=0**。restore-local **ok=435 fail=0**、`make check-shell` **ok=44 fail=0**、`make secret-scan` exit 0。
+  - **無関係な baseline 失敗**: `make safety-test` は `RUSTSEC-2026-0594`（cookie 0.18.2、修正版 >=0.18.3）で `AUDIT_VULNERABILITIES_FOUND`。今回の差分は bash のみで `Cargo.lock` 未変更のため原因ではない。次イテレーションで対処する。
 

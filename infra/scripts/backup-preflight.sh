@@ -29,7 +29,10 @@ for unit in postgresql.service qdrant.service; do
 done
 
 # 2) Backup tooling availability (names only).
-for tool in pg_dump pg_dumpall tar sha256sum; do
+# b6-ops / 2026-11-28: gzip/curl/jq are also mandatory for a real backup
+# (backup-local.sh:182 gzip, :191/:204 curl, :195 jq; install-backup-timer.sh:219
+# fails closed on missing jq). Include them so fail=0 means a backup can run.
+for tool in pg_dump pg_dumpall tar sha256sum gzip curl jq; do
   if command -v "$tool" >/dev/null 2>&1; then
     pass "tool:$tool"
   else

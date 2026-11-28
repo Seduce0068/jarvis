@@ -124,5 +124,28 @@ else
   printf 'FAIL: TC-I97A-over-bound\n'; fail=$((fail+1))
 fi
 
+# 2026-11-28 R5 (b6-ops follow-up): the git-archive secret-path vocabulary must
+# reject real secret-like member names without rejecting legitimate tracked
+# sources (ci/scripts/secret_scan.py, infra/config/bws.env.example). Extract the
+# live pattern from backup-local.sh so a future drift is caught here.
+archive_pattern="$(sed -n "s/.*grep -Ei '\([^']*\)'.*/\1/p" "$script" | head -1)"
+archive_pattern_guard() {
+  [ -n "$archive_pattern" ] || return 1
+  local positives negatives
+  positives="$(printf '%s\n' '.env' 'bws.env' 'server.key' 'server.pem' \
+    '.git/config' 'id_rsa' 'known_hosts' 'api_token.txt' \
+    | grep -Eic "$archive_pattern" || true)"
+  negatives="$(printf '%s\n' 'ci/scripts/secret_scan.py' \
+    'infra/config/bws.env.example' 'README.md' 'todo.md' \
+    | grep -Eic "$archive_pattern" || true)"
+  [ "$positives" -eq 8 ] && [ "$negatives" -eq 0 ]
+}
+
+if archive_pattern_guard; then
+  printf 'PASS: TC-ARCHIVE-secret-path-boundaries\n'; ok=$((ok+1))
+else
+  printf 'FAIL: TC-ARCHIVE-secret-path-boundaries\n'; fail=$((fail+1))
+fi
+
 printf 'result: ok=%d fail=%d\n' "$ok" "$fail"
 [ "$fail" -eq 0 ]
