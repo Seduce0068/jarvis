@@ -13,13 +13,11 @@ use qdrant_client::Qdrant;
 use std::sync::Arc;
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct ContextBuilder {
     config: config::ContextConfig,
     builder: Arc<builder::Builder>,
     pg_pool: Arc<deadpool_postgres::Pool>,
     qdrant_client: Arc<Qdrant>,
-    pii_filter: Arc<pii::PiiFilter>,
 }
 
 impl ContextBuilder {
@@ -32,7 +30,7 @@ impl ContextBuilder {
                 config.clone(),
                 pg_pool.clone(),
                 qdrant_client.clone(),
-                pii_filter.clone(),
+                pii_filter,
             )
             .await?,
         );
@@ -47,7 +45,6 @@ impl ContextBuilder {
             builder,
             pg_pool,
             qdrant_client,
-            pii_filter,
         })
     }
 

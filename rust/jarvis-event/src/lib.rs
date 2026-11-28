@@ -22,17 +22,8 @@ fn use_grpc_context(config: &config::EventConfig) -> bool {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct EventNormalizer {
-    config: config::EventConfig,
     normalizer: Arc<normalizer::Normalizer>,
-    ha_client: Arc<sources::HomeAssistantClient>,
-    android_client: Arc<sources::AndroidClient>,
-    policy_client: Arc<jarvis_policy::PolicyClient>,
-    opencode: Arc<opencode::OpenCodeClient>,
-    /// Present only on the legacy in-process route. `grpc` mode delegates to
-    /// the sidecar and must not initialize local PG/Qdrant clients.
-    context_client: Option<Arc<jarvis_context::ContextBuilder>>,
 }
 
 impl EventNormalizer {
@@ -45,27 +36,25 @@ impl EventNormalizer {
         // default route keeps the slice-1 in-process adapter. Local PG/Qdrant
         // clients are only built on the in-process path, so the sidecar route
         // has no local database dependency.
-        let context_client;
-        let context_provider: Arc<dyn ports::ContextProvider>;
-        if use_grpc_context(&config) {
-            context_client = None;
-            context_provider = Arc::new(context_grpc::GrpcContextProvider::new(
+        let context_provider: Arc<dyn ports::ContextProvider> = if use_grpc_context(&config) {
+            Arc::new(context_grpc::GrpcContextProvider::new(
                 &config.context_grpc_addr,
                 config.context_grpc_token(),
-            )?);
+            )?)
         } else {
             let client = Arc::new(
                 jarvis_context::ContextBuilder::new(jarvis_context::config::ContextConfig::load()?)
                     .await?,
             );
-            context_provider = Arc::new(DefaultContextProvider::new(client.clone()));
-            context_client = Some(client);
-        }
+            Arc::new(DefaultContextProvider::new(client))
+        };
         let policy_gate: Arc<dyn ports::PolicyGate> =
             Arc::new(DefaultPolicyGate::new(policy_client.clone()));
 
         let ha_client = Arc::new(sources::HomeAssistantClient::new(&config).await?);
-        let android_client = Arc::new(sources::AndroidClient::new(&config).await?);
+        // Kept for parity with the construction path; the client is not stored
+        // on EventNormalizer (no action dispatch route is wired yet).
+        let _android_client = Arc::new(sources::AndroidClient::new(&config).await?);
         let normalizer = Arc::new(
             normalizer::Normalizer::new(
                 config.clone(),
@@ -93,15 +82,7 @@ impl EventNormalizer {
             });
         }
 
-        Ok(Self {
-            config,
-            normalizer,
-            ha_client,
-            android_client,
-            policy_client,
-            opencode,
-            context_client,
-        })
+        Ok(Self { normalizer })
     }
 
     pub async fn serve_grpc(&self, addr: std::net::SocketAddr) -> Result<()> {

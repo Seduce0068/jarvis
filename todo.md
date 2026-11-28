@@ -2972,10 +2972,10 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] MEDIUM: `smoke-mcp-gw.sh` のデッド既定バイナリパスと `ss` 欠落時の fail-open（b4-scripts）— 2026-11-28 対応済み（デッド既定パスはイテレーション9、ss はイテレーション14で対応、完了記録は末尾を参照）。
 - [x] MEDIUM: `backup-local.sh` の `tar -tzf` 失敗が `|| true` で握り潰され完全扱い（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション14節を参照）。
 - [ ] MEDIUM: `McpGatewayError::kind` の Internal 4 バリアントが untested（`rust/jarvis-mcp-gw/src/error.rs:78-82`、b1-tests）。
-- [ ] MEDIUM: `jarvis-context` の `install_metrics` が 3 クレート修正から漏れ警告分岐が到達不能（`rust/jarvis-context/src/http.rs:25-27`、b5-code）。
+- [x] MEDIUM: `jarvis-context` の `install_metrics` が 3 クレート修正から漏れ警告分岐が到達不能（b5-code）— 2026-11-28 対応済み（完了記録は末尾イテレーション15節を参照）。
 - [ ] MEDIUM: Qdrant snapshot 取得待ちが固定 `sleep 2` で 404 になり得る／runbook の `JARVIS_QDRANT_TIMEOUT_SECS` がレガシー変数を案内（b6-ops）。
 - [ ] MEDIUM: `local-restore-design.md` の manifest 形式が 3 列のまま（現行 7 列記述子、b3-docs）。
-- [ ] LOW: `EventNormalizer` / `ContextBuilder` のデッドフィールドと `#[allow(dead_code)]` 削除（b5-code）。
+- [x] LOW: `EventNormalizer` / `ContextBuilder` のデッドフィールドと `#[allow(dead_code)]` 削除（b5-code）— 2026-11-28 対応済み（完了記録は末尾イテレーション15節を参照）。
 - [ ] LOW: Grafana README の scrape job 数 5→6、infra/README のツリー欠落、証跡再生成 Runbook の mcp-gw 件数 126→166、otelcol 行番号参照、backup-restore-runbook の根拠行（b3-docs / b6-ops、重複統合）。
 - [ ] LOW: `backup-local.sh` が HEAD のコミット ID を manifest に記録しない／COMPLETE の内容整合未検証（b6-ops）。
 - [ ] 契約変更のため保留: `ApprovalRequired` の `ErrorKind` 分離（HTTP/gRPC/MCP の status code 契約変更＋specs/evidence 再生成が必要、b5-code / autonomous=false）。
@@ -3095,4 +3095,10 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - backup: `tar -tzf "$archive_tmp"` の出力を変数へ取り、終了ステータスを検査。失敗時は `ERROR: git archive is not a readable tar.gz; refusing it` を出して一時アーカイブを削除し exit 1（空一覧を「クリーン」と扱わない）。secret-like パスの拒否語彙は不変。
   - 回帰: `test-legacy-guards.sh` に静的ガード 2 件を追加（`command -v ss` / `port check failed` / `port_out`、`archive_list=... || {` / `refusing it`）。動的な no-ss PATH プローブは環境依存で不安定なため静的ガードへ集約（理由をコメントに記録）。legacy guards **ok=131 fail=0**。
   - 検証: `bash -n` / `shellcheck` 3ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション15 / metrics とデッドフィールド）
+
+- [x] **`jarvis-context::install_metrics` を他 3 クレートと同一の fail-closed 形式へ揃えた** — 旧実装は `install_recorder()?` が先に失敗し `set(..).is_err()` の warn が到達不能だった。`METRICS_HANDLE.get().is_some()` を先頭で検査して warn＋`Ok(())` 早期リターンへ変更し、成功時のみ `let _ = METRICS_HANDLE.set(handle);`。通常の一度だけ install という挙動は不変。
+- [x] **`EventNormalizer` / `ContextBuilder` のデッドフィールドを削除** — `EventNormalizer` は `config` / `ha_client` / `android_client` / `policy_client` / `opencode` / `context_client` の 6 フィールドを削除し `normalizer` のみに（各クライアントの生成と `Normalizer` / PolicyGate / spawn への受け渡しは維持、実行経路は不変）。`ContextBuilder` は `pii_filter` フィールドのみ削除（`Builder` が Arc で保持するため PII フィルタ動作は不変）。両構造体の `#[allow(dead_code)]` も削除。clippy が要求した `context_provider` の late-init も式形式へ解消。
+- 検証: `cargo fmt --all -- --check` / `cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks` exit 0、`make ci-local` → **`ci-local: all gates passed`**。
 

@@ -23,10 +23,16 @@ static METRICS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> =
 
 /// Install the Prometheus recorder exactly once per process.
 pub fn install_metrics() -> anyhow::Result<()> {
-    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
-    if METRICS_HANDLE.set(handle).is_err() {
+    // Match policy/mcp-gw/event (2026-11-28): check before touching the global
+    // recorder, otherwise `install_recorder()?` fails first and the warning
+    // branch below is unreachable.
+    if METRICS_HANDLE.get().is_some() {
         tracing::warn!("metrics recorder already installed; keeping the first handle");
+        return Ok(());
     }
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()?;
+    // Only this function writes the handle after a successful install.
+    let _ = METRICS_HANDLE.set(handle);
     Ok(())
 }
 
