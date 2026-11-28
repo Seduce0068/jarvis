@@ -3026,3 +3026,13 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 回帰: `test-backup-args.sh` に `TC-ARCHIVE-secret-path-boundaries` を追加（実パターンをスクリプトから抽出し、tracked 誤検出 0 とシークレット検出を固定）→ **ok=10 fail=0**。restore-local **ok=435 fail=0**、`make check-shell` **ok=44 fail=0**、`make secret-scan` exit 0。
   - **無関係な baseline 失敗**: `make safety-test` は `RUSTSEC-2026-0594`（cookie 0.18.2、修正版 >=0.18.3）で `AUDIT_VULNERABILITIES_FOUND`。今回の差分は bash のみで `Cargo.lock` 未変更のため原因ではない。次イテレーションで対処する。
 
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション7 / 依存脆弱性の修正）
+
+- [x] **`RUSTSEC-2026-0594`（cookie 0.18.2）を修正** — `ui/Cargo.lock` の cookie を 0.18.3 へ更新（`cargo update -p cookie --precise 0.18.3`）。`ci/scripts/check-dependency-audit.sh` → **ok=2**、脆弱性 0（警告 7 件は既存 allowlist）。
+  - 検証: `cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks` は exit 0。
+  - **既存 baseline の切り分け**: `cargo test --locked` は 76 passed / 10 failed（すべて `policy_client` approve スタブの JSON パース `EOF while parsing a string at line 1 column 82`）。lockfile を一時的に 0.18.2 へ戻しても同一の 76/10 であり、cookie 更新とは無関係であることを Runtime Proof で確認した（更新版へ復元済み）。新規バックログ化して追跡する。
+
+### 新規バックログ（2026-11-28 発見）
+
+- [ ] **HIGH: UI の approve スタブテスト 10 件が失敗（既存 baseline）** — `ui/src/policy_client.rs:1099` 等。approve 系のローカル HTTP スタブが返す decision JSON が途中で切れ、`invalid decision JSON ... EOF while parsing a string at line 1 column 82` となる。`cargo test --locked` 全体が 76 passed / 10 failed で `make ui-test` / `ci-local` が赤い。cookie 0.18.2/0.18.3 の双方で同一。スタブのレスポンス本文生成（`approve` / `deny` の 2xx 経路と `tc_u13_*`）を調査し修正する。
+
