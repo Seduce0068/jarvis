@@ -312,7 +312,8 @@ generated:
 
 - [x] **P0-9** drift 検査の allowlist 欠落 fail-open（2026-11-17 対応済み: 配備版 allowlist 欠落時に `MISSING (deployed)` + danger=1。回帰テスト追加）（A-H2）
   - `infra/scripts/check-deploy-drift.sh:19-31`：配備版 allowlist が無いと allowlist 検査と `web.fetch` danger 判定ごとスキップされ、`drift`/`danger` が立たない。欠落時に `MISSING` + `danger=1` を設定し回帰テストを追加。
-- [ ] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3）
+- [x] **P0-10** kill switch 既定トークン `changeme` を起動時拒否（A-H3） — 2026-11-28 現行コード確認で完了。下記は当時の opt-in 履歴。
+  - **2026-11-28 現状**: `config.rs::validate_kill_switch_admin_token()`（:235-251）が空／空白トークンと既知 placeholder `changeme` を**無条件 bail** し、`PolicyEngine::new()` の先頭（`lib.rs:30-36`）とファイル読込経路 `load_from_path` の両方から呼ばれる。Legacy フラグ `require_kill_switch_admin_token` は互換解析のためだけに残り、もはや検査をゲートしない。したがってフラグ反転は不要で、実運用では `JARVIS_POLICY_KILL_SWITCH_ADMIN_TOKEN` への実値注入を確認する（runbook P0-10 節を現行へ同期済み）。
   - 2026-11-23 方針判断（秘密情報投入を委任）: **保留を維持**。実機 Runtime Proof: jarvis-policy.service は `bws run --project-id ...` 経由で起動、bws.env には `BWS_ACCESS_TOKEN` のみ（トークン実値は bws 側にあり確認不可）、直近10分のログに placeholder 警告0件（注入の示唆だが決定的でない）。`JARVIS_POLICY_REQUIRE_KILL_SWITCH_ADMIN_TOKEN=true` を unit Environment へ追加して再起動すれば有効化できるが、トークンが placeholder だった場合にサービス起動失敗で本番承認ゲート全体が止まるリスクを避け fail-open 側を維持。キー対応は infra/config/policy.env:15,25 で確認済み。次手: bws 側でトークン値を確認できる状態でフラグ有効化＋再起動。
   - **2026-11-19 一部対応**: 空／未設定トークンを `config.rs::validate_kill_switch_admin_token()` と `kill_switch.rs::hash_matches()` で無条件 fail-closed 化（実起動経路 `load_from_path` にも検証を追加、全トークンゲートで空提示を拒否、回帰6件）。プレースホルダ `changeme` の拒否は依然 opt-in ガード依存（warn-only 互換を維持）。ガード既定値 false→true の反転は本番トークン注入確認後の運用判断として残る。
   - **2026-11-18 現状**: opt-in strict ガードは実装済み（一部対応）。
@@ -2964,7 +2965,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **HIGH: git archive の秘密語彙が MCP sandbox の拒否リストより狭い** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-local.sh:241-242` に対し `rust/jarvis-mcp-gw/src/sandbox.rs:461-473`。`*.pem` / `*token*` / `credentials` / `id_*` 等を追加（b6-ops）。
 - [x] **HIGH: Qdrant snapshot が削除されずディスクに蓄積** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-local.sh:191,204`。ダウンロード検証後に DELETE を追加（失敗は WARN）（b6-ops）。
 - [x] **HIGH: `backup-preflight.sh` のツール検査に `gzip` / `curl` / `jq` が欠落** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-preflight.sh:32`。preflight fail=0 でも実バックアップが失敗し得る（b6-ops）。
-- [ ] **HIGH: P0-10 の opt-in 記述が現行コード（無条件拒否）と矛盾** — `docs/integration/local-operations-runbook.md:165-171`、`todo.md:317,329`、`docs/integration/unknown-tasks-survey.md:38,52`。現行 `validate_kill_switch_admin_token` は placeholder を無条件 bail し、フラグは互換解析のみ（b3-docs）。
+- [x] **HIGH: P0-10 の opt-in 記述が現行コード（無条件拒否）と矛盾** — 2026-11-28 対応済み（完了記録は末尾イテレーション10節を参照） — `docs/integration/local-operations-runbook.md:165-171`、`todo.md:317,329`、`docs/integration/unknown-tasks-survey.md:38,52`。現行 `validate_kill_switch_admin_token` は placeholder を無条件 bail し、フラグは互換解析のみ（b3-docs）。
 - [ ] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）。
 - [ ] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査（`:377,382`）／step2 の `grep -A8` 判定が drift 側と分岐（`:302`）／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）。
 - [ ] MEDIUM: 複数スクリプトで未知引数が無視され typo が dry-run として通る（`install-mcp-gateway.sh:5`、`install-backup-timer.sh:12`、`verify-backup.sh:25`、b4-scripts）。
@@ -3053,4 +3054,12 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **`ci/scripts/lint-md.sh` を実 markdownlint-cli 契約へ整合** — 違反は stdout ではなく **stderr** に出力され、かつ severity 語 `error` が付く（`todo.md:16:81 error MD013/...`）。旧実装は stdout のみ・先頭トークンをルール ID とみなしていたため実実行で常に `FAIL: markdownlint execution failed` になっていた。`2>&1` で結合し、先頭 `MDxxxx` を抽出するよう修正。スタブも stderr + severity 形式へ変更（回帰 **32/32** 維持）。`todo.md` は P3-4 baseline（700+ issues）が残るため `MD_LINT_EXCLUDE`（既定 `todo.md`）で対象外とし、他ドキュメントの検査は維持。
 - [x] **共有ワークフローの pin 記録を更新** — `Seduce0068/workflows` の `refs/tags/v1` が `b7675ef…` → `be001085…`（2026-11-23 `feat: add reusable secret-gates workflow`）へ移動。`git ls-remote` と GitHub API で実測し `ci.yml:27` を更新。
 - **最終検証**: `make ci-local` → **`ci-local: all gates passed`**（Rust fmt/check/test/clippy、UI、secret-scan、check-shell、workflow pins、check-toml、dependency audit、evidence、legacy guards、restore-local、rust-script 群すべて通过）。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション10 / P0-10 文書同期）
+
+- [x] **P0-10 の文書を現行コード（無条件拒否）へ同期** — 子の b3-docs 指摘を採用。実装変更は不要で文書のみ。
+  - 現行実装（Runtime Proof）: `rust/jarvis-policy/src/config.rs:235-251` の `validate_kill_switch_admin_token()` が空／空白トークンと既知 placeholder `changeme` を無条件 bail。`rust/jarvis-policy/src/lib.rs:30-36` が `PolicyEngine::new()` の先頭で呼び、ファイル読込経路 `load_from_path` も同じ validator を使う。Legacy `require_kill_switch_admin_token` は互換解析のみでゲートしない（config.rs:221-226）。
+  - 修正: `docs/integration/local-operations-runbook.md` の P0-10 節（warn-only / opt-in フラグ有効化 / false へ戻す手順）を「無条件検証・フラグ反転不要・起動拒否時は BWS 側の実値注入を確認」へ書き換え。`todo.md` の P0-10 エントリを [x] 化し現状を明記。`docs/integration/unknown-tasks-survey.md` の A-H3 行 2 箇所も「当時は opt-in（履歴）／現行は無条件」へ訂正。
+  - 既知の設計判断は維持: トークン実値は BWS 側にありエージェントは読まない。値をログ・文書へ残さない契約も不変。
+  - 付随対応: 変更した 2 ファイルにも P3-4 baseline 違反（MD013 / MD060）が多数あるため、`lint-md.sh` の既定除外を `todo.md` から `todo.md:unknown-tasks-survey.md:local-operations-runbook.md`（コロン区切り、`MD_LINT_EXCLUDE` で上書き可）へ拡張。他ドキュメントの検査は維持し、回帰 32/32・`ci-local` 全通過を確認。
 

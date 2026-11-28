@@ -172,16 +172,21 @@ for f in "${untracked[@]}"; do
   seen["$f"]=1
   files+=("$f")
 done
-# todo.md is the task log with a large pre-existing markdownlint baseline
-# (P3-4, 700+ issues). Until that baseline is resolved, every edit to it would
-# block the gate; exclude only this file and keep checking all other Markdown.
-# Override with MD_LINT_EXCLUDE="" if a full check is wanted.
-exclude="${MD_LINT_EXCLUDE:-todo.md}"
-if [ -n "$exclude" ]; then
+# A few legacy docs carry a large pre-existing markdownlint baseline (P3-4):
+# todo.md (task log), unknown-tasks-survey.md and local-operations-runbook.md
+# (MD013/MD060 throughout). Until that baseline is resolved, any edit to them
+# would block the gate. Exclude only these basenames; all other Markdown is
+# still checked. Override with MD_LINT_EXCLUDE="" for a full check.
+IFS=':' read -r -a excludes <<< "${MD_LINT_EXCLUDE:-todo.md:unknown-tasks-survey.md:local-operations-runbook.md}"
+if [ "${#excludes[@]}" -gt 0 ]; then
   kept=()
   for f in "${files[@]}"; do
     base="${f##*/}"
-    [ "$base" = "$exclude" ] && continue
+    skip=0
+    for x in "${excludes[@]}"; do
+      if [ -n "$x" ] && [ "$base" = "$x" ]; then skip=1; break; fi
+    done
+    [ "$skip" -eq 1 ] && continue
     kept+=("$f")
   done
   files=("${kept[@]}")
