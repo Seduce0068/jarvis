@@ -8,8 +8,8 @@ Safety properties:
 - Known-safe matches (placeholders, documented examples, and the repo's own
   PII-detection regex definitions) are classified as such, not as findings.
   Documentation under docs/ is NOT a blanket safe path (I7-B): placeholder
-  examples there are recognised via PLACEHOLDER, but a value-like literal in
-  documentation fails the gate just like one in source code.
+  examples there are recognised via the placeholder patterns below, but a
+  value-like literal in documentation fails the gate just like one in source.
 
 Usage: python3 ci/scripts/secret_scan.py (runnable from any CWD)
 
@@ -44,14 +44,25 @@ ASSIGNMENT = re.compile(
     r"PRIVATE_KEY|CLIENT_SECRET)\s*[:=]\s*(.+)"
 )
 PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")
-PLACEHOLDER = re.compile(
-    r"(?i)(changeme|replace[_-]?me|your[_-]|xxx+|<[^>]+>|\$\{|op://|example|placeholder|"
-    r"dummy|redact|template|none|null|todo|tbd|^\s*['\"]?\s*['\"]?\s*$)"
+# Placeholder shapes are split in two (b4-scripts / 2026-11-28). Word tokens
+# use explicit alphanumeric boundaries: plain `\b` counts `_` as a word
+# character, so `dummy_value_123` must stay a placeholder while a token inside
+# a real value (`A1B2C3exampleXYZ`) must no longer fail open as one. Structural
+# shapes keep search semantics for `your_`/`xxx`, but interpolation/reference
+# syntax (`<...>`, `${...}`, `op://`) is only recognised at the start of the
+# value because the same syntax can occur inside a real credential.
+PLACEHOLDER_WORD = re.compile(
+    r"(?i)(?<![A-Za-z0-9])(?:changeme|replace[_-]?me|example|placeholder|"
+    r"dummy|redact|template|none|null|todo|tbd)(?![A-Za-z0-9])"
+)
+PLACEHOLDER_STRUCT = re.compile(
+    r"(?i)(?:(?<![A-Za-z0-9])xxx+(?![A-Za-z0-9])|(?<![A-Za-z0-9])your[_-]|^<[^>]+>|^\$\{|^op://|"
+    r"^\s*['\"]?\s*['\"]?\s*$)"
 )
 # These files define detection regexes or document credential NAMES, not values.
 # docs/ is intentionally NOT a safe path (I7-B): placeholder examples in docs
-# are recognised via PLACEHOLDER, but a value-like literal in documentation
-# must fail the gate just like one in source code.
+# are recognised via the patterns above, but a value-like literal in
+# documentation must fail the gate just like one in source code.
 # Membership is EXACT, not prefix-based: a look-alike path such as
 # `AGENTS.md.bak` or `ci/review-gate.yml.template` must not silently inherit
 # the exemption of its namesake (static-guard coverage gap).
@@ -123,9 +134,27 @@ def index_count(root: str) -> int:
     return len(_nul_lines(result.stdout))
 
 
+def is_placeholder(value: str) -> bool:
+    """Return True when a stripped value has a known placeholder shape.
+
+    Pure helper: no scan, no output, no global state. The bounded word tokens
+    close the b4-scripts / 2026-11-28 substring fail-open; structural shapes
+    are anchored where mid-value syntax can belong to a real credential.
+    """
+    return bool(PLACEHOLDER_WORD.search(value) or PLACEHOLDER_STRUCT.search(value))
+
+
 def classify(value: str) -> str:
-    stripped = value.strip().strip("\"'").split("#", 1)[0].strip()
-    if not stripped or PLACEHOLDER.search(stripped) or len(stripped) < 8:
+    """Classify a credential-shaped value without ever returning it.
+
+    b4-scripts / 2026-11-28: substring matching fail-opened on values such as
+    `A1B2C3exampleXYZ`; bounded word tokens and value-anchored structural
+    shapes replace it. The `len(stripped) < 8` baseline is unchanged.
+    """
+    # A bare '#' is part of the credential value; only a whitespace-preceded
+    # '#' starts a trailing comment (R4 / 2026-11-28).
+    stripped = re.split(r"\s+#", value.strip().strip("\"'"), 1)[0].strip()
+    if not stripped or len(stripped) < 8 or is_placeholder(stripped):
         return "placeholder"
     return "VALUE-LIKE"
 

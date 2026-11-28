@@ -231,7 +231,9 @@ fi
 
 echo "== 0. 前提確認 =="
 id -u jarvis >/dev/null 2>&1 || die "ユーザー jarvis が存在しません（unit の User= と不一致）"
-[ -r <home> ] || die "<home> が読めません（ProtectHome=read-only と base dir の前提を確認）"
+service_home="$(getent passwd jarvis 2>/dev/null | cut -d: -f6 || true)"
+[ -n "$service_home" ] && [ -r "$service_home" ] \
+  || die "サービスのホームディレクトリが読めません（ProtectHome=read-only と base dir の前提を確認）"
 python3 -c 'import sys, tomllib; tomllib.load(open(sys.argv[1], "rb"))' "$repo_allowlist" \
   || die "allowlist の TOML が不正です: $repo_allowlist"
 systemd-analyze verify "$repo_unit" >/dev/null 2>&1 || die "unit ファイルの検証に失敗: $repo_unit"

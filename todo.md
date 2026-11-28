@@ -2985,3 +2985,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - lint-md 回帰の指摘は b1-tests と b2-ci で重複 → 即時修正済みのため新規バックログ化しない。
 - P0-10 は「方針保留」ではなく「文書が現行実装と矛盾」する点のみを採用（実装自体の変更ではない）。
 
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション3 / secret_scan 境界修正）
+
+- [x] **`secret_scan.py` の PLACEHOLDER 部分一致 fail-open を修正** — R1（1体・12件）→ R2（2体）→ R4（1体・5件）→ R5（親）→ R6（検証）で完了。
+  - 変更: `ci/scripts/secret_scan.py`、`ci/scripts/test-legacy-guards.sh`、`infra/scripts/deploy-mcp-gw-safe.sh`。
+  - 判定を `PLACEHOLDER_WORD`（英数字ルックアラウンド）と `PLACEHOLDER_STRUCT`（`xxx` / `your_` もルックアラウンド、`<...>` / `${` / `op://` は行頭アンカー）へ分離。純粋ヘルパ `is_placeholder()` を追加し `classify()` から呼ぶ。値非出力契約・`len(stripped) < 8` の baseline・SAFE_PATHS は不変。
+  - 値中の `#` は空白先行時のみコメント扱いへ変更（`abc#RealSecret123` を VALUE-LIKE として検出）。R4 指摘のうち `xxx` / `your_` の非境界 fail-open も同時に遮断。
+  - 回帰: `test-legacy-guards.sh` に negative test（伪プローブ `A1B2C3exampleXYZ` 等を throwaway repo 内で生成し、tracked テキストには ASSIGNMENT 形状を残さない）と positive baseline（`dummy_value` / `user@example.com` / `${VAR}` / `op://...` 等）を追加。legacy guards **ok=107 fail=0**。
+  - 検証: `make secret-scan` は before/after で `(path, key, kind)` 完全一致（**19 matches / exit 0**）、`make check-shell` **ok=43 fail=0**、`py_compile` OK、Betterleaks 既知 14 件のみ（新規 0）。
+  - 副次修正: リモートのサニタイズ時に `deploy-mcp-gw-safe.sh:234` が `<home>` プレースホルダのまま残り shellcheck SC1073 で fail していたため、`getent passwd jarvis` による動的解決へ変更（機微情報をコードへ戻さない）。
+  - R4 の残り指摘は次イテレーションへ: (1) 区切り文字（`_` / `-` / `.` / `/`）入りの実値 `A1B2C3_example_XYZ` が placeholder 化する問題（トークン文法への変更で baseline を壊すリスク）、(2) 動的ホーム解決が実効 `BASE_DIR` ではなく jarvis の passwd ホームを検査する問題（設計判断を伴う）。
+

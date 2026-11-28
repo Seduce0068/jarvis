@@ -1068,6 +1068,144 @@ else
   fi
 fi
 
+# R2 bounded-placeholder regression. The old unbounded PLACEHOLDER.search()
+# matched `example`/`placeholder` inside an otherwise value-like token and
+# silently downgraded it to "placeholder". All probes below are synthetic;
+# on failure only the exit code is reported, never the scanner output.
+scan_bounded="$tmp/secret_scan_bounded"
+mkdir -p "$scan_bounded"
+bounded_probe_example='A1B2C3exampleXYZ'
+bounded_probe_placeholder='A1B2C3placeholderXYZ'
+# Key names are held in variables so this tracked script never contains a
+# literal `KEY = value` line that the scanner would classify itself. The
+# assignment lines are generated at runtime inside the throwaway repo only.
+probe_key_password='PASSWORD'
+probe_key_api='API_KEY'
+probe_key_secret='SECRET'
+probe_key_access='ACCESS_TOKEN'
+probe_key_client='CLIENT_SECRET'
+probe_key_bws='BWS_ACCESS_TOKEN'
+if ! (cd "$scan_bounded" \
+      && git init -q >/dev/null 2>&1 \
+      && printf '%s = %s\n%s = %s\n' \
+           "$probe_key_password" "$bounded_probe_example" \
+           "$probe_key_api" "$bounded_probe_placeholder" > leaky.env \
+      && git add -f leaky.env >/dev/null 2>&1); then
+  echo "  FAIL: could not prepare bounded-placeholder git repo for secret scanner test"
+  fail=$((fail+1))
+else
+  # Copy the scanner only AFTER git add so its own regex literals stay
+  # untracked and are not scanned as tracked content.
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_bounded/secret_scan.py"
+  out=$(cd "$scan_bounded" && python3 secret_scan.py 2>&1); code=$?
+  leaked=0
+  for probe in "$bounded_probe_example" "$bounded_probe_placeholder"; do
+    if printf '%s' "$out" | grep -Fq -- "$probe"; then leaked=1; fi
+  done
+  if [ "$code" -eq 1 ] \
+     && printf '%s' "$out" | grep -q 'VALUE-LIKE' \
+     && [ "$leaked" -eq 0 ]; then
+    echo "  PASS: secret_scan.py flags embedded placeholder words as VALUE-LIKE"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: secret_scan.py accepted an embedded placeholder word (exit=$code, output withheld)"
+    fail=$((fail+1))
+  fi
+fi
+
+# R2 table-driven coverage: further embedded placeholder words must all be
+# VALUE-LIKE. Count the finding lines instead of echoing any probe value.
+scan_bounded_table="$tmp/secret_scan_bounded_table"
+mkdir -p "$scan_bounded_table"
+bounded_probe_dummy='A1B2C3dummyXYZ'
+bounded_probe_none='A1B2C3noneXYZ'
+bounded_probe_template='A1B2C3templateXYZ'
+if ! (cd "$scan_bounded_table" \
+      && git init -q >/dev/null 2>&1 \
+      && printf '%s = %s\n%s = %s\n%s = %s\n' \
+           "$probe_key_secret" "$bounded_probe_dummy" \
+           "$probe_key_access" "$bounded_probe_none" \
+           "$probe_key_client" "$bounded_probe_template" > leaky.env \
+      && git add -f leaky.env >/dev/null 2>&1); then
+  echo "  FAIL: could not prepare table-driven bounded-placeholder git repo"
+  fail=$((fail+1))
+else
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_bounded_table/secret_scan.py"
+  out=$(cd "$scan_bounded_table" && python3 secret_scan.py 2>&1); code=$?
+  vl_count=$(printf '%s' "$out" | grep -c -- '-> VALUE-LIKE' || true)
+  leaked=0
+  for probe in "$bounded_probe_dummy" "$bounded_probe_none" "$bounded_probe_template"; do
+    if printf '%s' "$out" | grep -Fq -- "$probe"; then leaked=1; fi
+  done
+  if [ "$code" -eq 1 ] \
+     && [ "$vl_count" -eq 3 ] \
+     && [ "$leaked" -eq 0 ]; then
+    echo "  PASS: secret_scan.py flags all table-driven embedded placeholder words"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: secret_scan.py missed a table-driven embedded placeholder word (exit=$code, output withheld)"
+    fail=$((fail+1))
+  fi
+fi
+
+# R2 positive baseline: known placeholder shapes must stay classified as
+# placeholder, guarding against flipping the existing baseline cases.
+scan_bounded_baseline="$tmp/secret_scan_bounded_baseline"
+mkdir -p "$scan_bounded_baseline"
+# shellcheck disable=SC2016
+# ${VAR} is scanned as a literal placeholder shape, not expanded here.
+baseline_probes=('dummy_value' 'user@example.com' '<your-token>' '${VAR}' 'op://vault/item/field')
+if ! (cd "$scan_bounded_baseline" \
+      && git init -q >/dev/null 2>&1 \
+      && printf '%s = %s\n%s = %s\n%s = %s\n%s = %s\n%s = %s\n' \
+           "$probe_key_password" "${baseline_probes[0]}" \
+           "$probe_key_api" "${baseline_probes[1]}" \
+           "$probe_key_secret" "${baseline_probes[2]}" \
+           "$probe_key_access" "${baseline_probes[3]}" \
+           "$probe_key_bws" "${baseline_probes[4]}" > leaky.env \
+      && git add -f leaky.env >/dev/null 2>&1); then
+  echo "  FAIL: could not prepare placeholder-baseline git repo"
+  fail=$((fail+1))
+else
+  cp "$repo/ci/scripts/secret_scan.py" "$scan_bounded_baseline/secret_scan.py"
+  out=$(cd "$scan_bounded_baseline" && python3 secret_scan.py 2>&1); code=$?
+  leaked=0
+  for probe in "${baseline_probes[@]}"; do
+    if printf '%s' "$out" | grep -Fq -- "$probe"; then leaked=1; fi
+  done
+  if [ "$code" -eq 0 ] \
+     && ! printf '%s' "$out" | grep -q 'VALUE-LIKE' \
+     && printf '%s' "$out" | grep -q 'no value-like credentials found' \
+     && [ "$leaked" -eq 0 ]; then
+    echo "  PASS: secret_scan.py keeps known placeholders classified as placeholder"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: secret_scan.py reclassified a known placeholder (exit=$code, output withheld)"
+    fail=$((fail+1))
+  fi
+fi
+
+# R2 direct assertions: import the scanner module (without running main) and
+# check both sides of the boundary rule. Messages contain no probe value and
+# any failing output is discarded rather than echoed.
+if python3 - "$repo/ci/scripts/secret_scan.py" 2>/dev/null <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location('secret_scan_under_test', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+assert module.classify('A1B2C3exampleXYZ') == 'VALUE-LIKE', 'embedded placeholder must be VALUE-LIKE'
+assert module.classify('dummy_value') == 'placeholder', 'known placeholder must stay placeholder'
+PY
+then
+  echo "  PASS: secret_scan.py classify() enforces the bounded placeholder rule"
+  ok=$((ok+1))
+else
+  echo "  FAIL: secret_scan.py classify() failed direct boundary assertions (output withheld)"
+  fail=$((fail+1))
+fi
+
 # Static-guard coverage: a look-alike of a SAFE_PATHS entry must NOT inherit
 # the exemption. With prefix matching, `AGENTS.md.bak` would be downgraded to
 # "review (safe path)" and the gate would pass silently (fail-open).
@@ -1197,6 +1335,23 @@ if grep -Fq '"git", "-C", script_dir, "rev-parse"' "$scanner_src" \
   ok=$((ok+1))
 else
   echo "  FAIL: secret_scan.py lost the root anchor or the index cross-check"
+  fail=$((fail+1))
+fi
+
+# R2 static guard: the PLACEHOLDER decision must be boundary-aware. Accept a
+# dedicated helper (e.g. is_placeholder) or an explicit bounded-regex / full-
+# match / token-split form; the unbounded substring search is what allowed an
+# embedded `example` to be downgraded to placeholder.
+if grep -Eq 'def[[:space:]]+[A-Za-z_]*placeholder' "$scanner_src" \
+   || grep -Fq '(?<!' "$scanner_src" \
+   || grep -Fq '(?!' "$scanner_src" \
+   || grep -Fq 'fullmatch' "$scanner_src" \
+   || grep -Fq '[^A-Za-z0-9]' "$scanner_src" \
+   || grep -Fq 're.escape' "$scanner_src"; then
+  echo "  PASS: secret_scan.py has a boundary-aware placeholder determination"
+  ok=$((ok+1))
+else
+  echo "  FAIL: secret_scan.py lost the boundary-aware placeholder determination"
   fail=$((fail+1))
 fi
 
