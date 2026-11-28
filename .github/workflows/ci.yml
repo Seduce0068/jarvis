@@ -92,6 +92,14 @@ jobs:
         make check-shell
         make check-workflow-pins
         make check-toml
+        # R4/R5: markdownlint incremental gate. A clean checkout has an empty
+        # `git diff HEAD`, so pass an explicit base. Fetch it first; if the
+        # fetch fails, lint-md.sh's base validation fails closed (the `|| true`
+        # only avoids aborting the shell here, it does not let the gate pass).
+        # push-to-master may be a no-op (already checked on the PR); baseline
+        # 456 issues stay excluded until P3-4 is resolved.
+        git fetch --no-tags --depth=1 origin master || true
+        MD_LINT_BASE=origin/master make lint-md
         # I93-A: dependency advisory audit for rust/ and ui/ Cargo.lock.
         # Precondition: cargo-audit is installed at a pinned version on the
         # runner; the gate fails closed with AUDIT_TOOL_MISSING otherwise.

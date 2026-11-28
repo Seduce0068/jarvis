@@ -65,8 +65,8 @@
       },
       {
         "matcher": "**/*.md",
-        "command": "shell npx markdownlint --fix",
-        "description": "Markdown編集後にlint自動修正"
+        "command": "shell npx --yes markdownlint@0.50.1 --fix {file}",
+        "description": "Markdown編集後にlint自動修正（編集したファイルのみ。版は Makefile の MARKDOWNLINT_VERSION と同期）"
       }
     ],
     "post-write": [
@@ -85,12 +85,12 @@
       {
         "matcher": "*",
         "command": "shell make secret-scan",
-        "description": "コミット前シークレットスキャン（値は出力しない ci/scripts/secret_scan.py。|| true を付けず失敗時にコミットをブロック。CI の extra_gates でも make secret-scan を最終ゲートとして併設 = pre-commit 主軸 / CI 最終ゲートの二段構成。git hook の実インストールは行わず設定ファイルのみ）"
+        "description": "コミット前シークレットスキャン（値は出力しない ci/scripts/secret_scan.py。|| true を付けず失敗時にコミットをブロック。CI の extra_gates にも make secret-scan を併設 = pre-commit 主軸 / CI 併設の二段構成。ただし CI では check-evidence / safety-test / ui-test が後続するため最終ゲートではない。git hook の実インストールは行わず設定ファイルのみ）"
       },
       {
         "matcher": "*",
-        "command": "shell git diff --cached --name-only | xargs -r npx markdownlint 2>/dev/null || true",
-        "description": "コミット前Markdownチェック（方針: docs/ に MD013 等の baseline が残存するため（todo.md P3-4、456 issues）現状は || true で警告扱いとしコミットをブロックしない。baseline 解消後に || true を外す。シークレット検出の fail-closed は上記 secret-scan が担う）"
+        "command": "shell MD_LINT_MODE=staged bash ci/scripts/lint-md.sh",
+        "description": "コミット前Markdownチェック（R5: ステージ済み＋untracked の *.md のみを fail-closed で検査。出力はファイル名とルール ID のみ。但し書き: docs/ に MD013 等の baseline 456 issues（todo.md P3-4）が残存するため、既存違反行を触るとコミットがブロックされる。baseline 全解消後に --all を常設ゲートへ昇格する。版は Makefile の MARKDOWNLINT_VERSION=0.50.1 と同期）"
       }
     ]
   }

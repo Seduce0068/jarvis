@@ -125,7 +125,7 @@ generated:
   - （旧状態）repo 側は完了、実機は未導入 / inactive。隔離先での実復元検証も未実施。
     `make timer-status` → `sudo ... install-backup-timer.sh --apply` →
     確認 → 復元演習の順（ユーザー実行が必要）。
-  - 2026-11-22 並列 Verify（V-141）: 未解決（ユーザー操作）。repo 側 timer unit と install-backup-timer.sh は整備済み、2026-11-19 に実機 active/enabled 記録あり。残るは修正済み unit（--repo-dir / ProtectHome=read-only）の実機再適用と S9 実機演習。
+  - 2026-11-22 並列 Verify（V-141）: 未解決（ユーザー操作）。repo 側 timer unit と install-backup-timer.sh は整備済み、2026-11-19 に実機 active/enabled 記録あり。残るは S9 実機演習。**2026-11-28 訂正**: 当時「修正済み unit（`--repo-dir` / `ProtectHome=read-only`）の実機再適用」と記録したが、同日の再適用で `--repo-dir` は postgres ユーザーが `/home/koppe`（0750）を through できず構造的に不可と判定し、repo unit から削除・`ProtectHome=yes` へ戻している（下記 2026-11-23 記録 `:699` が正）。
 - [ ] **P1-6** バックアップを暗号化・署名し保持期間を設定（R3-DR-002,
     R3-DR-003）
   - manifest は平文 SHA-256 のみ、署名なし。`--retain-days` は opt-in で
@@ -206,7 +206,7 @@ generated:
 - [x] **P2-11** setup スクリプトの固定 DB パスワードを除去（2026-11-17 対応済み: `JARVIS_DB_PASSWORD` 環境変数必須化、code-server 生成パスワードの標準出力を廃止、infra/README に手順追記）（R1-SEC-007）
   - 固定文字列をハードコード、生成パスワードを標準出力へ表示。
     `secret_scan.py` が SQL の `WITH PASSWORD` を検出できない問題も。
-- [x] **P2-13** pre-commit を主軸・CI を最終ゲートとする二段構成を完成（2026-11-20 監査 I68-B 対応: `hooks.json` の pre-commit に `make secret-scan`（`|| true` 無し・値非出力の `ci/scripts/secret_scan.py`）を追加しシークレット検出で fail-closed。Markdown lint は docs/ の baseline 456 issues（P3-4）が残るため `|| true` を維持し、その方針を description に明記。`.github/workflows/ci.yml` の `clippy_args` に `-D warnings` を追加。check/test の `--locked` は共有ワークフロー `rust-gates.yml@v1` 内部で未確認のため呼び出し側では設定せずコメントで現状を記録。git hook の実インストール（`git config core.hooksPath`）は行わず設定ファイルのみ編集）（共通指示 §4 / §15, R4-GATE-006）
+- [x] **P2-13** pre-commit を主軸・CI にも併設する二段構成を完成（2026-11-28 訂正: CI では check-evidence / safety-test / ui-test が後続するため「最終ゲート」ではない）（2026-11-20 監査 I68-B 対応: `hooks.json` の pre-commit に `make secret-scan`（`|| true` 無し・値非出力の `ci/scripts/secret_scan.py`）を追加しシークレット検出で fail-closed。Markdown lint は docs/ の baseline 456 issues（P3-4）が残るため `|| true` を維持し、その方針を description に明記。`.github/workflows/ci.yml` の `clippy_args` に `-D warnings` を追加。check/test の `--locked` は共有ワークフロー `rust-gates.yml@v1` 内部で未確認のため呼び出し側では設定せずコメントで現状を記録。git hook の実インストール（`git config core.hooksPath`）は行わず設定ファイルのみ編集）（共通指示 §4 / §15, R4-GATE-006）
 
 ## P3: ドキュメント・レガシー整理（低）
 
@@ -223,7 +223,7 @@ generated:
   - （解消済み）旧状態: 起動→検証→停止（停止手順は 0 件）、手動変更のロールバック、
     `make verify-backup` が `/opt` へ書き込む矛盾、clippy 表記の不統一。
 - [ ] **P3-4** markdownlint / 索引を整備
-  - 2026-11-22 並列 Verify（V-57）: 一部解消・全体は未解決。索引（adr/index.md / log.md / docs/*/index.md）と type 付与は完了、新規 lint 0・リンク切れ 0。残るは baseline 456 issues（MD013 等）の全解消方針と hooks.json:92-93 の `|| true` 解除判断で先送り明記。CI ゲート欠落は 3077 行目で別途追跡。
+  - 2026-11-22 並列 Verify（V-57）: 一部解消・全体は未解決。索引（adr/index.md / log.md / docs/*/index.md）と type 付与は完了、新規 lint 0・リンク切れ 0。残るは baseline 456 issues（MD013 等）の全解消方針と hooks.json:92-93 の `|| true` 解除判断で先送り明記。CI ゲート欠落は下記「markdownlint がフックのみで CI にゲートが無い」項目で別途追跡（2026-11-28 訂正: 旧「3077 行目」は陳腐化）。
 （2026-11-17 一部対応: `adr/index.md` と `adr/log.md` を追加。**2026-11-18 監査: 新規 lint 0・baseline 456 issues 残存**、リンク切れ0。既存 MD013 の全解消は未実施）（R5-FMT-003〜006）
   - テンプレートの `type` 欠落、MD013（docs 156 行 / adr 18 行）、
     `adr/index.md` と `log.md` の未配置。
@@ -781,7 +781,7 @@ generated:
 
 - [ ] **OpenCode の設定だけでは塞がらない秘密読取経路** — 根拠
   - 2026-11-22 並列 Verify（V-132）: 未解決（設計判断待ち）。opencode.jsonc は deny パターン＋per-agent permission を記録済み（todo.md:630-631 で [x]）だが bash/task 等は "*": "allow" を残し、メタ文字・cwd 外絶対パスは wildcard fallback で迂回可能。OS サンドボックス／実行前フックでの補完を「検討」として残存（todo.md:801-809）。配布未配線（V-83）も未解消。
-  `opencode-agent/src/executor.rs:578-651`（ローカル依存ソース）/
+  （2026-11-28 訂正: 根拠の `opencode-agent/src/executor.rs:578-651` は本 repo 内に実在せず glob 0 件。ローカル依存ソースは照合不可）/
   R4 レビュー / 優先度 中。
   - bash コマンドに `& ; | > < $ \` ( ) { } \` や改行が含まれると
     permission target が `"*"` へフォールバックし、`cat $HOME/.aws/credentials`
@@ -2033,7 +2033,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 71 の残り指摘（未対応）
 
-- [ ] 共有 lib の配布先（`install-backup-timer.sh` と `Makefile`）は追加したが、
+- [x] 共有 lib の配布先（`install-backup-timer.sh` と `Makefile`）は追加済み（2026-11-28 R1-doc で repo 側実装を確認: Makefile:163-166 / install-backup-timer.sh:29-31,171-173）。残る実機再インストールは下記ユーザー運用項目で追跡。
       既に configured 済みの実機へ反映するには再インストールが必要（ユーザー/
       実機運用）。
 - 親が対応: TC-R1（role 権威）と I74-B（basename 権威）の矛盾を `*.sql.gz`
@@ -2398,7 +2398,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 
 ### Round 88 の残り指摘（未対応）
 
-- [ ] major 更新待ち29件の解消（hickory 0.26 / rsa 0.10 / rmcp 3.9 /
+- [ ] major 更新待ち（audit.toml の ignore 実エントリ 31 件。旧記録の「29件」は実数と不一致 — 2026-11-28 R1-arch で訂正）の解消（hickory 0.26 / rsa 0.10 / rmcp 3.9 /
       旧 rustls 0.22 系統 / libsqlite3-sys）— 再評価 2026-12-20。
   - 2026-11-22 重複整理: 同一内容12件を1件へ統合。再評価日 2026-12-20 までは現状維持（advisory DB 更新と major 更新は外部依存・設計判断）。
 - [x] CI runner への cargo-audit 0.23.0 固定導入（冪等チェック付き、呼び出し側
@@ -2929,4 +2929,17 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - **外部ブロッカー（既知）**: CI が Billing 原因で全件 failure のまま
   （R5-VU01）。権限外のためユーザー対応待ち。解消まで `make ci-local` が
   唯一の決定論的検証。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション1 / markdownlint 増分ゲート）
+
+- [x] **P3-4 段階1: markdownlint の新規違反ゲートを追加** — R1（5観点・41件）→ R2（3体）→ R4（2観点・18件）→ R5（2体）→ R6（親検証）で完了。完全無制限プロファイル（同時起動上限80 / 深度80、上限まで使用せず、トータル制限なし）。
+  - 変更: `ci/scripts/lint-md.sh`（新規）, `ci/scripts/test-lint-md.sh`（新規）, `Makefile`, `.github/workflows/ci.yml`, `hooks.json`, 本ファイル。
+  - 契約: 既定は `MD_LINT_BASE`（既定 HEAD）から作業ツリーへの差分 Markdown のみを fail-closed で検査。`MD_LINT_MODE=staged` はステージ済み＋untracked。`--all` は baseline 解消後の将来用。`MARKDOWNLINT_VERSION=0.50.1`（2026-11-28 実測）で pin。
+  - 出力は `ファイル名: MDxxxx` のみ（本文・値・stderr 非出力）。git 失敗 / npx 不在 / 空 findings は fail-closed。`git -c core.quotepath=false -z` ＋ NUL 区切りで特殊パスの fail-open を遮断。
+  - 検証: `bash -n` / `shellcheck` 両スクリプト exit 0、回帰 `ok=16 fail=0`、`jq empty hooks.json` exit 0、`make secret-scan` / `check-shell` / `check-toml` exit 0。Betterleaks は既知の 14 件（generic-credential-uri プレースホルダ）のみで新規 0。
+  - 実データ: `bash ci/scripts/lint-md.sh` は編集した `todo.md` の baseline 違反を検出し exit 1（fail-closed が機能）。**既知の制約**: baseline 456 件（実測では MD013 633 件ほか計 674 件）が残存するため、既存違反行を含む `.md` を触ると CI / pre-commit がブロックされる。`--all` への昇格は baseline 全解消後（段階2）。`ci-local` 全体はこの制約により lint-md ステップで停止するが、他ゲートは個別実行で全通過。
+  - R5 中に発見した回帰（差分を `"$base" HEAD` として未コミット変更を見失う）を親が修正し、`"$base"`（base→作業ツリー）へ戻した。CI クリーン checkout では base→HEAD と同義。
+  - 却下: R4 の「todo.md:2822 の post-write 誤記」は根拠行に当該記述が無く Runtime Proof で確認できず却下。
+  - あわせて陳腐化記録を訂正: V-141 の unit 記述（:128）、「3077 行目」参照（:226）、切れた `executor.rs` 参照（:785）、共有 lib の [ ]（:2037）、major 更新件数 29→31（:2402）、secret-scan「最終ゲート」表記（:209）。
+- [ ] 次イテレーション: 残る未完了はユーザー判断 / 実機操作 / 2026-12-20 の日付ゲート待ち。バックログ補充（swarm-project-review + swarm-todo-discovery）で repo 内完結タスクを探索する。
 

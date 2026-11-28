@@ -1,9 +1,13 @@
 # JARVIS Makefile — 共通操作
 
-.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-server-minimal bootstrap-server-minimal-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-rust-scripts test-restore-local lint clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit print-cargo-audit-version check-evidence check-evidence-counts init-config
+.PHONY: help bootstrap-server bootstrap-server-dry bootstrap-server-minimal bootstrap-server-minimal-dry bootstrap-termux bootstrap-termux-boot doctor phone-status test test-rust-scripts test-restore-local lint lint-md print-markdownlint-version clean deploy deploy-dry deploy-mcp-gw ui-build ui-run ui-test backup-preflight ci-local secret-scan safety-test install-backup-timer install-verify-backup verify-backup test-verify-backup test-backup-args test-workflow-pins timer-status check-shell check-workflow-pins check-toml check-dependency-audit print-cargo-audit-version check-evidence check-evidence-counts init-config
 
 # 既定値
 CARGO_AUDIT_VERSION ?= 0.23.0
+# R5: markdownlint の実行版を固定する（2026-11-28 実測: npx markdownlint --version = 0.50.1）。
+# CARGO_AUDIT_VERSION と同じ单一情報源パターン。hooks.json の post-edit / pre-commit
+# も同じ版文字列を参照すること（Makefile 変数はフックから参照できないため同期は手運用）。
+MARKDOWNLINT_VERSION ?= 0.50.1
 JARVIS_ROOT ?= $(HOME)/jarvis
 HOST ?= jarvis-host
 # Portable bash lookup: Termux has no /bin/bash, Ubuntu has /bin/bash or /usr/bin/bash.
@@ -73,6 +77,8 @@ ci-local: ## 主要ゲートのローカル代替（CI の aarch64 クロス/Doc
 	@cd rust && cargo test --all-targets --locked
 	@cd rust && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks
 	@cd ui && cargo fmt -- --check && cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks && cargo test --locked
+	@$(MAKE) lint-md
+	@bash ci/scripts/test-lint-md.sh
 	@python3 ci/scripts/secret_scan.py
 	@bash ci/scripts/check-shell.sh
 	@bash ci/scripts/check-workflow-pins.sh
@@ -95,6 +101,7 @@ secret-scan: ## 追跡ファイルの資格情報パターンを走査（値は�
 # DEPENDENCY_AUDIT_FETCH が設定されていれば監査スクリプトへ透伝する（CI は 1 で fetch 実行）。
 safety-test: ## レガシー fail-closed とバックアップ検証ロジックを検証
 	@bash ci/scripts/test-legacy-guards.sh
+	@bash ci/scripts/test-lint-md.sh
 	@DEPENDENCY_AUDIT_FETCH=$${DEPENDENCY_AUDIT_FETCH:-} bash ci/scripts/check-dependency-audit.sh
 	@bash ci/scripts/test-workflow-pins.sh
 	@bash ci/scripts/test-verify-backup.sh
@@ -127,6 +134,16 @@ check-evidence-counts: ## 証跡 JSON の results と実 suite の導出件数�
 
 check-shell: ## 全 tracked *.sh の静的解析（bash -n / shellcheck）
 	@bash ci/scripts/check-shell.sh
+
+# R4/R5: 差分ベースは MD_LINT_BASE（既定 HEAD）、モードは MD_LINT_MODE（既定 working、
+# pre-commit は staged）。--all は baseline 456 issues 解消後のみ MD_LINT_ARGS で渡す。
+# 引数を Makefile オプションとして渡すと make に解釈されるため変数経由に統一する。
+MD_LINT_ARGS ?=
+lint-md: ## 変更 Markdown のみ lint（MD_LINT_BASE / MD_LINT_MODE / MD_LINT_ARGS 対応）
+	@MARKDOWNLINT_VERSION="$(MARKDOWNLINT_VERSION)" bash ci/scripts/lint-md.sh $(MD_LINT_ARGS)
+
+print-markdownlint-version: ## CI / フックが参照する固定版を出力
+	@printf '%s\n' '$(MARKDOWNLINT_VERSION)'
 
 check-workflow-pins: ## workflow の @vN ピンを記録 SHA と GitHub API で照合（オフラインは未検証警告・fail-closed）
 	@bash ci/scripts/check-workflow-pins.sh
