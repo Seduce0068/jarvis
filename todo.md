@@ -2967,7 +2967,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **HIGH: `backup-preflight.sh` のツール検査に `gzip` / `curl` / `jq` が欠落** — 2026-11-28 対応済み（完了記録は末尾イテレーション6節を参照） — `infra/scripts/backup-preflight.sh:32`。preflight fail=0 でも実バックアップが失敗し得る（b6-ops）。
 - [x] **HIGH: P0-10 の opt-in 記述が現行コード（無条件拒否）と矛盾** — 2026-11-28 対応済み（完了記録は末尾イテレーション10節を参照） — `docs/integration/local-operations-runbook.md:165-171`、`todo.md:317,329`、`docs/integration/unknown-tasks-survey.md:38,52`。現行 `validate_kill_switch_admin_token` は placeholder を無条件 bail し、フラグは互換解析のみ（b3-docs）。
 - [x] MEDIUM: `check-deploy-drift.sh` の `sha256sum` 失敗が空文字比較で binary OK と誤判定（`:206-212`、b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション11節を参照）。
-- [ ] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査（`:377,382`）／step2 の `grep -A8` 判定が drift 側と分岐（`:302`）／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）。
+- [x] MEDIUM: `deploy-mcp-gw-safe.sh` の step3 配置成否未検査／step2 の `grep -A8` 判定が drift 側と分岐／rollback のバイナリ MISSING が PENDING 扱い（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション12節を参照）。
 - [ ] MEDIUM: 複数スクリプトで未知引数が無視され typo が dry-run として通る（`install-mcp-gateway.sh:5`、`install-backup-timer.sh:12`、`verify-backup.sh:25`、b4-scripts）。
 - [ ] MEDIUM: `smoke-mcp-gw.sh` のデッド既定バイナリパスと `ss` 欠落時の fail-open（`:4-7,80-93`、b4-scripts）。
 - [ ] MEDIUM: `backup-local.sh` の `tar -tzf` 失敗が `|| true` で握り潰され完全扱い（`:239-249`、b4-scripts）。
@@ -3069,4 +3069,14 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
   - 修正: 両側のダイジェストが `^[0-9a-f]{64}$` に一致することを必須化し、算出不能時は `binary DANGER (hash unavailable)` ＋ `danger=1`（最終 exit 2）へ昇格。比較一致・PENDING の既存挙動は有効ハッシュ時のみ維持。
   - 回帰: `test-legacy-guards.sh` に実バイナリブロックを抽出して sha256sum 失敗をスタブする動的ケースを追加（`MISSING` 経路に落ちないよう実行可能なダミーを配置）→ legacy guards **ok=112 fail=0**。
   - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**、`secret_scan` value-like 0、Betterleaks 既知 14 件のみ。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション12 / deploy 3経路の整合）
+
+- [x] **`deploy-mcp-gw-safe.sh` の 3 件を修正** — b4-scripts の MEDIUM 指摘を R2（1体・6件）→ R5（親）→ R6（検証）で完了。
+  - step3 の unit / allowlist 配置（`install_expected_config`）に戻り値検査を追加し、失敗時に固定メッセージ＋`rollback` へ即遷移（スモーク／再起動／事後 drift へ進まない）。バイナリ配置の `|| die` と不整合だった点を解消。
+  - step2 の `grep -A8 ... | grep -q false` を、drift 側 `webfetch_approval_ok()`（tomllib 厳密 bool / 単一 web.fetch エントリ / パース失敗は非 0）と同じ判定へ置換。共有 lib への抽出は別タスクとして残し、コメントに明記。
+  - rollback の事後 drift が exit 1 (PENDING) のとき、配置先バイナリが実行可能でなければ `DANGER（バイナリ不在・サービス起動不能）` として exit 3 へ昇格。
+  - 回帰: `test-legacy-guards.sh` に 6 ケース追加（step3 配置失敗 2 + 成功 control、webfetch 実関数 6 fixture、drift 同等性の静的ガード、PENDING+バイナリ不在昇格）→ legacy guards **ok=118 fail=0**（3 回連続）。
+  - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**。
+  - 残タスク: `webfetch_approval_ok()` を共有 lib へ切り出し drift / deploy の二重定義を解消する（今回は意味一致を静的ガードで固定）。
 

@@ -16,6 +16,8 @@ for arg in "$@"; do
 done
 repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 bin="$repo/rust/target/release/jarvis-mcp-gw"
+# ロールバック後の「旧も新も無い」判定に使う固定配置先（値は出力しない）。
+deployed_bin="/opt/jarvis/bin/jarvis-mcp-gw"
 allowlist="/etc/jarvis/mcp_allowlist.toml"
 repo_allowlist="$repo/infra/config/mcp_allowlist.toml"
 # I50-A: unit が読む host override env。repo テンプレートをそのまま配置元にする
@@ -62,6 +64,40 @@ fetch_health() {
 health_is_degraded() {
   [ "$health_code" = "503" ] \
     || printf '%s' "$health_body" | grep -Eq "$health_degraded_pattern"
+}
+
+# b4-scripts / 2026-11-28: check-deploy-drift.sh:168-195 と同じ意味の厳密判定。
+# 旧 step2 の `grep -A8` は行距離依存で、padding を入れた fixture では
+# `requires_approval = false` を見逃し step2 をスキップ -> 配置後の drift が
+# DANGER となり全ロールバックしていた。tomllib で [[tools]] の web.fetch を
+# 厳密に読み、単一エントリ + キー存在 + strict bool true のみを許可する。
+# パース失敗 / 重複 / 欠落 / python3・tomllib 不在は非 0（fail-closed）。
+# 値は一切出力しない。共有 lib への抽出は今回のスコープ外（別タスクとして残す）。
+webfetch_approval_ok() { # allowlist_path -> 0 = approval required, !0 = DANGER
+  command -v python3 >/dev/null 2>&1 || return 2
+  python3 - "$1" <<'PY'
+import sys
+
+try:
+    import tomllib  # stdlib since Python 3.11
+except ImportError:
+    sys.exit(1)  # no strict TOML parser available -> unverifiable
+
+try:
+    with open(sys.argv[1], 'rb') as fh:
+        doc = tomllib.load(fh)
+except Exception:
+    sys.exit(1)
+
+tools = doc.get('tools')
+if not isinstance(tools, list):
+    sys.exit(1)
+matches = [t for t in tools if isinstance(t, dict) and t.get('name') == 'web.fetch']
+# Exactly one entry, an explicit key, and a strict boolean true are required.
+if len(matches) != 1 or 'requires_approval' not in matches[0]:
+    sys.exit(1)
+sys.exit(0 if matches[0]['requires_approval'] is True else 1)
+PY
 }
 
 # I74-C: this script is the THIRD writer of mcp_allowlist.toml (alongside
@@ -154,11 +190,20 @@ rollback() {
   # I56-A: ロールバック後の drift 検査は情報表示 (|| true) ではなく強制ゲート。
   # exit 1 (PENDING) はロールバックに伴う通常の差分なので警告に留めるが、
   # exit 2 (DANGER) は「安全な状態へ戻せていない」として明示的に失敗させる。
+  # b4-scripts / 2026-11-28: 退避欠落時にバイナリを rm -f した結果、
+  # 「旧も新も無くサービス起動不能」なのに PENDING 警告で終わる問題を塞ぐ。
+  # PENDING でも配置先が実行可能でなければ DANGER として exit 3 へ昇格する。
   bash "$repo/infra/scripts/check-deploy-drift.sh"
   drift_rc=$?
   case "$drift_rc" in
     0) echo "  ロールバック後 drift: OK" >&2 ;;
-    1) echo "  ロールバック後 drift: PENDING（差分あり・手動確認）" >&2 ;;
+    1)
+      if [ ! -x "$deployed_bin" ]; then
+        echo "  ロールバック後 drift: DANGER（バイナリ不在・サービス起動不能）" >&2
+        exit 3
+      fi
+      echo "  ロールバック後 drift: PENDING（差分あり・手動確認）" >&2
+      ;;
     2) echo "  ロールバック後 drift: DANGER（安全状態を確認できません。手動対応必須）" >&2; exit 3 ;;
     *) echo "  ロールバック後 drift: 不明な終了コード $drift_rc" >&2; exit 3 ;;
   esac
@@ -301,7 +346,8 @@ case "$pre_drift_rc" in
   *) echo "  事前 drift: 不明な終了コード $pre_drift_rc" ;;
 esac
 
-if grep -A8 'name = "web.fetch"' "$allowlist" 2>/dev/null | grep -q 'requires_approval = false'; then
+# b4-scripts / 2026-11-28: 行距離依存の grep -A8 を drift と同じ厳密判定へ置換。
+if ! webfetch_approval_ok "$allowlist"; then
   if [ "$allow" -eq 1 ]; then
     echo "== 2. web.fetch承認必須化（repo + /etc） =="
     if [ "$apply" -eq 1 ]; then
@@ -376,12 +422,16 @@ fi
 if [ "$apply" -eq 1 ]; then
   if [ "$unit_changed" -eq 1 ]; then
     # I74-C: 共有権限表（systemd/jarvis-mcp-gw.service）経由で配置。
-    install_expected_config "$unit_mode" "$repo_unit" "$unit"
+    # b4-scripts / 2026-11-28: バイナリ配置(:414-415) と同じく明示検査する。
+    # -e 無しのため戻り値を握り潰すとスモーク/再起動/事後 drift へ進んでしまう。
+    install_expected_config "$unit_mode" "$repo_unit" "$unit" \
+      || { echo "unit 配置失敗（ロールバック）" >&2; rollback; }
     systemctl daemon-reload
   fi
   if [ "$allowlist_changed" -eq 1 ]; then
     # I74-C: allowlist 配置も共有権限表経由（3経路のうち deploy 経路）。
-    install_expected_config "$allowlist_mode" "$repo_allowlist" "$allowlist"
+    install_expected_config "$allowlist_mode" "$repo_allowlist" "$allowlist" \
+      || { echo "allowlist 配置失敗（ロールバック）" >&2; rollback; }
   fi
   if [ "$env_changed" -eq 1 ]; then
     # 同一ディレクトリの一時ファイルへ書いて mv で原子的に置換する。

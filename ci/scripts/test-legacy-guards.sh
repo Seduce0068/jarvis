@@ -2617,6 +2617,7 @@ binary_hash_guard() {
       # shellcheck disable=SC2329
       sha256sum() { return 1; }
       danger=0; drift=0
+      # shellcheck disable=SC2030
       repo="$tmp"
       # shellcheck disable=SC2034
       deployed_binary="$tmp/bin"
@@ -2759,6 +2760,199 @@ if [ "$code" -eq 0 ] \
   ok=$((ok+1))
 else
   echo "  FAIL: install-mcp-gateway.sh skipped install or called cp (exit=$code)"
+  fail=$((fail+1))
+fi
+
+# b4-scripts / 2026-11-28 (1): step3 の unit / allowlist 配置は戻り値を検査し、
+# 失敗したらその場で rollback() へ入る（スモーク/再起動/事後 drift へ進まない）。
+# 実 install / systemctl / drift には触れず、本文を抽出して stub 実行する。
+# shellcheck disable=SC2016
+# The \$ escapes are literal sed patterns, not shell expansions.
+unit_block="$(sed -n '/^  if \[ "\$unit_changed" -eq 1 \]; then$/,/^  fi$/p' "$deploy_script")"
+# shellcheck disable=SC2016
+allowlist_block="$(sed -n '/^  if \[ "\$allowlist_changed" -eq 1 \]; then$/,/^  fi$/p' "$deploy_script")"
+# shellcheck disable=SC2034
+# Vars below are consumed by the eval'd apply body.
+step3_install_probe() { # fail_target block_text -> output; status = block status
+  local fail_target="$1" block="$2"
+  (
+    apply=1
+    unit_changed=1; allowlist_changed=1
+    unit_mode=0644; allowlist_mode=0644
+    repo_unit=/probe/repo_unit; unit=/probe/unit
+    repo_allowlist=/probe/repo_allowlist; allowlist=/probe/allowlist
+    # shellcheck disable=SC2329
+    install_expected_config() {
+      if [ "$3" = "$fail_target" ]; then
+        printf 'install-failed\n' >&2
+        return 1
+      fi
+      printf 'install-called\n' >&2
+      return 0
+    }
+    # shellcheck disable=SC2329
+    rollback() { printf 'rollback-called\n' >&2; exit 1; }
+    # shellcheck disable=SC2329
+    systemctl() { printf 'systemctl-called\n' >&2; return 0; }
+    # shellcheck disable=SC1090,SC2086
+    eval "$block"
+    printf 'after-step3-reached\n' >&2
+  ) 2>&1
+}
+
+step3_out="$(step3_install_probe /probe/unit "$unit_block")"; code=$?
+if [ "$code" -eq 1 ] \
+   && printf '%s' "$step3_out" | grep -Fq 'install-failed' \
+   && printf '%s' "$step3_out" | grep -Fq 'unit 配置失敗' \
+   && printf '%s' "$step3_out" | grep -Fq 'rollback-called' \
+   && ! printf '%s' "$step3_out" | grep -Fq 'systemctl-called' \
+   && ! printf '%s' "$step3_out" | grep -Fq 'after-step3-reached'; then
+  echo "  PASS: step3 unit install failure rolls back with no continuation"
+  ok=$((ok+1))
+else
+  echo "  FAIL: step3 unit install failure was ignored (exit=$code)"
+  fail=$((fail+1))
+fi
+
+step3_out="$(step3_install_probe /probe/allowlist "$allowlist_block")"; code=$?
+if [ "$code" -eq 1 ] \
+   && printf '%s' "$step3_out" | grep -Fq 'install-failed' \
+   && printf '%s' "$step3_out" | grep -Fq 'allowlist 配置失敗' \
+   && printf '%s' "$step3_out" | grep -Fq 'rollback-called' \
+   && ! printf '%s' "$step3_out" | grep -Fq 'after-step3-reached'; then
+  echo "  PASS: step3 allowlist install failure rolls back with no continuation"
+  ok=$((ok+1))
+else
+  echo "  FAIL: step3 allowlist install failure was ignored (exit=$code)"
+  fail=$((fail+1))
+fi
+
+step3_both="$unit_block"$'\n'"$allowlist_block"
+step3_out="$(step3_install_probe /probe/nonexistent "$step3_both")"; code=$?
+step3_install_calls=$(printf '%s\n' "$step3_out" | grep -c 'install-called' || true)
+if [ "$code" -eq 0 ] \
+   && [ "$step3_install_calls" -eq 2 ] \
+   && printf '%s' "$step3_out" | grep -Fq 'systemctl-called' \
+   && printf '%s' "$step3_out" | grep -Fq 'after-step3-reached' \
+   && ! printf '%s' "$step3_out" | grep -Fq 'rollback-called'; then
+  echo "  PASS: step3 successful installs continue to the next stage"
+  ok=$((ok+1))
+else
+  echo "  FAIL: step3 successful installs did not continue (exit=$code)"
+  fail=$((fail+1))
+fi
+
+# b4-scripts / 2026-11-28 (2): webfetch_approval_ok() を deploy 本文から抽出し、
+# tomllib の厳密判定を実実行で確認する。fixture は一時ディレクトリのみ。
+wf_dir="$tmp/webfetch_approval_fn"
+mkdir -p "$wf_dir"
+# shellcheck disable=SC2031
+# repo is only read here; the subshell edit is isolated.
+if python3 - "$repo/infra/config/mcp_allowlist.toml" "$wf_dir" <<'PY'
+import os, sys
+
+src, d = sys.argv[1:3]
+with open(src, encoding='utf-8') as fh:
+    lines = fh.readlines()
+start = next(i for i, l in enumerate(lines) if l.strip() == 'name = "web.fetch"')
+end = next((j for j in range(start + 1, len(lines))
+            if lines[j].strip().startswith('[[tools]]')), len(lines))
+approval = next(k for k in range(start, end) if 'requires_approval' in lines[k])
+
+def write(name, ls):
+    with open(os.path.join(d, name), 'w', encoding='utf-8') as fh:
+        fh.writelines(ls)
+
+write('wf_true.toml', lines)
+false_lines = lines[:]
+false_lines[approval] = 'requires_approval = false\n'
+write('wf_false.toml', false_lines)
+write('wf_missing_key.toml', lines[:approval] + lines[approval + 1:])
+padding = ['# regression padding %02d\n' % i for i in range(10)]
+write('wf_padding_false.toml',
+      false_lines[:start + 1] + padding + false_lines[start + 1:])
+write('wf_duplicate.toml', lines[:end] + lines[start - 1:end] + lines[end:])
+write('wf_invalid.toml', lines[:start] + ['not valid = = toml\n'] + lines[start:])
+PY
+then
+  wf_fn="$(sed -n '/^webfetch_approval_ok()/,/^}/p' "$deploy_script")"
+  wf_probe() { # path -> exit code
+    (
+      # shellcheck disable=SC1090,SC2086
+      eval "$wf_fn"
+      webfetch_approval_ok "$1"
+    )
+  }
+  wf_bad=0
+  for name in wf_true wf_false wf_missing_key wf_padding_false wf_duplicate wf_invalid; do
+    case "$name" in
+      wf_true) want=ok ;;
+      *) want=reject ;;
+    esac
+    wf_probe "$wf_dir/$name.toml"; wf_rc=$?
+    case "$want" in
+      ok) [ "$wf_rc" -eq 0 ] || wf_bad=$((wf_bad+1)) ;;
+      reject) [ "$wf_rc" -ne 0 ] || wf_bad=$((wf_bad+1)) ;;
+    esac
+  done
+  if [ "$wf_bad" -eq 0 ]; then
+    echo "  PASS: deploy webfetch_approval_ok() enforces strict tomllib semantics"
+    ok=$((ok+1))
+  else
+    echo "  FAIL: deploy webfetch_approval_ok() misclassified a fixture"
+    fail=$((fail+1))
+  fi
+else
+  echo "  FAIL: could not prepare webfetch_approval_ok() fixtures"
+  fail=$((fail+1))
+fi
+
+# drift 側と同じ実装であることを静的ガードで固定し、step2 が grep -A8 に
+# 戻らないことも同時に固定する（共有 lib 抽出は別タスク）。
+drift_wf="$(sed -n '/^webfetch_approval_ok()/,/^}/p' "$drift_src")"
+deploy_wf="$(sed -n '/^webfetch_approval_ok()/,/^}/p' "$deploy_script")"
+# shellcheck disable=SC2016
+step2_body="$(sed -n '/^if ! webfetch_approval_ok "\$allowlist"; then$/,/^fi$/p' "$deploy_script")"
+# shellcheck disable=SC2016
+# Literal grep pattern below, not a shell expansion.
+if [ -n "$drift_wf" ] \
+   && [ "$deploy_wf" = "$drift_wf" ] \
+   && printf '%s' "$step2_body" | grep -Fq 'if ! webfetch_approval_ok "$allowlist"; then' \
+   && ! printf '%s' "$step2_body" | grep -Fq 'grep -A8'; then
+  echo "  PASS: deploy webfetch_approval_ok() matches drift and step2 uses it"
+  ok=$((ok+1))
+else
+  echo "  FAIL: deploy web.fetch approval gate diverged from drift"
+  fail=$((fail+1))
+fi
+
+# b4-scripts / 2026-11-28 (3): rollback の PENDING(1) 経路でも、配置先
+# バイナリが実行不能なら「旧も新も無い」ため DANGER(exit 3) へ昇格する。
+# 上記で抽出済みの drift_gate 本文を stub 実行し、実 drift / systemctl は触らない。
+pending_bin="$tmp/pending_gw_bin"
+printf 'stub\n' > "$pending_bin"
+chmod 0755 -- "$pending_bin"
+# shellcheck disable=SC2034
+# deployed_bin is read by the eval'd drift gate.
+pending_drift_gate() { # bin_path -> exit code
+  local stub_bin="$1"
+  (
+    deployed_bin="$stub_bin"
+    # shellcheck disable=SC2329
+    bash() { return 1; }
+    # shellcheck disable=SC1090,SC2086
+    eval "$drift_gate"
+    # 抽出範囲は esac までなので、昇格が起きなければ rollback 本体と同じ exit 1。
+    exit 1
+  ) >/dev/null 2>&1
+}
+pending_drift_gate "$pending_bin"; pending_present_rc=$?
+pending_drift_gate "$tmp/no-such-gw-binary"; pending_absent_rc=$?
+if [ "$pending_present_rc" -eq 1 ] && [ "$pending_absent_rc" -eq 3 ]; then
+  echo "  PASS: rollback escalates PENDING with a missing binary to exit 3"
+  ok=$((ok+1))
+else
+  echo "  FAIL: rollback swallowed a missing binary under PENDING"
   fail=$((fail+1))
 fi
 
