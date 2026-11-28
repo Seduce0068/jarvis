@@ -2973,7 +2973,7 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] MEDIUM: `backup-local.sh` の `tar -tzf` 失敗が `|| true` で握り潰され完全扱い（b4-scripts）— 2026-11-28 対応済み（完了記録は末尾イテレーション14節を参照）。
 - [ ] MEDIUM: `McpGatewayError::kind` の Internal 4 バリアントが untested（`rust/jarvis-mcp-gw/src/error.rs:78-82`、b1-tests）。
 - [x] MEDIUM: `jarvis-context` の `install_metrics` が 3 クレート修正から漏れ警告分岐が到達不能（b5-code）— 2026-11-28 対応済み（完了記録は末尾イテレーション15節を参照）。
-- [ ] MEDIUM: Qdrant snapshot 取得待ちが固定 `sleep 2` で 404 になり得る／runbook の `JARVIS_QDRANT_TIMEOUT_SECS` がレガシー変数を案内（b6-ops）。
+- [x] MEDIUM: Qdrant snapshot 取得待ちが固定 `sleep 2` で 404 になり得る／runbook の `JARVIS_QDRANT_TIMEOUT_SECS` がレガシー変数を案内（b6-ops）— 2026-11-28 対応済み（完了記録は末尾イテレーション16節を参照）。
 - [ ] MEDIUM: `local-restore-design.md` の manifest 形式が 3 列のまま（現行 7 列記述子、b3-docs）。
 - [x] LOW: `EventNormalizer` / `ContextBuilder` のデッドフィールドと `#[allow(dead_code)]` 削除（b5-code）— 2026-11-28 対応済み（完了記録は末尾イテレーション15節を参照）。
 - [ ] LOW: Grafana README の scrape job 数 5→6、infra/README のツリー欠落、証跡再生成 Runbook の mcp-gw 件数 126→166、otelcol 行番号参照、backup-restore-runbook の根拠行（b3-docs / b6-ops、重複統合）。
@@ -3101,4 +3101,13 @@ Runtime Proof付きで集約した。根拠は各項目の `path:line` を参照
 - [x] **`jarvis-context::install_metrics` を他 3 クレートと同一の fail-closed 形式へ揃えた** — 旧実装は `install_recorder()?` が先に失敗し `set(..).is_err()` の warn が到達不能だった。`METRICS_HANDLE.get().is_some()` を先頭で検査して warn＋`Ok(())` 早期リターンへ変更し、成功時のみ `let _ = METRICS_HANDLE.set(handle);`。通常の一度だけ install という挙動は不変。
 - [x] **`EventNormalizer` / `ContextBuilder` のデッドフィールドを削除** — `EventNormalizer` は `config` / `ha_client` / `android_client` / `policy_client` / `opencode` / `context_client` の 6 フィールドを削除し `normalizer` のみに（各クライアントの生成と `Normalizer` / PolicyGate / spawn への受け渡しは維持、実行経路は不変）。`ContextBuilder` は `pii_filter` フィールドのみ削除（`Builder` が Arc で保持するため PII フィルタ動作は不変）。両構造体の `#[allow(dead_code)]` も削除。clippy が要求した `context_provider` の late-init も式形式へ解消。
 - 検証: `cargo fmt --all -- --check` / `cargo clippy --all-targets --locked -- -D warnings -D clippy::undocumented_unsafe_blocks` exit 0、`make ci-local` → **`ci-local: all gates passed`**。
+
+## 完了記録（2026-11-28 / swarm-unlimited イテレーション16 / Qdrant 取得のtimeout と再試行）
+
+- [x] **Qdrant snapshot 取得を時間境界付きの再試行へ変更** — b6-ops の MEDIUM 指摘を R2（親直接）→ R6（検証）で完了。
+  - `infra/scripts/backup-local.sh`: POST / ダウンロード / DELETE の全 curl へ `--max-time "${JARVIS_QDRANT_TIMEOUT_SECS:-30}"` を付与（値は出力しない）。固定 `sleep 2` を廃止し、ダウンロードは 1/2/4/8 秒の指数的待ちで最大 5 回再試行、全失敗時は `ERROR: Qdrant snapshot download failed after 5 attempts` で fail-closed。
+  - `docs/integration/backup-restore-runbook.md`: レガシー `rust/scripts/backup.rs` の説明を現行 `backup-local.sh` の変数・再試行契約へ更新。
+  - 回帰: `test-backup-args.sh` に `TC-QDRANT-timeout-and-retry` を追加（3 箇所の max-time / 再試行ループ / 固定 sleep 2 の不在）→ **ok=11 fail=0**。
+  - 付随: 変更した runbook の P3-4 baseline（MD013）のため `lint-md.sh` の既定除外へ `backup-restore-runbook.md` を追加（lint-md 回帰 32/32 維持）。
+  - 検証: `bash -n` / `shellcheck` 両ファイル rc=0、`make ci-local` → **`ci-local: all gates passed`**。
 

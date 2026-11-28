@@ -188,7 +188,10 @@ if [ "$skip_qdrant" -eq 0 ]; then
   # Use the name from the POST that creates the snapshot. Qdrant returns the
   # SnapshotDescription of the snapshot it just created; the snapshot list can
   # also hold older snapshots, so .result[0] may be a different one (I13-D).
-  create_response="$(curl -fsS -X POST "${qdrant_collection_url}/snapshots")" \
+  # b6-ops / 2026-11-28: bound every Qdrant call so an unresponsive host cannot
+  # hang the timer indefinitely. Value is never printed.
+  qdrant_max_time="${JARVIS_QDRANT_TIMEOUT_SECS:-30}"
+  create_response="$(curl -fsS --max-time "$qdrant_max_time" -X POST "${qdrant_collection_url}/snapshots")" \
     || { echo "ERROR: Qdrant snapshot creation request failed" >&2; exit 1; }
   # Accept both the object form (.result.name) and the plain-string form
   # (.result) used by older Qdrant versions. Anything else is a hard error.
@@ -200,16 +203,31 @@ if [ "$skip_qdrant" -eq 0 ]; then
     echo "ERROR: Qdrant snapshot create response has no snapshot name; aborting" >&2
     exit 1
   fi
-  sleep 2
-  curl -fsS "${qdrant_collection_url}/snapshots/${snapshot_name}" \
-    > "$set_dir/qdrant-snapshot.bin"
+  # A freshly created snapshot is not always downloadable immediately (404).
+  # Bounded retry with short exponential waits; a persistent failure is fatal.
+  downloaded=0
+  for attempt in 1 2 3 4 5; do
+    if curl -fsS --max-time "$qdrant_max_time" \
+        "${qdrant_collection_url}/snapshots/${snapshot_name}" \
+        > "$set_dir/qdrant-snapshot.bin"; then
+      downloaded=1
+      break
+    fi
+    [ "$attempt" -lt 5 ] || break
+    wait_secs=$((1 << (attempt - 1)))
+    sleep "$wait_secs"
+  done
+  if [ "$downloaded" -ne 1 ]; then
+    echo "ERROR: Qdrant snapshot download failed after 5 attempts" >&2
+    exit 1
+  fi
   record qdrant-snapshot.bin "$set_dir/qdrant-snapshot.bin" tar none none qdrant
   echo "Qdrant snapshot OK (collection=${qdrant_collection}, snapshot=${snapshot_name})"
   # Remove the Qdrant-side snapshot once the downloaded copy is recorded;
   # otherwise every daily timer run leaves another generation behind on the
   # Qdrant host. Cleanup is best-effort: a failed DELETE must not fail a backup
   # whose payload was already captured and verified. No values are printed.
-  curl -fsS -X DELETE "${qdrant_collection_url}/snapshots/${snapshot_name}" \
+  curl -fsS --max-time "$qdrant_max_time" -X DELETE "${qdrant_collection_url}/snapshots/${snapshot_name}" \
     || echo "WARN: Qdrant snapshot cleanup failed (collection=${qdrant_collection})" >&2
 fi
 

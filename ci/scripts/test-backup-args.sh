@@ -147,5 +147,19 @@ else
   printf 'FAIL: TC-ARCHIVE-secret-path-boundaries\n'; fail=$((fail+1))
 fi
 
+# b6-ops / 2026-11-28: Qdrant calls must be time-bounded and a freshly created
+# snapshot must be retried briefly instead of a fixed 2-second sleep.
+backup_src="$repo/infra/scripts/backup-local.sh"
+# shellcheck disable=SC2016
+if grep -Fq 'qdrant_max_time="${JARVIS_QDRANT_TIMEOUT_SECS:-30}"' "$backup_src" \
+   && [ "$(grep -Fc -- '--max-time "$qdrant_max_time"' "$backup_src")" -ge 3 ] \
+   && grep -Fq 'for attempt in 1 2 3 4 5' "$backup_src" \
+   && grep -Fq 'Qdrant snapshot download failed after 5 attempts' "$backup_src" \
+   && ! grep -Eq '^[[:space:]]*sleep 2[[:space:]]*$' "$backup_src"; then
+  printf 'PASS: TC-QDRANT-timeout-and-retry\n'; ok=$((ok+1))
+else
+  printf 'FAIL: TC-QDRANT-timeout-and-retry\n'; fail=$((fail+1))
+fi
+
 printf 'result: ok=%d fail=%d\n' "$ok" "$fail"
 [ "$fail" -eq 0 ]

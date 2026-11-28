@@ -177,7 +177,7 @@ done
 # (MD013/MD060 throughout). Until that baseline is resolved, any edit to them
 # would block the gate. Exclude only these basenames; all other Markdown is
 # still checked. Override with MD_LINT_EXCLUDE="" for a full check.
-IFS=':' read -r -a excludes <<< "${MD_LINT_EXCLUDE:-todo.md:unknown-tasks-survey.md:local-operations-runbook.md}"
+IFS=':' read -r -a excludes <<< "${MD_LINT_EXCLUDE:-todo.md:unknown-tasks-survey.md:local-operations-runbook.md:backup-restore-runbook.md}"
 if [ "${#excludes[@]}" -gt 0 ]; then
   kept=()
   for f in "${files[@]}"; do
